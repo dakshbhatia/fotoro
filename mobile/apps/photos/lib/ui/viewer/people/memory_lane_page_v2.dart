@@ -277,10 +277,10 @@ class _MemoryLanePageV2State extends State<MemoryLanePageV2> {
   Future<(Uint8List, int)?> _fetchEntry(
     Future<Uint8List?> entry,
     Size targetSize, {
-    bool fitWithin = false,
+    bool background = false,
   }) {
     return _decodedEntries.putIfAbsent(
-      (entry, targetSize, fitWithin),
+      (entry, targetSize, background),
       () async {
         final bytes = await entry;
         if (bytes == null || !mounted) return null;
@@ -288,16 +288,15 @@ class _MemoryLanePageV2State extends State<MemoryLanePageV2> {
         try {
           final descriptor = await ImageDescriptor.encoded(buffer);
           try {
-            final scale = (fitWithin ? math.min : math.max)(
+            if (background) {
+              return await _blurBackground(descriptor, targetSize);
+            }
+            final scale = math.max(
               targetSize.width / descriptor.width,
               targetSize.height / descriptor.height,
             );
             final scaledWidth = descriptor.width * scale;
-            final decodeWidth =
-                (fitWithin ? scaledWidth.floor() : scaledWidth.ceil()).clamp(
-                  1,
-                  descriptor.width,
-                );
+            final decodeWidth = scaledWidth.ceil().clamp(1, descriptor.width);
             return (bytes, decodeWidth);
           } finally {
             descriptor.dispose();
@@ -307,6 +306,70 @@ class _MemoryLanePageV2State extends State<MemoryLanePageV2> {
         }
       },
     );
+  }
+
+  Future<(Uint8List, int)?> _blurBackground(
+    ImageDescriptor descriptor,
+    Size viewport,
+  ) async {
+    final scale = 256 / viewport.longestSide;
+    final width = (viewport.width * scale).round().clamp(1, 256);
+    final height = (viewport.height * scale).round().clamp(1, 256);
+    final outputSize = Size(width.toDouble(), height.toDouble());
+    final decodeScale = math.max(
+      width / descriptor.width,
+      height / descriptor.height,
+    );
+    final codec = await descriptor.instantiateCodec(
+      targetWidth: (descriptor.width * decodeScale).ceil().clamp(
+        1,
+        descriptor.width,
+      ),
+    );
+    try {
+      final frame = await codec.getNextFrame();
+      try {
+        final sourceSize = Size(
+          frame.image.width.toDouble(),
+          frame.image.height.toDouble(),
+        );
+        final fitted = applyBoxFit(BoxFit.cover, sourceSize, outputSize);
+        final bounds = Offset.zero & outputSize;
+        final recorder = PictureRecorder();
+        final canvas = Canvas(recorder);
+        canvas.saveLayer(
+          bounds,
+          Paint()
+            ..imageFilter = ImageFilter.blur(
+              sigmaX: 100 * scale,
+              sigmaY: 100 * scale,
+            ),
+        );
+        canvas.drawImageRect(
+          frame.image,
+          Alignment.center.inscribe(fitted.source, Offset.zero & sourceSize),
+          bounds,
+          Paint(),
+        );
+        canvas.restore();
+        final picture = recorder.endRecording();
+        try {
+          final blurred = await picture.toImage(width, height);
+          try {
+            final data = await blurred.toByteData(format: ImageByteFormat.png);
+            return data == null ? null : (data.buffer.asUint8List(), width);
+          } finally {
+            blurred.dispose();
+          }
+        } finally {
+          picture.dispose();
+        }
+      } finally {
+        frame.image.dispose();
+      }
+    } finally {
+      codec.dispose();
+    }
   }
 
   void _selectEntry(int index, {bool fastTransition = false}) {
@@ -443,23 +506,16 @@ class _MemoryLanePageV2State extends State<MemoryLanePageV2> {
                     key: _currentEntryKey,
                     future: entry == null
                         ? null
-                        : _fetchEntry(
-                            entry,
-                            const Size.square(256),
-                            fitWithin: true,
-                          ),
+                        : _fetchEntry(entry, screenSize, background: true),
                     builder: (context, entrySnapshot) {
                       final crop = entrySnapshot.data;
                       if (crop == null) return const SizedBox.expand();
-                      return ImageFiltered(
-                        imageFilter: ImageFilter.blur(sigmaX: 100, sigmaY: 100),
-                        child: Image.memory(
-                          crop.$1,
-                          cacheWidth: crop.$2,
-                          fit: BoxFit.cover,
-                          width: double.infinity,
-                          height: double.infinity,
-                        ),
+                      return Image.memory(
+                        crop.$1,
+                        cacheWidth: crop.$2,
+                        fit: BoxFit.cover,
+                        width: double.infinity,
+                        height: double.infinity,
                       );
                     },
                   ),
