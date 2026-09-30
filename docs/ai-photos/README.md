@@ -2,6 +2,10 @@
 
 Fork: https://github.com/dakshbhatia/ente · branch: `codex/ai-photos`.
 
+The code is published on that branch. The app currently runs locally; there is
+no public app deployment or TestFlight release. See [deployment.md](deployment.md)
+for the hosting decision, launch sequence, and next ten product improvements.
+
 This fork retains Ente's Flutter iOS app, React web app, Go Museum server,
 encrypted storage and sync, album sharing, cleanup, and video playback.
 The first new feature is a selected-photo intelligence preview in the web app.

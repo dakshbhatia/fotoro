@@ -1,6 +1,11 @@
 **AI Photos — iPhone, cross-device sync, Safari, and trusted sharing**
 
-Updated September 30, 2026. Proposed architecture based on current documentation and targeted source inspection. No fork, running app, deployment, device benchmark, or interoperability test has been completed.
+Updated September 30, 2026. The fork is published on `dakshbhatia/ente`, branch
+`codex/ai-photos`. A local web preview and Museum/Postgres/object-storage stack
+run; unsigned iOS builds and Simulator startup have been verified. Public app
+deployment, physical-device benchmarks, and cross-device interoperability remain
+unfinished. The architecture below includes planned work; see `README.md` and
+`verification.md` for implemented behavior, and `deployment.md` for hosting.
 
 **Recommendation: start from Ente and build the distinctive experience.**
 
