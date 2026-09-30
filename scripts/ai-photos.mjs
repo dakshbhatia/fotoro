@@ -18,13 +18,19 @@ const web = join(root, "web");
 const env = {
   ...process.env,
   PATH:
-    ["flutter/bin", "cargo/bin", "go/bin"]
+    ["ruby/bin", "gems/bin", "flutter/bin", "cargo/bin", "go/bin"]
       .map((p) => join(root, ".tools", p))
       .join(":") +
     ":" +
     process.env.PATH,
   CARGO_HOME: join(root, ".tools/cargo"),
   RUSTUP_HOME: join(root, ".tools/rustup"),
+  ...(existsSync(join(root, ".tools/gems"))
+    ? {
+        GEM_HOME: join(root, ".tools/gems"),
+        GEM_PATH: join(root, ".tools/gems"),
+      }
+    : {}),
   FLUTTER_SUPPRESS_ANALYTICS: "true",
   NEXT_PUBLIC_ENTE_ENDPOINT: "http://localhost:4800",
 };
@@ -98,6 +104,8 @@ try {
         ["docker", ["info", "--format", "Docker {{.ServerVersion}}"]],
       ])
         run(cmd, args);
+      if (existsSync(join(root, ".tools/gems/bin/pod")))
+        run("pod", ["--version"]);
       break;
     case "setup-web":
       run(
@@ -175,9 +183,28 @@ try {
         join(root, "mobile/apps/photos"),
       );
       break;
+    case "setup-ios":
+      run("ruby", ["--version"]);
+      run("gem", [
+        "install",
+        "cocoapods",
+        "--version",
+        "1.17.0",
+        "--install-dir",
+        join(root, ".tools/gems"),
+        "--no-document",
+      ]);
+      break;
+    case "ios-sim":
+      run(
+        "flutter",
+        ["build", "ios", "--simulator", "--debug"],
+        join(root, "mobile/apps/photos"),
+      );
+      break;
     default:
       console.log(
-        "Usage: node scripts/ai-photos.mjs doctor|setup-web|services|stop|web|test|typecheck|setup-mobile|ios",
+        "Usage: node scripts/ai-photos.mjs doctor|setup-web|services|stop|web|test|typecheck|setup-mobile|setup-ios|ios|ios-sim",
       );
   }
 } catch (error) {
