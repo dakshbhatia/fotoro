@@ -1,6 +1,10 @@
-# AI Photos development
+# Fotoro development
 
-Fork: https://github.com/dakshbhatia/ente · branch: `codex/ai-photos`.
+Fork: https://github.com/dakshbhatia/fotoro · branch: `codex/ai-photos`.
+
+Selected product name: **Fotoro**. Intended domain: **fotoro.cloud**; domain
+ownership and public deployment have not been established. See [product.md](product.md)
+for the proposed first beta and ordered product work.
 
 The code is published on that branch. The app currently runs locally; there is
 no public app deployment or TestFlight release. See [deployment.md](deployment.md)

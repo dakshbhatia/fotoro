@@ -1,3 +1,25 @@
+# Fotoro
+
+Development fork of [Ente](https://github.com/ente/ente), focused on a fast,
+private photo library and sharing with family and friends. Intended domain:
+`fotoro.cloud` (not deployed).
+
+- [Product direction and next work](docs/ai-photos/product.md)
+- [Run the local preview and native build](docs/ai-photos/README.md)
+- [Deployment plan](docs/ai-photos/deployment.md)
+- [Verification and current limits](docs/ai-photos/verification.md)
+
+The new web preview supports selected-file import, EXIF search, exact-copy
+review, optional Gemini enrichment, and a glass photo carousel. Its library is
+session-only. Account-connected persistence and the new trusted-sharing flows
+are planned. Native startup works; the new UI is currently web-only.
+
+## Upstream Ente documentation
+
+The original project documentation follows. Its service offerings and audits
+refer to Ente; they do not establish validation of Fotoro's additions. Original
+licensing and attribution are retained.
+
 <div align="center">
 
 <img src=".github/assets/ente-rocketship.png" width="400"/>

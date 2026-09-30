@@ -1,4 +1,7 @@
-# AI Photos build — September 30, 2026
+# Fotoro build — September 30, 2026
+
+This records the completed initial development slice. For the proposed next
+product work, see [product.md](product.md); for hosting, see [deployment.md](deployment.md).
 
 Spec: the user's AI Photos requirements in this task; see `architecture.md`
 in this directory for the architecture and full product roadmap.

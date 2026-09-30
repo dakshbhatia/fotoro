@@ -1,6 +1,6 @@
-**AI Photos — iPhone, cross-device sync, Safari, and trusted sharing**
+**Fotoro — iPhone, cross-device sync, Safari, and trusted sharing**
 
-Updated September 30, 2026. The fork is published on `dakshbhatia/ente`, branch
+Updated September 30, 2026. The fork is published on `dakshbhatia/fotoro`, branch
 `codex/ai-photos`. A local web preview and Museum/Postgres/object-storage stack
 run; unsigned iOS builds and Simulator startup have been verified. Public app
 deployment, physical-device benchmarks, and cross-device interoperability remain

@@ -1,11 +1,11 @@
-# Hosting and next ten improvements
+# Fotoro hosting and next ten improvements
 
 Decision recorded September 30, 2026. This is a proposed deployment, not an
 already provisioned service.
 
 ## What exists
 
-Code: [dakshbhatia/ente, codex/ai-photos](https://github.com/dakshbhatia/ente/tree/codex/ai-photos).
+Code: [dakshbhatia/fotoro, codex/ai-photos](https://github.com/dakshbhatia/fotoro/tree/codex/ai-photos).
 The fork retains Flutter mobile, React web, Go Museum, Postgres, and Ente's
 encrypted storage and transfer mechanisms.
 
@@ -66,8 +66,10 @@ AI are additional. [R2 pricing](https://developers.cloudflare.com/r2/pricing/).
 1. Keep local development on the existing wrapper and loopback Docker stack.
    Build the web production export from the published fork and deploy a clearly
    marked session-only preview to Cloudflare first.
-2. Choose the stable HTTPS domain and Photos/API/Accounts/Albums origins before
-   adding passkey enrollment. Account and sharing handoffs need consistent URLs.
+2. The intended domain is `fotoro.cloud`. Proposed origins: `fotoro.cloud` for
+   Photos, `api.fotoro.cloud` for Museum, `accounts.fotoro.cloud` for Accounts,
+   and `albums.fotoro.cloud` for Albums. Ownership, DNS, TLS, and provider access
+   have not been established. Configure consistent origins before passkey enrollment.
 3. Provision the VM only after region and budget are chosen. Deploy pinned Museum
    and Postgres images with Caddy, persistent database storage, SMTP, private
    database access, and separately stored production secrets. Do not expose the

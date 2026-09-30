@@ -11,6 +11,7 @@ import CloseRounded from "@mui/icons-material/CloseRounded";
 import ContentCopyRounded from "@mui/icons-material/ContentCopyRounded";
 import { Dialog } from "@mui/material";
 import type { ParsedMetadata } from "ente-media/file-metadata";
+import Head from "next/head";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 interface LocalPhoto {
@@ -291,6 +292,9 @@ export default function IntelligencePage() {
 
     return (
         <main className={styles.app} data-photo-library>
+            <Head>
+                <title>Fotoro</title>
+            </Head>
             <input
                 ref={fileInput}
                 type="file"
@@ -304,7 +308,7 @@ export default function IntelligencePage() {
             />
 
             <header className={styles.header}>
-                <h1>{view === "duplicates" ? "Duplicates" : "Photos"}</h1>
+                <h1>{view === "duplicates" ? "Duplicates" : "Fotoro"}</h1>
                 {view === "library" &&
                     !query &&
                     duplicateIDs.size > 0 &&
