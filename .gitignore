@@ -6,3 +6,7 @@
 CLAUDE.local.md
 
 node_modules/
+
+# Local SDKs, generated credentials, and development artifacts.
+.tools
+.dev
