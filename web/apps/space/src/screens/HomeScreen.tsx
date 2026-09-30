@@ -1158,6 +1158,7 @@ const FeedItem: React.FC<FeedItemProps> = ({
             ref={rootRef}
             component="article"
             sx={{
+                WebkitTapHighlightColor: "transparent",
                 bgcolor: showFooter ? spaceSurface : "transparent",
                 borderRadius: "16px",
                 boxSizing: "border-box",

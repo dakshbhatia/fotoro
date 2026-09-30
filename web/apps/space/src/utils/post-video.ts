@@ -126,7 +126,7 @@ export const spaceVideoCover = async (
 ): Promise<PreparedSpacePostImage> => {
     const { video, dispose } = await openSpaceVideo(file, signal);
     try {
-        await seekSpaceVideo(video, Math.max(time, 0.001), signal);
+        await seekSpaceVideo(video, time, signal);
         const scale = Math.min(
             1,
             1280 / Math.max(video.videoWidth, video.videoHeight),
