@@ -1,3 +1,5 @@
+import { LocalPhotoViewer } from "@/components/LocalPhotoViewer";
+import { PhotoSymbol } from "@/components/PhotoSymbol";
 import {
     describePhoto,
     duplicateGroups,
@@ -5,21 +7,18 @@ import {
     type PhotoDescription,
 } from "@/services/photo-intelligence";
 import styles from "@/styles/intelligence.module.css";
-import AddRounded from "@mui/icons-material/AddRounded";
-import AutoAwesomeRounded from "@mui/icons-material/AutoAwesomeRounded";
 import CloseRounded from "@mui/icons-material/CloseRounded";
 import ContentCopyRounded from "@mui/icons-material/ContentCopyRounded";
-import PhotoLibraryRounded from "@mui/icons-material/PhotoLibraryRounded";
-import SearchRounded from "@mui/icons-material/SearchRounded";
-import TuneRounded from "@mui/icons-material/TuneRounded";
 import { Dialog } from "@mui/material";
 import type { ParsedMetadata } from "ente-media/file-metadata";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 interface LocalPhoto {
     id: string;
     hash: string;
     name: string;
+    original: File;
+    derivative: Blob;
     preview: string;
     jpeg: Uint8Array;
     width: number;
@@ -44,7 +43,7 @@ async function preparePhoto(file: File): Promise<LocalPhoto> {
     const [digest, metadata] = await Promise.all([
         crypto.subtle.digest("SHA-256", buffer),
         import("ente-gallery/services/exif").then(({ extractExif }) =>
-            extractExif(file).catch(() => ({}) as ParsedMetadata),
+            extractExif(file).catch((): ParsedMetadata => ({})),
         ),
     ]);
     const hash = Array.from(new Uint8Array(digest), (n) =>
@@ -94,6 +93,8 @@ async function preparePhoto(file: File): Promise<LocalPhoto> {
             id: crypto.randomUUID(),
             hash,
             name: file.name,
+            original: file,
+            derivative: blob,
             preview: URL.createObjectURL(blob),
             jpeg: new Uint8Array(await blob.arrayBuffer()),
             width: image.naturalWidth,
@@ -117,9 +118,10 @@ export default function IntelligencePage() {
     const fileInput = useRef<HTMLInputElement>(null);
     const [apiKey, setAPIKey] = useState("");
     const [allowCloud, setAllowCloud] = useState(false);
+    const [indexingEnabled, setIndexingEnabled] = useState(false);
+    const [indexingPaused, setIndexingPaused] = useState(false);
     const [busy, setBusy] = useState(false);
     const [adding, setAdding] = useState(false);
-    const [completed, setCompleted] = useState(0);
     const [message, setMessage] = useState("");
     const [usage, setUsage] = useState({ input: 0, output: 0 });
     const photosRef = useRef(photos);
@@ -127,13 +129,24 @@ export default function IntelligencePage() {
     const controller = useRef<AbortController | undefined>(undefined);
     const active = useRef(true);
     const importing = useRef(false);
+    const indexing = useRef(false);
     const cloudRef = useRef(allowCloud);
     cloudRef.current = allowCloud;
     useEffect(() => {
         active.current = true;
+        // Fast Refresh preserves state but runs the previous effect cleanup.
+        // Recreate revoked URLs from retained blobs so the library still works.
+        // Keep URL creation outside a state updater: React may replay updaters.
+        const restored = photosRef.current.map((p) => {
+            return { ...p, preview: URL.createObjectURL(p.derivative) };
+        });
+        if (restored.length) setPhotos(restored);
+        if (new URLSearchParams(window.location.search).get("setup") === "1")
+            setSettingsOpen(true);
         return () => {
             active.current = false;
             controller.current?.abort();
+            for (const p of restored) URL.revokeObjectURL(p.preview);
             for (const p of photosRef.current) URL.revokeObjectURL(p.preview);
         };
     }, []);
@@ -152,12 +165,11 @@ export default function IntelligencePage() {
             ),
         [photos, query, view, duplicateIDs],
     );
-    const indexed = photos.filter((p) => p.description).length;
     const estimatedSpend =
         (usage.input * 0.75 + usage.output * 3.75) / 1_000_000;
 
     async function addPhotos(files: FileList | null) {
-        if (!files || importing.current || busy) return;
+        if (!files || importing.current) return;
         setMessage("");
         if (files.length + photos.length > 100) {
             setMessage("Use up to 100 photos in this development preview.");
@@ -186,25 +198,31 @@ export default function IntelligencePage() {
         if (active.current) setAdding(false);
     }
 
-    async function analyze() {
-        if (!allowCloud || !apiKey.trim() || busy) return;
+    const analyze = useCallback(async () => {
+        if (
+            !indexingEnabled ||
+            !allowCloud ||
+            !apiKey.trim() ||
+            indexing.current
+        )
+            return;
+        indexing.current = true;
         setBusy(true);
-        setCompleted(0);
         setMessage("");
         controller.current = new AbortController();
         const signal = controller.current.signal;
+        // Re-read mutable cancellation state after each asynchronous boundary.
+        const shouldStop = () =>
+            !active.current || signal.aborted || !cloudRef.current;
         const descriptions = new Map(
             photos
                 .filter((p) => p.description)
                 .map((p) => [p.hash, p.description!]),
         );
         for (const photo of photos) {
-            if (!active.current || signal.aborted || !cloudRef.current) break;
+            if (shouldStop()) break;
             try {
-                if (photo.description) {
-                    setCompleted((n) => n + 1);
-                    continue;
-                }
+                if (photo.description) continue;
                 let description = descriptions.get(photo.hash);
                 if (!description) {
                     const result = await describePhoto({
@@ -214,7 +232,7 @@ export default function IntelligencePage() {
                         signal,
                     });
                     description = result.description;
-                    if (!active.current || signal.aborted) break;
+                    if (shouldStop()) break;
                     setUsage((u) => ({
                         input: u.input + result.usage.input,
                         output: u.output + result.usage.output,
@@ -229,7 +247,7 @@ export default function IntelligencePage() {
                     ),
                 );
             } catch (error) {
-                if (signal.aborted || !active.current) break;
+                if (shouldStop()) break;
                 const text =
                     error instanceof Error
                         ? error.message
@@ -240,13 +258,25 @@ export default function IntelligencePage() {
                     ),
                 );
                 // Stop on transport/key/rate failures rather than multiplying failed calls.
+                setIndexingPaused(true);
                 setMessage(text);
                 break;
             }
-            setCompleted((n) => n + 1);
         }
+        indexing.current = false;
         if (active.current) setBusy(false);
-    }
+    }, [indexingEnabled, allowCloud, apiKey, photos]);
+
+    useEffect(() => {
+        if (
+            indexingEnabled &&
+            !indexingPaused &&
+            !adding &&
+            !busy &&
+            photos.some((p) => !p.description)
+        )
+            void analyze();
+    }, [indexingEnabled, indexingPaused, adding, busy, photos, analyze]);
 
     function clear() {
         controller.current?.abort();
@@ -256,62 +286,99 @@ export default function IntelligencePage() {
         setQuery("");
         setMessage("");
         setSelectedID(undefined);
+        setIndexingPaused(false);
     }
 
     return (
-        <main className={styles.app}>
+        <main className={styles.app} data-photo-library>
+            <input
+                ref={fileInput}
+                type="file"
+                accept="image/jpeg,image/png,image/webp,image/avif,image/heic,image/heif"
+                multiple
+                hidden
+                onChange={(e) => {
+                    void addPhotos(e.target.files);
+                    e.target.value = "";
+                }}
+            />
+
             <header className={styles.header}>
-                <div className={styles.heading}>
-                    <h1>{view === "library" ? "Library" : "Duplicates"}</h1>
-                    <span>
-                        {photos.length
-                            ? `${visible.length} ${visible.length === 1 ? "photo" : "photos"}`
-                            : ""}
-                    </span>
-                </div>
-                <label className={styles.search}>
-                    <SearchRounded />
-                    <input
-                        aria-label="Search photos"
-                        placeholder="Search your photos"
-                        value={query}
-                        onChange={(e) => setQuery(e.target.value)}
-                    />
-                    {query && (
+                <h1>{view === "duplicates" ? "Duplicates" : "Photos"}</h1>
+                {view === "library" &&
+                    !query &&
+                    duplicateIDs.size > 0 &&
+                    !adding && (
                         <button
-                            type="button"
-                            aria-label="Clear search"
-                            onClick={() => setQuery("")}
+                            className={styles.cleanup}
+                            onClick={() => {
+                                setView("duplicates");
+                                setQuery("");
+                            }}
                         >
-                            <CloseRounded />
+                            {duplicateIDs.size} duplicate
+                            {duplicateIDs.size === 1 ? "" : "s"} · Review
                         </button>
                     )}
-                </label>
-                <button
-                    className={styles.add}
-                    aria-label="Add photos"
-                    title="Add photos"
-                    disabled={busy || adding}
-                    onClick={() => fileInput.current?.click()}
-                >
-                    <AddRounded />
-                </button>
-                <input
-                    ref={fileInput}
-                    type="file"
-                    accept="image/jpeg,image/png,image/webp,image/avif,image/heic,image/heif"
-                    multiple
-                    hidden
-                    onChange={(e) => {
-                        void addPhotos(e.target.files);
-                        e.target.value = "";
-                    }}
-                />
             </header>
+
+            {!!photos.length && (
+                <div className={styles.toolbar}>
+                    {view === "duplicates" ? (
+                        <button
+                            className={styles.back}
+                            onClick={() => {
+                                setView("library");
+                                setQuery("");
+                            }}
+                        >
+                            <PhotoSymbol name="previous" /> All photos
+                        </button>
+                    ) : (
+                        <label className={styles.search}>
+                            <PhotoSymbol name="search" />
+                            <input
+                                type="search"
+                                aria-label="Search photos"
+                                placeholder="Search photos"
+                                value={query}
+                                onChange={(e) => setQuery(e.target.value)}
+                            />
+                            {query && (
+                                <button
+                                    type="button"
+                                    aria-label="Clear search"
+                                    onClick={() => setQuery("")}
+                                >
+                                    <PhotoSymbol name="close" />
+                                </button>
+                            )}
+                        </label>
+                    )}
+                    <button
+                        className={styles.add}
+                        aria-label="Add photos"
+                        disabled={adding}
+                        onClick={() => fileInput.current?.click()}
+                    >
+                        <PhotoSymbol name="add" />
+                    </button>
+                </div>
+            )}
 
             {message && (
                 <div role="alert" className={styles.notice}>
-                    {message}
+                    <span>{message}</span>
+                    {indexingPaused && (
+                        <button
+                            onClick={() => {
+                                setIndexingPaused(false);
+                                setMessage("");
+                            }}
+                        >
+                            Retry
+                        </button>
+                    )}
                     <button
                         aria-label="Dismiss message"
                         onClick={() => setMessage("")}
@@ -320,115 +387,90 @@ export default function IntelligencePage() {
                     </button>
                 </div>
             )}
-            {busy && (
+            {(busy || adding) && (
                 <div role="status" className={styles.progress}>
                     <span>
-                        Describing {Math.min(completed + 1, photos.length)} of{" "}
-                        {photos.length}
+                        {adding ? "Adding photos…" : "Improving search…"}
                     </span>
-                    <button
-                        aria-label="Stop analysis"
-                        onClick={() => controller.current?.abort()}
-                    >
-                        <CloseRounded />
-                    </button>
-                </div>
-            )}
-            {adding && (
-                <div role="status" className={styles.progress}>
-                    Adding photos…
-                </div>
-            )}
-
-            {visible.length ? (
-                <div className={styles.grid}>
-                    {visible.map((photo) => (
+                    {busy && (
                         <button
-                            key={photo.id}
-                            className={styles.photo}
-                            aria-label={`Open photo ${photo.name}`}
-                            onClick={() => setSelectedID(photo.id)}
+                            onClick={() => {
+                                setIndexingPaused(true);
+                                controller.current?.abort();
+                            }}
                         >
-                            <img
-                                src={photo.preview}
-                                alt={photo.description?.summary ?? photo.name}
-                                loading="lazy"
-                            />
-                            {duplicateIDs.has(photo.id) && (
-                                <span className={styles.duplicate}>
-                                    <ContentCopyRounded />
-                                </span>
-                            )}
-                        </button>
-                    ))}
-                </div>
-            ) : (
-                <section className={styles.empty}>
-                    <div className={styles.emptyIcon}>
-                        <PhotoLibraryRounded />
-                    </div>
-                    <h2>
-                        {query
-                            ? "No photos found"
-                            : view === "duplicates"
-                              ? "No duplicates"
-                              : "Your photos, together."}
-                    </h2>
-                    {!query && view === "library" && (
-                        <button
-                            className={styles.emptyAction}
-                            disabled={busy || adding}
-                            onClick={() => fileInput.current?.click()}
-                        >
-                            Add your first photos <AddRounded />
+                            Pause
                         </button>
                     )}
-                </section>
+                </div>
             )}
 
-            <nav className={styles.dock} aria-label="Photo views">
-                <button
-                    className={view === "library" ? styles.active : ""}
-                    onClick={() => setView("library")}
-                    aria-pressed={view === "library"}
-                >
-                    <PhotoLibraryRounded />
-                    <span>Library</span>
-                </button>
-                <button
-                    className={view === "duplicates" ? styles.active : ""}
-                    onClick={() => setView("duplicates")}
-                    aria-pressed={view === "duplicates"}
-                >
-                    <ContentCopyRounded />
-                    <span>Duplicates</span>
-                </button>
-                <div className={styles.divider} />
-                <button
-                    aria-label="Describe photos"
-                    title="Describe photos"
-                    disabled={
-                        busy ||
-                        adding ||
-                        !photos.length ||
-                        indexed === photos.length
-                    }
-                    onClick={() => {
-                        if (!allowCloud || !apiKey.trim())
-                            setSettingsOpen(true);
-                        else void analyze();
-                    }}
-                >
-                    <AutoAwesomeRounded />
-                </button>
-                <button
-                    aria-label="Photo settings"
-                    title="Photo settings"
-                    onClick={() => setSettingsOpen(true)}
-                >
-                    <TuneRounded />
-                </button>
-            </nav>
+            {indexingEnabled &&
+                indexingPaused &&
+                !busy &&
+                !message &&
+                photos.some((p) => !p.description) && (
+                    <div role="status" className={styles.progress}>
+                        <span>Search improvements paused</span>
+                        <button onClick={() => setIndexingPaused(false)}>
+                            Resume
+                        </button>
+                    </div>
+                )}
+
+            {!photos.length ? (
+                <section className={styles.empty}>
+                    <button
+                        className={styles.start}
+                        disabled={adding}
+                        onClick={() => fileInput.current?.click()}
+                    >
+                        Add photos
+                    </button>
+                    <p className={styles.emptyNotice}>
+                        Local preview · not backed up
+                    </p>
+                </section>
+            ) : (
+                <>
+                    {visible.length ? (
+                        <div className={styles.grid}>
+                            {visible.map((photo) => (
+                                <button
+                                    key={photo.id}
+                                    data-photo-id={photo.id}
+                                    className={styles.photo}
+                                    aria-label={`Open photo ${photo.name}`}
+                                    onClick={() => setSelectedID(photo.id)}
+                                >
+                                    <img
+                                        src={photo.preview}
+                                        alt={
+                                            photo.description?.summary ??
+                                            photo.name
+                                        }
+                                        loading="lazy"
+                                    />
+                                    {view === "library" &&
+                                        duplicateIDs.has(photo.id) && (
+                                            <span
+                                                className={styles.duplicate}
+                                                aria-label="Duplicate copy"
+                                            >
+                                                <ContentCopyRounded />
+                                            </span>
+                                        )}
+                                </button>
+                            ))}
+                        </div>
+                    ) : (
+                        <p className={styles.noResults}>No photos found.</p>
+                    )}
+                    <p className={styles.localNotice}>
+                        Local preview · not backed up
+                    </p>
+                </>
+            )}
 
             <Dialog
                 open={settingsOpen}
@@ -436,27 +478,31 @@ export default function IntelligencePage() {
                 maxWidth="xs"
                 fullWidth
                 slotProps={{ paper: { className: styles.sheet } }}
+                aria-labelledby="cloud-setup-title"
             >
                 <div className={styles.sheetHeader}>
-                    <h2>Photo intelligence</h2>
+                    <h2 id="cloud-setup-title">Developer connection</h2>
                     <button
-                        aria-label="Close settings"
+                        aria-label="Close setup"
                         onClick={() => setSettingsOpen(false)}
                     >
                         <CloseRounded />
                     </button>
                 </div>
                 <p className={styles.sheetCopy}>
-                    Let Gemini describe your photos so they’re easier to find.
+                    Gemini 3.8 is the photo-indexing engine. Production
+                    credentials belong on the server; this preview uses your own
+                    paid key in memory.
                 </p>
                 <label className={styles.toggle}>
-                    <span>Use Gemini 3.8</span>
+                    <span>Allow cloud indexing</span>
                     <input
                         type="checkbox"
                         checked={allowCloud}
                         onChange={(e) => {
                             setAllowCloud(e.target.checked);
                             if (!e.target.checked) {
+                                setIndexingEnabled(false);
                                 controller.current?.abort();
                                 setAPIKey("");
                             }
@@ -470,21 +516,25 @@ export default function IntelligencePage() {
                             type="password"
                             value={apiKey}
                             onChange={(e) => setAPIKey(e.target.value)}
-                            placeholder="Your paid Gemini key"
                             autoComplete="off"
                             disabled={busy}
                         />
                     </label>
                 )}
                 <p className={styles.privacy}>
-                    Only selected, resized previews go to Google when you press
-                    Describe. EXIF is removed; visible faces and text remain.
-                    Your key and this preview’s index clear on refresh.
+                    When enabled, selected photos you add are indexed
+                    automatically using resized previews sent to Google. EXIF is
+                    removed; visible faces and text remain. Your key and index
+                    clear on refresh.
                 </p>
                 <button
                     className={styles.primary}
                     disabled={allowCloud && !apiKey.trim()}
-                    onClick={() => setSettingsOpen(false)}
+                    onClick={() => {
+                        setIndexingEnabled(allowCloud && !!apiKey.trim());
+                        setIndexingPaused(false);
+                        setSettingsOpen(false);
+                    }}
                 >
                     Done
                 </button>
@@ -497,7 +547,7 @@ export default function IntelligencePage() {
                             setSettingsOpen(false);
                         }}
                     >
-                        Clear this session
+                        Clear this preview
                     </button>
                 )}
                 {!!usage.input && (
@@ -508,67 +558,18 @@ export default function IntelligencePage() {
                 )}
             </Dialog>
 
-            <Dialog
-                open={!!selected}
-                onClose={() => setSelectedID(undefined)}
-                maxWidth="md"
-                fullWidth
-                slotProps={{ paper: { className: styles.viewer } }}
-            >
-                {selected && (
-                    <>
-                        <button
-                            className={styles.viewerClose}
-                            aria-label="Close photo"
-                            onClick={() => setSelectedID(undefined)}
-                        >
-                            <CloseRounded />
-                        </button>
-                        <img
-                            className={styles.fullPhoto}
-                            src={selected.preview}
-                            alt={selected.description?.summary ?? selected.name}
-                        />
-                        <div className={styles.photoInfo}>
-                            <h2>{selected.name}</h2>
-                            {selected.description && (
-                                <p>{selected.description.summary}</p>
-                            )}
-                            <span>
-                                {[
-                                    selected.metadata.creationDate?.dateTime.slice(
-                                        0,
-                                        10,
-                                    ),
-                                    selected.metadata.cameraModel,
-                                    `${selected.width} × ${selected.height}`,
-                                ]
-                                    .filter(Boolean)
-                                    .join(" · ")}
-                            </span>
-                            {selected.description && (
-                                <div className={styles.tags}>
-                                    {selected.description.tags.map((tag) => (
-                                        <button
-                                            key={tag}
-                                            onClick={() => {
-                                                setQuery(tag);
-                                                setView("library");
-                                                setSelectedID(undefined);
-                                            }}
-                                        >
-                                            {tag}
-                                        </button>
-                                    ))}
-                                </div>
-                            )}
-                            {selected.error && (
-                                <p role="alert">{selected.error}</p>
-                            )}
-                        </div>
-                    </>
-                )}
-            </Dialog>
+            {selected && (
+                <LocalPhotoViewer
+                    photos={visible}
+                    initialID={selected.id}
+                    onClose={() => setSelectedID(undefined)}
+                    onSearchTag={(tag) => {
+                        setQuery(tag);
+                        setView("library");
+                    }}
+                    onError={setMessage}
+                />
+            )}
         </main>
     );
 }

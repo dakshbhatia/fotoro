@@ -62,14 +62,25 @@ No global shell PATH edits are necessary.
 ```sh
 node scripts/ai-photos.mjs setup-web
 node scripts/ai-photos.mjs setup-mobile
+node scripts/ai-photos.mjs setup-ios
 node scripts/ai-photos.mjs ios
+node scripts/ai-photos.mjs ios-sim
 ```
 
 Mobile setup enforces the Flutter lockfile, prepares Rive iOS binaries, and
-generates Flutter/Rust bindings. The unsigned iOS build additionally needs
-CocoaPods (the current upstream lockfile records its version), and a Simulator
-runtime or physical device is required to run the app. Signing/TestFlight is a
-separate step requiring the user's Apple developer configuration.
+generates Flutter/Rust bindings. `setup-ios` installs the upstream-pinned
+CocoaPods 1.17.0 into `.tools/gems`. It needs a modern Ruby: this machine uses
+Homebrew Ruby 4.0.7 through the ignored `.tools/ruby` symlink. On another Mac,
+install Ruby from its official distribution or Homebrew and put its directory
+at `.tools/ruby`; no global shell PATH edit is required. The wrapper supplies
+Ruby, gem and Flutter paths for each invocation.
+
+The unsigned device and Simulator builds have passed. The fork adopts Flutter's
+scene lifecycle for Xcode 27 and pins `home_widget` 0.10.0 to reuse its upstream
+null-value crash fix and scene support. The iOS 27 Simulator reaches Ente's
+existing onboarding. The photo-first redesign below is currently the web preview;
+its native UI port remains product work. Signing and TestFlight still require
+the user's Apple developer configuration.
 
 ## New feature and model decision
 
@@ -78,7 +89,9 @@ metadata with Ente's existing parser, computes SHA-256 exact duplicate groups,
 and builds a fast local search view. It never deletes a photo.
 
 The user chose **`gemini-3.8-flash`** on September 30, 2026. Cloud analysis is
-off until explicitly enabled and started. It sends only a JPEG preview with a
+off until explicitly enabled with a paid key and committed with Done in the
+developer connection sheet at `/intelligence?setup=1`. It then indexes in the
+background, with pause/resume controls and no automatic retry of failed calls. It sends only a JPEG preview with a
 1536-pixel maximum edge and no EXIF; visible faces and readable text are still
 part of that image. It returns validated structured descriptions, tags, and
 visible text. Identical originals reuse descriptions within the session.
@@ -88,9 +101,14 @@ shared production key in this static frontend. A production deployment needs an
 authenticated relay, quota controls, consent/revocation handling, and encrypted
 index persistence through Ente's existing per-file key hierarchy.
 
-The main screen has only a photo grid, search, add, and a glass dock. Photo details
-open on tap; cloud settings live in a sheet. The sparkle action describes selected
-photos once setup is complete. Search and duplicate views work with cloud disabled.
+The main screen is a photo canvas with one floating glass search/import
+control. Exact duplicates expose a contextual review action. Tap a photo for
+the full-screen PhotoSwipe carousel: thumbnail zoom, horizontal swipe,
+pinch/double-tap zoom, vertical dismissal, keyboard navigation, and focus return.
+Details open on demand. Browsers that support file sharing expose the system
+share sheet for the original file. The preview does not implement trusted-contact
+grants, nearby transport, or duplicate deletion. Search and duplicate review work
+with cloud disabled. See `design.md` for the interaction decisions and boundaries.
 
 Search in this preview matches words in names, EXIF, descriptions, tags, and text.
 It is lexical search; semantic embeddings and person/date query composition
