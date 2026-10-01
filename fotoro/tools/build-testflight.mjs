@@ -27,13 +27,16 @@ const output = mkdtempSync(join(tmpdir(), "fotoro-testflight-"));
 const archive = join(output, `Fotoro-${buildNumber}.xcarchive`);
 const project = join(root, "apps/ios/Fotoro.xcodeproj");
 const exportOptions = join(root, "apps/ios/ExportOptions-TestFlight.plist");
+// Apple's rsync launches a peer by name. Keep both peers on the Apple toolchain
+// so Homebrew rsync cannot reject Apple's extended-attributes option at export.
+const toolchainEnv = {...process.env, PATH: `/usr/bin:/bin:/usr/sbin:/sbin:${process.env.PATH ?? ""}`};
 
 async function run(args, logName) {
   const log = join(output, logName);
   const fd = openSync(log, "wx", 0o600);
   try {
     await new Promise((resolve, reject) => {
-      const child = spawn("xcodebuild", args, { cwd: root, stdio: ["ignore", fd, fd] });
+      const child = spawn("/usr/bin/xcodebuild", args, { cwd: root, env: toolchainEnv, stdio: ["ignore", fd, fd] });
       child.once("error", reject);
       child.once("close", code => code === 0 ? resolve() : reject(new Error(`xcodebuild failed (${code}); diagnostics: ${log}`)));
     });

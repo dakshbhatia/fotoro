@@ -64,9 +64,9 @@ review can run concurrently. UI changes do not require an encryption-schema chan
 - Web `CloudApp` adds `onSyncSummary?: (summary: ConsumerSyncSummary) => void`; `LocalTrial` adds `syncSummary?: ConsumerSyncSummary`. `app.tsx` bridges this display snapshot. B derives it from existing sync/journal facts and resets account-specific counts on lock/sign out.
 - Core consumes existing `AppServices.pauseSync()`, `startPhotosBackup()`, `resumeTransfers()`, `searchCatalog(_:)`, local `SearchIndex`, and existing source-revision/digest bindings. The consumer models are local presentation contracts, never network DTOs.
 
-- [ ] Pin derivation rules with tests: no completed count from uploaded representations; paused takes precedence over reconnect; unknown total is omitted; incomplete annotations/skips remain visible.
-- [ ] Implement the native maintained summary snapshot and source-reference adapter above before lane A consumes them; test invalidation on lock/account switch and partial source coverage. Existing cloud substring retrieval is not silently upgraded to visual understanding or universal date parsing.
-- [ ] Freeze source-resolution behavior: authorized local hit, verified owned saved hit, and verified duplicate mapping; never deduplicate by filename/date.
+- [x] Pin derivation rules with tests: no completed count from uploaded representations; paused takes precedence over reconnect; unknown total is omitted; incomplete annotations/skips remain visible.
+- [x] Implement the native maintained summary snapshot and source-reference adapter above before lane A consumes them; test invalidation on lock/account switch and partial source coverage. Existing cloud substring retrieval is not silently upgraded to visual understanding or universal date parsing.
+- [x] Freeze source-resolution behavior: authorized local hit, verified owned saved hit, and verified duplicate mapping; never deduplicate by filename/date.
 
 ## Task 1: Durable Pause policy
 
@@ -88,12 +88,12 @@ review can run concurrently. UI changes do not require an encryption-schema chan
 
 **Interfaces:** Consume current permission/search stores and existing auth/backup commands. Add an account-view completion callback that returns the caller to its pending intent; it does not itself opt the Photos library into uploads.
 
-- [ ] Restore already-granted PhotoKit access and search on launch. Verify first use never prompts before Open Photos; relaunch opens gallery; limited/denied states remain correct.
-- [ ] Retain Sync intent through Create/Sign in/Recovery, fetch the owned catalog after unlock, then show explicit last-10-days backup choice and progress. Ordinary sign-in does not start PhotoKit upload.
-- [ ] Replace search-control overload with matching photos and useful optional alternatives. Move evidence/corrections into Info; preserve prefix stability, permission filtering and existing feedback data.
-- [ ] Present C's authorized local/saved hits through one search surface. Test a cloud-only receipt plus a local older receipt and account/permission changes.
-- [ ] Add standard original sharing to the saved-photo viewer, using the existing verified media path and system activity sheet. Preserve separate encrypted exchange trust checks.
-- [ ] Verify public fixture flows in Simulator; record screenshots and keyboard/accessibility checks. Run focused regressions and `pnpm test:ios`.
+- [x] Restore already-granted PhotoKit access and search on launch. Verify first use never prompts before Open Photos; relaunch opens gallery; limited/denied states remain correct.
+- [x] Retain Sync intent through Create/Sign in/Recovery, fetch the owned catalog after unlock, then show explicit last-10-days backup choice and progress. Ordinary sign-in does not start PhotoKit upload.
+- [x] Replace search-control overload with matching photos and useful optional alternatives. Move evidence/corrections into Info; preserve prefix stability, permission filtering and existing feedback data.
+- [x] Present C's authorized local/saved hits through one search surface. Test a cloud-only receipt plus a local older receipt and account/permission changes.
+- [x] Add standard original sharing to the saved-photo viewer, using the existing verified media path and system activity sheet. Preserve separate encrypted exchange trust checks.
+- [x] Verify public fixture flows in Simulator; record screenshots and keyboard/accessibility checks. Run focused regressions and `pnpm test:ios`.
 
 ## Task 3: Safari first-use, search and sharing
 
@@ -115,7 +115,7 @@ review can run concurrently. UI changes do not require an encryption-schema chan
 **Files:** `fotoro/docs/deployment.md`, `verification.md`, `tools/check-service.mjs`; service configuration/migrations and signing configuration only when actual resources are available.
 
 - [ ] Complete normal Cloudflare login; create distinct preview/production D1/R2 resources and apply migrations; deploy HTTPS with correct RP/origin/AASA configuration and rollback target.
-- [ ] Sign in through Xcode; obtain app-specific Associated Domains provisioning; connect a physical iPhone. Do not substitute wildcard provisioning or strip entitlements.
+- [x] Sign in through Xcode; obtain app-specific Associated Domains provisioning; connect a physical iPhone. Do not substitute wildcard provisioning or strip entitlements.
 - [ ] Run the spec's 10-day phone-to-Safari corpus scenarios, including recovery, byte-identical originals, interruption, Pause, background lifecycle and same-account annotations.
 - [ ] Investigate any reproduced connection loss with retained service/process/transport evidence. Do not hide it behind test skips or indiscriminate mutation retries.
 - [ ] Integrate Tasks 1–3 and run `pnpm check`, `pnpm test:exchange:isolated`, `pnpm test:ios`, unsigned Release compilation and hosted service checks. Record physical checks separately from automated tests.
@@ -142,3 +142,7 @@ Do not delay the usable consumer release for AI editing, video intelligence,
 duplicate deletion, Live Photo motion, or automatic trip/people features that have
 not passed their own feasibility and quality checks. Do not describe the release
 as better than every existing photo app without comparative evidence.
+
+## Consumer checkpoint — October 1, 2026
+
+Tasks 0 and 2 are implemented and independently reviewed. Final native suite 103/103 passes with no skips; web 128/128, core/fixture checks, API 27 and isolated HTTP exchange 3 pass. Both CI jobs pass on consumer source commit `7331294e625e` (run `36938213350`). Task 3 implementation is reviewed and builds, with rendered receipt/reselection/sync-return checks at 689×797; full physical Safari and narrow viewport acceptance remain open. Signed Debug installs on the connected iPhone, but its latest launch was denied while locked. Signed Release 0.1.0(2) archived and uploaded successfully; Apple processing and export compliance are pending. Cloudflare authorization/deployment is still required. Task 5 remains an isolated follow-up; synthetic rank-key measurements do not satisfy its physical performance gates.

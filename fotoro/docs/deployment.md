@@ -29,12 +29,17 @@ The native/web/API development build runs locally, with the web preview at 4310,
 real local API at 8787 and public fixtures at 8790. Production D1/R2 bindings and
 Cloudflare access are still required. The owner is signed in to Xcode, an
 app-specific development provisioning profile includes Associated Domains, and
-the signed consumer checkpoint is installed and launched on the connected iPhone.
+the final signed consumer checkpoint is installed on the connected iPhone. Its
+latest launch attempt was refused while the phone was locked; the earlier
+checkpoint launched successfully.
 Local browsing starts with the last 10 days; local search covers permitted still
 photos of any age. Personal Photos access remains the user's choice.
-Fotoro's App Store Connect record is created (app 6818330547). Archive/upload and
-Apple processing are separate from creating that record. Release artifacts and
-distribution logs must stay outside the repository.
+Fotoro's App Store Connect record is created (app 6818330547). The internal group
+has the owner's requested tester and automatic distribution enabled. Build 1
+was rejected for missing orientation metadata. The corrected version 0.1.0,
+build 2 archived and uploaded successfully; Apple began processing at 19:10
+Eastern. Processing and export compliance remain separate gates. Release
+artifacts and distribution logs stay outside the repository.
 The service now serves `/.well-known/apple-app-site-association` when
 `APPLE_APP_IDS` contains the signed application identifier, for example
 `APPLICATION_PREFIX.cloud.fotoro.Fotoro`. Use the actual application-identifier

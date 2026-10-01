@@ -11,7 +11,7 @@ include permanent regressions and were re-reviewed.
 | Worker/D1/R2 API | 27 tests pass: real cryptographic WebAuthn ceremonies, recovery, uploads, renewal, grants, encrypted annotation revisions, capability-bound ciphertext PUTs and Apple association metadata |
 | Web | 128 tests pass: consumer choices/status, account-isolated Pause, combined local/saved search, preview fences, original Share/fallback, rank-key read budget and existing retrieval/retention/annotation checks |
 | Web production build | TypeScript/Vite pass; local entry 306.15 kB (95.75 kB gzip). Account/crypto loads after Sync photos; the large encrypted-media chunk warning remains |
-| Native | 103 tests pass with Xcode 27, zero failures or skips. Consumer source/consent/cancellation tests, held-worker Continue, share-copy eviction/lock/cleanup, real PhotoKit all-age labels and existing crypto/journal/background checks are included. Prior iOS 26 CI passes the 88-test baseline; current-revision older-SDK CI is separate |
+| Native | 103 tests pass with Xcode 27, zero failures or skips. Consumer source/consent/cancellation tests, held-worker Continue, share-copy eviction/lock/cleanup, real PhotoKit all-age labels and existing crypto/journal/background checks are included. Both iOS and web/API CI jobs pass on consumer source commit `7331294e625e` in run `36938213350`; subsequent release metadata changes require their own CI |
 | Shared retrieval fixtures | Both platforms find all 20 predeclared supported tasks; five unsupported visual tasks and five absent terms remain empty. These are development fixtures, not held-out user accuracy |
 | Cross-language media | Swift decrypts frozen TypeScript vectors; TypeScript decrypts checked-in Swift ciphertext and rejects altered binding |
 | Real local HTTP exchange | Three isolated tests cover fresh migrations, recovery sessions, bidirectional contribution/save, revocation, restore, byte-preserved HEIC, background ciphertext staging, encrypted labels/OCR in a fresh account session, cross-account denial and idempotent revision conflicts |
@@ -29,9 +29,11 @@ session exposed Share rather than Download; its native share destination was not
 inspected. An IAB 390×844 override did not alter the actual dimensions, so this
 update does not add a phone-size Safari rendering claim.
 
-The signed consumer checkpoint is installed and launched on the connected owner's
-iPhone, with Associated Domains intact. Personal Photos access and usability have
-not been inspected. Simulator public samples exercise restored ten-day browsing,
+The final signed consumer checkpoint is installed on the connected owner's
+iPhone, with Associated Domains intact. Its latest launch attempt was refused
+because the physical phone was locked; an earlier checkpoint launched. Personal
+Photos access and usability have not been inspected. Simulator public samples
+exercise restored ten-day browsing,
 all-age receipt search, owned saved catalog search and both original system Share
 sheets. Final native consumer fixes pass all 103 tests. Review reproduced a fast
 Continue no-op behind settling workers and share URLs being evicted by subsequent
@@ -158,13 +160,17 @@ records; it cannot enumerate an iPhone photo library automatically.
 ## Remaining release gates
 
 - Cloudflare account access, distinct production D1/R2 bindings, HTTPS and routing.
-- A valid Apple development certificate exists, but the current wildcard profile
-  lacks Associated Domains. An app-specific profile and HTTPS association file
-  listing the signed app under `webcredentials.apps` are needed. No physical phone
-  is connected, and Xcode has no signed-in account for provisioning. Unsigned
-  Release is not installable on a physical iPhone. Universal-link handling is not
-  implemented. The read-only `check:service https://fotoro.cloud` currently fails:
-  vault and association endpoints both return 404.
+- Xcode is signed in and the physical iPhone is connected. The app-specific
+  development profile preserves Associated Domains, and the final Debug build
+  installs. Build 1's signed Release archive passed, but Apple upload validation
+  rejected its missing orientation metadata after the export's mixed rsync
+  toolchain was corrected. Build 2's signed Release archive includes standard
+  iPhone/iPad orientation arrays and uploaded successfully at 19:10 Eastern
+  (`EXPORT SUCCEEDED`, exit 0). Apple processing and export compliance remain
+  separate gates; the internal tester group is prepared.
+  The HTTPS association file still needs deployment. Universal-link handling is
+  not implemented. The read-only `check:service https://fotoro.cloud` currently
+  fails: vault and association endpoints both return 404.
 - Physical passkey/PRF and non-PRF flows, original PhotoKit/iCloud resources and a
   complete iPhone-to-Safari restore. See [release setup](deployment.md).
 - Physical background continuation, file protection, daemon reconnection and
