@@ -7,6 +7,11 @@ export const fixtureMode =
   ["localhost", "127.0.0.1"].includes(location.hostname) &&
   location.port === "4310";
 export const base = "";
+export const isPublicDemoAccount = (id: string) =>
+  [
+    "00000000-0000-4000-8000-000000000001",
+    "00000000-0000-4000-8000-000000000002",
+  ].includes(id);
 export function resolveUploadURL(
   staging: string,
   pageOrigin: string,
@@ -45,9 +50,11 @@ export async function api<T>(
   body?: unknown,
   schema?: string,
   method = body === undefined ? "GET" : "POST",
+  signal?: AbortSignal,
 ): Promise<T> {
   const response = await fetch(base + path, {
     method,
+    signal,
     credentials: "include",
     headers: {
       ...(body === undefined ? {} : { "content-type": "application/json" }),

@@ -23,8 +23,8 @@ final class ExchangeTests: XCTestCase {
       recipient.photos.first { $0.manifest.ownerAccountId == recipient.session.accountId })
     XCTAssertEqual(saved.metadata.originalSha256, photo.metadata.originalSha256)
     let url = Bundle.main.url(forResource: "singapore", withExtension: "jpg")!
-    try await recipient.importFiles([url])
-    await recipient.journal.resumePending()
+    try await recipient.importFiles([url], publicSample: true)
+    try await recipient.resumeTransfers()
     try recipient.reload()
     let contribution = try XCTUnwrap(recipient.photos.first { $0.transferState == "committed" })
     try await recipient.contribute([saved, contribution])

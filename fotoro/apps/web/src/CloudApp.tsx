@@ -20,7 +20,12 @@ import {
   completeEnrollment,
   cancelEnrollment,
 } from "./vault/session";
-import { fixtureMode, setFixtureAccount, api } from "./exchange/api";
+import {
+  fixtureMode,
+  setFixtureAccount,
+  api,
+  isPublicDemoAccount,
+} from "./exchange/api";
 import { Exchange } from "./exchange/Exchange";
 import {
   stageImport,
@@ -28,6 +33,18 @@ import {
   pendingImports,
   type PendingImport,
 } from "./exchange/journal";
+import {
+  refreshSync,
+  lastSync,
+  syncStatus,
+  sameVault,
+  readableSyncError,
+  pauseSync,
+  skippedImports,
+  recordSkipped,
+  clearSkipped,
+} from "./exchange/sync";
+import { syncSelectedSequential } from "./exchange/selected";
 import { clearAccount } from "./exchange/cache";
 const SearchIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -40,8 +57,22 @@ const PlusIcon = () => (
     <path d="M12 3v18M3 12h18" />
   </svg>
 );
-export default function CloudApp({ onBack }: { onBack: () => void }) {
-  const [account, setAccount] = useState(""),
+export default function CloudApp({
+  onBack,
+  localFiles = [],
+  active = true,
+}: {
+  onBack: () => void;
+  localFiles?: File[];
+  active?: boolean;
+}) {
+  const [account, setAccount] = useState(() => {
+      try {
+        return requireVault().accountId;
+      } catch {
+        return "";
+      }
+    }),
     [photos, setPhotos] = useState<Photo[]>([]),
     [received, setReceived] = useState<Photo[] | null>(null),
     [query, setQuery] = useState(""),
@@ -60,8 +91,23 @@ export default function CloudApp({ onBack }: { onBack: () => void }) {
     [approvalText, setApprovalText] = useState(""),
     [authenticated, setAuthenticated] = useState(false),
     [reselect, setReselect] = useState<PendingImport | undefined>(undefined);
+  const [authStep, setAuthStep] = useState<
+      "welcome" | "recovery" | "newRecovery"
+    >("welcome"),
+    [lastSuccessfulSync, setLastSuccessfulSync] = useState<string | null>(null),
+    [staging, setStaging] = useState(0),
+    [skipped, setSkipped] = useState(0),
+    [paused, setPaused] = useState(false),
+    [pickedFiles, setPickedFiles] = useState<File[]>([]),
+    [needsAttention, setNeedsAttention] = useState(false);
+  const running = useRef(false),
+    pausedRef = useRef(false),
+    uploadAbort = useRef<AbortController | null>(null),
+    localSynced = useRef(new WeakMap<File, string>());
   const input = useRef<HTMLInputElement>(null);
+  const allLocalFiles = [...new Set([...localFiles, ...pickedFiles])];
   const unlocked = !!account;
+  const publicDemo = fixtureMode || isPublicDemoAccount(account);
   const clear = () => {
     for (const photo of [...photos, ...(received ?? [])])
       photo.metadataKey.fill(0);
@@ -72,36 +118,90 @@ export default function CloudApp({ onBack }: { onBack: () => void }) {
     setViewer(null);
     setExchange(false);
     setPending([]);
+    setLastSuccessfulSync(null);
+    setStaging(0);
+    setStatus("");
+    setNeedsAttention(false);
+    setSkipped(0);
+    pausedRef.current = true;
+    setPaused(true);
+    uploadAbort.current?.abort();
   };
   useEffect(() => {
-    const onLock = () => clear();
+    let observed: ReturnType<typeof requireVault> | undefined;
+    try {
+      observed = requireVault();
+    } catch {}
+    const onLock = () => {
+      if (observed) pauseSync(observed);
+      clear();
+    };
     window.addEventListener("fotoro-lock", onLock);
     return () => window.removeEventListener("fotoro-lock", onLock);
   }, [photos, received]);
   const refresh = async () => {
-    setPhotos(await cachedCatalog());
-    setPending(await pendingImports());
-    try {
-      await syncCatalog();
-      setPhotos(await cachedCatalog());
-      setStatus("");
-    } catch (e) {
-      setStatus(
-        navigator.onLine
-          ? (e as Error).message
-          : "Offline · cached photos available after unlock",
-      );
+    const session = requireVault();
+    const cached = await cachedCatalog();
+    if (!sameVault(session)) return;
+    setPhotos((previous) => (sameVault(session) ? cached : previous));
+    const imports = await pendingImports();
+    if (!sameVault(session)) return;
+    setPending((previous) => (sameVault(session) ? imports : previous));
+    const previous = await lastSync(session);
+    if (!sameVault(session)) return;
+    setLastSuccessfulSync((value) => (sameVault(session) ? previous : value));
+    const skip = await skippedImports(session);
+    if (!sameVault(session)) return;
+    setSkipped((value) => (sameVault(session) ? skip : value));
+    if (pausedRef.current) {
+      setStatus("Sync is paused. Retry when you’re ready.");
+      return;
     }
+    if (!navigator.onLine) {
+      setStatus(
+        "Offline · your cached photos are available. Sync will resume when online.",
+      );
+      return;
+    }
+    const result = await refreshSync(session);
+    if (!sameVault(session)) return;
+    setPhotos((previous) => (sameVault(session) ? result.photos : previous));
+    setPending((previous) => (sameVault(session) ? result.pending : previous));
+    setSkipped((previous) => (sameVault(session) ? result.skipped : previous));
+    setLastSuccessfulSync((previous) =>
+      sameVault(session) ? result.lastSuccessfulSync : previous,
+    );
+    setStatus((previous) => (sameVault(session) ? "" : previous));
+    setNeedsAttention((previous) => (sameVault(session) ? false : previous));
   };
   const run = async (fn: () => Promise<void>) => {
+    if (running.current) return;
+    running.current = true;
     setBusy(true);
     setStatus("");
+    let session;
+    try {
+      session = requireVault();
+    } catch {}
     try {
       await ready;
       await fn();
     } catch (e) {
-      setStatus((e as Error).message);
+      if (!session || sameVault(session)) {
+        setStatus(readableSyncError(e));
+        setNeedsAttention(true);
+      }
+      if (session && sameVault(session)) {
+        const queue = await pendingImports();
+        if (sameVault(session))
+          setPending((previous) => (sameVault(session) ? queue : previous));
+      }
     } finally {
+      if (uploadAbort.current?.signal.aborted) {
+        uploadAbort.current = null;
+        setStaging(0);
+      }
+      running.current = false;
       setBusy(false);
     }
   };
@@ -109,13 +209,110 @@ export default function CloudApp({ onBack }: { onBack: () => void }) {
     run(async () => {
       await fn();
       setAuthenticated(true);
+      pausedRef.current = false;
+      setPaused(false);
       try {
         setAccount(requireVault().accountId);
+        setAuthStep("welcome");
       } catch {
-        throw new Error("AUTHENTICATED_USE_RECOVERY_OR_TRUSTED_DEVICE");
+        setAuthStep("recovery");
+        setStatus(
+          "Use your saved recovery code to unlock photos on this device.",
+        );
+        return;
       }
       await refresh();
     });
+  useEffect(() => {
+    if (!account || !active) return;
+    const update = () => {
+      if (document.visibilityState === "visible" && !pausedRef.current)
+        void run(refresh);
+    };
+    update();
+    window.addEventListener("online", update);
+    document.addEventListener("visibilitychange", update);
+    return () => {
+      window.removeEventListener("online", update);
+      document.removeEventListener("visibilitychange", update);
+    };
+  }, [account, active]);
+  const syncLocal = () =>
+    run(async () => {
+      const session = requireVault();
+      if (publicDemo) throw new Error("PUBLIC_TEST_ACCOUNT_UPLOAD_DISABLED");
+      pausedRef.current = false;
+      setPaused(false);
+      const controller = new AbortController();
+      uploadAbort.current = controller;
+      let failures = 0;
+      const candidates = allLocalFiles.filter(
+        (file) => localSynced.current.get(file) !== session.accountId,
+      );
+      try {
+        const result = await syncSelectedSequential(candidates, {
+          current: () => sameVault(session),
+          signal: controller.signal,
+          stage: async (file) => {
+            setStaging((value) => (sameVault(session) ? 1 : value));
+            await stageImport(file, undefined, controller.signal);
+            if (!sameVault(session)) throw new Error("VAULT_LOCKED");
+            localSynced.current.set(file, session.accountId);
+            await clearSkipped(session, file);
+            setStaging((value) => (sameVault(session) ? 0 : value));
+          },
+          drain: async () => {
+            await refresh();
+          },
+          unresolved: async () => {
+            const queue = await pendingImports();
+            if (!sameVault(session)) throw new Error("VAULT_LOCKED");
+            return queue.some((item) => item.state !== "committed");
+          },
+          skipped: async (file, error) => {
+            failures++;
+            await recordSkipped(session, file, error);
+            if (sameVault(session)) setStatus(readableSyncError(error));
+          },
+        });
+        if (sameVault(session) && result.stopped)
+          setStatus(
+            "A photo still needs to sync. Retry it before adding more photos.",
+          );
+        else if (sameVault(session) && failures)
+          setStatus(
+            `${failures} photos could not be prepared. Your local originals are unchanged.`,
+          );
+      } finally {
+        if (uploadAbort.current === controller) uploadAbort.current = null;
+        if (sameVault(session)) setStaging(0);
+      }
+    });
+  const summary = syncStatus(
+    pending,
+    lastSuccessfulSync,
+    skipped,
+    allLocalFiles.filter((file) => localSynced.current.get(file) !== account)
+      .length,
+  );
+  const pause = () => {
+    pausedRef.current = true;
+    setPaused(true);
+    uploadAbort.current?.abort();
+    try {
+      pauseSync();
+    } catch {}
+    setStatus("Pausing sync. Your originals are unchanged.");
+  };
+  const retry = () =>
+    run(async () => {
+      pausedRef.current = false;
+      setPaused(false);
+      await refresh();
+    });
+  const localCount = allLocalFiles.filter(
+    (file) => localSynced.current.get(file) !== account,
+  ).length;
   const shown = (received ?? photos).filter((p) =>
     (p.metadata.filename + " " + p.metadata.sourceDate)
       .toLowerCase()
@@ -127,7 +324,18 @@ export default function CloudApp({ onBack }: { onBack: () => void }) {
       <main inert={viewer || exchange ? true : undefined}>
         <header>
           <h1>Fotoro</h1>
-          <button onClick={onBack}>Photos</button>
+          <button
+            onClick={() => {
+              if (!account) {
+                cancelEnrollment();
+                setRecoveryNew("");
+                setAuthStep("welcome");
+              }
+              onBack();
+            }}
+          >
+            Local photos
+          </button>
           {unlocked && (
             <button
               className="menu-button glass"
@@ -146,165 +354,169 @@ export default function CloudApp({ onBack }: { onBack: () => void }) {
           )}
         </header>
         {!unlocked ? (
-          <section className="unlock">
-            <h2>Unlock your library</h2>
-            <button disabled={busy} onClick={() => login(passkeyLogin)}>
-              Use passkey
-            </button>
-            <details className="account-options">
-              <summary>Account options</summary>
-              <button
-                disabled={busy}
-                onClick={() =>
-                  run(async () => {
-                    setRecoveryNew(await prepareEnrollment());
-                    setRecoverySaved(false);
-                  })
-                }
-              >
-                Create account
-              </button>
-              {recoveryNew && (
-                <section>
-                  <label>
-                    Save this recovery code
-                    <textarea readOnly value={recoveryNew} />
-                  </label>
-                  <p className="hint">
-                    Store this code safely. The service never receives it.
-                    Without PRF support, use this code or trusted-device
-                    approval after reload.
-                  </p>
-                  <label className="check">
-                    <input
-                      type="checkbox"
-                      checked={recoverySaved}
-                      onChange={(e) => setRecoverySaved(e.target.checked)}
-                    />
-                    I saved the recovery code
-                  </label>
-                  <button
-                    disabled={busy || !recoverySaved}
-                    onClick={() =>
-                      login(async () => {
+          <section className="unlock sync-onboarding">
+            <h2>Sync photos</h2>
+            <p className="hint">
+              Use one account on your iPhone and browser. Your local photos stay
+              private until you choose to sync them.
+            </p>
+            {authStep === "welcome" && (
+              <>
+                <button
+                  disabled={busy}
+                  onClick={() =>
+                    run(async () => {
+                      setRecoveryNew(await prepareEnrollment());
+                      setRecoverySaved(false);
+                      setAuthStep("newRecovery");
+                    })
+                  }
+                >
+                  Create account
+                </button>
+                <button disabled={busy} onClick={() => login(passkeyLogin)}>
+                  Sign in
+                </button>
+                <button
+                  className="text-button"
+                  disabled={busy}
+                  onClick={() => setAuthStep("recovery")}
+                >
+                  Use a recovery code
+                </button>
+              </>
+            )}
+            {authStep === "newRecovery" && (
+              <>
+                <h3>Save your recovery code</h3>
+                <p className="hint">
+                  Keep this code somewhere safe. It unlocks your photos on
+                  another device if your passkey cannot. Fotoro never receives
+                  the code.
+                </p>
+                <textarea
+                  readOnly
+                  aria-label="Your recovery code"
+                  value={recoveryNew}
+                />
+                <label className="local-check">
+                  <input
+                    type="checkbox"
+                    checked={recoverySaved}
+                    onChange={(event) => setRecoverySaved(event.target.checked)}
+                  />
+                  I saved my recovery code
+                </label>
+                <button
+                  disabled={busy || !recoverySaved}
+                  onClick={() =>
+                    login(async () => {
+                      try {
                         await completeEnrollment(recoverySaved);
                         setRecoveryNew("");
                         setRecoverySaved(false);
-                      })
-                    }
-                  >
-                    Create passkey and enroll
-                  </button>
-                  <button
-                    onClick={() => {
-                      cancelEnrollment();
-                      setRecoveryNew("");
-                    }}
-                  >
-                    Cancel enrollment
-                  </button>
-                </section>
-              )}
-              <label>
-                Recovery code
-                <input
-                  value={recovery}
-                  onChange={(e) => setRecovery(e.target.value)}
-                  type="password"
-                  autoComplete="off"
-                  placeholder="fotoro1.account.secret"
-                />
-              </label>
-              <button
-                disabled={busy || !recovery}
-                onClick={() =>
-                  login(async () => {
-                    await recover(recovery);
-                    setRecovery("");
-                  })
-                }
-              >
-                Use recovery code
-              </button>
-              <p className="hint">
-                A passkey authenticates your account. Without passkey PRF,
-                recovery or a trusted device is required again after reload.
-                Photo caches stay encrypted while locked.
-              </p>
-              {authenticated && (
-                <section>
-                  <button
-                    onClick={() =>
-                      run(async () => {
-                        const challenge = await requestDeviceApproval();
-                        setDeviceChallenge(JSON.stringify(challenge));
-                        setEnrollmentId(challenge.enrollmentId);
-                      })
-                    }
-                  >
-                    Request trusted-device approval
-                  </button>
-                  {deviceChallenge && (
-                    <>
-                      <label>
-                        Send challenge to your trusted device
-                        <textarea readOnly value={deviceChallenge} />
-                      </label>
-                      <button
-                        onClick={() =>
-                          login(() =>
-                            unlockVault({
-                              kind: "trustedDevice",
-                              enrollmentId,
-                            }),
-                          )
-                        }
-                      >
-                        Complete approved request
-                      </button>
-                    </>
-                  )}
-                </section>
-              )}
-              {fixtureMode && (
-                <details>
-                  <summary>Public test accounts · loopback fixture</summary>
-                  <p className="hint">
-                    These accounts and their keys are public test data. Fixture
-                    auth does not simulate passkey success.
-                  </p>
-                  <div className="actions">
-                    <button
-                      disabled={busy}
-                      onClick={() =>
-                        login(() =>
-                          publicTestSession(
-                            "00000000-0000-4000-8000-000000000001",
-                          ),
-                        )
+                      } catch (error) {
+                        setAuthStep("welcome");
+                        setRecoveryNew("");
+                        throw error;
                       }
-                    >
-                      Open public account 1
-                    </button>
-                    <button
-                      disabled={busy}
-                      onClick={() =>
-                        login(() =>
-                          publicTestSession(
-                            "00000000-0000-4000-8000-000000000002",
-                          ),
-                        )
-                      }
-                    >
-                      Open public account 2
-                    </button>
-                  </div>
-                </details>
-              )}
-            </details>
+                    })
+                  }
+                >
+                  Continue
+                </button>
+                <button
+                  disabled={busy}
+                  onClick={() => {
+                    cancelEnrollment();
+                    setRecoveryNew("");
+                    setAuthStep("welcome");
+                  }}
+                >
+                  Cancel
+                </button>
+              </>
+            )}
+            {authStep === "recovery" && (
+              <>
+                <h3>Unlock photos on this device</h3>
+                <p className="hint">
+                  Enter the recovery code you saved when creating your account.
+                  This opens the same encrypted library as your iPhone.
+                </p>
+                <label>
+                  Recovery code
+                  <input
+                    value={recovery}
+                    onChange={(event) => setRecovery(event.target.value)}
+                    type="password"
+                    autoComplete="off"
+                    placeholder="Paste your saved code"
+                  />
+                </label>
+                <button
+                  disabled={busy || !recovery}
+                  onClick={() =>
+                    login(async () => {
+                      await recover(recovery);
+                      setRecovery("");
+                    })
+                  }
+                >
+                  Continue
+                </button>
+                <button disabled={busy} onClick={() => setAuthStep("welcome")}>
+                  Back
+                </button>
+              </>
+            )}
+            {fixtureMode && (
+              <details>
+                <summary>Advanced DEBUG</summary>
+                <p className="hint">
+                  Public test accounts only. These accounts are not private and
+                  do not simulate passkey success.
+                </p>
+                <button
+                  disabled={busy}
+                  onClick={() =>
+                    login(() =>
+                      publicTestSession("00000000-0000-4000-8000-000000000001"),
+                    )
+                  }
+                >
+                  Open public account 1
+                </button>
+                <button
+                  disabled={busy}
+                  onClick={() =>
+                    login(() =>
+                      publicTestSession("00000000-0000-4000-8000-000000000002"),
+                    )
+                  }
+                >
+                  Open public account 2
+                </button>
+              </details>
+            )}
           </section>
         ) : (
           <>
+            {publicDemo && (
+              <p className="demo-notice hint">
+                Public demo account — create a private account to sync your
+                photos. Pending uploads are kept here but will not be sent.
+              </p>
+            )}
+            {localCount > 0 && !received && (
+              <button
+                className="sync-local-button"
+                disabled={busy || publicDemo}
+                onClick={syncLocal}
+              >
+                Sync selected photos · {localCount}
+              </button>
+            )}
             {received && (
               <div className="received-bar">
                 <span>Received · explicit save required</span>
@@ -361,7 +573,7 @@ export default function CloudApp({ onBack }: { onBack: () => void }) {
               <button
                 onClick={() => input.current?.click()}
                 aria-label="Add photos"
-                disabled={busy}
+                disabled={busy || publicDemo}
               >
                 <PlusIcon />
               </button>
@@ -381,21 +593,27 @@ export default function CloudApp({ onBack }: { onBack: () => void }) {
               type="file"
               accept="image/jpeg,image/png"
               multiple
-              onChange={(e) =>
-                run(async () => {
-                  const files = Array.from(e.target.files ?? []);
-                  e.target.value = "";
-                  for (const file of files) {
-                    await stageImport(file, reselect);
+              onChange={(e) => {
+                const files = Array.from(e.target.files ?? []);
+                e.target.value = "";
+                if (!files.length) return;
+                if (reselect) {
+                  void run(async () => {
+                    if (publicDemo)
+                      throw new Error("PUBLIC_TEST_ACCOUNT_UPLOAD_DISABLED");
+                    await stageImport(files[0], reselect);
                     setReselect(undefined);
-                    setStatus(
-                      "Ciphertext staged · keep your source until committed",
-                    );
-                  }
-                  await resumePendingImports();
-                  await refresh();
-                })
-              }
+                    pausedRef.current = false;
+                    setPaused(false);
+                    await refresh();
+                  });
+                  return;
+                }
+                setPickedFiles((current) => [
+                  ...new Set([...current, ...files]),
+                ]);
+                setMenu(true);
+              }}
             />
           </>
         )}
@@ -418,10 +636,47 @@ export default function CloudApp({ onBack }: { onBack: () => void }) {
             >
               ×
             </button>
-            <h2>Library</h2>
+            <h2>Sync photos</h2>
             <p className="hint">
-              {fixtureMode ? "Public test account · " : ""}
-              {account}
+              Original quality · smaller JPEG previews are only for browsing.
+            </p>
+            <p role="status">
+              {paused
+                ? "Paused"
+                : needsAttention
+                  ? "Sync needs attention"
+                  : staging
+                    ? "Preparing one photo…"
+                    : busy
+                      ? "Checking photos…"
+                      : summary.label}
+            </p>
+            <p className="hint">
+              Browser uploads: {summary.synced} synced · {summary.pending}{" "}
+              pending · {summary.failed} failed · {summary.skipped} skipped
+            </p>
+            <p className="hint">
+              {lastSuccessfulSync
+                ? "Last checked " +
+                  new Date(lastSuccessfulSync).toLocaleString()
+                : "Not checked yet"}
+            </p>
+            {localCount > 0 && (
+              <>
+                <button disabled={busy || publicDemo} onClick={syncLocal}>
+                  Sync selected photos · {localCount}
+                </button>
+                <p className="hint">
+                  Only these selected files will be encrypted and uploaded.
+                  Originals stay unchanged. Browser imports support JPEG and
+                  PNG; HEIC photos synced from iPhone use JPEG previews here.
+                </p>
+              </>
+            )}
+            <p className="hint">
+              {publicDemo
+                ? "Public demo account — private uploads disabled"
+                : "Encrypted library"}
             </p>
             <div className="actions">
               <button
@@ -432,9 +687,10 @@ export default function CloudApp({ onBack }: { onBack: () => void }) {
               >
                 Exchanges
               </button>
-              <button disabled={busy} onClick={() => run(refresh)}>
-                Sync
+              <button disabled={busy} onClick={retry}>
+                {paused ? "Resume sync" : "Sync now"}
               </button>
+              {busy && <button onClick={pause}>Pause</button>}
               <button
                 onClick={() => {
                   lockVault();
@@ -444,97 +700,100 @@ export default function CloudApp({ onBack }: { onBack: () => void }) {
                 Lock
               </button>
             </div>
-            <label>
-              Your account card
-              <textarea readOnly value={JSON.stringify(requireVault().card)} />
-            </label>
-            <p className="hint">
-              Send this card through a trusted channel. Compare the complete
-              keys before pinning a received card.
-            </p>
-            {fixtureMode && (
+            <details>
+              <summary>Sharing & device options</summary>
+              <label>
+                Your account card
+                <textarea
+                  readOnly
+                  value={JSON.stringify(requireVault().card)}
+                />
+              </label>
+              <p className="hint">
+                Send this card through a trusted channel. Compare the complete
+                keys before pinning a received card.
+              </p>
+              {fixtureMode && (
+                <button
+                  onClick={() =>
+                    run(async () => {
+                      const data = await fixtureAccounts();
+                      const card = data.accounts.find(
+                        (c) => c.accountId !== account,
+                      )!;
+                      await navigator.clipboard.writeText(JSON.stringify(card));
+                      setStatus(
+                        "Other public test card copied · pin explicitly in Exchanges",
+                      );
+                    })
+                  }
+                >
+                  Copy other public test account card
+                </button>
+              )}
               <button
                 onClick={() =>
                   run(async () => {
-                    const data = await fixtureAccounts();
-                    const card = data.accounts.find(
-                      (c) => c.accountId !== account,
-                    )!;
-                    await navigator.clipboard.writeText(JSON.stringify(card));
-                    setStatus(
-                      "Other public test card copied · pin explicitly in Exchanges",
-                    );
+                    const challenge = await requestDeviceApproval();
+                    setStatus("Approval requested · " + challenge.enrollmentId);
                   })
                 }
               >
-                Copy other public test account card
+                Request trusted-device approval
               </button>
-            )}
-            <button
-              onClick={() =>
-                run(async () => {
-                  const challenge = await requestDeviceApproval();
-                  setStatus("Approval requested · " + challenge.enrollmentId);
-                })
-              }
-            >
-              Request trusted-device approval
-            </button>
-            <label>
-              Device challenge from your other device
-              <textarea
-                value={approvalText}
-                onChange={(e) => setApprovalText(e.target.value)}
-              />
-            </label>
-            <button
-              disabled={busy || !approvalText}
-              onClick={() =>
-                run(async () => {
-                  await approveDeviceChallenge(approvalText);
-                  setApprovalText("");
-                  setStatus("Device approved");
-                })
-              }
-            >
-              Approve device challenge
-            </button>
-            <h3>Pending imports</h3>
-            <p className="hint">
-              JPEG/PNG originals only, up to 50 MiB. Keep source files until
-              commit. Browser storage may be evicted.
-            </p>
-            {pending.length === 0 ? (
-              <p>No pending imports</p>
-            ) : (
-              pending.map((p) => (
-                <p key={p.operationId}>
-                  {p.sourceFilename} · {p.state}
-                  {p.error ? " · " + p.error : ""}
-                  {p.error === "STAGING_MISSING_RESELECT_ORIGINAL" && (
-                    <button
-                      onClick={() => {
-                        setReselect(p);
-                        input.current?.click();
-                      }}
-                    >
-                      Re-select matching original
-                    </button>
-                  )}
-                </p>
-              ))
-            )}
-            <button
-              disabled={busy}
-              onClick={() =>
-                run(async () => {
-                  await resumePendingImports();
-                  await refresh();
-                })
-              }
-            >
-              Retry pending imports
-            </button>
+              <label>
+                Device challenge from your other device
+                <textarea
+                  value={approvalText}
+                  onChange={(e) => setApprovalText(e.target.value)}
+                />
+              </label>
+              <button
+                disabled={busy || !approvalText}
+                onClick={() =>
+                  run(async () => {
+                    await approveDeviceChallenge(approvalText);
+                    setApprovalText("");
+                    setStatus("Device approved");
+                  })
+                }
+              >
+                Approve device challenge
+              </button>
+            </details>
+            <details open={summary.pending > 0 || summary.failed > 0}>
+              <summary>Photo status</summary>
+              <p className="hint">
+                Keep your original files until they are synced.
+              </p>
+              {pending.length === 0 ? (
+                <p>No pending imports</p>
+              ) : (
+                pending.map((p) => (
+                  <p key={p.operationId}>
+                    {p.sourceFilename} ·{" "}
+                    {p.state === "committed"
+                      ? "Synced"
+                      : p.state === "failed"
+                        ? "Failed"
+                        : "Pending"}
+                    {p.error
+                      ? " · " + readableSyncError(new Error(p.error))
+                      : ""}
+                    {p.error === "STAGING_MISSING_RESELECT_ORIGINAL" && (
+                      <button
+                        onClick={() => {
+                          setReselect(p);
+                          input.current?.click();
+                        }}
+                      >
+                        Re-select matching original
+                      </button>
+                    )}
+                  </p>
+                ))
+              )}
+            </details>
             <button
               onClick={() =>
                 run(async () => {

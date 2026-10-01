@@ -24,3 +24,32 @@ test("snapshot changes and signed crypto fixtures conform", async () => {
     }),
   );
 });
+test("still original metadata accepts HEIC and PhotoKit dates without allowing video or empty originals", () => {
+  const metadata = {
+    version: 1,
+    filename: "IMG_0001.HEIC",
+    mediaType: "image/heic",
+    sourceDate: "2026-10-01T12:00:00.000Z",
+    dateSource: "photos",
+    originalBytes: 52428800,
+    originalSha256: "A".repeat(43),
+    representationKeys: {},
+  };
+  assert.equal(validateWire("PhotoMetadataV1", metadata), metadata);
+  for (const mediaType of ["image/jpeg", "image/png", "image/heic"]) {
+    validateWire("PhotoMetadataV1", { ...metadata, mediaType });
+  }
+  for (const mediaType of ["video/quicktime", "image/gif", "image/heif"]) {
+    assert.throws(() =>
+      validateWire("PhotoMetadataV1", { ...metadata, mediaType }),
+    );
+  }
+  for (const originalBytes of [0, -1, 52428801]) {
+    assert.throws(() =>
+      validateWire("PhotoMetadataV1", { ...metadata, originalBytes }),
+    );
+  }
+  assert.throws(() =>
+    validateWire("PhotoMetadataV1", { ...metadata, dateSource: "guessed" }),
+  );
+});

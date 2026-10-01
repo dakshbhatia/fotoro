@@ -1,8 +1,42 @@
+import ImageIO
+import UniformTypeIdentifiers
 import XCTest
 
 @testable import Fotoro
 
 final class ImportTests: XCTestCase {
+  func testHEICOriginalPreservedAndJPEGDerivatives() async throws {
+    let jpeg = try Data(
+      contentsOf: Bundle.main.url(forResource: "singapore", withExtension: "jpg")!)
+    let source = try XCTUnwrap(CGImageSourceCreateWithData(jpeg as CFData, nil))
+    let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+    let encoded = NSMutableData()
+    let destination = try XCTUnwrap(
+      CGImageDestinationCreateWithData(encoded, UTType.heic.identifier as CFString, 1, nil))
+    CGImageDestinationAddImage(destination, image, nil)
+    XCTAssertTrue(CGImageDestinationFinalize(destination))
+    let original = encoded as Data
+    try original.write(
+      to: FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("fotoro-sync-sample.heic"))
+    XCTAssertEqual(try PhotoImport.validate(original, filename: "original.heic"), "image/heic")
+    XCTAssertThrowsError(try PhotoImport.validate(original, filename: "pretend.jpg"))
+    let store = try LibraryStore(
+      root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
+    let account = try fixture(FixtureAccounts.self, "accounts").testSecrets[0]
+    let photo = try await PhotoImport(store: store).build(
+      bytes: original, filename: "original.heic", accountId: account.accountId,
+      bundle: AccountBundle(
+        vaultKey: account.vaultKey, boxSecretKey: account.boxSecretKey,
+        signingSecretKey: account.signingSecretKey))
+    XCTAssertEqual(photo.metadata.mediaType, "image/heic")
+    XCTAssertEqual(photo.originalURL?.pathExtension, "heic")
+    XCTAssertEqual(try Data(contentsOf: XCTUnwrap(photo.originalURL)), original)
+    for url in [photo.thumbnailURL, photo.previewURL] {
+      let bytes = try Data(contentsOf: XCTUnwrap(url))
+      XCTAssertTrue(bytes.starts(with: [0xff, 0xd8, 0xff]))
+    }
+  }
   func testUnsupportedTranscodedAndUnavailableOriginals() async throws {
     let store = try LibraryStore(
       root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))

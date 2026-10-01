@@ -135,7 +135,6 @@ struct RecentPhotosView: View {
   @State private var sharing: [URL] = []
   @State private var showShare = false
   @State private var settings = false
-  @State private var backup = false
   @State private var services: AppServices?
   @State private var preparingShare = false
   var visible: [RecentPhoto] {
@@ -257,7 +256,6 @@ struct RecentPhotosView: View {
               pendingBackup = false
               do {
                 services = try AppServices()
-                backup = true
               } catch { store.error = error.localizedDescription }
             }
           }
@@ -265,7 +263,7 @@ struct RecentPhotosView: View {
           NavigationStack {
             List {
               Text("Photos stay in your library. Fotoro does not upload them while you browse.")
-              Button("Backup & sharing") {
+              Button("Sync photos") {
                 pendingBackup = true
                 settings = false
               }
@@ -278,8 +276,10 @@ struct RecentPhotosView: View {
             }.navigationTitle("Settings")
           }
         }
-        .onChange(of: scenePhase) { if scenePhase == .active { store.refresh() } }
-        .sheet(isPresented: $backup) { if let services { LibraryView(services: services) } }
+        .onChange(of: scenePhase) {
+          if scenePhase == .active { store.refresh() } else { services?.backup.pause() }
+        }
+        .sheet(item: $services) { service in LibraryView(services: service) }
         .alert(
           "Fotoro",
           isPresented: Binding(get: { store.error != nil }, set: { if !$0 { store.error = nil } })

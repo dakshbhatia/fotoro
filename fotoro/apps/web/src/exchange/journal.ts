@@ -8,8 +8,16 @@ import type {
 import { ready, signPayload, utf8 } from "@fotoro/crypto";
 import { requireVault, encryptPrivate, decryptPrivate } from "../vault/vault";
 import { all, get, atomic, put } from "./cache";
-import { api, ApiError, base, fixtureMode, resolveUploadURL } from "./api";
+import {
+  api,
+  ApiError,
+  base,
+  fixtureMode,
+  resolveUploadURL,
+  isPublicDemoAccount,
+} from "./api";
 import { digest } from "../library/catalog";
+import { assertVault, sameVault } from "../vault/scope";
 import { captureDate } from "../library/exif";
 export interface PendingImport {
   operationId: string;
@@ -75,14 +83,20 @@ async function preview(file: File, max: number) {
 export async function stageImport(
   file: File,
   reselect?: PendingImport,
+  signal?: AbortSignal,
 ): Promise<PendingImport> {
+  if (fixtureMode) throw new Error("PUBLIC_TEST_ACCOUNT_UPLOAD_DISABLED");
+  signal?.throwIfAborted();
   validateSource(file);
   if (reselect && !(await sourceMatches(file, reselect)))
     throw new Error("SOURCE_MISMATCH");
   const v = requireVault(),
     operationId = reselect?.operationId ?? crypto.randomUUID(),
     photoId = reselect?.photoId ?? crypto.randomUUID();
+  if (isPublicDemoAccount(v.accountId))
+    throw new Error("PUBLIC_TEST_ACCOUNT_UPLOAD_DISABLED");
   const original = await file.arrayBuffer();
+  assertVault(v);
   const signature = new Uint8Array(original);
   if (
     file.type === "image/jpeg"
@@ -93,10 +107,20 @@ export async function stageImport(
   const exifDate = captureDate(new Uint8Array(original));
   const thumb = await preview(file, 256),
     medium = await preview(file, 1600);
+  assertVault(v);
+  signal?.throwIfAborted();
   const worker = new Worker(new URL("./crypto.worker.ts", import.meta.url), {
     type: "module",
   });
   const result: any = await new Promise((resolve, reject) => {
+    signal?.addEventListener(
+      "abort",
+      () => {
+        worker.terminate();
+        reject(new DOMException("Sync paused", "AbortError"));
+      },
+      { once: true },
+    );
     worker.onmessage = (e) =>
       e.data.error ? reject(new Error(e.data.error)) : resolve(e.data);
     worker.onerror = () => reject(new Error("CRYPTO_WORKER_FAILED"));
@@ -119,6 +143,8 @@ export async function stageImport(
       [original, thumb, medium],
     );
   }).finally(() => worker.terminate());
+  assertVault(v);
+  signal?.throwIfAborted();
   const stagingKeys = result.staged.map(
     (part: any) =>
       v.accountId + ":" + operationId + ":" + part.binding.representationId,
@@ -155,19 +181,32 @@ export async function stageImport(
   return pending;
 }
 export async function pendingImports() {
-  const id = requireVault().accountId;
-  return (await all<WrappedKeyV1>("journal"))
+  const session = requireVault();
+  const id = session.accountId;
+  const records = await all<WrappedKeyV1>("journal");
+  assertVault(session);
+  return records
     .filter(([key]) => key.startsWith(id + ":"))
     .map(([, value]) => decryptPrivate<PendingImport>(value));
 }
-export async function resumePendingImports() {
+export async function resumePendingImports(signal?: AbortSignal) {
   const v = requireVault();
+  if (fixtureMode || isPublicDemoAccount(v.accountId)) return;
+  const check = () => {
+    assertVault(v);
+    signal?.throwIfAborted();
+  };
   for (const pending of await pendingImports()) {
+    check();
     if (pending.state === "committed") continue;
     const journalKey = v.accountId + ":" + pending.operationId;
-    const persist = () => put("journal", journalKey, encryptPrivate(pending));
+    const persist = () => {
+      check();
+      return put("journal", journalKey, encryptPrivate(pending));
+    };
     try {
       for (let i = 0; i < pending.parts.length; i++) {
+        check();
         const part = pending.parts[i];
         if (part.commit) continue;
         if (part.reservation) {
@@ -176,6 +215,8 @@ export async function resumePendingImports() {
               "/v1/uploads/" + part.reservation.uploadId + "/commit",
               {},
               "UploadCommitV1",
+              "POST",
+              signal,
             );
             if (
               part.commit!.ciphertextBytes !== part.ciphertextBytes ||
@@ -194,10 +235,12 @@ export async function resumePendingImports() {
           }
         }
         const bytes = await get<Uint8Array>("staging", pending.stagingKeys[i]);
+        check();
         if (!bytes || digest(bytes) !== part.ciphertextSha256)
           throw new Error("STAGING_MISSING_RESELECT_ORIGINAL");
         pending.state = "uploading";
         await persist();
+        check();
         part.reservation ??= await api(
           "/v1/uploads/reserve",
           {
@@ -208,6 +251,8 @@ export async function resumePendingImports() {
             operationId: part.uploadOperation,
           },
           "UploadReservationV1",
+          "POST",
+          signal,
         );
         await persist();
         const url = resolveUploadURL(
@@ -218,8 +263,10 @@ export async function resumePendingImports() {
                 (fixtureMode ? "http://127.0.0.1:8790" : undefined))
             : undefined,
         );
+        check();
         const response = await fetch(url, {
           method: "PUT",
+          signal,
           body: new Uint8Array(bytes),
           credentials: "include",
           headers: fixtureMode
@@ -233,6 +280,8 @@ export async function resumePendingImports() {
           "/v1/uploads/" + part.reservation!.uploadId + "/commit",
           {},
           "UploadCommitV1",
+          "POST",
+          signal,
         );
         if (
           part.commit!.ciphertextBytes !== part.ciphertextBytes ||
@@ -260,6 +309,7 @@ export async function resumePendingImports() {
       };
       pending.manifest = manifest;
       await persist();
+      check();
       await api(
         "/v1/photos",
         signPayload(
@@ -269,7 +319,10 @@ export async function resumePendingImports() {
           v.signingSecretKey,
         ),
         "PhotoManifestV1",
+        "POST",
+        signal,
       );
+      check();
       pending.state = "committed";
       pending.error = undefined;
       await atomic([
@@ -280,6 +333,13 @@ export async function resumePendingImports() {
         })),
       ]);
     } catch (e) {
+      if (!sameVault(v)) throw new Error("VAULT_LOCKED");
+      if (signal?.aborted) {
+        pending.state = "queued";
+        pending.error = undefined;
+        await put("journal", journalKey, encryptPrivate(pending));
+        return;
+      }
       pending.state = "failed";
       pending.error = e instanceof Error ? e.message : "IMPORT_FAILED";
       await persist();

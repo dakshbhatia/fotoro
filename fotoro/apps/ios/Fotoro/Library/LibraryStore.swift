@@ -15,6 +15,7 @@ struct LocalPhoto: Codable, Identifiable, Sendable {
 final class LibraryStore: @unchecked Sendable {
   let database: DatabaseQueue
   let root: URL
+  private var ownedRoots: Set<String> = []
   init(root: URL) throws {
     self.root = root
     try FileManager.default.createDirectory(
@@ -24,15 +25,58 @@ final class LibraryStore: @unchecked Sendable {
     try database.write { db in
       try db.execute(
         sql:
-          "CREATE TABLE IF NOT EXISTS photos (id TEXT PRIMARY KEY, sourceDate TEXT NOT NULL, value BLOB NOT NULL); CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT); CREATE TABLE IF NOT EXISTS transfers (id TEXT PRIMARY KEY, value BLOB NOT NULL); CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, value BLOB NOT NULL)"
+          "CREATE TABLE IF NOT EXISTS backupSources (id TEXT PRIMARY KEY, value BLOB NOT NULL); CREATE TABLE IF NOT EXISTS photos (id TEXT PRIMARY KEY, sourceDate TEXT NOT NULL, value BLOB NOT NULL); CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT); CREATE TABLE IF NOT EXISTS transfers (id TEXT PRIMARY KEY, value BLOB NOT NULL); CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, value BLOB NOT NULL)"
       )
+    }
+    let history = try database.read { db -> [String] in
+      guard
+        let value = try String.fetchOne(db, sql: "SELECT value FROM state WHERE key='rootHistory'")
+      else { return [] }
+      return try Wire.decode([String].self, Data(value.utf8))
+    }
+    ownedRoots = Set(history.map { ($0 as NSString).standardizingPath })
+    ownedRoots.insert((root.path as NSString).standardizingPath)
+    let historyValue = String(
+      data: try Wire.encode(ownedRoots.sorted()), encoding: .utf8)!
+    try database.write { db in
+      try db.execute(
+        sql:
+          "INSERT INTO state(key,value) VALUES('rootHistory',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        arguments: [historyValue])
     }
     try FileManager.default.setAttributes(
       [.protectionKey: FileProtectionType.complete],
       ofItemAtPath: root.appendingPathComponent("catalog.sqlite").path)
   }
+  // Only paths created inside this account's Media/Pending folders move with its sandbox.
+  func rebased(_ photo: LocalPhoto) -> LocalPhoto {
+    func owned(_ url: URL?, folder: String) -> URL? {
+      guard let url, url.isFileURL else { return url }
+      let previousRoot = url.deletingLastPathComponent().deletingLastPathComponent()
+      // Legacy production records predate rootHistory; only the exact app-owned layout migrates.
+      let legacyLayout =
+        previousRoot.deletingLastPathComponent().lastPathComponent == "Fotoro"
+        && previousRoot.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent
+          == "Application Support"
+        && previousRoot.deletingLastPathComponent().deletingLastPathComponent()
+          .deletingLastPathComponent().lastPathComponent == "Library"
+      guard ownedRoots.contains((previousRoot.path as NSString).standardizingPath) || legacyLayout,
+        url.deletingLastPathComponent().lastPathComponent == folder,
+        url.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent
+          == root.lastPathComponent,
+        ![".", "..", ""].contains(url.lastPathComponent)
+      else { return url }
+      return root.appendingPathComponent(folder).appendingPathComponent(url.lastPathComponent)
+    }
+    var value = photo
+    value.originalURL = owned(photo.originalURL, folder: "Media")
+    value.thumbnailURL = owned(photo.thumbnailURL, folder: "Media")
+    value.previewURL = owned(photo.previewURL, folder: "Media")
+    value.staged = photo.staged.mapValues { owned($0, folder: "Pending")! }
+    return value
+  }
   func put(_ photo: LocalPhoto) throws { try database.write { db in try put(photo, db: db) } }
-  private func put(_ photo: LocalPhoto, db: Database) throws {
+  func put(_ photo: LocalPhoto, db: Database) throws {
     try db.execute(
       sql:
         "INSERT INTO photos(id,sourceDate,value) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET sourceDate=excluded.sourceDate,value=excluded.value",
@@ -55,7 +99,21 @@ final class LibraryStore: @unchecked Sendable {
           db, sql: "SELECT value FROM photos ORDER BY sourceDate DESC,id LIMIT ?",
           arguments: [min(1000, max(1, limit))])
       }
-      return try rows.map { try Wire.decode(LocalPhoto.self, $0["value"] as Data) }
+      return try rows.map { rebased(try Wire.decode(LocalPhoto.self, $0["value"] as Data)) }
+    }
+  }
+  func ownedOriginal(digest: String, accountId: String) throws -> LocalPhoto? {
+    try database.read { db in
+      let cursor = try Row.fetchCursor(db, sql: "SELECT value FROM photos")
+      while let row = try cursor.next() {
+        let photo = try Wire.decode(LocalPhoto.self, row["value"] as Data)
+        if photo.manifest.ownerAccountId == accountId, photo.metadata.originalSha256 == digest,
+          ["pending", "committed", "saved"].contains(photo.transferState)
+        {
+          return rebased(photo)
+        }
+      }
+      return nil
     }
   }
   func cursor() throws -> String? {

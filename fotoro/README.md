@@ -16,8 +16,20 @@ or reloading clears the session; the browser cannot scan the iPhone Photos libra
 Unknown image dimensions, including HEIC in this browser slice, are skipped before
 decoding. Thumbnail/preview caches are bounded and generated sequentially.
 
-Backup & sharing opens the separate encrypted exchange slice: JPEG/PNG imports
-up to 50 MiB, encrypted originals and derivatives,
+Settings → Sync photos connects the local canvas to the encrypted account catalog.
+On iOS, explicitly start Sync last 30 days after unlocking your account. Backup
+processes one original at a time, resumes durable pending work, and shows synced,
+pending, failed and skipped counts. Keep the app open; closed-app scheduling is
+not implemented. In the browser, opening setup preserves selected files and
+uploads nothing; Sync selected photos starts their upload.
+
+Native imports preserve JPEG/PNG/HEIC originals byte for byte, up to 50 MiB.
+Native browsing copies are JPEG thumbnails at 320 px and previews at 1600 px, quality
+82%; they never replace the original. Safari displays HEIC through those copies
+and downloads the untouched HEIC. Browser imports accept JPEG/PNG. Live Photo
+motion pairs and videos are visibly skipped by backup.
+
+The encrypted exchange also provides encrypted metadata,
 metadata search, passkey/recovery/device-approval protocols, explicit sharing,
 15-minute or ongoing grants, view/save/contribute, revocation, and recipient-owned
 saved copies. Exchanges accept up to 100 photos. Originals are verified by digest.
@@ -33,8 +45,9 @@ pnpm dev
 ```
 
 Open http://127.0.0.1:4310 and choose Open photos. No account is required for local
-browsing. For the cloud demo, Settings → Backup & sharing exposes public test
-accounts in development. Those keys are intentionally public. Fixtures reset when
+browsing. Sync photos exposes public test accounts inside Advanced in fixture
+development builds. Those keys are intentionally public and private uploads are
+blocked, including when a public account is unlocked through recovery. Fixtures reset when
 stopped; clear the cloud session after a reset. The demo does not simulate successful passkeys.
 
 For the real local Worker/D1/R2 service:
@@ -48,7 +61,7 @@ The seed command uses local storage only. Recover with a public code printed by
 the command. Do not store personal photographs in either public test account.
 
 Open `apps/ios/Fotoro.xcodeproj`, scheme `Fotoro`, on an iOS 26+ Simulator.
-Open Photos starts local browsing. Settings → Backup & sharing opens account
+Open Photos starts local browsing. Settings → Sync photos opens account
 setup; developer controls are inside Advanced in DEBUG builds. Physical-device
 passkeys require HTTPS, signing, and associated domains.
 
@@ -66,7 +79,7 @@ The isolated exchange check creates and removes its own local D1/R2 state.
 See [verification](docs/verification.md), [release setup](docs/deployment.md),
 and the [product roadmap](../docs/ai-photos/roadmap.md).
 
-Next: validate on a signed physical iPhone and HTTPS Safari, measure the large
-library targets, then add cloud HEIC/Live Photo preservation and durable local OCR/EXIF
-indexing. Semantic search, faces, dedupe cleanup, optional Gemini enrichment,
-video, and nearby transport remain planned work.
+Next: deploy HTTPS and validate sync on a signed physical iPhone and Safari,
+then measure the large-library targets and implement background scheduling.
+Live Photo motion preservation, OCR, semantic search, faces, cleanup, optional
+AI enrichment, video and nearby transport remain planned work.

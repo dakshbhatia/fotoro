@@ -14,6 +14,7 @@ enum UnlockMethod {
     signedPayload: SignedPayloadV1, deviceSecret: Data)
 }
 @MainActor @Observable final class VaultStore {
+  private(set) var generation = UUID()
   private(set) var bundle: AccountBundle?
   var isUnlocked: Bool { bundle != nil }
   private let session: AccountSession
@@ -26,6 +27,7 @@ enum UnlockMethod {
   }
   func unlock(_ method: UnlockMethod) async throws {
     guard let id = session.accountId else { throw FotoroError("Authenticate before unlocking") }
+    let unlockingGeneration = generation
     var bytes: Data
     switch method {
     case .recoveryEnvelope(let secret, let wrapper): bytes = try crypto.unwrap(wrapper, key: secret)
@@ -75,11 +77,16 @@ enum UnlockMethod {
       try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: Data(b64: candidate.boxSecretKey))
         .publicKey.rawRepresentation.b64 == card.boxPublicKey
     else { throw FotoroError("Recovered box identity mismatch") }
+    guard session.accountId == id, generation == unlockingGeneration else {
+      throw CancellationError()
+    }
     try Keychain.write(bytes, id: id)
+    generation = UUID()
     bundle = candidate
   }
   func recover(secret: Data) async throws { try await unlock(.recovery(secret)) }
   func lock() {
+    generation = UUID()
     bundle = nil
     onLock?()
   }

@@ -27,22 +27,38 @@ actor PhotoImport {
     self.store = store
     self.sourceReader = sourceReader
   }
-  func importResources(_ selected: [SelectedResource], accountId: String, bundle: AccountBundle)
+  func importResources(
+    _ selected: [SelectedResource], accountId: String, bundle: AccountBundle,
+    valid: @escaping @Sendable () async -> Bool = { true }
+  )
     async throws -> [LocalPhoto]
   {
     failures = []
     notices = []
     var imported: [LocalPhoto] = []
     for selection in selected {
+      try Task.checkCancellation()
+      guard await valid() else { throw CancellationError() }
       do {
         let (bytes, filename, edited) = try await read(selection)
+        guard await valid() else { throw CancellationError() }
         let photo = try build(
           bytes: bytes, filename: filename, accountId: accountId, bundle: bundle)
+        guard await valid() else {
+          for url in Array(photo.staged.values)
+            + [photo.originalURL, photo.thumbnailURL, photo.previewURL].compactMap({ $0 })
+          {
+            try? FileManager.default.removeItem(at: url)
+          }
+          throw CancellationError()
+        }
         try store.put(photo)
         imported.append(photo)
         if edited {
           notices.append("Imported the unmodified original; Photos edits are not included.")
         }
+      } catch is CancellationError {
+        throw CancellationError()
       } catch {
         failures.append(ImportFailure(id: selection.id, message: error.localizedDescription))
       }
@@ -57,22 +73,29 @@ actor PhotoImport {
       throw FotoroError("Original must be between 1 byte and 50 MiB")
     }
     let ext = URL(fileURLWithPath: filename).pathExtension.lowercased()
-    guard ["jpg", "jpeg", "png"].contains(ext) else {
-      throw FotoroError(
-        "Only unmodified JPEG and PNG originals are supported; HEIC, Live Photos and video are not converted"
-      )
+    guard let source = CGImageSourceCreateWithData(bytes as CFData, nil),
+      let type = CGImageSourceGetType(source) as String?
+    else {
+      throw FotoroError("The original image cannot be decoded")
     }
-    let jpeg = bytes.starts(with: [0xff, 0xd8, 0xff])
-    let png = bytes.starts(with: [137, 80, 78, 71, 13, 10, 26, 10])
-    guard jpeg || png, let source = CGImageSourceCreateWithData(bytes as CFData, nil),
-      let type = CGImageSourceGetType(source) as String?,
-      type == (jpeg ? UTType.jpeg.identifier : UTType.png.identifier)
-    else { throw FotoroError("File type does not match an original JPEG or PNG") }
-    guard (jpeg && ext != "png") || (png && ext == "png") else {
-      throw FotoroError("Filename and original resource type do not match")
+    let supported: [String: (String, [String])] = [
+      UTType.jpeg.identifier: ("image/jpeg", ["jpg", "jpeg"]),
+      UTType.png.identifier: ("image/png", ["png"]),
+      UTType.heic.identifier: ("image/heic", ["heic"]),
+    ]
+    guard let (mediaType, extensions) = supported[type], extensions.contains(ext) else {
+      throw FotoroError("Choose an unmodified JPEG, PNG or HEIC original with a matching filename")
     }
-    return jpeg ? "image/jpeg" : "image/png"
+    return mediaType
   }
+  static func originalExtension(for mediaType: String) -> String {
+    switch mediaType {
+    case "image/png": return "png"
+    case "image/heic": return "heic"
+    default: return "jpg"
+    }
+  }
+
   private func read(_ selected: SelectedResource) async throws -> (Data, String, Bool) {
     if let sourceReader { return try await sourceReader(selected) }
     switch selected.origin {
@@ -97,13 +120,19 @@ actor PhotoImport {
       }
       let resources = PHAssetResource.assetResources(for: asset)
       guard let original = resources.first(where: { $0.type == .photo }),
-        [UTType.jpeg.identifier, UTType.png.identifier].contains(original.uniformTypeIdentifier)
+        [UTType.jpeg.identifier, UTType.png.identifier, UTType.heic.identifier].contains(
+          original.uniformTypeIdentifier)
       else {
         throw FotoroError(
-          "This original is not JPEG or PNG. A transcoded JPEG is not imported as an original.")
+          "This original is not JPEG, PNG or HEIC. A transcoded JPEG is not imported as an original."
+        )
       }
-      let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
-      defer { try? FileManager.default.removeItem(at: temporary) }
+      let directory = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+      try FileManager.default.createDirectory(
+        at: directory, withIntermediateDirectories: true,
+        attributes: [.protectionKey: FileProtectionType.complete])
+      let temporary = directory.appendingPathComponent("original")
+      defer { try? FileManager.default.removeItem(at: directory) }
       let options = PHAssetResourceRequestOptions()
       options.isNetworkAccessAllowed = true
       try await withCheckedThrowingContinuation {
@@ -121,6 +150,9 @@ actor PhotoImport {
           }
         }
       }
+      try Task.checkCancellation()
+      try FileManager.default.setAttributes(
+        [.protectionKey: FileProtectionType.complete], ofItemAtPath: temporary.path)
       let size = try temporary.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
       guard size <= 50 * 1024 * 1024 else { throw FotoroError("Original exceeds 50 MiB") }
       return (
@@ -129,11 +161,50 @@ actor PhotoImport {
       )
     }
   }
-  func build(bytes: Data, filename: String, accountId: String, bundle: AccountBundle) throws
+  func stageBackup(
+    _ source: BackupSource, accountId: String, bundle: AccountBundle, capturedAt: Date? = nil
+  ) async throws -> LocalPhoto {
+    if let existing = try store.backupPhoto(source.photoId) { return existing }
+    try Task.checkCancellation()
+    let selection = SelectedResource(
+      id: source.id, origin: .photos, resourceIdentifier: source.id, fileURL: nil)
+    let (bytes, filename, _) = try await read(selection)
+    try Task.checkCancellation()
+    if let reused = try store.ownedOriginal(digest: bytes.digest, accountId: accountId) {
+      var checkpoint = source
+      checkpoint.photoId = reused.photoId
+      checkpoint.message = nil
+      if ["committed", "saved"].contains(reused.transferState) {
+        checkpoint.phase = .committed
+        try store.putBackupSource(checkpoint)
+      } else {
+        try store.stageBackup(reused, source: checkpoint)
+      }
+      return reused
+    }
+    let photo = try build(
+      bytes: bytes, filename: filename, accountId: accountId, bundle: bundle,
+      photoId: source.photoId, backup: true, capturedAt: capturedAt)
+    do {
+      try Task.checkCancellation()
+      try store.stageBackup(photo, source: source)
+    } catch {
+      for url in Array(photo.staged.values)
+        + [photo.originalURL, photo.thumbnailURL, photo.previewURL].compactMap({ $0 })
+      {
+        try? FileManager.default.removeItem(at: url)
+      }
+      throw error
+    }
+    return photo
+  }
+  func build(
+    bytes: Data, filename: String, accountId: String, bundle: AccountBundle,
+    photoId: String = Wire.id(), backup: Bool = false, capturedAt: Date? = nil
+  ) throws
     -> LocalPhoto
   {
     let media = try Self.validate(bytes, filename: filename)
-    let photoId = Wire.id()
     let metadataKey = crypto.randomKey()
     let vault = try Data(b64: bundle.vaultKey)
     var reps: [RepresentationV1] = []
@@ -141,9 +212,17 @@ actor PhotoImport {
     var staged: [String: URL] = [:]
     var thumbURL: URL?
     var previewURL: URL?
+    var completed = false
+    defer {
+      if !completed {
+        for url in Array(staged.values) + [thumbURL, previewURL].compactMap({ $0 }) {
+          try? FileManager.default.removeItem(at: url)
+        }
+      }
+    }
     let source = CGImageSourceCreateWithData(bytes as CFData, nil)!
-    var sourceDate = Wire.date()
-    var provenance = "import"
+    var sourceDate = capturedAt.map(Wire.date) ?? Wire.date()
+    var provenance = capturedAt == nil ? "import" : "photos"
     if let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
       let exif = properties[kCGImagePropertyExifDictionary as String] as? [String: Any],
       let originalDate = exif[kCGImagePropertyExifDateTimeOriginal as String] as? String
@@ -167,7 +246,8 @@ actor PhotoImport {
         plain = try Self.derivative(source, maxPixel: kind == "thumbnail" ? 320 : 1600)
       }
       let encrypted = try crypto.encrypt(plain, key: key, binding: binding)
-      let path = try store.write(encrypted, name: representationId + ".bin", pending: true)
+      let path = try store.write(
+        encrypted, name: (backup ? photoId + "-" + kind : representationId) + ".bin", pending: true)
       staged[representationId] = path
       keys[representationId] = key.b64
       reps.append(
@@ -183,7 +263,8 @@ actor PhotoImport {
     let binding = MediaBinding(photoId: photoId, representationId: Wire.id(), kind: "metadata")
     let cipher = try crypto.encrypt(Wire.encode(metadata), key: metadataKey, binding: binding)
     staged[binding.representationId] = try store.write(
-      cipher, name: binding.representationId + ".bin", pending: true)
+      cipher, name: (backup ? photoId + "-metadata" : binding.representationId) + ".bin",
+      pending: true)
     let representation = RepresentationV1(
       binding: binding, objectId: Wire.id(), header: cipher.prefix(24).b64,
       ciphertextBytes: cipher.count, ciphertextSha256: cipher.digest)
@@ -191,11 +272,13 @@ actor PhotoImport {
       photoId: photoId, ownerAccountId: accountId, representations: reps,
       metadataRepresentation: representation,
       ownerWrappedMetadataKey: try crypto.wrap(metadataKey, key: vault))
-    return LocalPhoto(
+    let photo = LocalPhoto(
       photoId: photoId, manifest: manifest, metadata: metadata, transferState: "pending",
       originalURL: try store.write(
-        bytes, name: photoId + "-original." + (media == "image/png" ? "png" : "jpg")),
+        bytes, name: photoId + "-original." + Self.originalExtension(for: media)),
       thumbnailURL: thumbURL, previewURL: previewURL, staged: staged)
+    completed = true
+    return photo
   }
   private static func derivative(_ source: CGImageSource, maxPixel: Int) throws -> Data {
     guard

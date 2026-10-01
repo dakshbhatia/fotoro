@@ -8,7 +8,13 @@ import {
   type LocalPhoto,
   LocalResources,
 } from "./resources";
-export function LocalTrial({ onBackup }: { onBackup: () => void }) {
+export function LocalTrial({
+  onBackup,
+  onPhotosChange,
+}: {
+  onBackup: () => void;
+  onPhotosChange?: (files: File[]) => void;
+}) {
   const [photos, setPhotos] = useState<LocalPhoto[]>([]),
     [query, setQuery] = useState(""),
     [viewer, setViewer] = useState<string | null>(null),
@@ -35,6 +41,9 @@ export function LocalTrial({ onBackup }: { onBackup: () => void }) {
         .includes(query.toLowerCase()),
   );
   useEffect(() => () => resources.current.clear(), []);
+  useEffect(() => {
+    onPhotosChange?.(photos.map((photo) => photo.file));
+  }, [photos, onPhotosChange]);
   useEffect(() => {
     if (!settings) return;
     settingsPanel.current?.focus();
@@ -290,7 +299,7 @@ export function LocalTrial({ onBackup }: { onBackup: () => void }) {
               onBackup();
             }}
           >
-            Backup & sharing
+            Sync photos
           </button>
           <p className="hint">
             Choose the files you want to open. This browser cannot scan your

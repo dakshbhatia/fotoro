@@ -22,9 +22,9 @@ export interface RepresentationV1 {
 export interface PhotoMetadataV1 {
   version: 1;
   filename: string;
-  mediaType: "image/jpeg" | "image/png";
+  mediaType: "image/jpeg" | "image/png" | "image/heic";
   sourceDate: string;
-  dateSource: "exif" | "import";
+  dateSource: "exif" | "photos" | "import";
   originalBytes: number;
   originalSha256: Base64Url;
   representationKeys: Record<UUID, Base64Url>;

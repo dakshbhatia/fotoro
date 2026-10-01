@@ -9,8 +9,9 @@ struct AccountView: View {
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
-        Text("Backup & sharing").font(.title2)
-        Button("Continue") {
+        Text("Sync photos").font(.title2)
+        Text("Use the same account on iPhone and in your browser.").foregroundStyle(.secondary)
+        Button("Sign in") {
           services.run {
             if services.session.accountId != nil {
               do { try await services.vault.unlock(.localKeychain) } catch {
@@ -22,7 +23,8 @@ struct AccountView: View {
             try services.activateAccount()
           }
         }.buttonStyle(.borderedProminent)
-        Button("Recover account") { recovering.toggle() }
+        Button("Create account") { services.run { try await services.auth.prepareEnrollment() } }
+        Button("Use a recovery code") { recovering.toggle() }
         if recovering {
           SecureField("Recovery code", text: $recovery).textInputAutocapitalization(.never)
             .autocorrectionDisabled()
@@ -49,7 +51,6 @@ struct AccountView: View {
         }
         if let fallback = services.auth.fallbackMessage { Text(fallback).font(.caption) }
         DisclosureGroup("More options") {
-          Button("Create account") { services.run { try await services.auth.prepareEnrollment() } }
           DisclosureGroup("Use a trusted device") {
             Button("Request approval") { services.run { try await services.deviceTrust.begin() } }
             if let request = services.deviceTrust.challengeJSON {

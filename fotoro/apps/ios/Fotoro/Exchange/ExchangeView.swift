@@ -60,7 +60,7 @@ struct ExchangeView: View {
           Button("Retry pending saves") { services.run { try await services.resumeSaves() } }
           Button("Retry pending uploads") {
             services.run {
-              await services.journal.resumePending()
+              try await services.resumeTransfers()
               try services.reload()
               if let error = services.journal.errors.values.first { throw FotoroError(error) }
             }

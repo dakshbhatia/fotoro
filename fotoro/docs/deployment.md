@@ -30,6 +30,13 @@ real local API at 8787 and public fixtures at 8790. Production D1/R2 bindings,
 Cloudflare access and Apple signing are still required. No public Fotoro service
 or TestFlight release is claimed. See [verification](verification.md).
 
+Foreground Photos sync is implemented locally. On a deployed/signed build:
+create or unlock one account on iPhone, save its recovery code, then start
+Sync last 30 days. Open the same HTTPS service in Safari and sign in or recover
+that account to load committed photos. Keep the iPhone app open during backup.
+Background scheduling and a personal physical-device acceptance run remain release
+gates; localhost on this Mac is not an installable iPhone service.
+
 Production web assets and Worker bundling pass a Wrangler `--dry-run`. Wrangler
 reports missing production D1/R2 bindings: those bindings are not inherited from
 the local environment. Add the real resource identifiers before deployment;

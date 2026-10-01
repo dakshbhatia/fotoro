@@ -174,13 +174,20 @@ let enrollment:
       prfSalt: Uint8Array;
     }
   | undefined;
+let enrollmentEpoch = 0;
 export async function prepareEnrollment() {
+  cancelEnrollment();
+  const epoch = enrollmentEpoch;
   await ready;
+  if (epoch !== enrollmentEpoch)
+    throw new DOMException("Setup cancelled", "AbortError");
   setFixtureAccount();
   const options = await api<any>("/v1/auth/register/options", {
     version: 1,
     client: "web",
   });
+  if (epoch !== enrollmentEpoch)
+    throw new DOMException("Setup cancelled", "AbortError");
   const box = sodium.crypto_box_keypair(),
     signing = sodium.crypto_sign_keypair(),
     vault = sodium.randombytes_buf(32),
@@ -224,6 +231,7 @@ export async function prepareEnrollment() {
   return "fotoro1." + card.accountId + "." + b64(recovery);
 }
 export function cancelEnrollment() {
+  enrollmentEpoch++;
   if (enrollment) {
     enrollment.bundle.fill(0);
     enrollment.recovery.fill(0);
@@ -244,6 +252,8 @@ export async function completeEnrollment(recoverySaved: boolean) {
     const response = await startRegistration({
       optionsJSON: e.options.options,
     });
+    if (enrollment !== e)
+      throw new DOMException("Setup cancelled", "AbortError");
     const output = prfOutput(response);
     const session = await api<any>(
       "/v1/auth/register/verify",
@@ -265,6 +275,8 @@ export async function completeEnrollment(recoverySaved: boolean) {
       },
       "SessionV1",
     );
+    if (enrollment !== e)
+      throw new DOMException("Setup cancelled", "AbortError");
     configureDevice(session.deviceId);
     const vault: VaultV1 = {
       version: 1,
@@ -294,6 +306,6 @@ export async function completeEnrollment(recoverySaved: boolean) {
     await unlockVault({ kind: "recovery", secret: e.recovery });
     await remember(vault);
   } finally {
-    cancelEnrollment();
+    if (enrollment === e) cancelEnrollment();
   }
 }

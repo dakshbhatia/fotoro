@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import accounts from "../../fixtures/accounts.json";
+import { validateWire } from "../../packages/contracts/src/validate.js";
 import type {
   PhotoManifestV1,
   RepresentationV1,
@@ -124,7 +125,7 @@ async function authenticate(index: number) {
   return { card, secrets, token: session.token! };
 }
 type Client = Awaited<ReturnType<typeof authenticate>>;
-async function upload(client: Client) {
+async function upload(client: Client, filename = "singapore.jpg") {
   const photoId = randomUUID(),
     metadataKey = sodium.randombytes_buf(32),
     keys: Record<string, string> = {};
@@ -179,7 +180,7 @@ async function upload(client: Client) {
     } satisfies RepresentationV1;
   }
   const original = await readFile(
-    new URL("../../fixtures/media/singapore.jpg", import.meta.url),
+    new URL(`../../fixtures/media/${filename}`, import.meta.url),
   );
   const reps: RepresentationV1[] = [];
   for (const [kind, name] of [
@@ -190,9 +191,11 @@ async function upload(client: Client) {
     const key = sodium.randombytes_buf(32);
     const rep = await representation(
       kind,
-      await readFile(
-        new URL(`../../fixtures/media/${name}.jpg`, import.meta.url),
-      ),
+      kind === "original"
+        ? original
+        : await readFile(
+            new URL(`../../fixtures/media/${name}.jpg`, import.meta.url),
+          ),
       key,
     );
     reps.push(rep);
@@ -200,10 +203,10 @@ async function upload(client: Client) {
   }
   const metadata: PhotoMetadataV1 = {
     version: 1,
-    filename: "singapore.jpg",
-    mediaType: "image/jpeg",
+    filename,
+    mediaType: filename.endsWith(".heic") ? "image/heic" : "image/jpeg",
     sourceDate: new Date().toISOString(),
-    dateSource: "import",
+    dateSource: filename.endsWith(".heic") ? "photos" : "import",
     originalBytes: original.length,
     originalSha256: sha(original),
     representationKeys: keys,
@@ -230,7 +233,8 @@ async function upload(client: Client) {
     unb64(client.secrets.signingSecretKey),
   );
   assert.deepEqual(await api("/v1/photos", client.token, signed), manifest);
-  return { manifest, signed, metadataKey, original };
+  validateWire("PhotoMetadataV1", metadata);
+  return { manifest, signed, metadataKey, original, metadata };
 }
 async function restore(client: Client, manifest: PhotoManifestV1) {
   const metadataKey = unwrapKey(
@@ -246,9 +250,12 @@ async function restore(client: Client, manifest: PhotoManifestV1) {
     assert.equal(b64(ciphertext.subarray(0, 24)), rep.header);
     return collect(decryptMedia(records(ciphertext), key, rep.binding));
   }
-  const metadata: PhotoMetadataV1 = JSON.parse(
-    new TextDecoder().decode(
-      await decode(manifest.metadataRepresentation, metadataKey),
+  const metadata = validateWire<PhotoMetadataV1>(
+    "PhotoMetadataV1",
+    JSON.parse(
+      new TextDecoder().decode(
+        await decode(manifest.metadataRepresentation, metadataKey),
+      ),
     ),
   );
   const rep = manifest.representations.find(
@@ -422,4 +429,33 @@ test("real local D1/R2: recover, encrypted originals both ways, independent save
       "Restored original bytes must match the source",
     );
   }
+});
+
+test("real local D1/R2: HEIC still bytes survive upload and same-account restore in a fresh session", async () => {
+  await ready;
+  const original = await readFile(
+    new URL("../../fixtures/media/singapore.heic", import.meta.url),
+  );
+  assert.equal(original.subarray(4, 8).toString(), "ftyp");
+  const owner = await authenticate(0);
+  const photo = await upload(owner, "singapore.heic");
+  assert.equal(photo.metadata.mediaType, "image/heic");
+  assert.equal(photo.metadata.filename, "singapore.heic");
+  assert.equal(photo.metadata.dateSource, "photos");
+  assert.equal(Buffer.from(photo.original).equals(original), true);
+  const freshSession = await authenticate(0);
+  const page = await api<{
+    changes: { entityId: string; payload: SignedPayloadV1 | null }[];
+  }>("/v1/changes?limit=100", freshSession.token);
+  const signed = page.changes.find(
+    (change) => change.entityId === photo.manifest.photoId,
+  )!.payload!;
+  const manifest = JSON.parse(
+    new TextDecoder().decode(
+      verifyPayload(signed, unb64(freshSession.card.signingPublicKey)),
+    ),
+  );
+  const restored = await restore(freshSession, manifest);
+  assert.equal(Buffer.from(restored).equals(original), true);
+  assert.equal(sha(restored), sha(original));
 });

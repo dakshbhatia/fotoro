@@ -9,6 +9,8 @@ struct LibraryView: View {
   @State private var showingFiles = false
   @State private var viewer: LocalPhoto?
   @State private var showExchange = false
+  @State private var showingBackup = false
+  @Environment(\.scenePhase) private var scenePhase
   @State private var selectedPhotos: [PhotosPickerItem] = []
   @State private var scrollID: String?
   @State private var signingOut = false
@@ -44,17 +46,20 @@ struct LibraryView: View {
 
                     } label: {
                       ZStack(alignment: .bottomTrailing) {
-                        LazyImage(url: photo.thumbnailURL) { state in
-                          if let image = state.image {
-                            image.resizable().scaledToFill()
-                          } else {
-                            Rectangle().fill(.quaternary)
-                          }
-                        }.frame(height: 140).clipped()
+                        GeometryReader { geometry in
+                          LazyImage(url: photo.thumbnailURL) { state in
+                            if let image = state.image {
+                              image.resizable().scaledToFill()
+                            } else {
+                              Rectangle().fill(.quaternary)
+                            }
+                          }.frame(width: geometry.size.width, height: geometry.size.height)
+                            .clipped()
+                        }
                         if selection.contains(photo.id) {
                           Image(systemName: "checkmark.circle.fill").padding(8)
                         }
-                      }
+                      }.aspectRatio(1, contentMode: .fit)
                     }.buttonStyle(.plain).id(photo.id).accessibilityLabel(photo.metadata.filename)
                       .onAppear {
                         if photo.id == services.photos.last?.id { try? services.loadMore() }
@@ -78,12 +83,17 @@ struct LibraryView: View {
             if filtered.isEmpty {
               ContentUnavailableView(
                 "No photos", systemImage: "photo",
-                description: Text("Add JPEG or PNG originals to your library."))
+                description: Text("Add JPEG, PNG or HEIC originals to your library."))
             }
             ForEach(services.notices, id: \.self) { Text($0).font(.caption).padding() }
           }.scrollPosition(id: $scrollID, anchor: .top)
             .searchable(text: $query, prompt: "Search")
             .toolbar {
+              ToolbarItem(placement: .topBarLeading) {
+                Button("Sync photos", systemImage: "arrow.triangle.2.circlepath") {
+                  showingBackup = true
+                }
+              }
               ToolbarItem(placement: .topBarTrailing) {
                 Menu("Add", systemImage: "plus") {
                   Button("Shared moments") { showExchange = true }
@@ -100,7 +110,7 @@ struct LibraryView: View {
                         guard
                           let url = Bundle.main.url(forResource: "singapore", withExtension: "jpg")
                         else { throw FotoroError("Sample missing") }
-                        try await services.importFiles([url])
+                        try await services.importFiles([url], publicSample: true)
                       }
                     }
                   #endif
@@ -121,16 +131,25 @@ struct LibraryView: View {
           PhotoViewer(
             services: services, initialID: photo.id)
         }
+        .onChange(of: scenePhase) { if scenePhase != .active { services.backup.pause() } }
+        .sheet(isPresented: $showingBackup) { PhotosBackupView(services: services) }
         .sheet(isPresented: $showExchange) {
           ExchangeView(
             services: services, selected: services.photos.filter { selection.contains($0.id) })
         }
         .fileImporter(
-          isPresented: $showingFiles, allowedContentTypes: [.jpeg, .png],
+          isPresented: $showingFiles, allowedContentTypes: [.jpeg, .png, .heic],
           allowsMultipleSelection: true
         ) { result in services.run { try await services.importFiles(result.get()) } }
         .onChange(of: selectedPhotos) { _, items in
           services.run {
+            guard
+              NativeBackupPolicy.allowsPrivatePhotos(
+                accountId: services.session.accountId, fixture: services.session.fixture)
+            else {
+              throw FotoroError(
+                "Public test accounts cannot import your Photos library. Use a real account.")
+            }
             let selected = items.compactMap { item in
               item.itemIdentifier.map {
                 SelectedResource(
@@ -141,34 +160,14 @@ struct LibraryView: View {
               throw FotoroError(
                 "Original Photos identifiers unavailable; select an original from Files")
             }
-            let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
-            guard status == .authorized || status == .limited else {
-              throw FotoroError("Allow access to the selected originals or import from Files")
-            }
-            let assets = PHAsset.fetchAssets(
-              withLocalIdentifiers: selected.map { $0.resourceIdentifier }, options: nil)
-            var cached: [PHAsset] = []
-            assets.enumerateObjects { asset, _, _ in cached.append(asset) }
-            photoManager.startCachingImages(
-              for: cached, targetSize: CGSize(width: 320, height: 320), contentMode: .aspectFill,
-              options: nil)
-            defer { photoManager.stopCachingImagesForAllAssets() }
-            services.notices = [
-              "Downloading selected unmodified originals. iCloud photos may need network access."
-            ]
-            let photos = try await services.importer.importResources(
-              selected, accountId: services.session.accountId!,
-              bundle: services.vault.requireBundle())
-            for photo in photos { try services.journal.enqueue(photo) }
-            services.notices = await services.importer.failures.map { $0.message }
-            services.notices += await services.importer.notices
-            try services.reload()
+            try await services.importPhotos(selected)
           }
         }
         .onChange(of: services.vault.isUnlocked) { _, unlocked in
           if !unlocked {
             viewer = nil
             showExchange = false
+            showingBackup = false
             selection = []
           }
         }

@@ -125,7 +125,8 @@
         "mediaType": {
           "enum": [
             "image/jpeg",
-            "image/png"
+            "image/png",
+            "image/heic"
           ]
         },
         "sourceDate": {
@@ -136,12 +137,13 @@
         "dateSource": {
           "enum": [
             "exif",
+            "photos",
             "import"
           ]
         },
         "originalBytes": {
           "type": "integer",
-          "minimum": 0,
+          "minimum": 1,
           "maximum": 52428800
         },
         "originalSha256": {

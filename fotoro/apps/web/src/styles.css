@@ -521,3 +521,36 @@ summary {
     top: 82px;
   }
 }
+.sync-onboarding .text-button {
+  border: 0;
+  background: transparent;
+  color: #666;
+}
+.sync-onboarding textarea {
+  min-height: 100px;
+  word-break: break-all;
+}
+.sync-local-button {
+  position: fixed;
+  top: 93px;
+  right: 32px;
+  font-size: 13px;
+  border: 0;
+  color: #666;
+  background: transparent;
+}
+@media (max-width: 700px) {
+  .sync-local-button {
+    top: 78px;
+    right: 16px;
+    max-width: calc(100vw - 32px);
+  }
+}
+.demo-notice {
+  margin: 0 32px 10px;
+}
+@media (max-width: 700px) {
+  .demo-notice {
+    margin: 0 16px 10px;
+  }
+}

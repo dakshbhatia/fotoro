@@ -155,7 +155,7 @@ export async function applyChanges(
   await atomic(writes);
   if (requireVault() !== session) throw new Error("VAULT_LOCKED");
 }
-export async function syncCatalog() {
+export async function syncCatalog(signal?: AbortSignal) {
   const session = requireVault();
   const id = session.accountId;
   let cursor = await get<WrappedKeyV1>("settings", id + ":cursor");
@@ -168,6 +168,8 @@ export async function syncCatalog() {
           : ""),
       undefined,
       "ChangePageV1",
+      "GET",
+      signal,
     );
     await applyChanges(page, session);
     if (!page.hasMore) break;
