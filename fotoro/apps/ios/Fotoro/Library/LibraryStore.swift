@@ -119,6 +119,21 @@ final class LibraryStore: @unchecked Sendable {
   func cursor() throws -> String? {
     try database.read { try String.fetchOne($0, sql: "SELECT value FROM state WHERE key='cursor'") }
   }
+  func uploadsPaused() throws -> Bool {
+    // Absent means manual Files imports are allowed before Photos sync is selected.
+    try database.read {
+      try String.fetchOne($0, sql: "SELECT value FROM state WHERE key='uploadsPaused'") == "1"
+    }
+  }
+  func setSyncIntent(enabled: Bool, uploadsPaused: Bool) throws {
+    try database.write { db in
+      for (key, value) in [("syncEnabled", enabled), ("uploadsPaused", uploadsPaused)] {
+        try db.execute(
+          sql: "INSERT INTO state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+          arguments: [key, value ? "1" : "0"])
+      }
+    }
+  }
   // A verified caller supplies decoded catalog records; the page and cursor commit together.
   func apply(_ page: ChangePageV1, verified: [String: LocalPhoto]) throws {
     guard page.version == 1 else { throw FotoroError("Unsupported change version") }

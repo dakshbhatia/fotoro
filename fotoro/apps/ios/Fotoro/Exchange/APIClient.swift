@@ -17,11 +17,12 @@ private final class APIRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchec
       ? "http://localhost:4310" : "https://fotoro.cloud"
   }
   var rpId: String { origin == "https://fotoro.cloud" ? "fotoro.cloud" : "localhost" }
-  private let network = URLSession(
-    configuration: .ephemeral, delegate: APIRedirectPolicy(), delegateQueue: nil)
-  init(session: AccountSession, baseURL: URL) {
+  private let network: URLSession
+  init(session: AccountSession, baseURL: URL, networkConfiguration: URLSessionConfiguration = .ephemeral) {
     self.session = session
     self.baseURL = baseURL
+    network = URLSession(
+      configuration: networkConfiguration, delegate: APIRedirectPolicy(), delegateQueue: nil)
   }
   func request(_ path: String, method: String = "GET", body: Data? = nil) async throws -> Data {
     guard let url = URL(string: path, relativeTo: baseURL) else {

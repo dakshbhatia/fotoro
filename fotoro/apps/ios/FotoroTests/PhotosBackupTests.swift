@@ -4,6 +4,92 @@ import XCTest
 @testable import Fotoro
 
 final class PhotosBackupTests: XCTestCase {
+  @MainActor func testExplicitPausePreservesQueuedFilesAcrossForegroundAndProcessRestoration() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore() }
+    let services = try await context.enroll()
+    try await services.importFiles([context.sample])
+    let queued = try XCTUnwrap(services.journal.entries().first)
+    XCTAssertFalse(try services.store.syncEnabled())
+
+    services.pauseSync()
+    await services.resumeSavedAccount()
+    XCTAssertEqual(try services.journal.entries().map { $0.photo.id }, [queued.photo.id])
+    XCTAssertTrue(PausedUploadProtocol.server.requests.allSatisfy { $0.method == "GET" })
+    XCTAssertTrue(PausedUploadProtocol.server.requests.contains { $0.path == "/v1/changes" })
+    do {
+      try await services.resumeTransfers()
+      XCTFail("Retrying an upload must respect explicit Pause")
+    } catch { XCTAssertTrue(error.localizedDescription.contains("paused")) }
+
+    try context.persistSession(services)
+    let restarted = try context.restoredServices()
+    await restarted.resumeSavedAccount(initialRestoration: true)
+    XCTAssertTrue(restarted.vault.isUnlocked)
+    XCTAssertEqual(try restarted.journal.entries().map { $0.photo.id }, [queued.photo.id])
+    XCTAssertTrue(PausedUploadProtocol.server.requests.allSatisfy { $0.method == "GET" })
+    XCTAssertEqual(try Data(contentsOf: XCTUnwrap(queued.photo.originalURL)), try Data(contentsOf: context.sample))
+    XCTAssertTrue(queued.photo.staged.values.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+    restarted.vault.lock()
+  }
+
+  @MainActor func testManualFilesBeforePhotosOptInAndExplicitContinueReleaseUploadFence() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore() }
+    let services = try await context.enroll()
+    XCTAssertFalse(try services.store.syncEnabled())
+    try await services.importFiles([context.sample])
+    try await services.resumeTransfers()
+    XCTAssertTrue(try services.journal.entries().isEmpty, "Manual Files imports work before Photos opt-in")
+    let photo = try XCTUnwrap(services.store.photos().first)
+    XCTAssertEqual(photo.transferState, "committed")
+    try services.setLabels(["  Pending private label  "], photo: photo)
+    services.pauseSync()
+    let writesBeforeRefresh = PausedUploadProtocol.server.requests.filter { $0.method != "GET" }.count
+    try await services.sync()
+    XCTAssertEqual(PausedUploadProtocol.server.requests.filter { $0.method != "GET" }.count, writesBeforeRefresh)
+    XCTAssertEqual(try services.annotations.ledger.pendingIDs(), [photo.id])
+    XCTAssertEqual(try services.annotations.ledger.state(photo.id)?.revision, 0)
+    XCTAssertEqual(services.annotation(photo).labels, ["  Pending private label  "])
+    try await services.importFiles([context.sample])
+    XCTAssertEqual(try services.journal.entries().count, 1, "Pause retains newly selected Files locally")
+
+    // Exercise the same Continue entry point as the UI, cancelling its Photos scan before it runs.
+    try services.startPhotosBackup()
+    services.backup.pause()
+    await services.backup.waitUntilSettled()
+    try await services.resumeTransfers()
+    XCTAssertTrue(try services.journal.entries().isEmpty)
+    await services.syncAnnotations()
+    XCTAssertTrue(try services.annotations.ledger.pendingIDs().isEmpty)
+    XCTAssertEqual(try services.annotations.ledger.state(photo.id)?.revision, 1)
+    XCTAssertTrue(try services.store.syncEnabled())
+    services.vault.lock()
+  }
+
+  @MainActor func testExplicitUploadPauseIsIsolatedToItsAccount() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore() }
+    let first = try await context.enroll()
+    try await first.importFiles([context.sample])
+    let firstID = try XCTUnwrap(first.journal.entries().first).photo.id
+    first.pauseSync()
+
+    let second = try await context.enroll(accountId: Wire.id())
+    XCTAssertFalse(try second.store.syncEnabled())
+    try await second.importFiles([context.sample])
+    try await second.resumeTransfers()
+    XCTAssertTrue(try second.journal.entries().isEmpty)
+    XCTAssertEqual(try second.store.photos().first?.transferState, "committed")
+    XCTAssertEqual(try first.journal.entries().map { $0.photo.id }, [firstID])
+    let writesBeforeFirstResume = PausedUploadProtocol.server.requests.filter { $0.method != "GET" }.count
+    await first.resumeSavedAccount()
+    XCTAssertEqual(try first.journal.entries().map { $0.photo.id }, [firstID])
+    XCTAssertEqual(PausedUploadProtocol.server.requests.filter { $0.method != "GET" }.count, writesBeforeFirstResume)
+    first.vault.lock()
+    second.vault.lock()
+  }
+
   func testPublicSeedAccountsNeverAcceptPrivatePhotoSync() {
     for id in ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002"] {
       XCTAssertFalse(NativeBackupPolicy.allowsPrivatePhotos(accountId: id, fixture: false))
@@ -271,4 +357,133 @@ final class PhotosBackupTests: XCTestCase {
     continuation?.resume()
     continuation = nil
   }
+}
+
+@MainActor private final class PausedUploadContext {
+  let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+  let sample = Bundle.main.url(forResource: "singapore", withExtension: "jpg")!
+  private let accounts: FixtureAccounts
+  private let savedSession: Data?
+  private let savedDefaults: [String: Any]
+  private var enrolled: [String] = []
+  private let accountId = Wire.id()
+  private let defaultsKeys = ["fotoro.api", "fotoro.fixtureAccount", "fotoro.pinnedCards"]
+  init() throws {
+    accounts = try fixture(FixtureAccounts.self, "accounts")
+    savedSession = try? Keychain.read("session")
+    savedDefaults = Dictionary(uniqueKeysWithValues: defaultsKeys.compactMap { key in
+      UserDefaults.standard.object(forKey: key).map { (key, $0) }
+    })
+    UserDefaults.standard.set("https://pause-sync.test", forKey: "fotoro.api")
+    PausedUploadProtocol.server.reset()
+  }
+  func restoredServices() throws -> AppServices {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [PausedUploadProtocol.self]
+    return try AppServices(root: root, networkConfiguration: configuration)
+  }
+  func enroll(accountId id: String? = nil) async throws -> AppServices {
+    let services = try restoredServices()
+    var card = accounts.accounts[0]
+    card.accountId = id ?? accountId
+    enrolled.append(card.accountId)
+    services.session.accountId = card.accountId
+    services.session.fixture = false
+    services.session.bearerToken = "controlled-test-session"
+    try services.session.pin(card)
+    let secret = accounts.testSecrets[0]
+    try await services.vault.unlock(.recoveryEnvelope(secret: Data(b64: secret.recoverySecret), wrapper: secret.encryptedBundle))
+    try services.activateAccount()
+    return services
+  }
+  func persistSession(_ services: AppServices) throws {
+    try Keychain.write(Wire.encode(SessionV1(version: 1, accountId: XCTUnwrap(services.session.accountId), deviceId: Wire.id(), expiresAt: Wire.date(Date().addingTimeInterval(3600)), token: services.session.bearerToken)), id: "session")
+  }
+  func restore() {
+    for id in enrolled { Keychain.remove(id) }
+    if let savedSession { try? Keychain.write(savedSession, id: "session") }
+    else { Keychain.remove("session") }
+    for key in defaultsKeys {
+      if let value = savedDefaults[key] { UserDefaults.standard.set(value, forKey: key) }
+      else { UserDefaults.standard.removeObject(forKey: key) }
+    }
+  }
+}
+
+private final class PausedUploadServer: @unchecked Sendable {
+  struct Request {
+    var method: String
+    var path: String
+  }
+  private let lock = NSLock()
+  private var recorded: [Request] = []
+  private var reservations: [String: ReserveUploadV1] = [:]
+  var requests: [Request] {
+    lock.lock()
+    defer { lock.unlock() }
+    return recorded
+  }
+  func reset() {
+    lock.lock()
+    defer { lock.unlock() }
+    recorded = []
+    reservations = [:]
+  }
+  func response(_ request: URLRequest) throws -> Data {
+    lock.lock()
+    defer { lock.unlock() }
+    let path = request.url!.path
+    recorded.append(Request(method: request.httpMethod ?? "GET", path: path))
+    switch path {
+    case "/v1/changes":
+      return try Wire.encode(ChangePageV1(version: 1, changes: [], nextCursor: nil, hasMore: false))
+    case "/v1/grants":
+      return try Wire.encode(GrantInboxV1(version: 1, grants: []))
+    case "/v1/uploads/reserve":
+      let input = try Wire.decode(ReserveUploadV1.self, body(request))
+      let id = Wire.id()
+      reservations[id] = input
+      return try Wire.encode(UploadReservationV1(version: 1, uploadId: id, photoId: input.binding.photoId, representationId: input.binding.representationId, stagingUrl: "https://pause-sync.test/v1/staging/\(id)", expiresAt: Wire.date(Date().addingTimeInterval(3600))))
+    case "/v1/photos":
+      let signed = try Wire.decode(SignedPayloadV1.self, body(request))
+      return try Data(b64: signed.body)
+    default:
+      if path.hasSuffix("/commit"), let input = reservations[request.url!.deletingLastPathComponent().lastPathComponent] {
+        // A commit probe found a previously uploaded immutable representation.
+        return try Wire.encode(UploadCommitV1(version: 1, uploadId: request.url!.deletingLastPathComponent().lastPathComponent, objectId: Wire.id(), ciphertextBytes: input.ciphertextBytes, ciphertextSha256: input.ciphertextSha256))
+      }
+      if path.hasSuffix("/annotations"), request.httpMethod == "PUT" { return Data("{}".utf8) }
+      throw FotoroError("Unexpected controlled request: \(path)")
+    }
+  }
+  private func body(_ request: URLRequest) throws -> Data {
+    if let bytes = request.httpBody { return bytes }
+    guard let stream = request.httpBodyStream else { throw FotoroError("Missing test request body") }
+    stream.open()
+    defer { stream.close() }
+    var result = Data()
+    var buffer = [UInt8](repeating: 0, count: 4096)
+    while true {
+      let count = stream.read(&buffer, maxLength: buffer.count)
+      if count < 0 { throw stream.streamError ?? FotoroError("Cannot read test request body") }
+      if count == 0 { return result }
+      result.append(contentsOf: buffer.prefix(count))
+    }
+  }
+}
+
+private final class PausedUploadProtocol: URLProtocol, @unchecked Sendable {
+  static let server = PausedUploadServer()
+  override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "pause-sync.test" }
+  override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+  override func startLoading() {
+    do {
+      let data = try Self.server.response(request)
+      let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+      client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+      client?.urlProtocol(self, didLoad: data)
+      client?.urlProtocolDidFinishLoading(self)
+    } catch { client?.urlProtocol(self, didFailWithError: error) }
+  }
+  override func stopLoading() {}
 }

@@ -32,12 +32,13 @@ struct PendingSave: Codable {
   var fixtureAccounts: FixtureAccounts?
   var selectedGrant: GrantV1?
   let crypto = CryptoAdapter()
-  init(root: URL? = nil) throws {
+  init(root: URL? = nil, networkConfiguration: URLSessionConfiguration = .ephemeral) throws {
     session = AccountSession()
     api = APIClient(
       session: session,
       baseURL: URL(
-        string: UserDefaults.standard.string(forKey: "fotoro.api") ?? "https://fotoro.cloud")!)
+        string: UserDefaults.standard.string(forKey: "fotoro.api") ?? "https://fotoro.cloud")!,
+      networkConfiguration: networkConfiguration)
     vault = VaultStore(session: session, api: api)
     auth = NativeAuth(session: session, api: api, vault: vault)
     deviceTrust = DeviceTrust(session: session, api: api, vault: vault)
@@ -95,7 +96,7 @@ struct PendingSave: Codable {
     }
     guard let account = session.accountId else { throw FotoroError("Sign in first") }
     let bundle = try vault.requireBundle()
-    try store.setSyncEnabled(true)
+    try store.setSyncIntent(enabled: true, uploadsPaused: false)
     let generation = vault.generation
     let catalog = store
     let importWorker = importer
@@ -188,9 +189,9 @@ struct PendingSave: Codable {
         try await vault.unlock(.localKeychain)
         try activateAccount()
       }
-      await journal.resumePending()
+      if try !store.uploadsPaused() { await journal.resumePending() }
       try await sync()
-      if try store.syncEnabled(), !backup.isRunning { try startPhotosBackup() }
+      if try store.syncEnabled(), try !store.uploadsPaused(), !backup.isRunning { try startPhotosBackup() }
     } catch {
       if vault.isUnlocked { notices = ["Sync will continue when you reconnect."] }
       else { self.error = "Sign in to continue syncing your photos." }
@@ -201,9 +202,10 @@ struct PendingSave: Codable {
     vault.lock()
   }
   func pauseSync() {
+    do { try store.setSyncIntent(enabled: false, uploadsPaused: true) }
+    catch { self.error = error.localizedDescription }
     backup.pause()
     journal.pause(cancelBackground: true)
-    do { try store.setSyncEnabled(false) } catch { self.error = error.localizedDescription }
   }
   func configureAPI(_ value: String) throws {
     guard let url = URL(string: value),
@@ -514,14 +516,15 @@ struct PendingSave: Codable {
     }
   }
   func syncAnnotations() async {
-    guard vault.isUnlocked, let account = session.accountId, let bundle = try? vault.requireBundle(),
+    guard (try? store.uploadsPaused()) == false, vault.isUnlocked,
+      let account = session.accountId, let bundle = try? vault.requireBundle(),
       let card = try? session.requireCard(account) else { return }
     let generation = vault.generation
     let catalog = store
     let worker = annotations
     await worker.resume(bundle: bundle, card: card, valid: { [weak self] in
       guard let self else { return false }
-      return self.vault.isUnlocked && self.vault.generation == generation && self.session.accountId == account && self.store === catalog
+      return self.vault.isUnlocked && self.vault.generation == generation && self.session.accountId == account && self.store === catalog && (try? catalog.uploadsPaused()) == false
     }, send: { signed in
       _ = try await self.api.request("/v1/photos/\(try Wire.decode(PhotoAnnotationsUpdateV1.self, Data(b64: signed.body)).photoId)/annotations", method: "PUT", body: Wire.encode(signed))
     })
@@ -610,6 +613,9 @@ struct PendingSave: Codable {
     try reload()
   }
   func resumeTransfers() async throws {
+    guard try !store.uploadsPaused() else {
+      throw FotoroError("Sync is paused. Continue sync to upload photos.")
+    }
     if NativeBackupPolicy.allowsPrivatePhotos(
       accountId: session.accountId, fixture: session.fixture)
     {
