@@ -101,12 +101,12 @@ review can run concurrently. UI changes do not require an encryption-schema chan
 
 **Interfaces:** Preserve `PhotoSearchIndex`, `LocalResources`, retention and annotation/journal APIs. Use the agreed summary presentation values. System-share helper consumes only a verified `File`, called from a user gesture; download is fallback.
 
-- [ ] Immediately after selection, offer text reading and bounded preview/search retention. Verify a neutral-name receipt becomes searchable without Settings and opt-in/opt-out reopen semantics remain correct.
-- [ ] Lead search with matching photos/swiping. Move predicted/accepted/meaning/pin/provenance controls behind optional details without changing ranking/source semantics.
+- [x] Immediately after selection, offer text reading and bounded preview/search retention. Verify a neutral-name receipt becomes searchable without Settings and opt-in/opt-out reopen semantics remain correct.
+- [x] Lead search with matching photos/swiping. Move predicted/accepted/meaning/pin/provenance controls behind optional details without changing ranking/source semantics.
 - [ ] Expose shared backup status while browsing; preserve query, selected photo and scroll position when entering/leaving account setup. Check ten uploads, offline/reconnect, pause/reopen, skipped items and annotation conflict.
-- [ ] Give owned saved originals the same system Share/download flow as selected originals. Verify unsupported Web Share falls back and cancel produces no error banner.
+- [x] Give owned saved originals the same system Share/download flow as selected originals. Verify unsupported Web Share falls back and cancel produces no error banner. Helper regressions cover fallback/cancel; actual physical Safari sharing remains a release gate.
 - [ ] Check compact phone layout, keyboard, safe area, screen-reader names and reduced motion with the actual browser. Use public samples only.
-- [ ] Run `pnpm test:web` and `pnpm build:web`; save rendered evidence. Physical Safari behavior is a later release gate, not established by desktop emulation.
+- [x] Run `pnpm test:web` and `pnpm build:web`; save rendered evidence. Physical Safari behavior is a later release gate, not established by desktop emulation.
 
 ## Task 4: Real service and physical acceptance
 
@@ -145,4 +145,4 @@ as better than every existing photo app without comparative evidence.
 
 ## Consumer checkpoint — October 1, 2026
 
-Tasks 0 and 2 are implemented and independently reviewed. Final native suite 103/103 passes with no skips; web 128/128, core/fixture checks, API 27 and isolated HTTP exchange 3 pass. Both CI jobs pass on consumer source commit `7331294e625e` (run `36938213350`). Task 3 implementation is reviewed and builds, with rendered receipt/reselection/sync-return checks at 689×797; full physical Safari and narrow viewport acceptance remain open. Signed Debug installs on the connected iPhone, but its latest launch was denied while locked. Signed Release 0.1.0(2) archived and uploaded successfully; Apple processing and export compliance are pending. Cloudflare authorization/deployment is still required. Task 5 remains an isolated follow-up; synthetic rank-key measurements do not satisfy its physical performance gates.
+Tasks 0 and 2 are implemented and independently reviewed. Final local native suite 103/103 passes with no skips; web 128/128, core/fixture checks, API 27 and isolated HTTP exchange 3 pass. Both CI jobs pass on release code `4eb1240439` (run `36939449167`). Task 3 implementation is reviewed and builds, with rendered receipt/reselection/sync-return checks at 689×797; full physical Safari and narrow viewport acceptance remain open. Signed Debug installs on the connected iPhone, but its latest launch was denied while locked. Signed Release 0.1.0(2) archived, uploaded and processed successfully; Apple now displays Missing Compliance, awaiting its encryption declaration and the owner's actual France distribution answer. Cloudflare authorization/deployment is still required. Task 5 remains an isolated follow-up; synthetic rank-key measurements do not satisfy its physical performance gates.

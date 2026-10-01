@@ -37,8 +37,9 @@ photos of any age. Personal Photos access remains the user's choice.
 Fotoro's App Store Connect record is created (app 6818330547). The internal group
 has the owner's requested tester and automatic distribution enabled. Build 1
 was rejected for missing orientation metadata. The corrected version 0.1.0,
-build 2 archived and uploaded successfully; Apple began processing at 19:10
-Eastern. Processing and export compliance remain separate gates. Release
+build 2 archived and uploaded successfully at 19:10 Eastern and has finished
+processing. Its current App Store Connect status is Missing Compliance;
+Apple's encryption declaration remains open. Release
 artifacts and distribution logs stay outside the repository.
 The service now serves `/.well-known/apple-app-site-association` when
 `APPLE_APP_IDS` contains the signed application identifier, for example
@@ -50,6 +51,45 @@ Universal-link handling remains unimplemented. See
 [Apple's associated domains documentation](https://developer.apple.com/documentation/xcode/supporting-associated-domains).
 Wrangler's normal account check is unauthenticated. No public Fotoro service
 or TestFlight release is claimed yet. See [verification](verification.md).
+
+## Internal TestFlight checkpoint
+
+Version 0.1.0, build 2 is uploaded and processed. `Fotoro Internal` has automatic
+distribution enabled and the requested existing owner tester; no account roles
+were changed. Tester access still reports no available build until compliance is
+completed. No invitation or ready-to-install TestFlight result is claimed.
+Build-specific What to Test notes are saved. Adding the group to this build opens
+the encryption form, so build-specific groups/testers remain zero until the gate
+is resolved; group membership and build access are distinct.
+
+The native binary uses libsodium for XChaCha20-Poly1305 secretstream media,
+XSalsa20-Poly1305 secretbox envelopes, X25519 sealed boxes and Ed25519 signatures.
+These are public implementations; Fotoro does not invent a cipher. They are
+additional to Apple's system TLS. The current
+[XChaCha IETF draft](https://datatracker.ietf.org/doc/draft-irtf-cfrg-xchacha/)
+is expired and has no formal standing in the IETF standards process. Publication,
+industry use and formal standard approval are distinct facts. Apple's
+[export compliance overview](https://developer.apple.com/help/app-store-connect/manage-app-information/overview-of-export-compliance)
+and [documentation table](https://developer.apple.com/help/app-store-connect/reference/app-information/export-compliance-documentation-for-encryption/)
+must be applied to the actual declaration; source inspection alone does not prove
+a legal exemption or an existing CCATS document. The actual proprietary/nonstandard
+and Both choices lead to mandatory export-document upload, with no approved
+documents available on this app record. The standard-only path asks about France;
+a France answer alone does not establish that classification for this binary.
+No compliance answer, `ITSAppUsesNonExemptEncryption` override or unsupported
+exemption has been submitted.
+
+Saved beta test notes: "Browse photos from the last 10 days. Search permitted
+photos and recognized text. Share an original photo. Hosted backup is unavailable
+in this build." Local Photos access does not opt the library into uploads. This
+pilot does not establish personal iCloud or background-transfer acceptance.
+
+A separate local-only preview scheme is feasible using shared PhotoKit/Vision
+views and search, an isolated local index, explicit source/resource allowlists
+and GRDB-only linkage. Account, network/backup/exchange sources and Sodium would
+be excluded from the binary. This variant is a proposal pending the owner's
+scope choice; no preview code has been implemented or uploaded. The default
+encrypted scheme and its formats remain intact.
 
 Foreground Photos sync is implemented locally. On a deployed/signed build:
 create or unlock one account on iPhone, save its recovery code, then start
