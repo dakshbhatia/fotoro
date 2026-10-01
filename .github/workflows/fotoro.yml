@@ -1,0 +1,65 @@
+name: Fotoro
+
+on:
+  pull_request:
+    paths: ["fotoro/**", ".github/workflows/fotoro.yml"]
+  push:
+    branches: ["codex/ai-photos"]
+    paths: ["fotoro/**", ".github/workflows/fotoro.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fotoro-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web-api:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: fotoro
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - run: npm install --global pnpm@10.17.1
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm test:exchange:isolated
+
+  ios:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - run: npm install --global pnpm@10.17.1
+      - run: pnpm install --frozen-lockfile
+        working-directory: fotoro
+      - name: Native tests against public local services
+        working-directory: fotoro
+        run: |
+          pnpm seed:local
+          pnpm dev:api > /tmp/fotoro-api.log 2>&1 &
+          api_pid=$!
+          pnpm dev:fixtures > /tmp/fotoro-fixtures.log 2>&1 &
+          fixture_pid=$!
+          trap 'kill "$api_pid" "$fixture_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..100}; do
+            if curl --silent http://127.0.0.1:8787/v1/vault >/dev/null && curl --silent http://127.0.0.1:8790/__fixtures/accounts >/dev/null; then
+              break
+            fi
+            sleep 0.2
+          done
+          pnpm test:ios

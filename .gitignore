@@ -10,3 +10,10 @@ node_modules/
 # Local SDKs, generated credentials, and development artifacts.
 .tools
 .dev
+
+# Fotoro generated builds and local state.
+fotoro/apps/web/dist/
+fotoro/services/api/.wrangler/
+fotoro/apps/ios/build/
+fotoro/apps/ios/**/xcuserdata/
+*.xcresult

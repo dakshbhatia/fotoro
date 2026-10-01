@@ -1,5 +1,9 @@
 # Fotoro development
 
+The active build has moved to [fotoro/](../../fotoro/README.md): native SwiftUI,
+React and a Cloudflare Worker. The instructions below describe the earlier
+Ente reference experiment, not the current app. Use the new run instructions.
+
 Fork: https://github.com/dakshbhatia/fotoro · branch: `codex/ai-photos`.
 
 Selected product name: **Fotoro**. Intended domain: **fotoro.cloud**; domain

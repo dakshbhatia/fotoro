@@ -1,19 +1,19 @@
 # Fotoro
 
-Development fork of [Ente](https://github.com/ente/ente), focused on a fast,
-private photo library and sharing with family and friends. Intended domain:
-`fotoro.cloud` (not deployed).
+Private photo library and exchange app. The active native SwiftUI, React web and
+Cloudflare API build lives in [fotoro/](fotoro/README.md). Intended domain:
+`fotoro.cloud` (not deployed). This repository retains [Ente](https://github.com/ente/ente)
+as an attributed reference.
 
 - [Product direction and next work](docs/ai-photos/product.md)
-- [Run the local preview and native build](docs/ai-photos/README.md)
-- [Deployment plan](docs/ai-photos/deployment.md)
-- [Verification and current limits](docs/ai-photos/verification.md)
+- [Run the local preview and native build](fotoro/README.md)
+- [Deployment plan](fotoro/docs/deployment.md)
+- [Verification and current limits](fotoro/docs/verification.md)
 
-Fotoro's `/library` connects the photo canvas to Ente's encrypted account catalog
-and uploader, with metadata search and visible sync/upload states. The separate
-`/intelligence` preview supports EXIF search, exact-copy review and optional Gemini
-enrichment; that preview's index is session-only. New trusted-sharing flows are
-planned. Native startup works; the new UI is currently web-only.
+The current development build supports encrypted original preservation,
+recovery, explicit two-person sharing, save/contribute and revocation. Local
+checks pass; physical-device, performance and public-release gates remain.
+Earlier Ente-based `/library` and `/intelligence` experiments remain reference work.
 
 ## Upstream Ente documentation
 

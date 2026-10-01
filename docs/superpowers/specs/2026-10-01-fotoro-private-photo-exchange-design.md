@@ -3,8 +3,7 @@
 October 1, 2026. Written design for user review. The approved conversational
 direction is native iOS + Safari, selective open-source reuse, and a simple
 photo experience independent of Ente as the application base. The user's
-subsequent instruction to proceed approves this written spec. Implementation
-awaits review of the written plan under the invoked Superpowers workflow.
+subsequent instruction to proceed approves this written spec. The user approved execution of the written plan on October 1, 2026.
 
 ## Outcome and boundary
 

@@ -64,7 +64,7 @@ export function createFixtureServer(
     ]),
     reservations = new Map<string, any>(),
     saves = new Map<string, any>(),
-    viewed = new Set<string>();
+    viewed = new Map<string, string>();
   let seq = 0;
   const addChange = (
     owner: string,
@@ -462,16 +462,17 @@ export function createFixtureServer(
         const grant = grants.get(view[1]);
         if (
           !grant ||
-          grant.recipientAccountId !== actor ||
+          ![grant.recipientAccountId, grant.ownerAccountId].includes(actor) ||
           grant.revokedAt ||
           (grant.expiresAt && Date.parse(grant.expiresAt) <= Date.now())
         )
           return error(res, 403, "GRANT_INACTIVE");
-        viewed.add(view[1]);
+        const viewKey = actor + ":" + view[1];
+        if (!viewed.has(viewKey)) viewed.set(viewKey, new Date().toISOString());
         return send(res, 200, {
           version: 1,
           grantId: view[1],
-          viewedAt: new Date().toISOString(),
+          viewedAt: viewed.get(viewKey),
         });
       }
       if (path === "/v1/saves" && method === "POST") {
@@ -486,7 +487,7 @@ export function createFixtureServer(
         const grant = grants.get(save.sourceGrantId);
         if (
           !grant ||
-          grant.recipientAccountId !== actor ||
+          ![grant.recipientAccountId, grant.ownerAccountId].includes(actor) ||
           grant.revokedAt ||
           (grant.expiresAt && Date.parse(grant.expiresAt) <= Date.now())
         )
@@ -515,7 +516,11 @@ export function createFixtureServer(
         if (
           !grantDetails
             .get(grant.grantId)
-            ?.envelopes.some((e) => e.photoId === save.sourcePhotoId)
+            ?.envelopes.some(
+              (e) =>
+                e.photoId === save.sourcePhotoId &&
+                e.recipientAccountId === actor,
+            )
         )
           return error(res, 403, "FORBIDDEN");
         const source = photos.get(save.sourcePhotoId);
@@ -556,7 +561,17 @@ export function createFixtureServer(
         /^\/v1\/moments\/([^/]+)\/contributions$/,
       );
       if (contribution && method === "POST") {
-        const input = await json(req);
+        const input = validateWire<any>("ContributionV1", await json(req));
+        const operation = actor + ":" + input.operationId;
+        const prior = contributions.get(operation);
+        if (prior) {
+          if (
+            prior.momentId !== contribution[1] ||
+            !isDeepStrictEqual(prior.input, input)
+          )
+            return error(res, 409, "IDEMPOTENCY_CONFLICT");
+          return send(res, 200, prior.result);
+        }
         const grant = [...grants.values()].find(
           (g) =>
             g.momentId === contribution[1] &&
@@ -568,10 +583,6 @@ export function createFixtureServer(
         if (!grant) return error(res, 403, "GRANT_INACTIVE");
         if (input.expectedGrantVersion !== grant.version)
           return error(res, 409, "VERSION_CONFLICT");
-        validateWire("ContributionV1", input);
-        const operation = actor + ":" + input.operationId;
-        if (contributions.has(operation))
-          return send(res, 200, contributions.get(operation));
         const additions = [];
         for (const signed of input.manifests) {
           const manifest = validateWire<PhotoManifestV1>(
@@ -599,7 +610,10 @@ export function createFixtureServer(
               (e: any) =>
                 e.photoId === manifest.photoId &&
                 e.senderAccountId === actor &&
-                e.recipientAccountId === grant.ownerAccountId &&
+                e.recipientAccountId ===
+                  (actor === grant.ownerAccountId
+                    ? grant.recipientAccountId
+                    : grant.ownerAccountId) &&
                 e.grantId === grant.grantId,
             )
           )
@@ -624,7 +638,11 @@ export function createFixtureServer(
           operationId: input.operationId,
           accepted: input.manifests.length,
         };
-        contributions.set(operation, result);
+        contributions.set(operation, {
+          input,
+          result,
+          momentId: contribution[1],
+        });
         return send(res, 200, result);
       }
       if (path === "/v1/vault" && method === "GET") {

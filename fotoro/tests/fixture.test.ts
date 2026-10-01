@@ -44,7 +44,7 @@ test("fixture server binds only loopback, isolates accounts, serves encrypted or
   }
 });
 
-test("inbox exposes only included photos and independent save survives revocation", async () => {
+test("inbox exposes only included photos and independently decryptable save survives revocation", async (t) => {
   const {
     ready,
     unb64,
@@ -52,6 +52,9 @@ test("inbox exposes only included photos and independent save survives revocatio
     signPayload,
     sealShareKey,
     unwrapKey,
+    wrapKey,
+    decryptMedia,
+    openShareKey,
     verifyPayload,
   } = await import("../packages/crypto/src/index.js");
   await ready;
@@ -140,10 +143,38 @@ test("inbox exposes only included photos and independent save survives revocatio
       await request("/v1/grants/" + grant.grantId, B.accountId)
     ).json();
     assert.equal(detail.envelopes[0].photoId, manifest.photoId);
+    t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+    const firstViewed = await (
+      await request(
+        "/v1/grants/" + grant.grantId + "/viewed",
+        B.accountId,
+        "POST",
+      )
+    ).json();
+    t.mock.timers.tick(1000);
+    const againViewed = await (
+      await request(
+        "/v1/grants/" + grant.grantId + "/viewed",
+        B.accountId,
+        "POST",
+      )
+    ).json();
+    assert.equal(againViewed.viewedAt, firstViewed.viewedAt);
+    t.mock.timers.reset();
+    const receivedMetadataKey = openShareKey(
+      detail.envelopes[0],
+      unb64(accounts.testSecrets[1].boxSecretKey),
+      A as any,
+      binding,
+    );
     const savedManifest = {
       ...manifest,
       photoId: "00000000-0000-4000-8000-000000000050",
       ownerAccountId: B.accountId,
+      ownerWrappedMetadataKey: wrapKey(
+        receivedMetadataKey,
+        unb64(accounts.testSecrets[1].vaultKey),
+      ),
     };
     const save = {
       version: 1,
@@ -182,11 +213,167 @@ test("inbox exposes only included photos and independent save survives revocatio
       ).status,
       200,
     );
+    // A retry retains one catalog record and the same immutable original.
+    const retry = await request("/v1/saves", B.accountId, "POST", {
+      version: 1,
+      expectedGrantVersion: 1,
+      save,
+    });
+    assert.equal(retry.status, 200);
+    const contributedEnvelope = sealShareKey(
+      receivedMetadataKey,
+      A as any,
+      {
+        version: 1,
+        grantId: grant.grantId,
+        photoId: savedManifest.photoId,
+        senderAccountId: B.accountId,
+        recipientAccountId: A.accountId,
+      },
+      unb64(accounts.testSecrets[1].signingSecretKey),
+    );
+    const contribution = {
+      version: 1,
+      operationId: "00000000-0000-4000-8000-000000000052",
+      expectedGrantVersion: 1,
+      manifests: [save.signedPayload],
+      envelopes: [contributedEnvelope],
+    };
+    assert.equal(
+      (
+        await request(
+          "/v1/moments/" + grant.momentId + "/contributions",
+          B.accountId,
+          "POST",
+          contribution,
+        )
+      ).status,
+      200,
+    );
+    assert.equal(
+      (
+        await request(
+          "/v1/grants/" + grant.grantId + "/viewed",
+          A.accountId,
+          "POST",
+        )
+      ).status,
+      200,
+    );
+    const ownerCopy = {
+      ...savedManifest,
+      photoId: "00000000-0000-4000-8000-000000000053",
+      ownerAccountId: A.accountId,
+      ownerWrappedMetadataKey: wrapKey(
+        receivedMetadataKey,
+        unb64(accounts.testSecrets[0].vaultKey),
+      ),
+    };
+    const ownerSave = {
+      version: 1,
+      operationId: "00000000-0000-4000-8000-000000000054",
+      photoId: ownerCopy.photoId,
+      sourceGrantId: grant.grantId,
+      sourcePhotoId: savedManifest.photoId,
+      manifest: ownerCopy,
+      signedPayload: signPayload(
+        "photo-manifest",
+        A.accountId,
+        utf8(ownerCopy),
+        unb64(accounts.testSecrets[0].signingSecretKey),
+      ),
+    };
+    assert.equal(
+      (
+        await request("/v1/saves", A.accountId, "POST", {
+          version: 1,
+          expectedGrantVersion: 1,
+          save: ownerSave,
+        })
+      ).status,
+      200,
+    );
     assert.equal(
       (await request("/v1/grants/" + grant.grantId, A.accountId, "DELETE"))
         .status,
       200,
     );
+    assert.equal(
+      (await request("/v1/grants/" + grant.grantId, B.accountId)).status,
+      403,
+    );
+    assert.equal(
+      (
+        await request(
+          "/v1/moments/" + grant.momentId + "/contributions",
+          B.accountId,
+          "POST",
+          contribution,
+        )
+      ).status,
+      200,
+    );
+    assert.equal(
+      (
+        await request(
+          "/v1/moments/" + grant.momentId + "/contributions",
+          B.accountId,
+          "POST",
+          { ...contribution, manifests: [] },
+        )
+      ).status,
+      409,
+    );
+    const retained = await (await request("/v1/changes", B.accountId)).json();
+    assert.equal(
+      retained.changes.filter((c: any) => c.entityId === savedManifest.photoId)
+        .length,
+      1,
+    );
+    const own = JSON.parse(
+      new TextDecoder().decode(
+        verifyPayload(
+          retained.changes.find(
+            (c: any) => c.entityId === savedManifest.photoId,
+          ).payload,
+          unb64(B.signingPublicKey),
+        ),
+      ),
+    );
+    const ownMetadataKey = unwrapKey(
+      own.ownerWrappedMetadataKey,
+      unb64(accounts.testSecrets[1].vaultKey),
+    );
+    async function decode(rep: any, key: Uint8Array) {
+      const response = await request(
+        "/v1/objects/" + rep.objectId,
+        B.accountId,
+      );
+      assert.equal(response.status, 200);
+      async function* bytes() {
+        yield new Uint8Array(await response.arrayBuffer());
+      }
+      const plain = [];
+      for await (const record of decryptMedia(bytes(), key, rep.binding))
+        plain.push(record);
+      return Buffer.concat(plain);
+    }
+    const metadata = JSON.parse(
+      (await decode(own.metadataRepresentation, ownMetadataKey)).toString(),
+    );
+    const original = own.representations.find(
+      (r: any) => r.binding.kind === "original",
+    );
+    const restored = await decode(
+      original,
+      unb64(metadata.representationKeys[original.binding.representationId]),
+    );
+    const { createHash } = await import("node:crypto");
+    assert.equal(
+      createHash("sha256").update(restored).digest("base64url"),
+      metadata.originalSha256,
+    );
+    assert.equal(restored.length, metadata.originalBytes);
     assert.equal(
       (
         await request(

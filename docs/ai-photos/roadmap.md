@@ -1,8 +1,9 @@
 # Fotoro roadmap
 
-October 1, 2026. Planning revision after the user requested another concise
-iteration. This covers the whole product; each implementation slice requires
-its own reviewed spec and plan. No new architecture has been scaffolded.
+October 1, 2026. This covers the whole product. The approved private-photo exchange
+slice now has a local native/web/API implementation in `fotoro/`; see its
+[run instructions](../../fotoro/README.md) and [verification](../../fotoro/docs/verification.md).
+Later slices still require their own implementation and acceptance checks.
 
 ## One experience
 

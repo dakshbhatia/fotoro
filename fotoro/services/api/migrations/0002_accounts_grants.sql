@@ -1,0 +1,12 @@
+CREATE TABLE accounts(id TEXT PRIMARY KEY,card TEXT NOT NULL);
+CREATE TABLE devices(id TEXT PRIMARY KEY,account_id TEXT NOT NULL,trusted INTEGER NOT NULL DEFAULT 0,box_key TEXT);
+CREATE TABLE credentials(id TEXT PRIMARY KEY,account_id TEXT NOT NULL,public_key TEXT NOT NULL,counter INTEGER NOT NULL,transports TEXT NOT NULL);
+CREATE TABLE sessions(token_hash TEXT PRIMARY KEY,account_id TEXT NOT NULL,device_id TEXT NOT NULL,expires INTEGER NOT NULL);
+CREATE TABLE auth_challenges(id TEXT PRIMARY KEY,account_id TEXT,challenge TEXT NOT NULL,kind TEXT NOT NULL,client TEXT NOT NULL,expires INTEGER NOT NULL,consumed INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE wrappers(id TEXT PRIMARY KEY,account_id TEXT NOT NULL,json TEXT NOT NULL);
+CREATE TABLE enrollments(id TEXT PRIMARY KEY,account_id TEXT NOT NULL,device_id TEXT NOT NULL,challenge TEXT NOT NULL,json TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',expires INTEGER NOT NULL,sealed TEXT,signed TEXT);
+CREATE TABLE grant_reservations(id TEXT PRIMARY KEY,account_id TEXT NOT NULL,json TEXT NOT NULL,expires INTEGER NOT NULL);
+CREATE TABLE grants(id TEXT PRIMARY KEY,moment_id TEXT NOT NULL,owner TEXT NOT NULL,recipient TEXT NOT NULL,role TEXT NOT NULL,expires INTEGER,revoked INTEGER,revision INTEGER NOT NULL,json TEXT NOT NULL,signed TEXT NOT NULL,viewed TEXT);
+CREATE TABLE grant_photos(grant_id TEXT NOT NULL REFERENCES grants(id),photo_id TEXT NOT NULL REFERENCES photos(id),envelope TEXT NOT NULL,PRIMARY KEY(grant_id,photo_id));
+CREATE TABLE saves(account_id TEXT NOT NULL,operation_id TEXT NOT NULL,json TEXT NOT NULL,PRIMARY KEY(account_id,operation_id));
+CREATE TABLE contributions(account_id TEXT NOT NULL,operation_id TEXT NOT NULL,json TEXT NOT NULL,PRIMARY KEY(account_id,operation_id));

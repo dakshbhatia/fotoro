@@ -1,1 +1,39 @@
-{"name":"fotoro","private":true,"type":"module","packageManager":"pnpm@10.17.1","scripts":{"test:contracts":"tsx --test tests/contracts.test.ts","test:crypto":"tsx --test tests/crypto.test.ts","test:fixtures":"tsx --test tests/fixture.test.ts","test":"tsx --test tests/*.test.ts","check":"tsc --noEmit && pnpm test","dev:fixtures":"tsx tools/fixture-server.ts","dev":"node tools/dev.mjs"},"dependencies":{"ajv":"8.17.1","ajv-formats":"3.0.1","libsodium-wrappers-sumo":"0.7.15"},"devDependencies":{"@types/node":"22.18.6","@types/libsodium-wrappers-sumo":"0.7.8","tsx":"4.20.5","typescript":"5.9.2"}}
+{
+  "name": "fotoro",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.17.1",
+  "scripts": {
+    "doctor": "node tools/doctor.mjs",
+    "dev": "node tools/dev.mjs",
+    "dev:service": "node tools/dev.mjs --service",
+    "dev:fixtures": "tsx tools/fixture-server.ts",
+    "dev:web": "pnpm --filter @fotoro/web dev",
+    "dev:api": "pnpm --filter @fotoro/api dev",
+    "seed:local": "tsx tools/seed-local.ts",
+    "test:contracts": "tsx --test tests/contracts.test.ts",
+    "test:crypto": "tsx --test tests/crypto.test.ts",
+    "test:fixtures": "tsx --test tests/fixture.test.ts",
+    "test:api": "pnpm --filter @fotoro/api test",
+    "test:web": "pnpm --filter @fotoro/web test",
+    "test:exchange": "tsx --test tests/integration/exchange.test.ts",
+    "test:exchange:isolated": "node tools/test-exchange.mjs",
+    "test:ios": "node tools/test-ios.mjs",
+    "test": "tsx --test tests/*.test.ts",
+    "check:core": "tsc --noEmit && pnpm test",
+    "check:api": "pnpm --filter @fotoro/api check && pnpm test:api",
+    "build:web": "pnpm --filter @fotoro/web build",
+    "check": "pnpm check:core && pnpm check:api && pnpm test:web && pnpm build:web"
+  },
+  "dependencies": {
+    "ajv": "8.17.1",
+    "ajv-formats": "3.0.1",
+    "libsodium-wrappers-sumo": "0.7.15"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.6",
+    "@types/libsodium-wrappers-sumo": "0.7.8",
+    "tsx": "4.20.5",
+    "typescript": "5.9.2"
+  }
+}

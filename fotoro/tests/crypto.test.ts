@@ -190,3 +190,27 @@ test("arbitrary network chunks, empty input and 4 MiB records retain framing int
     collect(encryptMedia(chunks([new Uint8Array(4194305)]), key, binding)),
   );
 });
+
+test("Swift-produced secretstream decrypts with the web implementation", async () => {
+  const vector = (await import("../fixtures/crypto-swift-v1.json")).default;
+  const { unb64, b64 } = await import("../packages/crypto/src/common.js");
+  const plaintext = Buffer.concat(
+    await collect(
+      decryptMedia(
+        chunks([unb64(vector.container)]),
+        unb64(vector.key),
+        vector.binding as any,
+      ),
+    ),
+  );
+  assert.equal(b64(plaintext), vector.plaintext);
+  await assert.rejects(() =>
+    collect(
+      decryptMedia(chunks([unb64(vector.container)]), unb64(vector.key), {
+        ...vector.binding,
+        version: 1 as const,
+        kind: "preview" as const,
+      }),
+    ),
+  );
+});
