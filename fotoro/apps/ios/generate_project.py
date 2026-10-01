@@ -28,7 +28,7 @@ for target,sources,res,ptype in [('Fotoro',build,resources,'application'),('Foto
  for conf in ['Debug','Release']:
   settings='SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 26.0; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; GENERATE_INFOPLIST_FILE = YES; CODE_SIGN_STYLE = Automatic; PRODUCT_NAME = "$(TARGET_NAME)"; PRODUCT_BUNDLE_IDENTIFIER = cloud.fotoro.'+target+'; '
   settings+='ENABLE_TESTABILITY = YES; ONLY_ACTIVE_ARCH = YES; SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; ' if conf=='Debug' else ''
-  settings+='INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Select original photos to import into Fotoro."; INFOPLIST_FILE = Fotoro/Info.plist; CODE_SIGN_ENTITLEMENTS = Fotoro/Fotoro.entitlements; INFOPLIST_KEY_UILaunchScreen_Generation = YES; ' if target=='Fotoro' else 'TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Fotoro.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Fotoro"; BUNDLE_LOADER = "$(TEST_HOST)"; '
+  settings+='INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Browse your last 30 days of photos and share selected originals."; INFOPLIST_FILE = Fotoro/Info.plist; CODE_SIGN_ENTITLEMENTS = Fotoro/Fotoro.entitlements; INFOPLIST_KEY_UILaunchScreen_Generation = YES; ' if target=='Fotoro' else 'TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Fotoro.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Fotoro"; BUNDLE_LOADER = "$(TEST_HOST)"; '
   configs.append(add(target+conf,f'isa = XCBuildConfiguration; name = {conf}; buildSettings = {{{settings}}};'))
  cl=add(target+'configs',f'isa = XCConfigurationList; buildConfigurations = ({",".join(configs)}); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;')
  dependency=[]
