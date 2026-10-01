@@ -17,9 +17,16 @@ struct BackupSource: Codable, Identifiable {
   var photoId: String
   var phase: Phase = .pending
   var message: String?
+  var sourceRevision: String?
 }
 
 extension LibraryStore {
+  func syncEnabled() throws -> Bool {
+    try database.read { try String.fetchOne($0, sql: "SELECT value FROM state WHERE key='syncEnabled'") == "1" }
+  }
+  func setSyncEnabled(_ enabled: Bool) throws {
+    try database.write { try $0.execute(sql: "INSERT INTO state(key,value) VALUES('syncEnabled',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", arguments: [enabled ? "1" : "0"]) }
+  }
   func backupSource(_ id: String) throws -> BackupSource {
     try database.write { db in
       if let bytes = try Data.fetchOne(
@@ -78,6 +85,7 @@ struct BackupCandidate {
   var id: String
   var capturedAt: Date?
   var skipReason: String?
+  var sourceRevision: String?
 }
 struct BackupStatus: Codable {
   enum Phase: String, Codable { case idle, scanning, running, paused, failed, partial, complete }
@@ -152,6 +160,10 @@ struct BackupStatus: Codable {
         for candidate in candidates {
           var source = try store.backupSource(candidate.id)
           dates[candidate.id] = candidate.capturedAt
+          if source.phase == .pending || source.phase == .failed {
+            source.sourceRevision = candidate.sourceRevision
+            try store.putBackupSource(source)
+          }
           if let reason = candidate.skipReason, source.phase == .pending || source.phase == .failed
           {
             source.phase = .skipped

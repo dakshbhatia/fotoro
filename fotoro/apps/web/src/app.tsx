@@ -1,15 +1,16 @@
 import { lazy, Suspense, useState } from "react";
 import { LocalTrial } from "./local/LocalTrial";
+import type { LocalPhoto } from "./local/resources";
 const CloudApp = lazy(() => import("./CloudApp"));
 export default function App() {
   const [cloud, setCloud] = useState(false),
     [opened, setOpened] = useState(false),
-    [localFiles, setLocalFiles] = useState<File[]>([]);
+    [localPhotos, setLocalPhotos] = useState<LocalPhoto[]>([]);
   return (
     <>
       <div hidden={cloud}>
         <LocalTrial
-          onPhotosChange={setLocalFiles}
+          onPhotosChange={setLocalPhotos}
           onBackup={() => {
             setOpened(true);
             setCloud(true);
@@ -21,7 +22,7 @@ export default function App() {
           <Suspense fallback={<p className="hint">Opening Sync photos…</p>}>
             <CloudApp
               active={cloud}
-              localFiles={localFiles}
+              localPhotos={localPhotos}
               onBack={() => setCloud(false)}
             />
           </Suspense>

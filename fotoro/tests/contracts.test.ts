@@ -53,3 +53,15 @@ test("still original metadata accepts HEIC and PhotoKit dates without allowing v
     validateWire("PhotoMetadataV1", { ...metadata, dateSource: "guessed" }),
   );
 });
+
+test("private photo annotations preserve labels and bound OCR and update ciphertext", () => {
+  const photoId = "a1672cf8-cc9b-44a5-9992-5508a40b36bc";
+  const value = { version: 1, photoId, originalSha256: "A".repeat(43), labels: ["My EXACT label"], ocr: { text: "Receipt", confidence: 0.8, processor: "vision-v1" } };
+  assert.equal(validateWire("PhotoAnnotationsV1", value), value);
+  for (const bad of [{...value, labels: ["x".repeat(121)]}, {...value, labels: Array(65).fill("a")}, {...value, ocr: {...value.ocr, text: "x".repeat(131073)}}, {...value, ocr: {...value.ocr, confidence: 1.1}}, {...value, originalSha256: "not-a-digest"}, {...value, searchHistory: []}])
+    assert.throws(() => validateWire("PhotoAnnotationsV1", bad));
+  const update = {version: 1, photoId, revision: 1, encrypted: {version: 1, nonce: "A".repeat(32), ciphertext: "A".repeat(22)}};
+  validateWire("PhotoAnnotationsUpdateV1", update);
+  for (const revision of [0, 1.2, 2147483648]) assert.throws(() => validateWire("PhotoAnnotationsUpdateV1", {...update, revision}));
+  assert.throws(() => validateWire("PhotoAnnotationsUpdateV1", {...update, encrypted: {...update.encrypted, ciphertext: "A".repeat(262145)}}));
+});

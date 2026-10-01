@@ -30,7 +30,7 @@ export function displaySearchResult(predicted: SearchResult, navigation?: Search
     return {...predicted, photoId: navigation.photoID};
   return predicted;
 }
-export function LocalTrial({onBackup, onPhotosChange}: {onBackup: () => void; onPhotosChange?: (files: File[]) => void}) {
+export function LocalTrial({onBackup, onPhotosChange}: {onBackup: () => void; onPhotosChange?: (photos: LocalPhoto[]) => void}) {
   const [photos, setPhotos] = useState<LocalOcrPhoto[]>([]), [query, setQuery] = useState(""),
     [viewer, setViewer] = useState<string | null>(null), [settings, setSettings] = useState(false),
     [last30, setLast30] = useState(false), [status, setStatus] = useState(""), [progress, setProgress] = useState(""),
@@ -53,7 +53,7 @@ export function LocalTrial({onBackup, onPhotosChange}: {onBackup: () => void; on
   const pin = result.meaning ? feedback.pins[JSON.stringify([scope, result.meaning.id])] : undefined;
   const available = scoped.filter(photo => photo.previewAvailable !== false && (photo.file || photo.preview || photo.previewLoader)).length,
     textComplete = scoped.filter(photo => photo.ocr?.status === "complete").length;
-  const coverage = `${scoped.length} photos indexed · ${available} previews available${readText || textComplete ? ` · ${textComplete} text previews read` : ""}`;
+  const coverage = `${scoped.length} photos${readText || textComplete ? ` · ${textComplete} with text read` : ""}${available < scoped.length ? ` · ${scoped.length - available} need to be reopened` : ""}`;
   const ocrProgress = useLocalOcr(photos, readText, resources, sourceGeneration, output => {
     setPhotos(current => current.map(photo => photo.id === output.photoID && (photo.digest ?? photo.id) === output.revision ? {...photo, ocr: output} : photo));
   });
@@ -75,7 +75,7 @@ export function LocalTrial({onBackup, onPhotosChange}: {onBackup: () => void; on
       .finally(() => {if (alive.current && token === generation.current) setReady(true);});
     return () => {alive.current = false; generation.current++; saveVersion.current++; stop(); resources.clear();};
   }, [resources, retention]);
-  useEffect(() => {onPhotosChange?.(selectedOriginals(photos));}, [photos, onPhotosChange]);
+  useEffect(() => {onPhotosChange?.(photos);}, [photos, onPhotosChange]);
   useEffect(() => {
     if (!ready || !retained) return;
     const token = generation.current, version = ++saveVersion.current;
@@ -164,14 +164,15 @@ export function LocalTrial({onBackup, onPhotosChange}: {onBackup: () => void; on
     {settings && <aside className="sheet local-settings" ref={settingsPanel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Settings">
       <button className="close" aria-label="Close settings" onClick={closeSettings}><Icon kind="close" /></button><h2>Photos</h2>
       <label className="local-check"><input type="checkbox" checked={last30} onChange={event => {setLast30(event.target.checked); setCommitted(undefined); previous.current = undefined;}} />Last 30 days</label>
-      <p className="hint">Uses capture dates when available. Photos without a capture date stay visible.</p>
+      <p className="hint">Photos without a capture date stay visible.</p>
       <label className="local-check"><input type="checkbox" checked={readText} onChange={event => setReadText(event.target.checked)} />Read text in photos</label>
-      <p className="hint">Optional English text recognition runs locally on bounded previews. Labels and filenames are searchable immediately.</p>
+      <p className="hint">Find photos by English words inside them. Text is read on this device.</p>
       <label className="local-check"><input type="checkbox" checked={retained} disabled={!ready || retentionBusy} onChange={event => void toggleRetention(event.target.checked)} />Keep local search after reopening</label>
-      <p className="hint">Saves encrypted labels, text, preferences and bounded previews using a browser-held key. Previews are limited to 100 MiB. Originals aren’t saved. Browser storage can be cleared or evicted.</p>
+      <p className="hint">Keep labels, photo text and previews on this browser.</p>
       {saving && <p role="status">{saving}</p>}
       <button onClick={() => {closeSettings(); onBackup();}}>Sync photos</button>
-      <p className="hint">Choose the files you want to open. This browser cannot scan your Photos library. Originals stay unchanged; nothing is uploaded here. Session-only photos disappear on reload.</p>
+      <p className="hint">Sync selected photos to your account to use them on another device.</p>
+      <details><summary>About local storage</summary><p className="hint">Originals stay unchanged and aren’t saved in this browser. Saved previews use up to 100 MB. Browser storage may be cleared, so keep your original files. Choose photos to open; this browser cannot scan your Photos library.</p></details>
       <button disabled={!ready} onClick={() => {void clear(); closeSettings();}}>Clear local search</button>
     </aside>}
     {viewer && viewerPhotos.length > 0 && <LocalViewer photos={viewerPhotos} initial={viewer} resources={resources} onLabels={(id, labels) => setPhotos(current => current.map(photo => photo.id === id ? {...photo, labels} : photo))} onUse={normalizeSearch(query) ? id => confirm(id) : undefined} onConfirm={normalizeSearch(query) ? id => confirm(id) : undefined} onPin={normalizeSearch(query) ? id => confirm(id, true) : undefined} meaning={result.meaning?.term} onReselect={() => {input.current?.click(); setViewer(null);}} onClose={() => {const id = viewer; setViewer(null); requestAnimationFrame(() => document.getElementById("local-photo-" + id)?.focus({preventScroll: true}));}} />}

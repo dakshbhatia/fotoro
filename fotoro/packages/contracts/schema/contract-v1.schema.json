@@ -538,7 +538,8 @@
         "entity": {
           "enum": [
             "photo",
-            "grant"
+            "grant",
+            "annotation"
           ]
         },
         "entityId": {
@@ -1254,6 +1255,162 @@
         "origin": {
           "type": "string",
           "format": "uri"
+        }
+      }
+    },
+    "PhotoAnnotationsV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "photoId",
+        "originalSha256"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "photoId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "originalSha256": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]*$",
+          "minLength": 43,
+          "maxLength": 43
+        },
+        "labels": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1
+          }
+        },
+        "caption": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "keywords": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1
+          }
+        },
+        "facts": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 240,
+            "minLength": 1
+          }
+        },
+        "favorite": {
+          "type": "boolean"
+        },
+        "ocr": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "text",
+            "confidence",
+            "processor"
+          ],
+          "properties": {
+            "text": {
+              "type": "string",
+              "maxLength": 131072
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "processor": {
+              "type": "string",
+              "maxLength": 120,
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "PhotoAnnotationsUpdateV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "photoId",
+        "revision",
+        "encrypted"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "photoId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "encrypted": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "nonce",
+            "ciphertext"
+          ],
+          "properties": {
+            "version": {
+              "const": 1
+            },
+            "nonce": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]*$",
+              "minLength": 32,
+              "maxLength": 32
+            },
+            "ciphertext": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]*$",
+              "minLength": 22,
+              "maxLength": 262144
+            }
+          }
+        }
+      }
+    },
+    "PhotoAnnotationsReplyV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "annotations"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "annotations": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SignedPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     }

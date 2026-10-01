@@ -16,6 +16,9 @@ import type {
   UploadReservationV1,
   UploadCommitV1,
   PhotoMetadataV1,
+  PhotoAnnotationsV1,
+  PhotoAnnotationsUpdateV1,
+  PhotoAnnotationsReplyV1,
 } from "../../packages/contracts/src/models.js";
 import {
   ready,
@@ -125,7 +128,7 @@ async function authenticate(index: number) {
   return { card, secrets, token: session.token! };
 }
 type Client = Awaited<ReturnType<typeof authenticate>>;
-async function upload(client: Client, filename = "singapore.jpg") {
+async function upload(client: Client, filename = "singapore.jpg", background = false) {
   const photoId = randomUUID(),
     metadataKey = sodium.randombytes_buf(32),
     keys: Record<string, string> = {};
@@ -156,9 +159,10 @@ async function upload(client: Client, filename = "singapore.jpg") {
     );
     const staging = new URL(reservation.stagingUrl);
     assert.equal(staging.origin, base.origin);
+    if (background) staging.pathname = `/v1/background/uploads/${reservation.uploadId}/staging`;
     const put = await fetch(staging, {
       method: "PUT",
-      headers: { origin, authorization: `Bearer ${client.token}` },
+      headers: background ? { origin } : { origin, authorization: `Bearer ${client.token}` },
       body: ciphertext,
     });
     assert.equal(put.status, 200);
@@ -429,6 +433,38 @@ test("real local D1/R2: recover, encrypted originals both ways, independent save
       "Restored original bytes must match the source",
     );
   }
+});
+
+test("real local D1/R2: background ciphertext upload and encrypted labels/OCR restore into a fresh account session", async () => {
+  await ready;
+  const owner = await authenticate(0), other = await authenticate(1);
+  const photo = await upload(owner, "singapore.jpg", true);
+  const value: PhotoAnnotationsV1 = {
+    version: 1, photoId: photo.manifest.photoId, originalSha256: photo.metadata.originalSha256,
+    labels: ["My EXACT Marina label"], caption: "Public test photo", favorite: true,
+    ocr: {text: "Public invoice 481 total 86.00", confidence: 0.93, processor: "fixture-ocr-v1"},
+  };
+  validateWire("PhotoAnnotationsV1", value);
+  const encrypted = wrapKey(utf8(value), unb64(owner.secrets.vaultKey));
+  const update: PhotoAnnotationsUpdateV1 = {version: 1, photoId: value.photoId, revision: 1, encrypted};
+  const proof = signPayload("photo-annotations", owner.card.accountId, utf8(update), unb64(owner.secrets.signingSecretKey));
+  const path = `/v1/photos/${value.photoId}/annotations`;
+  assert.deepEqual(await api(path, owner.token, proof, "PUT"), proof);
+  assert.deepEqual(await api(path, owner.token, proof, "PUT"), proof);
+  const fresh = await authenticate(0);
+  const reply = validateWire<PhotoAnnotationsReplyV1>("PhotoAnnotationsReplyV1", await api(path, fresh.token));
+  const restoredUpdate = validateWire<PhotoAnnotationsUpdateV1>("PhotoAnnotationsUpdateV1", JSON.parse(new TextDecoder().decode(verifyPayload(reply.annotations!, unb64(fresh.card.signingPublicKey)))));
+  const restored = validateWire<PhotoAnnotationsV1>("PhotoAnnotationsV1", JSON.parse(new TextDecoder().decode(unwrapKey(restoredUpdate.encrypted, unb64(fresh.secrets.vaultKey)))));
+  assert.deepEqual(restored, value);
+  assert.equal(restored.originalSha256, photo.metadata.originalSha256);
+  assert.equal(JSON.stringify(update).includes(value.labels![0]), false);
+  assert.equal((await request(path, other.token)).status, 403);
+  const competing = signPayload("photo-annotations", owner.card.accountId, utf8({...update, encrypted: wrapKey(utf8({...value, labels:["Other edit"]}),unb64(owner.secrets.vaultKey))}), unb64(owner.secrets.signingSecretKey));
+  assert.equal((await request(path, fresh.token, competing, "PUT")).status, 409);
+  const page = await api<{changes:{entity:string;entityId:string;payload:SignedPayloadV1|null}[]}>("/v1/changes?limit=100", fresh.token);
+  assert.equal(page.changes.filter(c => c.entity === "annotation" && c.entityId === value.photoId).length, 1);
+  assert.deepEqual(page.changes.find(c => c.entity === "annotation" && c.entityId === value.photoId)!.payload, proof);
+  assert.equal(Buffer.from(await restore(fresh, photo.manifest)).equals(photo.original), true);
 });
 
 test("real local D1/R2: HEIC still bytes survive upload and same-account restore in a fresh session", async () => {

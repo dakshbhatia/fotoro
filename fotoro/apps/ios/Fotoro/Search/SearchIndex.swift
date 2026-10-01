@@ -1,7 +1,7 @@
 import Foundation
 import GRDB
 
-/// A separate device-local index. It has no account service or network dependency.
+/// A device-local index. Network synchronization is handled by the owner annotation journal.
 final class SearchIndex: @unchecked Sendable {
   let database: DatabaseQueue
   private let generationLock = NSLock()
@@ -104,6 +104,43 @@ final class SearchIndex: @unchecked Sendable {
       return true
     }
   }
+  @discardableResult func applyAnnotations(_ value: PhotoAnnotationsV1, photoID: String, revision: String, accountId: String) throws -> Bool {
+    try database.write { db in
+      guard var record = try Row.fetchOne(db, sql: "SELECT value FROM searchRecords WHERE id=?", arguments: [photoID]).map(decode), record.revision == revision else { return false }
+      if record.beforeSync == nil {
+        record.beforeSync = LocalSearchFields(labels: record.labels, captions: record.captions, keywords: record.keywords, facts: record.facts, favorite: record.favorite, ocrText: record.ocrText, ocrConfidence: record.ocrConfidence, ocrStatus: record.ocrStatus)
+      }
+      record.syncedAccountId = accountId
+      record.labels = value.labels ?? []
+      record.captions = value.caption.map { [$0] } ?? []
+      record.keywords = value.keywords ?? []
+      record.facts = value.facts ?? []
+      record.favorite = value.favorite ?? record.favorite
+      if let ocr = value.ocr, ocr.processor == record.processor {
+        record.ocrText = ocr.text
+        record.ocrConfidence = ocr.confidence
+        record.ocrStatus = .complete
+      }
+      try put(record, db: db)
+      return true
+    }
+  }
+  func clearSyncedAnnotations() throws {
+    try database.write { db in
+      let records = try Row.fetchAll(db, sql: "SELECT value FROM searchRecords").map(decode)
+      for var record in records where record.syncedAccountId != nil {
+        if let prior = record.beforeSync {
+          record.labels = prior.labels; record.captions = prior.captions; record.keywords = prior.keywords
+          record.facts = prior.facts; record.favorite = prior.favorite
+          record.ocrText = prior.ocrText; record.ocrConfidence = prior.ocrConfidence; record.ocrStatus = prior.ocrStatus
+        } else { record.labels = []; record.ocrText = ""; record.ocrConfidence = 0; record.ocrStatus = .pending }
+        record.syncedAccountId = nil; record.beforeSync = nil
+        try put(record, db: db)
+        try db.execute(sql: "DELETE FROM searchPins WHERE photo=?; DELETE FROM searchEvents WHERE photo=?", arguments: [record.id, record.id])
+      }
+      try db.execute(sql: "DELETE FROM searchTerms WHERE meaning NOT IN (SELECT meaning FROM searchPostings)")
+    }
+  }
   func pendingRecords() throws -> [SearchRecord] {
     try database.read { db in
       try Row.fetchAll(
@@ -142,7 +179,11 @@ final class SearchIndex: @unchecked Sendable {
           if let old = try Row.fetchOne(
             db, sql: "SELECT value FROM searchRecords WHERE id=?", arguments: [r.id]
           ).map(decode) {
-            r.labels = old.labels  // Durable supplied facts survive metadata refresh and source edits.
+            r.labels = old.revision == r.revision ? old.labels : (old.beforeSync?.labels ?? old.labels)
+            if old.revision == r.revision {
+              r.syncedAccountId = old.syncedAccountId
+              r.beforeSync = old.beforeSync
+            }
             if old.revision == r.revision, old.processor == r.processor {
               r.ocrText = old.ocrText
               r.ocrConfidence = old.ocrConfidence
@@ -247,6 +288,19 @@ final class SearchIndex: @unchecked Sendable {
           db, sql: "SELECT value FROM searchRecords WHERE id=?", arguments: [photoID]
         ).map(decode)
       else { return false }
+      if var prior = r.beforeSync {
+        var removed = r.labels
+        var added: [String] = []
+        for label in labels {
+          if let index = removed.firstIndex(of: label) { removed.remove(at: index) }
+          else { added.append(label) }
+        }
+        for label in removed {
+          if let index = prior.labels.firstIndex(of: label) { prior.labels.remove(at: index) }
+        }
+        prior.labels += added
+        r.beforeSync = prior
+      }
       r.labels = labels
       try put(r, db: db)
       return true

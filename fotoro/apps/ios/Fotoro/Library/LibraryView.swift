@@ -5,19 +5,22 @@ import SwiftUI
 struct LibraryView: View {
   @Bindable var services: AppServices
   @State private var query = ""
+  @State private var searchResults: [LocalPhoto]?
   @State private var selection: Set<String> = []
   @State private var showingFiles = false
   @State private var viewer: LocalPhoto?
   @State private var showExchange = false
   @State private var showingBackup = false
   @Environment(\.scenePhase) private var scenePhase
+  @Environment(\.dismiss) private var dismiss
   @State private var selectedPhotos: [PhotosPickerItem] = []
   @State private var scrollID: String?
   @State private var signingOut = false
   private let photoManager = PHCachingImageManager()
   var filtered: [LocalPhoto] {
-    services.photos.filter {
-      query.isEmpty || $0.metadata.filename.localizedCaseInsensitiveContains(query)
+    if !query.isEmpty, let searchResults { return searchResults }
+    return services.photos.filter {
+      services.matches($0, query: query)
     }
   }
   var days: [(String, [LocalPhoto])] {
@@ -83,11 +86,17 @@ struct LibraryView: View {
             if filtered.isEmpty {
               ContentUnavailableView(
                 "No photos", systemImage: "photo",
-                description: Text("Add JPEG, PNG or HEIC originals to your library."))
+                description: Text(query.isEmpty ? "Sync your photos to find them on every device." : "Try a label, filename or words in a photo."))
+              if query.isEmpty { Button("Sync my photos") { showingBackup = true }.buttonStyle(.borderedProminent) }
             }
             ForEach(services.notices, id: \.self) { Text($0).font(.caption).padding() }
           }.scrollPosition(id: $scrollID, anchor: .top)
             .searchable(text: $query, prompt: "Search")
+            .task(id: query) {
+              guard !query.isEmpty else { searchResults = nil; return }
+              do { searchResults = try await services.searchCatalog(query) }
+              catch is CancellationError {} catch { services.error = error.localizedDescription }
+            }
             .toolbar {
               ToolbarItem(placement: .topBarLeading) {
                 Button("Sync photos", systemImage: "arrow.triangle.2.circlepath") {
@@ -97,7 +106,7 @@ struct LibraryView: View {
               ToolbarItem(placement: .topBarTrailing) {
                 Menu("Add", systemImage: "plus") {
                   Button("Shared moments") { showExchange = true }
-                  Button("Lock", systemImage: "lock") { services.vault.lock() }
+                  Button("Lock", systemImage: "lock") { services.lockAccount() }
                   Button("Sign out", systemImage: "person.crop.circle.badge.xmark") {
                     signingOut = true
                   }
@@ -125,13 +134,17 @@ struct LibraryView: View {
               }
             }
         }
-      }.navigationTitle("Fotoro")
+      }.navigationTitle("Saved photos")
+        .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         .overlay { if services.busy { ProgressView().padding().glassEffect() } }
         .sheet(item: $viewer, onDismiss: { viewer = nil }) { photo in
           PhotoViewer(
-            services: services, initialID: photo.id)
+            services: services, initialID: photo.id, displayedPhotos: filtered)
         }
-        .onChange(of: scenePhase) { if scenePhase != .active { services.backup.pause() } }
+        .onChange(of: scenePhase) {
+          if scenePhase != .active { services.backup.pause() }
+          else if services.vault.isUnlocked { services.run { try await services.sync() } }
+        }
         .sheet(isPresented: $showingBackup) { PhotosBackupView(services: services) }
         .sheet(isPresented: $showExchange) {
           ExchangeView(
@@ -169,6 +182,7 @@ struct LibraryView: View {
             showExchange = false
             showingBackup = false
             selection = []
+            searchResults = nil
           }
         }
         .alert("Sign out?", isPresented: $signingOut) {

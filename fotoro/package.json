@@ -5,6 +5,7 @@
   "packageManager": "pnpm@10.17.1",
   "scripts": {
     "doctor": "node tools/doctor.mjs",
+    "check:service": "node tools/check-service.mjs",
     "dev": "node tools/dev.mjs",
     "dev:service": "node tools/dev.mjs --service",
     "dev:fixtures": "tsx tools/fixture-server.ts",

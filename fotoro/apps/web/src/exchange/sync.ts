@@ -6,6 +6,7 @@ import type { UnlockedVault } from "../vault/vault";
 import type { WrappedKeyV1 } from "@fotoro/contracts";
 import { assertVault } from "../vault/scope";
 import { get, put } from "./cache";
+import { flushAnnotations, pendingAnnotations } from "./annotations";
 export function syncStatus(
   imports: Pick<PendingImport, "state">[],
   lastSuccessfulSync: string | null,
@@ -108,6 +109,11 @@ async function performSync(session: UnlockedVault, signal: AbortSignal) {
   await syncCatalog(signal);
   assertVault(session);
   signal.throwIfAborted();
+  await flushAnnotations(session, signal);
+  assertVault(session);
+  signal.throwIfAborted();
+  const annotations = await pendingAnnotations(session);
+  assertVault(session);
   const pending = await pendingImports();
   assertVault(session);
   let lastSuccessfulSync = await lastSync(session);
@@ -125,7 +131,7 @@ async function performSync(session: UnlockedVault, signal: AbortSignal) {
   assertVault(session);
   const skipped = await skippedImports(session);
   assertVault(session);
-  return { photos, pending, lastSuccessfulSync, skipped };
+  return { photos, pending, annotations, lastSuccessfulSync, skipped };
 }
 export function refreshSync(session = requireVault()) {
   return flight.run(session, () => {
@@ -145,6 +151,8 @@ export function readableSyncError(error: unknown) {
     return "Paused or cancelled. Your originals have not changed.";
   if (code === "PUBLIC_TEST_ACCOUNT_UPLOAD_DISABLED")
     return "Public test accounts cannot sync your private files. Use a real account.";
+  if (/ANNOTATION|VERSION_CONFLICT/.test(code))
+    return "Your labels or text could not sync. Your pending edits are saved here; open Sync photos to retry or review them.";
   if (code === "VAULT_LOCKED")
     return "Your library is locked. Sign in to continue.";
   if (/UNAUTHENTICATED|FORBIDDEN/.test(code))

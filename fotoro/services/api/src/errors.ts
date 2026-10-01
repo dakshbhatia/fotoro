@@ -5,6 +5,7 @@ export interface Env {
   BUCKET: R2Bucket;
   AUTH_MODE: "local" | "production";
   ASSETS?: Fetcher;
+  APPLE_APP_IDS?: string;
 }
 export interface Actor {
   accountId: string;

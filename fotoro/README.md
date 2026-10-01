@@ -13,8 +13,10 @@ exports the still original through the system share sheet.
 Native search covers all permitted non-hidden still photos, including older photos
 outside the 30-day canvas. It indexes supplied labels, available metadata and
 English text using Vision on one bounded local preview at a time. Indexing does
-not download iCloud originals. Labels and search preferences stay in a protected,
-device-local database excluded from backup; they do not sync to the account.
+not download iCloud originals. Local search lives in a protected database excluded
+from device backup. Labels and completed recognized text attached to synced
+originals also travel encrypted through the account. Search choices and pins stay
+on each device.
 
 In the browser, Open photos selects JPEG/PNG files for a local session. Search,
 day grouping, zoom and original sharing/download work without an account. The
@@ -35,9 +37,17 @@ not teach a preference. Text mentions never establish named face identity.
 Settings → Sync photos connects the local canvas to the encrypted account catalog.
 On iOS, explicitly start Sync last 30 days after unlocking your account. Backup
 processes one original at a time, resumes durable pending work, and shows synced,
-pending, failed and skipped counts. Keep the app open; closed-app scheduling is
-not implemented. In the browser, opening setup preserves selected files and
+pending, failed and skipped counts. Scheduled encrypted file uploads can continue
+through iOS background transfer. Open and unlock Fotoro to scan/encrypt more photos
+and finish catalog commits; force quitting interrupts system transfers. In the
+browser, opening setup preserves selected files and
 uploads nothing; Sync selected photos starts their upload.
+
+Account annotations are bound to the unchanged original digest, encrypted with
+the account vault key, signed and revisioned separately from media. Label edits
+and text resume from an encrypted outbox. Concurrent edits preserve changes to
+different fields; a conflicting field waits for an explicit choice. Private
+annotations are absent from shared grants.
 
 Native imports preserve JPEG/PNG/HEIC originals byte for byte, up to 50 MiB.
 Native browsing copies are JPEG thumbnails at 320 px and previews at 1600 px, quality

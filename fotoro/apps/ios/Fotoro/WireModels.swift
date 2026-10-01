@@ -238,3 +238,30 @@ struct DeviceApprovalBody: Codable, Sendable {
   var challenge: DeviceChallengeV1
   var sealedBundle: String
 }
+
+struct PhotoAnnotationsV1: Codable, Equatable, Sendable {
+  struct OCR: Codable, Equatable, Sendable {
+    var text: String
+    var confidence: Double
+    var processor: String
+  }
+  var version = 1
+  var photoId: String
+  var originalSha256: String
+  var labels: [String]?
+  var caption: String?
+  var keywords: [String]?
+  var facts: [String]?
+  var favorite: Bool?
+  var ocr: OCR?
+}
+struct PhotoAnnotationsUpdateV1: Codable, Equatable, Sendable {
+  var version = 1
+  var photoId: String
+  var revision: Int
+  var encrypted: WrappedKeyV1
+}
+struct PhotoAnnotationsReplyV1: Codable, Sendable {
+  var version: Int
+  var annotations: SignedPayloadV1?
+}

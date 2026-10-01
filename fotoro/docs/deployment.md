@@ -30,25 +30,59 @@ real local API at 8787 and public fixtures at 8790. Production D1/R2 bindings,
 Cloudflare access and Apple provisioning are still required. A valid local Apple
 Development certificate was found, but the generic-device Release preflight fails:
 the available wildcard provisioning profile lacks Associated Domains and the
-`com.apple.developer.associated-domains` entitlement. Configure an app-specific
-profile with the existing webcredentials/applinks domains; do not remove those
-capabilities to make a full-sync build pass. Only a Simulator is currently connected.
-The HTTPS origin also needs an `apple-app-site-association` file that lists the
-signed application identifier under `webcredentials.apps`. The current service
-does not serve that file. Universal-link handling is not implemented in the app.
+`com.apple.developer.associated-domains` entitlement. A fresh Release attempt with
+`-allowProvisioningUpdates` also reports `No Accounts: Add a new account in Accounts
+settings.` Sign in through Xcode and configure an app-specific profile with the
+existing webcredentials/applinks domains; do not remove those capabilities to make
+a full-sync build pass. Only a Simulator is currently connected. Unsigned generic
+iOS Release compilation succeeds, but that artifact cannot be installed on a phone.
+The service now serves `/.well-known/apple-app-site-association` when
+`APPLE_APP_IDS` contains the signed application identifier, for example
+`APPLICATION_PREFIX.cloud.fotoro.Fotoro`. Use the actual application-identifier
+entitlement from the signed build. Multiple identifiers are comma-separated.
+Missing or invalid configuration returns an uncached 503; the route does not
+fall through to the web app. It lists `webcredentials.apps` for passkeys.
+Universal-link handling remains unimplemented. See
+[Apple's associated domains documentation](https://developer.apple.com/documentation/xcode/supporting-associated-domains).
 Wrangler's normal account check is unauthenticated. No public Fotoro service
 or TestFlight release is claimed. See [verification](verification.md).
 
 Foreground Photos sync is implemented locally. On a deployed/signed build:
 create or unlock one account on iPhone, save its recovery code, then start
 Sync last 30 days. Open the same HTTPS service in Safari and sign in or recover
-that account to load committed photos. Keep the iPhone app open during backup.
-Background scheduling and a personal physical-device acceptance run remain release
-gates; localhost on this Mac is not an installable iPhone service.
+that account to load committed photos. Open and unlock the iPhone app to scan and
+prepare more photos and finish catalog commits. An encrypted upload already
+scheduled with iOS can continue in the background. Whole-library background
+processing and a personal physical-device acceptance run remain release gates;
+localhost on this Mac is not an installable iPhone service.
+
+Read-only checks of `https://fotoro.cloud/v1/vault` and the HTTPS association route
+currently return 404. This origin is not serving the prepared API/association build.
 
 Production web assets and Worker bundling pass a Wrangler `--dry-run`. Wrangler
 reports missing production D1/R2 bindings: those bindings are not inherited from
 the local environment. Add the real resource identifiers before deployment;
 the dry-run is not a provisioned or usable service.
+
+After deploying to the intended HTTPS origin, run `pnpm check:service
+https://fotoro.cloud APPLICATION_PREFIX.cloud.fotoro.Fotoro`. It checks the
+unauthenticated API response and configured passkey association without creating
+an account or changing data. It cannot replace the physical-device run.
+
+Account-private labels and recognized text use migration
+`0004_private_annotations.sql`. Apply migrations before deploying the updated
+clients. These sidecars are encrypted with the account vault key, signed by the
+account and atomically revisioned. They are absent from sharing grants; search
+choices and pins stay on each device. Client pending edits survive interruption
+and conflicting edits wait for a visible choice.
+
+`PUT /v1/background/uploads/:id/staging?cap=...` accepts only an existing,
+expiring, 256-bit upload capability. It can write one bounded staging object and
+cannot read, reserve or commit an object. Background requests carry no account
+bearer or cookie credentials. The service never redirects this endpoint. Apple
+background URLSession follows redirects without the foreground redirect veto;
+clients therefore require this trusted, same-origin endpoint and verify the
+final response origin. Original data is encrypted before transport. Catalog
+commits still require authenticated foreground work after vault unlock.
 
 References: [Workers static assets](https://developers.cloudflare.com/workers/static-assets/), [R2 pricing](https://developers.cloudflare.com/r2/pricing/), [D1 limits](https://developers.cloudflare.com/d1/platform/limits/), [Worker limits](https://developers.cloudflare.com/workers/platform/limits/).

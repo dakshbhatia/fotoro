@@ -1,5 +1,14 @@
 import Foundation
 
+private final class APIRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+  func urlSession(_ session: URLSession, task: URLSessionTask,
+    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+    completionHandler: @escaping @Sendable (URLRequest?) -> Void)
+  {
+    completionHandler(nil)
+  }
+}
+
 @MainActor final class APIClient {
   let session: AccountSession
   var baseURL: URL
@@ -8,6 +17,8 @@ import Foundation
       ? "http://localhost:4310" : "https://fotoro.cloud"
   }
   var rpId: String { origin == "https://fotoro.cloud" ? "fotoro.cloud" : "localhost" }
+  private let network = URLSession(
+    configuration: .ephemeral, delegate: APIRedirectPolicy(), delegateQueue: nil)
   init(session: AccountSession, baseURL: URL) {
     self.session = session
     self.baseURL = baseURL
@@ -19,6 +30,10 @@ import Foundation
     return try await perform(url, method: method, body: body)
   }
   private func perform(_ url: URL, method: String, body: Data?) async throws -> Data {
+    guard let expected = BackgroundUploadPolicy.origin(baseURL),
+      BackgroundUploadPolicy.origin(url) == expected,
+      URLComponents(url: url, resolvingAgainstBaseURL: true)?.fragment == nil
+    else { throw FotoroError("Untrusted API URL") }
     var r = URLRequest(url: url)
     r.httpMethod = method
     r.httpBody = body
@@ -34,7 +49,7 @@ import Foundation
     {
       r.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     }
-    let (data, response) = try await URLSession.shared.data(for: r)
+    let (data, response) = try await network.data(for: r)
     guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
       let code =
         (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["code"] as? String

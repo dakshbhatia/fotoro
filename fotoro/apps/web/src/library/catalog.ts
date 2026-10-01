@@ -6,6 +6,7 @@ import type {
   ChangePageV1,
   AccountCardV1,
   WrappedKeyV1,
+  PhotoAnnotationsV1,
 } from "@fotoro/contracts";
 import { validateWire } from "@fotoro/contracts/validate";
 import {
@@ -20,11 +21,14 @@ import {
 import { api, fetchCipher } from "../exchange/api";
 import { get, all, atomic, cacheCipher } from "../exchange/cache";
 import { requireVault, encryptPrivate, decryptPrivate } from "../vault/vault";
+import { annotationCacheWrite, readAnnotations, serializeAnnotationWrites } from "../exchange/annotations";
 export interface Photo {
   manifest: PhotoManifestV1;
   metadata: PhotoMetadataV1;
   metadataKey: Uint8Array;
   grantId?: string;
+  annotations?: PhotoAnnotationsV1;
+  annotationRevision?: number;
 }
 export const digest = (bytes: Uint8Array) =>
   b64(sodium.crypto_hash_sha256(bytes));
@@ -118,42 +122,53 @@ export async function applyChanges(
   page: ChangePageV1,
   session = requireVault(),
 ) {
-  validateWire("ChangePageV1", page);
-  if (requireVault() !== session) throw new Error("VAULT_LOCKED");
-  const v = requireVault();
-  const writes: any[] = [];
-  for (const change of page.changes) {
-    if (change.entity !== "photo") continue;
-    const key = v.accountId + ":" + change.entityId;
-    if (change.deleted) writes.push({ store: "catalog", key });
-    else {
-      const payload = change.payload!;
-      if (payload.accountId !== v.accountId) continue;
-      if (payload.kind !== "photo-manifest")
-        throw new Error("CATALOG_IDENTITY_MISMATCH");
-      const manifest = validateWire<PhotoManifestV1>(
-        "PhotoManifestV1",
-        JSON.parse(
-          new TextDecoder().decode(
-            verifyPayload(payload, unb64(v.card.signingPublicKey)),
+  return serializeAnnotationWrites(session, async () => {
+    validateWire("ChangePageV1", page);
+    if (requireVault() !== session) throw new Error("VAULT_LOCKED");
+    const v = requireVault();
+    const writes: any[] = [];
+    const stagedAnnotations = new Map<string, SignedPayloadV1>();
+    for (const change of page.changes) {
+      if (change.entity === "annotation") {
+        if (change.deleted) writes.push({store: "settings", key: v.accountId + ":annotation:" + change.entityId});
+        else {
+          const write = await annotationCacheWrite(change.payload!, change.entityId, session, stagedAnnotations.get(change.entityId));
+          if (write) {writes.push(write); stagedAnnotations.set(change.entityId, change.payload!);}
+        }
+        continue;
+      }
+      if (change.entity !== "photo") continue;
+      const key = v.accountId + ":" + change.entityId;
+      if (change.deleted) writes.push({ store: "catalog", key });
+      else {
+        const payload = change.payload!;
+        if (payload.accountId !== v.accountId) continue;
+        if (payload.kind !== "photo-manifest")
+          throw new Error("CATALOG_IDENTITY_MISMATCH");
+        const manifest = validateWire<PhotoManifestV1>(
+          "PhotoManifestV1",
+          JSON.parse(
+            new TextDecoder().decode(
+              verifyPayload(payload, unb64(v.card.signingPublicKey)),
+            ),
           ),
-        ),
-      );
-      if (
-        manifest.ownerAccountId !== v.accountId ||
-        manifest.photoId !== change.entityId
-      )
-        throw new Error("CATALOG_BINDING_MISMATCH");
-      writes.push({ store: "catalog", key, value: encryptPrivate(payload) });
+        );
+        if (
+          manifest.ownerAccountId !== v.accountId ||
+          manifest.photoId !== change.entityId
+        )
+          throw new Error("CATALOG_BINDING_MISMATCH");
+        writes.push({ store: "catalog", key, value: encryptPrivate(payload) });
+      }
     }
-  }
-  writes.push({
-    store: "settings",
-    key: v.accountId + ":cursor",
-    value: encryptPrivate(page.nextCursor),
+    writes.push({
+      store: "settings",
+      key: v.accountId + ":cursor",
+      value: encryptPrivate(page.nextCursor),
+    });
+    await atomic(writes);
+    if (requireVault() !== session) throw new Error("VAULT_LOCKED");
   });
-  await atomic(writes);
-  if (requireVault() !== session) throw new Error("VAULT_LOCKED");
 }
 export async function syncCatalog(signal?: AbortSignal) {
   const session = requireVault();
@@ -192,7 +207,12 @@ export async function cachedCatalog() {
         ),
       ),
     );
-    photos.push(await readPhoto(manifest));
+    if (signed.accountId !== v.accountId || signed.kind !== "photo-manifest" || manifest.ownerAccountId !== v.accountId || id !== v.accountId + ":" + manifest.photoId)
+      throw new Error("CATALOG_BINDING_MISMATCH");
+    const photo = await readPhoto(manifest);
+    const annotation = await readAnnotations({ownerAccountId: manifest.ownerAccountId, photoId: manifest.photoId, originalSha256: photo.metadata.originalSha256}, v);
+    if (annotation) {photo.annotations = annotation.value; photo.annotationRevision = annotation.revision;}
+    photos.push(photo);
     if (requireVault() !== v) throw new Error("VAULT_LOCKED");
   }
   return photos.sort((a, b) =>

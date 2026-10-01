@@ -1,0 +1,279 @@
+import "fake-indexeddb/auto";
+import test from "node:test";
+import assert from "node:assert/strict";
+import accounts from "../../../fixtures/accounts.json";
+import { ready, unb64, signPayload, utf8 } from "@fotoro/crypto";
+import { configureVault, unlockVault, lockVault, encryptPrivate, decryptPrivate, requireVault } from "../src/vault/vault";
+import { all, clearAccount, get } from "../src/exchange/cache";
+import { applyChanges } from "../src/library/catalog";
+import * as annotations from "../src/exchange/annotations";
+
+const owner = "11111111-1111-4111-8111-111111111111";
+const other = "22222222-2222-4222-8222-222222222222";
+const photoId = "33333333-3333-4333-8333-333333333333";
+const originalSha256 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const localProcessor = "tesseract.js-7.0.0/eng-1.0.0/lstm-orientation-v2";
+const identity = { ownerAccountId: owner, photoId, originalSha256 };
+async function open(accountId = owner) {
+  await ready;
+  const secret = accounts.testSecrets[0];
+  configureVault({version: 1, accountCard: {...accounts.accounts[0], accountId}, wrappers: [{version: 1, wrapperId: crypto.randomUUID(), kind: "recovery", credentialId: null, prfSalt: null, verified: true, wrappedBundle: secret.encryptedBundle}]} as any);
+  return unlockVault({kind: "recovery", secret: unb64(secret.recoverySecret)});
+}
+function signed(revision: number, fields: object, signedOwner = owner, boundPhoto = photoId) {
+  return signPayload("photo-annotations", signedOwner, utf8({version: 1, photoId: boundPhoto, revision, encrypted: encryptPrivate({version: 1, photoId: boundPhoto, originalSha256, ...fields})}), requireVault().signingSecretKey);
+}
+const reply = (value: unknown) => new Response(JSON.stringify(value), {status: 200});
+async function clean() {await clearAccount(owner); await clearAccount(other); lockVault();}
+
+test("verified annotations reject a different owner, signed kind, photo identity, or original digest", async () => {
+  await open();
+  try {
+    assert.deepEqual(annotations.verifyAnnotations(signed(1, {labels: ["family"]}), identity).value.labels, ["family"]);
+    assert.throws(() => annotations.verifyAnnotations(signed(1, {}, other), identity), /IDENTITY/);
+    assert.throws(() => annotations.verifyAnnotations({...signed(1, {}), kind: "photo-manifest"}, identity), /IDENTITY/);
+    assert.throws(() => annotations.verifyAnnotations(signed(1, {}, owner, crypto.randomUUID()), identity), /BINDING/);
+    assert.throws(() => annotations.verifyAnnotations(signed(1, {originalSha256: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"}), identity), /DIGEST/);
+  } finally {await clean();}
+});
+
+test("queued labels are encrypted at rest, searchable before sending, and isolated by account", async () => {
+  await open();
+  const old = globalThis.fetch;
+  globalThis.fetch = (async () => {throw new Error("must not fetch while queueing");}) as any;
+  try {
+    await annotations.queueAnnotations(identity, {labels: ["home"]});
+    assert.deepEqual((await annotations.readAnnotations(identity))?.value.labels, ["home"]);
+    const rows = await all("settings");
+    assert.doesNotMatch(JSON.stringify(rows), /home/);
+    lockVault(); await open(other);
+    assert.equal((await annotations.pendingAnnotations()).length, 0);
+    await assert.rejects(annotations.readAnnotations(identity), /IDENTITY/);
+  } finally {globalThis.fetch = old; await clean();}
+});
+
+test("a network failure retains the exact signed retry and a successful retry removes it", async () => {
+  await open(); const old = globalThis.fetch;
+  try {
+    await annotations.queueAnnotations(identity, {labels: ["receipt"]});
+    const pending = await annotations.pendingAnnotations();
+    globalThis.fetch = (async () => {throw new Error("offline");}) as any;
+    await assert.rejects(annotations.flushAnnotations(), /offline/);
+    assert.deepEqual((await annotations.pendingAnnotations())[0].signed, pending[0].signed);
+    globalThis.fetch = (async (_url: unknown, init: RequestInit) => reply(JSON.parse(init.body as string))) as any;
+    await annotations.flushAnnotations();
+    assert.equal((await annotations.pendingAnnotations()).length, 0);
+    assert.deepEqual((await annotations.readAnnotations(identity))?.value.labels, ["receipt"]);
+  } finally {globalThis.fetch = old; await clean();}
+});
+
+test("same-field revision conflicts retain both versions until the user chooses", async () => {
+  await open(); const old = globalThis.fetch;
+  try {
+    await annotations.cacheAnnotations(signed(1, {labels: ["old"]}), photoId);
+    await annotations.queueAnnotations(identity, {labels: ["mine"]});
+    const remote = signed(2, {labels: ["theirs"]});
+    let writes = 0;
+    globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
+      if (init.method === "PUT") {writes++; return new Response(JSON.stringify({code: "VERSION_CONFLICT", retryable: false}), {status: 409});}
+      return reply({version: 1, annotations: remote});
+    }) as any;
+    await annotations.flushAnnotations();
+    assert.equal(writes, 1);
+    const pending = (await annotations.pendingAnnotations())[0];
+    assert.equal(pending.conflict, true);
+    assert.deepEqual((await annotations.readAnnotations(identity))?.value.labels, ["mine"]);
+    await annotations.resolveAnnotationConflict(photoId, "remote");
+    assert.equal((await annotations.pendingAnnotations()).length, 0);
+    assert.deepEqual((await annotations.readAnnotations(identity))?.value.labels, ["theirs"]);
+  } finally {globalThis.fetch = old; await clean();}
+});
+
+test("safe rebase preserves remote OCR when only labels changed locally", async () => {
+  await open(); const old = globalThis.fetch;
+  try {
+    await annotations.cacheAnnotations(signed(1, {labels: ["old"]}), photoId);
+    await annotations.queueAnnotations(identity, {labels: ["mine"]});
+    const ocr = {text: "Invoice total", confidence: 0.9, processor: "test"};
+    const remote = signed(2, {labels: ["old"], ocr});
+    let writes = 0;
+    globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
+      if (init.method !== "PUT") return reply({version: 1, annotations: remote});
+      if (++writes === 1) return new Response(JSON.stringify({code: "VERSION_CONFLICT", retryable: false}), {status: 409});
+      const value = annotations.verifyAnnotations(JSON.parse(init.body as string), identity);
+      assert.equal(value.revision, 3);
+      assert.deepEqual(value.value.labels, ["mine"]);
+      assert.deepEqual(value.value.ocr, ocr);
+      return reply(JSON.parse(init.body as string));
+    }) as any;
+    await annotations.flushAnnotations();
+    assert.equal(writes, 2);
+    assert.equal((await annotations.pendingAnnotations()).length, 0);
+  } finally {globalThis.fetch = old; await clean();}
+});
+
+test("delayed annotation upload cannot publish into a new account after lock", async () => {
+  await open(); const old = globalThis.fetch;
+  let receive!: (value: Response) => void;
+  let began!: () => void;
+  const started = new Promise<void>(resolve => {began = resolve;});
+  try {
+    await annotations.queueAnnotations(identity, {labels: ["mine"]});
+    const payload = (await annotations.pendingAnnotations())[0].signed;
+    globalThis.fetch = (async () => {began(); return new Promise<Response>(resolve => {receive = resolve;});}) as any;
+    const upload = annotations.flushAnnotations();
+    const rejected = assert.rejects(upload, /VAULT_LOCKED/);
+    await started; lockVault(); await open(other); receive(reply(payload)); await rejected;
+    assert.equal((await annotations.pendingAnnotations()).length, 0);
+    assert.equal(await get("settings", other + ":annotation:" + photoId), undefined);
+    lockVault(); await open(); assert.equal((await annotations.pendingAnnotations()).length, 1);
+  } finally {globalThis.fetch = old; await clean();}
+});
+
+test("annotation changes hydrate verified cache and cursor together", async () => {
+  const session = await open();
+  try {
+    await applyChanges({version: 1, changes: [{cursor: "1", entity: "annotation", entityId: photoId, deleted: false, payload: signed(1, {labels: ["trip"]})}], nextCursor: "bmV4dA", hasMore: false} as any, session);
+    assert.deepEqual((await annotations.readAnnotations(identity))?.value.labels, ["trip"]);
+    assert.equal(decryptPrivate(await get("settings", owner + ":cursor") as any), "bmV4dA");
+  } finally {await clean();}
+});
+
+test("local OCR and labels only bind to the matching immutable original", async () => {
+  await open();
+  try {
+    const local = {id: "local", digest: originalSha256, filename: "sample.jpg", date: "2026-10-01T12:00:00Z", dateSource: "selected" as const, labels: ["home"], ocr: {photoID: "local", revision: originalSha256, processor: localProcessor, status: "complete" as const, text: "Invoice", confidence: 0.8}};
+    assert.equal(await annotations.queueLocalAnnotations({...identity, originalSha256: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"}, local), false);
+    assert.equal((await annotations.pendingAnnotations()).length, 0);
+    assert.equal(await annotations.queueLocalAnnotations(identity, local), true);
+    assert.deepEqual((await annotations.readAnnotations(identity))?.value.ocr, {processor: localProcessor, text: "Invoice", confidence: 0.8});
+    assert.equal(await annotations.queueLocalAnnotations(identity, local), false);
+    assert.equal(await annotations.queueLocalAnnotations(identity, {...local, labels: ["changed"]}), true);
+    assert.deepEqual((await annotations.readAnnotations(identity))?.value.labels, ["changed"]);
+  } finally {await clean();}
+});
+
+test("an edit made during upload survives the first acknowledgement without a false conflict", async () => {
+  await open(); const old = globalThis.fetch;
+  let receive!: (value: Response) => void, begin!: () => void;
+  const started = new Promise<void>(resolve => {begin = resolve;});
+  try {
+    await annotations.queueAnnotations(identity, {labels: ["first"]});
+    const first = (await annotations.pendingAnnotations())[0].signed;
+    let writes = 0;
+    globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
+      if (++writes === 1) {begin(); return new Promise<Response>(resolve => {receive = resolve;});}
+      const outgoing = JSON.parse(init.body as string);
+      const value = annotations.verifyAnnotations(outgoing, identity);
+      assert.equal(value.revision, 2);
+      assert.deepEqual(value.value.labels, ["latest"]);
+      return reply(outgoing);
+    }) as any;
+    const flushing = annotations.flushAnnotations();
+    await started; await annotations.queueAnnotations(identity, {labels: ["latest"]}); receive(reply(first));
+    await flushing;
+    assert.equal(writes, 2);
+    assert.equal((await annotations.pendingAnnotations()).length, 0);
+    assert.deepEqual((await annotations.readAnnotations(identity))?.value.labels, ["latest"]);
+  } finally {globalThis.fetch = old; await clean();}
+});
+
+test("identical signed annotation receipts may reorder JSON fields without becoming a revision conflict", async () => {
+  await open();
+  try {
+    const original = signed(1, {labels: ["home"]});
+    await annotations.cacheAnnotations(original, photoId);
+    await annotations.cacheAnnotations({signature: original.signature, body: original.body, accountId: original.accountId, kind: original.kind, version: original.version}, photoId);
+    assert.deepEqual((await annotations.readAnnotations(identity))?.value.labels, ["home"]);
+  } finally {await clean();}
+});
+
+test("invalid annotation pages cannot advance the cursor or publish a partial valid update", async () => {
+  const session = await open();
+  try {
+    const valid = signed(1, {labels: ["home"]});
+    const invalid = {...signed(1, {labels: ["tampered"]}), signature: "A".repeat(86)};
+    await assert.rejects(applyChanges({version: 1, changes: [{cursor: "1", entity: "annotation", entityId: photoId, deleted: false, payload: valid}, {cursor: "2", entity: "annotation", entityId: photoId, deleted: false, payload: invalid}], nextCursor: "new-cursor", hasMore: false}, session), /SIGNATURE/);
+    assert.equal(await get("settings", owner + ":cursor"), undefined);
+    assert.equal(await annotations.readAnnotations(identity), undefined);
+  } finally {await clean();}
+});
+
+test("a local snapshot detects later removals without replacing cloud fields it has not changed", async () => {
+  await open();
+  try {
+    const local = {id: "local", digest: originalSha256, filename: "sample.jpg", date: "2026-10-01T12:00:00Z", dateSource: "selected" as const, labels: ["home"]};
+    await annotations.queueLocalAnnotations(identity, local);
+    await annotations.cacheAnnotations(signed(1, {labels: ["home"], caption: "remote caption"}), photoId);
+    await annotations.resolveAnnotationConflict(photoId, "remote");
+    assert.equal(await annotations.queueLocalAnnotations(identity, local, requireVault(), false), false);
+    await annotations.queueLocalAnnotations(identity, {...local, labels: []}, requireVault(), false);
+    const value = (await annotations.readAnnotations(identity))?.value;
+    assert.deepEqual(value?.labels, []);
+    assert.equal(value?.caption, "remote caption");
+  } finally {await clean();}
+});
+
+test("hex digests retained by local search bind to base64url original digests in account sync", async () => {
+  await open();
+  try {
+    const hex = "00".repeat(32);
+    const local = {id: hex, digest: hex, filename: "local.png", date: "2026-10-01T12:00:00Z", dateSource: "selected" as const, labels: ["family"], ocr: {photoID: hex, revision: hex, status: "complete" as const, processor: localProcessor, text: "Photo text", confidence: 0.8}};
+    assert.equal(await annotations.queueLocalAnnotations(identity, local), true);
+    const value = (await annotations.readAnnotations(identity))?.value;
+    assert.deepEqual(value?.labels, ["family"]);
+    assert.equal(value?.ocr?.text, "Photo text");
+    assert.equal(local.digest, hex);
+  } finally {await clean();}
+});
+
+
+test("an obsolete local OCR processor or source revision cannot enter account annotations", async () => {
+  await open();
+  try {
+    const source = {id: "local", digest: originalSha256, filename: "local.png", date: "2026-10-01T12:00:00Z", dateSource: "selected" as const, labels: ["family"]};
+    await annotations.queueLocalAnnotations(identity, {...source, ocr: {photoID: "local", revision: originalSha256, status: "complete", processor: "obsolete", text: "Outdated words", confidence: 0.8}});
+    assert.equal((await annotations.readAnnotations(identity))?.value.ocr, undefined);
+    await annotations.queueLocalAnnotations(identity, {...source, ocr: {photoID: "local", revision: "wrong-original", status: "complete", processor: localProcessor, text: "Unrelated words", confidence: 0.8}});
+    assert.equal((await annotations.readAnnotations(identity))?.value.ocr, undefined);
+  } finally {await clean();}
+});
+
+test("a delayed changes page cannot roll annotation cache back after a concurrent flush receipt", async () => {
+  const session = await open();
+  const originalGet = IDBObjectStore.prototype.get;
+  let release!: () => void, began!: () => void;
+  const paused = new Promise<void>(resolve => {began = resolve;});
+  try {
+    await annotations.cacheAnnotations(signed(1, {labels: ["old"]}), photoId);
+    const oldPayload = (await annotations.readAnnotations(identity))!.signed;
+    let pauseNext = true;
+    IDBObjectStore.prototype.get = function(key: IDBValidKey | IDBKeyRange) {
+      const request = originalGet.call(this, key);
+      if (this.name !== "settings" || key !== owner + ":annotation:" + photoId || !pauseNext) return request;
+      pauseNext = false;
+      return new Proxy(request, {
+        get(target, field) {return Reflect.get(target, field, target);},
+        set(target, field, value) {
+          if (field === "onsuccess") {target.onsuccess = () => {began(); release = () => value.call(target);}; return true;}
+          return Reflect.set(target, field, value, target);
+        },
+      });
+    };
+    const page = applyChanges({version: 1, changes: [{cursor: "1", entity: "annotation", entityId: photoId, deleted: false, payload: oldPayload}], nextCursor: "next", hasMore: false}, session);
+    await paused;
+    const receipt = annotations.cacheAnnotations(signed(2, {labels: ["new"]}), photoId, session);
+    await Promise.race([receipt, new Promise(resolve => setTimeout(resolve, 15))]);
+    release(); await Promise.all([page, receipt]);
+    assert.equal((await annotations.readAnnotations(identity))?.revision, 2);
+    assert.deepEqual((await annotations.readAnnotations(identity))?.value.labels, ["new"]);
+  } finally {IDBObjectStore.prototype.get = originalGet; await clean();}
+});
+
+test("multiple annotation changes in one page keep the highest revision even when ordered newest first", async () => {
+  const session = await open();
+  try {
+    await applyChanges({version: 1, changes: [{cursor: "2", entity: "annotation", entityId: photoId, deleted: false, payload: signed(2, {labels: ["new"]})}, {cursor: "1", entity: "annotation", entityId: photoId, deleted: false, payload: signed(1, {labels: ["old"]})}], nextCursor: "next", hasMore: false}, session);
+    assert.equal((await annotations.readAnnotations(identity))?.revision, 2);
+  } finally {await clean();}
+});

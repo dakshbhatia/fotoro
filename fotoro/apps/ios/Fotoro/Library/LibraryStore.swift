@@ -25,7 +25,7 @@ final class LibraryStore: @unchecked Sendable {
     try database.write { db in
       try db.execute(
         sql:
-          "CREATE TABLE IF NOT EXISTS backupSources (id TEXT PRIMARY KEY, value BLOB NOT NULL); CREATE TABLE IF NOT EXISTS photos (id TEXT PRIMARY KEY, sourceDate TEXT NOT NULL, value BLOB NOT NULL); CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT); CREATE TABLE IF NOT EXISTS transfers (id TEXT PRIMARY KEY, value BLOB NOT NULL); CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, value BLOB NOT NULL)"
+          "CREATE TABLE IF NOT EXISTS annotations (id TEXT PRIMARY KEY, value BLOB NOT NULL); CREATE TABLE IF NOT EXISTS backupSources (id TEXT PRIMARY KEY, value BLOB NOT NULL); CREATE TABLE IF NOT EXISTS photos (id TEXT PRIMARY KEY, sourceDate TEXT NOT NULL, value BLOB NOT NULL); CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT); CREATE TABLE IF NOT EXISTS transfers (id TEXT PRIMARY KEY, value BLOB NOT NULL); CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, value BLOB NOT NULL)"
       )
     }
     let history = try database.read { db -> [String] in
@@ -126,6 +126,7 @@ final class LibraryStore: @unchecked Sendable {
       for change in page.changes where change.entity == "photo" {
         if change.deleted {
           try db.execute(sql: "DELETE FROM photos WHERE id=?", arguments: [change.entityId])
+          try db.execute(sql: "DELETE FROM annotations WHERE id=?", arguments: [change.entityId])
         } else {
           guard let photo = verified[change.entityId], photo.photoId == change.entityId else {
             throw FotoroError("Unverified catalog change")
@@ -179,7 +180,7 @@ final class LibraryStore: @unchecked Sendable {
   }
   func removeAll() throws {
     try database.write {
-      try $0.execute(sql: "DELETE FROM photos; DELETE FROM state; DELETE FROM transfers")
+      try $0.execute(sql: "DELETE FROM annotations; DELETE FROM photos; DELETE FROM state; DELETE FROM transfers")
     }
   }
   func write(_ bytes: Data, name: String, pending: Bool = false) throws -> URL {

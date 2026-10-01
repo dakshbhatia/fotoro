@@ -526,6 +526,17 @@ summary {
   background: transparent;
   color: #666;
 }
+.sync-onboarding .primary-action {
+  min-height: 50px;
+  border-color: #111;
+  border-radius: 25px;
+  background: #111;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 600;
+}
+.sync-onboarding .primary-action:hover:not(:disabled) { background: #333; }
+.sync-onboarding .text-button:hover:not(:disabled) { background: transparent; color: #111; }
 .sync-onboarding textarea {
   min-height: 100px;
   word-break: break-all;
@@ -593,3 +604,6 @@ summary {
 }
 .unavailable-photo { display: flex; height: 100%; align-items: center; justify-content: center; flex-direction: column; color: #777; font-size: 12px; padding: 12px; }
 .unavailable-photo small { margin-top: 6px; text-decoration: underline; }
+
+.cloud-search-meanings { position: fixed; z-index: 2; top: 78px; left: 50%; transform: translateX(-50%); max-width: min(90vw, 640px); padding: 6px; border-radius: 14px; }
+.cloud-search-meanings button[aria-pressed="true"] { outline: 1px solid currentColor; }

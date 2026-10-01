@@ -8,11 +8,13 @@ export function Viewer({
   initial,
   onClose,
   onSaved,
+  onLabels,
 }: {
   photos: Photo[];
   initial: string;
   onClose: () => void;
   onSaved: () => void;
+  onLabels?: (photo: Photo, labels: string[]) => void;
 }) {
   const [index, setIndex] = useState(
       Math.max(
@@ -23,21 +25,23 @@ export function Viewer({
     [url, setUrl] = useState(""),
     [zoom, setZoom] = useState(false),
     [details, setDetails] = useState(false),
-    [status, setStatus] = useState("");
+    [status, setStatus] = useState(""),
+    [label, setLabel] = useState("");
   const touch = useRef<{ x: number; y: number } | undefined>(undefined);
   const panel = useRef<HTMLDivElement>(null);
-  const photo = photos[index];
+  const photo = photos[Math.min(index, photos.length - 1)];
   useEffect(() => {
     panel.current?.focus();
     const key = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
-      if (e.key === "ArrowRight")
+      const editing = (e.target as HTMLElement)?.matches("input,textarea,select");
+      if (!editing && e.key === "ArrowRight")
         setIndex((i) => Math.min(photos.length - 1, i + 1));
-      if (e.key === "ArrowLeft") setIndex((i) => Math.max(0, i - 1));
+      if (!editing && e.key === "ArrowLeft") setIndex((i) => Math.max(0, i - 1));
       if (e.key === "Tab") {
         const buttons = Array.from(
-          panel.current?.querySelectorAll<HTMLButtonElement>(
-            "button:not(:disabled)",
+          panel.current?.querySelectorAll<HTMLElement>(
+            "button:not(:disabled),input,textarea,summary",
           ) ?? [],
         );
         if (e.shiftKey && document.activeElement === buttons[0]) {
@@ -53,7 +57,9 @@ export function Viewer({
     return () => window.removeEventListener("keydown", key);
   }, []);
   useEffect(() => {
+    if (!photo) return;
     let alive = true;
+    setLabel("");
     setUrl("");
     setStatus("");
     setZoom(false);
@@ -75,7 +81,8 @@ export function Viewer({
     return () => {
       alive = false;
     };
-  }, [photo]);
+  }, [photo?.manifest.photoId]);
+  if (!photo) return null;
   return (
     <div
       className="viewer"
@@ -194,6 +201,18 @@ export function Viewer({
               : "Capture date"}{" "}
             · {new Date(photo.metadata.sourceDate).toLocaleString()}
           </p>
+          {!photo.grantId && <>
+            <h3>Labels</h3>
+            <div className="local-labels">{(photo.annotations?.labels ?? []).map((value, index) => onLabels ? <button key={index} aria-label={"Remove label " + value} onClick={() => onLabels(photo, photo.annotations!.labels!.filter((_, position) => position !== index))}>{value} ×</button> : <span key={index}>{value}</span>)}</div>
+            {onLabels && <form className="local-label-form" onSubmit={event => {
+              event.preventDefault();
+              const labels = photo.annotations?.labels ?? [];
+              if (!label.trim() || labels.length >= 64) return;
+              if (!labels.includes(label)) onLabels(photo, [...labels, label]);
+              setLabel("");
+            }}><label>New label<input aria-label="New label" value={label} maxLength={120} onChange={event => setLabel(event.target.value)} /></label><button disabled={!label.trim() || (photo.annotations?.labels?.length ?? 0) >= 64}>Add label</button></form>}
+            {photo.annotations?.ocr && <details><summary>Text in photo</summary><p className="local-ocr-text">{photo.annotations.ocr.text || "No readable text found."}</p></details>}
+          </>}
         </aside>
       )}
       <p role="status" className="viewer-status">

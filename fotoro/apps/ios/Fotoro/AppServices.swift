@@ -19,6 +19,9 @@ struct PendingSave: Codable {
   var importer: PhotoImport
   var backup: PhotosBackup
   var journal: TransferJournal
+  var annotations: AnnotationSync
+  var photoAnnotations: [String: PhotoAnnotationsV1] = [:]
+  @ObservationIgnored private weak var localSearch: LocalSearchStore?
   let storageRoot: URL
   var photos: [LocalPhoto] = []
   var received: [LocalPhoto] = []
@@ -49,9 +52,16 @@ struct PendingSave: Codable {
     store = initialStore
     importer = PhotoImport(store: initialStore)
     journal = TransferJournal(store: initialStore, api: api, vault: vault)
+    annotations = AnnotationSync(ledger: AnnotationLedger(store: initialStore, accountId: session.accountId ?? "locked"))
+    if session.accountId != nil {
+      try BackgroundUploadTransport.shared.configure(accountId: session.accountId, fixture: session.fixture, baseURL: api.baseURL)
+    }
     ImageCache.shared.costLimit = 48 * 1024 * 1024
     vault.onLock = { [weak self] in
       self?.backup.pause()
+      self?.journal.pause()
+      self?.photoAnnotations = [:]
+      self?.localSearch?.clearSyncedAnnotations()
       self?.photos = []
       self?.received = []
       self?.grants = []
@@ -64,11 +74,18 @@ struct PendingSave: Codable {
   func activateAccount() throws {
     backup.pause()
     guard let id = session.accountId else { throw FotoroError("Authenticate first") }
+    if store.root.lastPathComponent != id { localSearch?.clearSyncedAnnotations() }
+    journal.pause(cancelBackground: store.root.lastPathComponent != id)
     store = try LibraryStore(root: storageRoot.appendingPathComponent(id))
     backup = try PhotosBackup(store: store)
     importer = PhotoImport(store: store)
     journal = TransferJournal(store: store, api: api, vault: vault)
+    annotations = AnnotationSync(ledger: AnnotationLedger(store: store, accountId: id))
+    try BackgroundUploadTransport.shared.configure(accountId: id, fixture: session.fixture, baseURL: api.baseURL)
+    UserDefaults.standard.removeObject(forKey: "fotoro.manualLock." + id)
+    photoAnnotations = [:]
     try reload()
+    try hydrateLocalAnnotations()
   }
   func startPhotosBackup() throws {
     guard
@@ -78,6 +95,7 @@ struct PendingSave: Codable {
     }
     guard let account = session.accountId else { throw FotoroError("Sign in first") }
     let bundle = try vault.requireBundle()
+    try store.setSyncEnabled(true)
     let generation = vault.generation
     let catalog = store
     let importWorker = importer
@@ -111,7 +129,26 @@ struct PendingSave: Codable {
             : asset.mediaSubtypes.contains(.photoLive) ? "Live Photo pairs are not backed up." : nil
           candidates.append(
             BackupCandidate(
-              id: asset.localIdentifier, capturedAt: asset.creationDate, skipReason: skip))
+              id: asset.localIdentifier, capturedAt: asset.creationDate, skipReason: skip,
+              sourceRevision: RecentPhoto.sourceRevision(asset)))
+        }
+        for candidate in candidates where candidate.skipReason == nil {
+          var source = try catalog.backupSource(candidate.id)
+          if source.phase == .committed, source.sourceRevision != candidate.sourceRevision,
+            let photo = try catalog.backupPhoto(source.photoId) {
+            let digest = try await importWorker.sourceDigest(candidate.id)
+            try Task.checkCancellation()
+            guard self.vault.generation == generation, self.session.accountId == account else { throw CancellationError() }
+            guard let current = PHAsset.fetchAssets(withLocalIdentifiers: [candidate.id], options: nil).firstObject,
+              RecentPhoto.sourceRevision(current) == candidate.sourceRevision else { throw FotoroError("Photo changed during sync. Try again.") }
+            if digest == photo.metadata.originalSha256 {
+              source.sourceRevision = candidate.sourceRevision
+            } else {
+              source.sourceRevision = nil
+              source.message = "This Photos original changed. Its earlier backup is kept separately."
+            }
+            try catalog.putBackupSource(source)
+          }
         }
         return candidates
       },
@@ -138,14 +175,43 @@ struct PendingSave: Codable {
         guard let self, self.store === catalog, self.vault.generation == generation else {
           throw CancellationError()
         }
+        try self.captureLocalAnnotations()
+        await self.syncAnnotations()
         try await self.sync()
       })
+  }
+  func resumeSavedAccount(initialRestoration: Bool = false) async {
+    guard session.accountId != nil, !session.fixture else { return }
+    do {
+      if !vault.isUnlocked {
+        guard initialRestoration, let account = session.accountId, !UserDefaults.standard.bool(forKey: "fotoro.manualLock." + account) else { return }
+        try await vault.unlock(.localKeychain)
+        try activateAccount()
+      }
+      await journal.resumePending()
+      try await sync()
+      if try store.syncEnabled(), !backup.isRunning { try startPhotosBackup() }
+    } catch {
+      if vault.isUnlocked { notices = ["Sync will continue when you reconnect."] }
+      else { self.error = "Sign in to continue syncing your photos." }
+    }
+  }
+  func lockAccount() {
+    if let account = session.accountId { UserDefaults.standard.set(true, forKey: "fotoro.manualLock." + account) }
+    vault.lock()
+  }
+  func pauseSync() {
+    backup.pause()
+    journal.pause(cancelBackground: true)
+    do { try store.setSyncEnabled(false) } catch { self.error = error.localizedDescription }
   }
   func configureAPI(_ value: String) throws {
     guard let url = URL(string: value),
       url.scheme == "https"
         || (["localhost", "127.0.0.1"].contains(url.host ?? "") && url.scheme == "http")
     else { throw FotoroError("Use HTTPS or a loopback API") }
+    journal.pause(cancelBackground: true)
+    try BackgroundUploadTransport.shared.configure(accountId: nil, fixture: false, baseURL: api.baseURL)
     vault.lock()
     session.fixture = false
     session.bearerToken = nil
@@ -156,15 +222,19 @@ struct PendingSave: Codable {
     guard let last = photos.last else { return }
     let page = try store.photos(after: last.id, limit: 1000)
     photos += page.filter { $0.manifest.ownerAccountId == session.accountId }
+    try reloadAnnotations()
   }
   func reload() throws {
     guard vault.isUnlocked else { return }
     photos = try store.photos(limit: 1000).filter {
       $0.manifest.ownerAccountId == session.accountId
     }
+    try reloadAnnotations()
   }
   #if DEBUG
     func fixtureUnlock(index: Int) async throws {
+      journal.pause(cancelBackground: true)
+      try BackgroundUploadTransport.shared.configure(accountId: nil, fixture: false, baseURL: api.baseURL)
       vault.lock()
       api.baseURL = URL(string: "http://127.0.0.1:8790")!
       let accounts: FixtureAccounts = try await api.get("/__fixtures/accounts")
@@ -178,17 +248,23 @@ struct PendingSave: Codable {
       backup = try PhotosBackup(store: store)
       importer = PhotoImport(store: store)
       journal = TransferJournal(store: store, api: api, vault: vault)
+      annotations = AnnotationSync(ledger: AnnotationLedger(store: store, accountId: session.accountId!))
       try await vault.recover(secret: Data(b64: accounts.testSecrets[index].recoverySecret))
       try reload()
       try await sync()
     }
   #endif
   func signOut(discardPending: Bool) throws {
-    if try !discardPending && !journal.entries().isEmpty {
+    if try !discardPending && (!journal.entries().isEmpty || !annotations.ledger.pendingIDs().isEmpty) {
       throw FotoroError("Pending unsent imports will be removed. Confirm sign-out to discard them.")
     }
+    journal.pause(cancelBackground: true)
+    try BackgroundUploadTransport.shared.configure(accountId: nil, fixture: false, baseURL: api.baseURL)
     let root = store.root
-    if let id = session.accountId { Keychain.remove("device-request-" + id) }
+    if let id = session.accountId {
+      Keychain.remove("device-request-" + id)
+      UserDefaults.standard.removeObject(forKey: "fotoro.manualLock." + id)
+    }
     try vault.signOut()
     Keychain.remove("session")
     UserDefaults.standard.removeObject(forKey: "fotoro.account")
@@ -269,7 +345,9 @@ struct PendingSave: Codable {
     updated.previewURL = try catalog.write(plain, name: "cache-" + photo.photoId + "-preview.jpg")
     try catalog.put(updated)
     if let i = photos.firstIndex(where: { $0.id == photo.id }) { photos[i] = updated }
+    else if photo.manifest.ownerAccountId == session.accountId { photos.append(updated) }
     if let i = received.firstIndex(where: { $0.id == photo.id }) { received[i] = updated }
+    try reloadAnnotations()
   }
   func sync() async throws {
     let bundle = try vault.requireBundle()
@@ -312,14 +390,159 @@ struct PendingSave: Codable {
         version: page.version,
         changes: ownedChanges + page.changes.filter { $0.deleted || $0.entity != "photo" },
         nextCursor: page.nextCursor, hasMore: page.hasMore)
+      for change in page.changes where change.entity == "annotation" && !change.deleted {
+        guard let signed = change.payload, let photo = try verified[change.entityId] ?? catalog.backupPhoto(change.entityId),
+          photo.manifest.ownerAccountId == authorizedAccount else { throw FotoroError("Labels have no verified original") }
+        try annotations.ledger.receive(signed, photo: photo, bundle: bundle, card: session.requireCard(signed.accountId))
+      }
       try catalog.apply(ownedPage, verified: verified)
       more = page.hasMore
     }
     try fence()
     try reload()
+    try hydrateLocalAnnotations()
+    await syncAnnotations()
+    try fence()
     let inbox: GrantInboxV1 = try await api.get("/v1/grants")
     try fence()
     grants = inbox.grants
+  }
+  func bindLocalSearch(_ search: LocalSearchStore) {
+    localSearch = search
+    search.onRecordChanged = { [weak self] record, labelsChanged in
+      try self?.captureLocalAnnotation(record, labelsChanged: labelsChanged)
+    }
+    search.onSnapshotReady = { [weak self] in
+      try self?.hydrateLocalAnnotations()
+      try self?.captureLocalAnnotations()
+    }
+  }
+  private func reloadAnnotations() throws {
+    guard vault.isUnlocked, let account = session.accountId else { photoAnnotations = [:]; return }
+    let bundle = try vault.requireBundle()
+    let card = try session.requireCard(account)
+    var values: [String: PhotoAnnotationsV1] = [:]
+    for photo in photos {
+      if let value = try annotations.ledger.current(photo: photo, bundle: bundle, card: card) { values[photo.id] = value }
+    }
+    photoAnnotations = values
+  }
+  func annotation(_ photo: LocalPhoto) -> PhotoAnnotationsV1 {
+    if let cached = photoAnnotations[photo.id] { return cached }
+    if vault.isUnlocked, let account = session.accountId, let card = try? session.requireCard(account),
+      let bundle = try? vault.requireBundle(),
+      let current = try? annotations.ledger.current(photo: photo, bundle: bundle, card: card) { return current }
+    return PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+  }
+  func setLabels(_ labels: [String], photo: LocalPhoto) throws {
+    guard let account = session.accountId else { throw FotoroError("Sign in first") }
+    let bundle = try vault.requireBundle()
+    var value = try annotations.ledger.current(photo: photo, bundle: bundle, card: session.requireCard(account)) ?? PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+    value.labels = labels
+    try annotations.ledger.edit(value, photo: photo, bundle: bundle, card: session.requireCard(account))
+    try reloadAnnotations()
+    try hydrateLocalAnnotations()
+    Task { await self.syncAnnotations() }
+  }
+  func searchCatalog(_ query: String) async throws -> [LocalPhoto] {
+    let generation = vault.generation
+    let catalog = store
+    guard let account = session.accountId else { throw FotoroError("Sign in first") }
+    let bundle = try vault.requireBundle()
+    let card = try session.requireCard(account)
+    let ledger = annotations.ledger
+    let result = try await Task.detached(priority: .userInitiated) {
+      var matches: [LocalPhoto] = []
+      var after: String?
+      while true {
+        try Task.checkCancellation()
+        let page = try catalog.photos(after: after, limit: 1000)
+        for photo in page where photo.manifest.ownerAccountId == account {
+          let value = try ledger.current(photo: photo, bundle: bundle, card: card)
+          let terms = [photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + (value?.facts ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""]
+          if terms.contains(where: { $0.localizedCaseInsensitiveContains(query) }) { matches.append(photo) }
+        }
+        guard page.count == 1000, let last = page.last else { break }
+        after = last.id
+      }
+      return matches
+    }.value
+    try Task.checkCancellation()
+    guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account else { throw CancellationError() }
+    return result
+  }
+  func matches(_ photo: LocalPhoto, query: String) -> Bool {
+    guard !query.isEmpty else { return true }
+    let value = photoAnnotations[photo.id]
+    return ([photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + (value?.facts ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""])
+      .contains { $0.localizedCaseInsensitiveContains(query) }
+  }
+  private func captureLocalAnnotation(_ record: SearchRecord, labelsChanged: Bool) throws {
+    guard vault.isUnlocked, let account = session.accountId,
+      let source = try store.backupSources().first(where: { $0.id == record.id }),
+      AnnotationSourceBinding.accepts(sourceRevision: source.sourceRevision, recordRevision: record.revision),
+      let photo = try store.backupPhoto(source.photoId) else { return }
+    let bundle = try vault.requireBundle()
+    let card = try session.requireCard(account)
+    var value = try annotations.ledger.current(photo: photo, bundle: bundle, card: card) ?? PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+    if labelsChanged || value.labels == nil { value.labels = record.labels }
+    if let caption = record.captions.first { value.caption = caption }
+    if !record.keywords.isEmpty { value.keywords = record.keywords }
+    if !record.facts.isEmpty { value.facts = record.facts }
+    value.favorite = record.favorite
+    if record.ocrStatus == .complete {
+      value.ocr = PhotoAnnotationsV1.OCR(text: record.ocrText, confidence: record.ocrConfidence, processor: record.processor)
+    }
+    try annotations.ledger.edit(value, photo: photo, bundle: bundle, card: card)
+    photoAnnotations[photo.id] = value
+    if labelsChanged { Task { await self.syncAnnotations() } }
+  }
+  private func captureLocalAnnotations() throws {
+    guard let localSearch, vault.isUnlocked else { return }
+    for source in try store.backupSources() {
+      if let record = try localSearch.record(source.id) { try captureLocalAnnotation(record, labelsChanged: false) }
+    }
+  }
+  private func hydrateLocalAnnotations() throws {
+    guard let localSearch, vault.isUnlocked, let account = session.accountId else { return }
+    let bundle = try vault.requireBundle()
+    let card = try session.requireCard(account)
+    for source in try store.backupSources() {
+      guard let photo = try store.backupPhoto(source.photoId),
+        let value = try annotations.ledger.current(photo: photo, bundle: bundle, card: card) else { continue }
+      try localSearch.applyAnnotations(value, source: source, accountId: account)
+    }
+  }
+  func syncAnnotations() async {
+    guard vault.isUnlocked, let account = session.accountId, let bundle = try? vault.requireBundle(),
+      let card = try? session.requireCard(account) else { return }
+    let generation = vault.generation
+    let catalog = store
+    let worker = annotations
+    await worker.resume(bundle: bundle, card: card, valid: { [weak self] in
+      guard let self else { return false }
+      return self.vault.isUnlocked && self.vault.generation == generation && self.session.accountId == account && self.store === catalog
+    }, send: { signed in
+      _ = try await self.api.request("/v1/photos/\(try Wire.decode(PhotoAnnotationsUpdateV1.self, Data(b64: signed.body)).photoId)/annotations", method: "PUT", body: Wire.encode(signed))
+    })
+    guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account else { return }
+    do { try reloadAnnotations() } catch { self.error = error.localizedDescription }
+  }
+  func resolveAnnotationConflict(_ photo: LocalPhoto, keepLocal: Bool) async throws {
+    let generation = vault.generation
+    let account = session.accountId
+    let catalog = store
+    let bundle = try vault.requireBundle()
+    let reply: PhotoAnnotationsReplyV1 = try await api.get("/v1/photos/\(photo.id)/annotations")
+    guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account else { throw CancellationError() }
+    guard reply.version == 1, let signed = reply.annotations else { throw FotoroError("Refresh labels before choosing a version") }
+    try annotations.ledger.receive(signed, photo: photo, bundle: bundle, card: session.requireCard(signed.accountId))
+    if try annotations.ledger.state(photo.id)?.conflict == true {
+      try annotations.ledger.resolve(photo.id, keepLocal: keepLocal)
+    }
+    try reloadAnnotations()
+    try hydrateLocalAnnotations()
+    await syncAnnotations()
   }
   func importFiles(_ urls: [URL], publicSample: Bool = false) async throws {
     var permittedSample = false
@@ -371,12 +594,10 @@ struct PendingSave: Codable {
     let bundle = try vault.requireBundle()
     let result = try await worker.importResources(
       selected, accountId: account, bundle: bundle,
-      valid: { [weak self] in
-        await MainActor.run {
-          guard let self else { return false }
-          return self.vault.isUnlocked && self.vault.generation == generation
-            && self.session.accountId == account && self.store === catalog
-        }
+      valid: { @MainActor [weak self] in
+        guard let self else { return false }
+        return self.vault.isUnlocked && self.vault.generation == generation
+          && self.session.accountId == account && self.store === catalog
       })
     guard vault.isUnlocked, vault.generation == generation, session.accountId == account,
       store === catalog

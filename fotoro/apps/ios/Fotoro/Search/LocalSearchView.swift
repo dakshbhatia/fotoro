@@ -127,7 +127,7 @@ struct LocalPhotoDetails: View {
                   labelFocused = false
                 }
               }
-              .disabled(SearchNormalization.text(label).isEmpty || !search.canEditLabels(photo.id))
+              .disabled(SearchNormalization.text(label).isEmpty || label.unicodeScalars.count > 120 || labels.count >= 64 || !search.canEditLabels(photo.id))
             }
             if !search.canEditLabels(photo.id) {
               Text("The local index is preparing this photo.").font(.caption).foregroundStyle(

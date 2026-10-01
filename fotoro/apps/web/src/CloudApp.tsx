@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { GrantV1 } from "@fotoro/contracts";
 import { ready } from "@fotoro/crypto";
 import { Library } from "./library/Library";
@@ -46,6 +46,11 @@ import {
 } from "./exchange/sync";
 import { syncSelectedSequential } from "./exchange/selected";
 import { clearAccount } from "./exchange/cache";
+import { localOriginalDigest, queueAnnotations, queueLocalAnnotations, pendingAnnotations, resolveAnnotationConflict, type PendingAnnotation } from "./exchange/annotations";
+import { PhotoSearchIndex, normalizeSearch } from "./local/search";
+import type { LocalPhoto } from "./local/resources";
+import { cloudSearchRecords } from "./library/search";
+const noLocalPhotos: LocalPhoto[] = [];
 const SearchIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
     <circle cx="10" cy="10" r="7" />
@@ -59,11 +64,11 @@ const PlusIcon = () => (
 );
 export default function CloudApp({
   onBack,
-  localFiles = [],
+  localPhotos = noLocalPhotos,
   active = true,
 }: {
   onBack: () => void;
-  localFiles?: File[];
+  localPhotos?: LocalPhoto[];
   active?: boolean;
 }) {
   const [account, setAccount] = useState(() => {
@@ -99,13 +104,17 @@ export default function CloudApp({
     [skipped, setSkipped] = useState(0),
     [paused, setPaused] = useState(false),
     [pickedFiles, setPickedFiles] = useState<File[]>([]),
-    [needsAttention, setNeedsAttention] = useState(false);
+    [needsAttention, setNeedsAttention] = useState(false),
+    [annotationPending, setAnnotationPending] = useState<PendingAnnotation[]>([]),
+    [committedMeaning, setCommittedMeaning] = useState<string>();
   const running = useRef(false),
     pausedRef = useRef(false),
     uploadAbort = useRef<AbortController | null>(null),
     localSynced = useRef(new WeakMap<File, string>());
   const input = useRef<HTMLInputElement>(null);
-  const allLocalFiles = [...new Set([...localFiles, ...pickedFiles])];
+  const localPhotosRef = useRef(localPhotos);
+  localPhotosRef.current = localPhotos;
+  const allLocalFiles = [...new Set([...localPhotos.flatMap(photo => photo.file ? [photo.file] : []), ...pickedFiles])];
   const unlocked = !!account;
   const publicDemo = fixtureMode || isPublicDemoAccount(account);
   const clear = () => {
@@ -118,6 +127,9 @@ export default function CloudApp({
     setViewer(null);
     setExchange(false);
     setPending([]);
+    setAnnotationPending([]);
+    setCommittedMeaning(undefined);
+    setQuery("");
     setLastSuccessfulSync(null);
     setStaging(0);
     setStatus("");
@@ -147,6 +159,9 @@ export default function CloudApp({
     const imports = await pendingImports();
     if (!sameVault(session)) return;
     setPending((previous) => (sameVault(session) ? imports : previous));
+    const edits = await pendingAnnotations(session);
+    if (!sameVault(session)) return;
+    setAnnotationPending(edits);
     const previous = await lastSync(session);
     if (!sameVault(session)) return;
     setLastSuccessfulSync((value) => (sameVault(session) ? previous : value));
@@ -168,6 +183,7 @@ export default function CloudApp({
     setPhotos((previous) => (sameVault(session) ? result.photos : previous));
     setPending((previous) => (sameVault(session) ? result.pending : previous));
     setSkipped((previous) => (sameVault(session) ? result.skipped : previous));
+    setAnnotationPending(result.annotations);
     setLastSuccessfulSync((previous) =>
       sameVault(session) ? result.lastSuccessfulSync : previous,
     );
@@ -193,6 +209,8 @@ export default function CloudApp({
       }
       if (session && sameVault(session)) {
         const queue = await pendingImports();
+        const edits = await pendingAnnotations(session);
+        if (sameVault(session)) setAnnotationPending(edits);
         if (sameVault(session))
           setPending((previous) => (sameVault(session) ? queue : previous));
       }
@@ -255,7 +273,14 @@ export default function CloudApp({
           signal: controller.signal,
           stage: async (file) => {
             setStaging((value) => (sameVault(session) ? 1 : value));
-            await stageImport(file, undefined, controller.signal);
+            const source = localPhotosRef.current.find(photo => photo.file === file);
+            const existing = source?.digest ? photos.find(photo => photo.metadata.originalSha256 === localOriginalDigest(source)) : undefined;
+            const staged = existing ? undefined : await stageImport(file, undefined, controller.signal);
+            if (source && (staged || existing)) {
+              const photoId = existing?.manifest.photoId ?? staged!.photoId;
+              const originalSha256 = existing?.metadata.originalSha256 ?? staged!.sourceDigest;
+              await queueLocalAnnotations({ownerAccountId: session.accountId, photoId, originalSha256}, source, session);
+            }
             if (!sameVault(session)) throw new Error("VAULT_LOCKED");
             localSynced.current.set(file, session.accountId);
             await clearSkipped(session, file);
@@ -313,11 +338,49 @@ export default function CloudApp({
   const localCount = allLocalFiles.filter(
     (file) => localSynced.current.get(file) !== account,
   ).length;
-  const shown = (received ?? photos).filter((p) =>
-    (p.metadata.filename + " " + p.metadata.sourceDate)
-      .toLowerCase()
-      .includes(query.toLowerCase()),
-  );
+  const searchable = received ?? photos;
+  const index = useMemo(() => new PhotoSearchIndex(cloudSearchRecords(searchable)), [searchable]);
+  const searchResult = useMemo(() => index.search(query, {scope: "account:" + account, committedMeaning}), [index, query, account, committedMeaning]);
+  const shown = normalizeSearch(query) ? searchResult.photoIds.flatMap(id => {const photo = searchable.find(photo => photo.manifest.photoId === id); return photo ? [photo] : [];}) : searchable;
+  const editLabels = async (photo: Photo, labels: string[]) => {
+    const session = requireVault();
+    try {
+      await queueAnnotations({ownerAccountId: photo.manifest.ownerAccountId, photoId: photo.manifest.photoId, originalSha256: photo.metadata.originalSha256}, {labels}, session);
+      if (!sameVault(session)) return;
+      const cached = await cachedCatalog();
+      if (!sameVault(session)) return;
+      setPhotos(cached);
+      setAnnotationPending(await pendingAnnotations(session));
+    } catch (error) {if (sameVault(session)) {setStatus(readableSyncError(error)); setNeedsAttention(true);}}
+  };
+  useEffect(() => {
+    if (!account || publicDemo) return;
+    const session = requireVault();
+    let alive = true;
+    void (async () => {
+      let changed = false;
+      for (const photo of photos) {
+        const local = localPhotos.find(source => localOriginalDigest(source) === photo.metadata.originalSha256);
+        if (!local) continue;
+        changed = await queueLocalAnnotations({ownerAccountId: session.accountId, photoId: photo.manifest.photoId, originalSha256: photo.metadata.originalSha256}, local, session, false) || changed;
+      }
+      if (!alive || !sameVault(session) || !changed) return;
+      const cached = await cachedCatalog();
+      if (!alive || !sameVault(session)) return;
+      const edits = await pendingAnnotations(session);
+      if (!alive || !sameVault(session)) return;
+      setPhotos(cached);
+      setAnnotationPending(edits);
+    })().catch(error => {if (alive && sameVault(session)) {setStatus(readableSyncError(error)); setNeedsAttention(true);}});
+    return () => {alive = false;};
+  }, [account, localPhotos, photos, publicDemo]);
+  useEffect(() => {
+    if (!account || !active || busy || paused || needsAttention || !annotationPending.some(edit => !edit.conflict)) return;
+    const timeout = setTimeout(() => {
+      if (navigator.onLine && !running.current && !pausedRef.current) void run(refresh);
+    }, 1000);
+    return () => clearTimeout(timeout);
+  }, [account, active, busy, paused, needsAttention, annotationPending]);
   const chosen = photos.filter((p) => selected.has(p.manifest.photoId));
   return (
     <>
@@ -363,6 +426,7 @@ export default function CloudApp({
             {authStep === "welcome" && (
               <>
                 <button
+                  className="primary-action"
                   disabled={busy}
                   onClick={() =>
                     run(async () => {
@@ -517,6 +581,7 @@ export default function CloudApp({
                 Sync selected photos · {localCount}
               </button>
             )}
+            {annotationPending.some(edit => edit.conflict) && !received && <button className="sync-local-button" onClick={() => setMenu(true)}>Review photo edits</button>}
             {received && (
               <div className="received-bar">
                 <span>Received · explicit save required</span>
@@ -528,6 +593,11 @@ export default function CloudApp({
                 >
                   My library
                 </button>
+              </div>
+            )}
+            {normalizeSearch(query) && searchResult.meanings.length > 0 && (
+              <div className="cloud-search-meanings local-labels glass">
+                {searchResult.meanings.map(meaning => <button key={meaning.id} aria-pressed={meaning.id === searchResult.meaning?.id} onClick={() => setCommittedMeaning(meaning.id)}>{meaning.term} · {meaning.photoIds.length}</button>)}
               </div>
             )}
             {shown.length ? (
@@ -563,7 +633,7 @@ export default function CloudApp({
                 aria-label="Search photos"
                 placeholder="Search"
                 value={query}
-                onChange={(e) => setQuery(e.target.value)}
+                onChange={(e) => {setQuery(e.target.value); setCommittedMeaning(undefined);}}
               />
               {query && (
                 <button onClick={() => setQuery("")} aria-label="Clear search">
@@ -638,7 +708,7 @@ export default function CloudApp({
             </button>
             <h2>Sync photos</h2>
             <p className="hint">
-              Original quality · smaller JPEG previews are only for browsing.
+              Originals, labels and photo text are encrypted. Keep this browser open while syncing.
             </p>
             <p role="status">
               {paused
@@ -649,7 +719,11 @@ export default function CloudApp({
                     ? "Preparing one photo…"
                     : busy
                       ? "Checking photos…"
-                      : summary.label}
+                      : annotationPending.some(edit => edit.conflict)
+                        ? "Review label or text changes"
+                        : annotationPending.length
+                          ? `${annotationPending.length} photo edits pending`
+                          : summary.label}
             </p>
             <p className="hint">
               Browser uploads: {summary.synced} synced · {summary.pending}{" "}
@@ -761,6 +835,16 @@ export default function CloudApp({
                 Approve device challenge
               </button>
             </details>
+            {annotationPending.length > 0 && <details open={annotationPending.some(edit => edit.conflict)}>
+              <summary>Labels and photo text · {annotationPending.length} pending</summary>
+              {annotationPending.map(edit => <div key={edit.photoId}>
+                <p>{photos.find(photo => photo.manifest.photoId === edit.photoId)?.metadata.filename ?? "Photo"} · {edit.conflict ? "Changed on another device" : "Waiting to sync"}</p>
+                {edit.conflict && <>
+                  <p className="hint">Your pending edits are kept here. Choose which changes to keep.</p>
+                  <div className="actions"><button disabled={busy} onClick={() => run(async () => {await resolveAnnotationConflict(edit.photoId, "local"); await refresh();})}>Use my edits</button><button disabled={busy} onClick={() => run(async () => {await resolveAnnotationConflict(edit.photoId, "remote"); await refresh();})}>Keep synced edits</button></div>
+                </>}
+              </div>)}
+            </details>}
             <details open={summary.pending > 0 || summary.failed > 0}>
               <summary>Photo status</summary>
               <p className="hint">
@@ -840,6 +924,7 @@ export default function CloudApp({
           photos={shown}
           initial={viewer}
           onSaved={() => run(refresh)}
+          onLabels={!received && !publicDemo ? (photo, labels) => {void editLabels(photo, labels);} : undefined}
           onClose={() => {
             const id = viewer;
             setViewer(null);

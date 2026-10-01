@@ -6,6 +6,7 @@ import * as catalog from "./catalog";
 import * as devices from "./devices";
 import * as grants from "./grants";
 import { savePhoto } from "./saves";
+import * as annotations from "./annotations";
 const app = new Hono<{ Bindings: Env; Variables: { actor: Actor } }>();
 app.onError((error, c) => {
   const e =
@@ -29,6 +30,15 @@ app.onError((error, c) => {
     e.status as any,
   );
 });
+app.get("/.well-known/apple-app-site-association", (c) => {
+  const apps = [...new Set((c.env.APPLE_APP_IDS ?? "").split(",").map(value => value.trim()))];
+  if (!apps.length || apps.some(value => !/^[A-Z0-9]{10}\.[A-Za-z0-9][A-Za-z0-9.-]*$/.test(value))) {
+    c.header("Cache-Control", "no-store");
+    return c.json({error: "ASSOCIATION_NOT_CONFIGURED"}, 503);
+  }
+  c.header("Cache-Control", "public, max-age=3600");
+  return c.json({webcredentials: {apps}});
+});
 app.use("/v1/*", async (c, next) => {
   if (c.req.header("x-fotoro-fixture-account")) fail("UNAUTHENTICATED", 401);
   const o = c.req.header("origin");
@@ -43,7 +53,8 @@ app.use("/v1/*", async (c, next) => {
     c.header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
     return c.body(null, 204);
   }
-  if (!c.req.path.startsWith("/v1/auth/")) {
+  const backgroundUpload = c.req.method === "PUT" && /^\/v1\/background\/uploads\/[^/]+\/staging$/.test(c.req.path);
+  if (!c.req.path.startsWith("/v1/auth/") && !backgroundUpload) {
     if (c.req.method !== "GET") auth.origin(c.env, c.req.raw);
     c.set("actor", await auth.actorFor(c.env, c.req.raw));
   }
@@ -131,6 +142,11 @@ app.put("/v1/uploads/:id/staging", async (c) =>
     ),
   ),
 );
+app.put("/v1/background/uploads/:id/staging", async (c) => {
+  c.header("Cache-Control", "no-store");
+  c.header("Referrer-Policy", "no-referrer");
+  return c.json(await storage.putBackgroundStaging(c.env, c.req.param("id"), c.req.query("cap") || "", c.req.raw));
+});
 app.post("/v1/uploads/:id/commit", async (c) =>
   c.json(await storage.commitUpload(c.env, c.get("actor"), c.req.param("id"))),
 );
@@ -140,6 +156,14 @@ app.get("/v1/objects/:id", (c) =>
 app.post("/v1/photos", async (c) =>
   c.json(await catalog.addPhoto(c.env, c.get("actor"), await c.req.json())),
 );
+app.get("/v1/photos/:id/annotations", async (c) => {
+  c.header("Cache-Control", "no-store");
+  return c.json(await annotations.getAnnotations(c.env, c.get("actor"), c.req.param("id")));
+});
+app.put("/v1/photos/:id/annotations", async (c) => {
+  c.header("Cache-Control", "no-store");
+  return c.json(await annotations.putAnnotations(c.env, c.get("actor"), c.req.param("id"), await annotations.readAnnotationRequest(c.req.raw)));
+});
 app.get("/v1/changes", async (c) =>
   c.json(
     await catalog.changes(

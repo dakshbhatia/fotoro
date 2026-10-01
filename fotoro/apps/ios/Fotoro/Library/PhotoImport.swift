@@ -161,14 +161,24 @@ actor PhotoImport {
       )
     }
   }
+  func sourceDigest(_ id: String) async throws -> String {
+    try await read(SelectedResource(id: id, origin: .photos, resourceIdentifier: id, fileURL: nil)).0.digest
+  }
   func stageBackup(
     _ source: BackupSource, accountId: String, bundle: AccountBundle, capturedAt: Date? = nil
   ) async throws -> LocalPhoto {
     if let existing = try store.backupPhoto(source.photoId) { return existing }
+    func checkRevision() throws {
+      guard let expected = source.sourceRevision else { return }
+      guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [source.id], options: nil).firstObject,
+        RecentPhoto.sourceRevision(asset) == expected else { throw FotoroError("Photo changed during sync. Try again.") }
+    }
+    try checkRevision()
     try Task.checkCancellation()
     let selection = SelectedResource(
       id: source.id, origin: .photos, resourceIdentifier: source.id, fileURL: nil)
     let (bytes, filename, _) = try await read(selection)
+    try checkRevision()
     try Task.checkCancellation()
     if let reused = try store.ownedOriginal(digest: bytes.digest, accountId: accountId) {
       var checkpoint = source

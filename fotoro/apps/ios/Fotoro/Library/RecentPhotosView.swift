@@ -145,6 +145,7 @@ struct RecentPhotosView: View {
   @State private var showShare = false
   @State private var settings = false
   @State private var services: AppServices?
+  @State private var showingAccount = false
   @State private var preparingShare = false
   var visible: [RecentPhoto] {
     query.isEmpty ? store.photos : search.matchingPhotos
@@ -233,6 +234,15 @@ struct RecentPhotosView: View {
               }.disabled(preparingShare)
             }
           }
+          ToolbarItem(placement: .topBarLeading) {
+            Button("Sync", systemImage: "icloud") {
+              do {
+                if services == nil { services = try AppServices() }
+                services?.bindLocalSearch(search)
+                showingAccount = true
+              } catch { store.error = error.localizedDescription }
+            }
+          }
           ToolbarItem(placement: .topBarTrailing) {
             Button("Settings", systemImage: "gearshape") { settings = true }
           }
@@ -292,7 +302,9 @@ struct RecentPhotosView: View {
             if pendingBackup {
               pendingBackup = false
               do {
-                services = try AppServices()
+                if services == nil { services = try AppServices() }
+                services?.bindLocalSearch(search)
+                showingAccount = true
               } catch { store.error = error.localizedDescription }
             }
           }
@@ -322,13 +334,23 @@ struct RecentPhotosView: View {
           if scenePhase == .active {
             store.refresh()
             search.auditAuthorization()
+            if let services { Task { await services.resumeSavedAccount() } }
           } else {
             services?.backup.pause()
             search.pause()
           }
         }
-        .task { search.auditAuthorization() }
-        .sheet(item: $services) { service in LibraryView(services: service) }
+        .task {
+          search.auditAuthorization()
+          do {
+            if services == nil { services = try AppServices() }
+            services?.bindLocalSearch(search)
+            await services?.resumeSavedAccount(initialRestoration: true)
+          } catch { store.error = error.localizedDescription }
+        }
+        .sheet(isPresented: $showingAccount) {
+          if let services { LibraryView(services: services) }
+        }
         .alert(
           "Fotoro",
           isPresented: Binding(get: { store.error != nil }, set: { if !$0 { store.error = nil } })

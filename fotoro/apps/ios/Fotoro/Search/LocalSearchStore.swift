@@ -13,6 +13,8 @@ import UIKit
   private(set) var acceptedMeaningID: String?
   private(set) var displayedID: String?
   var error: String?
+  @ObservationIgnored var onRecordChanged: ((SearchRecord, Bool) throws -> Void)?
+  @ObservationIgnored var onSnapshotReady: (() throws -> Void)?
   @ObservationIgnored private var index: SearchIndex?
   @ObservationIgnored private var opened = false
   @ObservationIgnored private var ready = false
@@ -121,6 +123,7 @@ import UIKit
         }
         localIndex = try await Task.detached { try SearchIndex(root: root) }.value
         guard token == work.generation, !Task.isCancelled else { return }
+        try localIndex.clearSyncedAnnotations()
         index = localIndex
         try localIndex.setWorkGeneration(token)
       }
@@ -137,6 +140,7 @@ import UIKit
         let root = self.root
         localIndex = try await Task.detached { try SearchIndex(root: root) }.value
         guard token == work.generation, !Task.isCancelled else { return }
+        try localIndex.clearSyncedAnnotations()
         index = localIndex
         try localIndex.setWorkGeneration(token)
       }
@@ -150,6 +154,7 @@ import UIKit
       }.value
       guard applied, token == work.generation, !Task.isCancelled else { return }
       completePermittedSnapshotRefresh(photos: scanned.photos)
+      try onSnapshotReady?()
       let pending = try await Task.detached { try localIndex.pendingRecords() }.value
       for record in pending {
         try Task.checkCancellation()
@@ -183,6 +188,9 @@ import UIKit
             generation: token)
         }.value
         guard token == work.generation, !Task.isCancelled else { break }
+        if let current = try localIndex.record(record.id), current.revision == record.revision {
+          try onRecordChanged?(current, false)
+        }
         updateQuery(query)
       }
     } catch is CancellationError {} catch {
@@ -214,8 +222,7 @@ import UIKit
       let photo = RecentPhoto(asset: asset)
       photos.append(photo)
       var r = SearchRecord(id: asset.localIdentifier)
-      r.revision =
-        "\(asset.modificationDate?.timeIntervalSince1970 ?? 0)|\(asset.pixelWidth)x\(asset.pixelHeight)"
+      r.revision = RecentPhoto.sourceRevision(asset)
       r.capturedAt = asset.creationDate
       r.favorite = asset.isFavorite
       r.burstID = asset.burstIdentifier
@@ -242,7 +249,7 @@ import UIKit
     options.isNetworkAccessAllowed = false
     options.deliveryMode = .highQualityFormat
     options.resizeMode = .exact
-    options.version = .current
+    options.version = .original
     return await withCheckedContinuation { continuation in
       imageRequest = images.requestImage(
         for: asset, targetSize: CGSize(width: 1600, height: 1600), contentMode: .aspectFit,
@@ -358,8 +365,22 @@ import UIKit
       updateQuery(query)
     } catch { self.error = error.localizedDescription }
   }
+  func clearSyncedAnnotations() {
+    do { try index?.clearSyncedAnnotations(); updateQuery(query) }
+    catch { self.error = error.localizedDescription }
+  }
+  func record(_ photoID: String) throws -> SearchRecord? { try index?.record(photoID) }
+  func applyAnnotations(_ value: PhotoAnnotationsV1, source: BackupSource, accountId: String) throws {
+    guard ready, let revision = source.sourceRevision,
+      try index?.applyAnnotations(value, photoID: source.id, revision: revision, accountId: accountId) == true else { return }
+    updateQuery(query)
+  }
   func labels(_ photoID: String) -> [String] { (try? index?.record(photoID)?.labels) ?? [] }
   @discardableResult func setLabels(_ labels: [String], photoID: String) -> Bool {
+    guard labels.count <= 64, labels.allSatisfy({ !$0.isEmpty && $0.unicodeScalars.count <= 120 }) else {
+      error = "Use up to 64 labels, each with up to 120 characters."
+      return false
+    }
     guard canEditLabels(photoID), let index else {
       error = "The local index is preparing this photo."
       return false
@@ -369,6 +390,7 @@ import UIKit
         error = "The photo is no longer permitted."
         return false
       }
+      if let record = try index.record(photoID) { try onRecordChanged?(record, true) }
       updateQuery(query)
       return true
     } catch {

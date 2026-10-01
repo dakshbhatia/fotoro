@@ -21,6 +21,10 @@ struct RecentPhotoFacts {
 struct RecentPhoto: Identifiable {
   let asset: PHAsset
   var id: String { asset.localIdentifier }
+  var sourceRevision: String { Self.sourceRevision(asset) }
+  static func sourceRevision(_ asset: PHAsset) -> String {
+    "\(asset.modificationDate?.timeIntervalSince1970 ?? 0)|\(asset.pixelWidth)x\(asset.pixelHeight)"
+  }
   var capturedAt: Date? { asset.creationDate }
   var isFavorite: Bool { asset.isFavorite }
   var isScreenshot: Bool { asset.mediaSubtypes.contains(.photoScreenshot) }

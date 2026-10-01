@@ -2,6 +2,16 @@ import Foundation
 
 enum SearchRelation: String, Codable, Sendable { case label, text, metadata }
 enum SearchOCRStatus: String, Codable, Sendable { case pending, complete, failed, unavailable }
+struct LocalSearchFields: Codable, Sendable {
+  var labels: [String]
+  var captions: [String]
+  var keywords: [String]
+  var facts: [String]
+  var favorite: Bool
+  var ocrText: String
+  var ocrConfidence: Double
+  var ocrStatus: SearchOCRStatus
+}
 struct SearchRecord: Codable, Sendable {
   var version = 1
   var id: String
@@ -22,6 +32,8 @@ struct SearchRecord: Codable, Sendable {
   var previewAvailable = false
   var originalAvailable = true
   var burstID: String?
+  var syncedAccountId: String?
+  var beforeSync: LocalSearchFields?
 }
 struct SearchScope: Equatable, Sendable {
   var source = "photos"

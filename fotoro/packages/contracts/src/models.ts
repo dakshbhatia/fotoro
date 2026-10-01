@@ -29,6 +29,28 @@ export interface PhotoMetadataV1 {
   originalSha256: Base64Url;
   representationKeys: Record<UUID, Base64Url>;
 }
+/** Account-private search data. Encrypted separately from shared photo metadata. */
+export interface PhotoAnnotationsV1 {
+  version: 1;
+  photoId: UUID;
+  originalSha256: Base64Url;
+  labels?: string[];
+  caption?: string;
+  keywords?: string[];
+  facts?: string[];
+  favorite?: boolean;
+  ocr?: { text: string; confidence: number; processor: string };
+}
+export interface PhotoAnnotationsUpdateV1 {
+  version: 1;
+  photoId: UUID;
+  revision: number;
+  encrypted: WrappedKeyV1;
+}
+export interface PhotoAnnotationsReplyV1 {
+  version: 1;
+  annotations: SignedPayloadV1 | null;
+}
 export interface WrappedKeyV1 {
   version: 1;
   nonce: Base64Url;
@@ -96,7 +118,7 @@ export interface SavedPhotoV1 {
 }
 export interface ChangeV1 {
   cursor: string;
-  entity: "photo" | "grant";
+  entity: "photo" | "grant" | "annotation";
   entityId: UUID;
   deleted: boolean;
   payload: SignedPayloadV1 | null;

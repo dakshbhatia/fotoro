@@ -7,14 +7,14 @@ include permanent regressions and were re-reviewed.
 
 | Check | Evidence |
 | --- | --- |
-| Contracts, crypto and loopback fixtures | 10 tests pass: schema boundaries, signatures, media binding and preservation |
-| Worker/D1/R2 API | 20 tests pass: real cryptographic WebAuthn ceremonies, recovery, uploads, renewal, grants and saves |
-| Web | 97 tests pass: retrieval/evidence, scoped feedback, encrypted retention, cross-instance clear, lazy previews, OCR worker lifecycle, original gating and sync |
-| Web production build | TypeScript/Vite pass; local entry 296.38 kB (93.02 kB gzip). Account/crypto loads after Sync photos; its large chunk warning remains |
-| Native | 57 tests pass; Debug tests and Release build pass with Xcode 27. Metadata available only in the iOS 27 SDK is compiler guarded; older SDK CI verification is separate |
+| Contracts, crypto and loopback fixtures | 11 tests pass: schema boundaries, bounded annotations, signatures, media binding and preservation |
+| Worker/D1/R2 API | 27 tests pass: real cryptographic WebAuthn ceremonies, recovery, uploads, renewal, grants, encrypted annotation revisions, capability-bound ciphertext PUTs and Apple association metadata |
+| Web | 115 tests pass: retrieval/evidence, scoped feedback, encrypted retention, cross-instance clear, lazy previews, OCR worker lifecycle, original gating, annotation sync, conflict resolution and stale-page rejection |
+| Web production build | TypeScript/Vite pass; local entry 296.39 kB (93.02 kB gzip). Account/crypto loads after Sync photos; its large chunk warning remains |
+| Native | 85 tests pass; Debug Simulator tests and unsigned generic-device Release build pass with Xcode 27. Includes encrypted annotation exchange, persistent explicit lock, older catalog results, cancellation, local-label preservation, conflict merging and background ciphertext policies. Metadata available only in the iOS 27 SDK is compiler guarded; older SDK CI verification is separate |
 | Shared retrieval fixtures | Both platforms find all 20 predeclared supported tasks; five unsupported visual tasks and five absent terms remain empty. These are development fixtures, not held-out user accuracy |
 | Cross-language media | Swift decrypts frozen TypeScript vectors; TypeScript decrypts checked-in Swift ciphertext and rejects altered binding |
-| Real local HTTP exchange | Two isolated tests cover fresh migrations, recovery sessions, bidirectional contribution/save, revocation, restore and byte-preserved HEIC |
+| Real local HTTP exchange | Three isolated tests cover fresh migrations, recovery sessions, bidirectional contribution/save, revocation, restore, byte-preserved HEIC, background ciphertext staging, encrypted labels/OCR in a fresh account session, cross-account denial and idempotent revision conflicts |
 | Native local lifecycle | All-age permitted enumeration, limited/denied startup, permission purge, 30-day browse, changed revisions, cancellation rollback and refresh stability are exercised |
 | Browser local lifecycle | Session-only default; retained labels/text/previews; lazy preview hydration; unavailable preview preservation; digest reselection; pending/cross-instance clear fences |
 
@@ -54,6 +54,27 @@ browser import, native durable journals, restored media after sandbox relocation
 public-account upload guards, and explicit account setup preserving selected files.
 The HTTP and Simulator checks do not establish a physical iPhone-to-Safari run.
 
+Consumer sync now carries owner-only encrypted labels, supported OCR text and
+other annotations separately from immutable originals. Independent review found
+and re-reviewed fixes for explicit lock persistence, stale catalog pages, older
+search-result edits, cancellation and same-field conflicts. Resolving a label
+conflict preserves unrelated remote OCR. Personal search history and pinned
+choices stay local; shared recipients do not receive these private annotations.
+
+The browser's simple Sync photos entry preserves the selected local collection.
+Create account, Sign in and Use a recovery code are the three initial choices.
+Rendered public-sample checks confirmed Settings, that entry, return to local
+photos and an `invoice` search finding the neutral receipt through recognized
+text. Evidence: [sync onboarding](../apps/web/Evidence/consumer-sync-onboarding.png),
+[receipt search](../apps/web/Evidence/consumer-receipt-search.png),
+[native local gallery](../apps/ios/Evidence/consumer-photos.jpg),
+[native receipt search](../apps/ios/Evidence/consumer-search.jpg),
+[native sync status](../apps/ios/Evidence/consumer-sync-status.jpg).
+Public seeded accounts deliberately disable private uploads; their status screen
+is not evidence of personal account sync. The native integration test separately
+used a synthetic real local account and restored encrypted annotations in a fresh
+AppServices instance.
+
 ## Measurements and limits
 
 The frozen fixture SHA-256 is
@@ -85,9 +106,11 @@ Safari performance and a larger OCR quality corpus remain unverified.
 
 Native search includes all permitted non-hidden still photos, while browsing stays
 at 30 days. Native OCR uses network-disabled local previews, so iCloud-only assets
-can have incomplete text coverage. Labels/history are device-local and excluded
-from backup. Browser search covers explicitly selected or retained records only.
-Neither local index currently syncs through the encrypted account catalog.
+can have incomplete text coverage. Local labels/history are excluded from device
+backup. Labels and supported OCR for photos explicitly synced to an account now
+travel as encrypted annotations. History and pinned choices stay device-local.
+Browser search covers explicitly selected/retained records and verified account
+records; it cannot enumerate an iPhone photo library automatically.
 
 ## Remaining release gates
 
@@ -95,11 +118,18 @@ Neither local index currently syncs through the encrypted account catalog.
 - A valid Apple development certificate exists, but the current wildcard profile
   lacks Associated Domains. An app-specific profile and HTTPS association file
   listing the signed app under `webcredentials.apps` are needed. No physical phone
-  is connected. Universal-link handling is not implemented.
+  is connected, and Xcode has no signed-in account for provisioning. Unsigned
+  Release is not installable on a physical iPhone. Universal-link handling is not
+  implemented. The read-only `check:service https://fotoro.cloud` currently fails:
+  vault and association endpoints both return 404.
 - Physical passkey/PRF and non-PRF flows, original PhotoKit/iCloud resources and a
   complete iPhone-to-Safari restore. See [release setup](deployment.md).
-- Closed-app background scheduling. Transfer journals are durable, but native
-  backup currently requires the app to stay active and unlocked.
+- Physical background continuation, file protection, daemon reconnection and
+  termination/relaunch checks. Background URLSession can continue an already
+  scheduled encrypted file; reservation, additional PhotoKit preparation, signing
+  and final commit wait for the foreground unlocked app. The durable journal
+  currently schedules representations serially. Pause/logout cancel transfers;
+  explicit lock lets the scheduled ciphertext finish while clearing plaintext.
 - Older supported iPhone and Safari measurements using 10,000 items and 1,000
   distinct thumbnails: frame pacing, query-to-visible preview, memory and battery.
 - Final-object garbage collection and deletion/retention races. Final ciphertext
