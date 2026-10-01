@@ -1,8 +1,10 @@
 **Fotoro — iPhone, cross-device sync, Safari, and trusted sharing**
 
 Updated September 30, 2026. The fork is published on `dakshbhatia/fotoro`, branch
-`codex/ai-photos`. A local web preview and Museum/Postgres/object-storage stack
-run; unsigned iOS builds and Simulator startup have been verified. Public app
+`codex/ai-photos`. The account-connected Fotoro web canvas, separate intelligence
+preview and Museum/Postgres/object-storage stack run. Local upload, browser
+catalog restoration and one original digest round trip pass; unsigned iOS builds
+and Simulator startup have been verified. Public app
 deployment, physical-device benchmarks, and cross-device interoperability remain
 unfinished. The architecture below includes planned work; see `README.md` and
 `verification.md` for implemented behavior, and `deployment.md` for hosting.

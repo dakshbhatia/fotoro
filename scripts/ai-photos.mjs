@@ -32,7 +32,8 @@ const env = {
       }
     : {}),
   FLUTTER_SUPPRESS_ANALYTICS: "true",
-  NEXT_PUBLIC_ENTE_ENDPOINT: "http://localhost:4800",
+  NEXT_PUBLIC_ENTE_ENDPOINT:
+    process.env.NEXT_PUBLIC_ENTE_ENDPOINT || "http://localhost:4800",
 };
 const run = (cmd, args, cwd = root, extra = {}) => {
   const result = spawnSync(cmd, args, { cwd, env, stdio: "inherit", ...extra });
@@ -146,6 +147,16 @@ try {
     case "test":
       run("npm", ["run", "test", "--workspace", "photos"], web);
       break;
+    case "build-web":
+      run(
+        "npm",
+        ["exec", "--workspace", "photos", "--", "next", "build", "--webpack"],
+        web,
+        {
+          env: { ...env, FOTORO_BUILD_DIR: ".next-fotoro-build" },
+        },
+      );
+      break;
     case "typecheck":
       run(
         "npm",
@@ -204,7 +215,7 @@ try {
       break;
     default:
       console.log(
-        "Usage: node scripts/ai-photos.mjs doctor|setup-web|services|stop|web|test|typecheck|setup-mobile|setup-ios|ios|ios-sim",
+        "Usage: node scripts/ai-photos.mjs doctor|setup-web|services|stop|web|build-web|test|typecheck|setup-mobile|setup-ios|ios|ios-sim",
       );
   }
 } catch (error) {

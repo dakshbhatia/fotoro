@@ -12,8 +12,10 @@ for the hosting decision, launch sequence, and next ten product improvements.
 
 This fork retains Ente's Flutter iOS app, React web app, Go Museum server,
 encrypted storage and sync, album sharing, cleanup, and video playback.
-The first new feature is a selected-photo intelligence preview in the web app.
-It is a development slice; its index has not yet been connected to account sync.
+Fotoro's `/library` presents the real encrypted account catalog and uploader with
+a virtualized photo grid, metadata search and separate catalog/upload status.
+The selected-photo intelligence preview remains separate; its AI index has not
+yet been connected to account sync.
 
 ## Run and iterate
 
@@ -25,17 +27,26 @@ node scripts/ai-photos.mjs services
 node scripts/ai-photos.mjs web
 ```
 
-Open http://localhost:4300/intelligence for the new flow, or
-http://localhost:4300 for the original Ente app. The source web server reloads
+Open http://localhost:4300/library for the account library (sign-in required),
+http://localhost:4300/intelligence for the session-only intelligence preview,
+or http://localhost:4300/gallery for the upstream gallery presentation.
+The source web server reloads
 when edited; Rust WASM only needs rebuilding when its source changes.
 
 ```sh
 node scripts/ai-photos.mjs test
 node scripts/ai-photos.mjs typecheck
+node scripts/ai-photos.mjs build-web
 node scripts/ai-photos.mjs stop
 ```
 
 `stop` stops containers without removing local databases or photos.
+`build-web` exports the Photos app to `web/apps/photos/.next-fotoro-build`;
+Next's static export uses this configured output directory. It does not
+overwrite the live dev server's `.next` directory.
+The wrapper defaults to the local Museum endpoint; set `NEXT_PUBLIC_ENTE_ENDPOINT`
+to the intended API URL **before building** a deployment export. The endpoint is
+baked into browser assets. An export built against localhost is for local QA.
 The development services bind to loopback: Museum 4800, MinIO 4320,
 prebuilt photos 4390, accounts 4391, public albums 4392.
 The service command reuses `server/quickstart.sh` from this checkout to generate

@@ -9,7 +9,7 @@ export const appHomeRoute: string = {
     cast: "/",
     embed: "/",
     share: "/",
-    photos: "/gallery",
+    photos: "/library",
     ensu: "/",
     locker: "/locker",
     legacy: "/",

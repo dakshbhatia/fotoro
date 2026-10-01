@@ -49,6 +49,7 @@ export type FileListWithViewerProps = {
     onVisibleDateChange?: (date: string | undefined) => void;
 } & Pick<
     FileListProps,
+    | "appearance"
     | "mode"
     | "modePlus"
     | "header"
@@ -90,6 +91,7 @@ export type FileListWithViewerProps = {
     >;
 
 export const FileListWithViewer: React.FC<FileListWithViewerProps> = ({
+    appearance,
     mode,
     modePlus,
     header,
@@ -286,6 +288,7 @@ export const FileListWithViewer: React.FC<FileListWithViewerProps> = ({
             <AutoSizer>
                 {({ height, width }) => (
                     <FileList
+                        appearance={appearance}
                         {...{ width, height, annotatedFiles }}
                         {...{
                             mode,

@@ -11,6 +11,7 @@
     font-synthesis: none;
 }
 .app button,
+.accountLibrary button,
 .sheet button,
 .viewer button {
     font: inherit;
@@ -25,6 +26,8 @@
 }
 .app button:focus-visible,
 .app input:focus-visible,
+.accountLibrary button:focus-visible,
+.accountLibrary input:focus-visible,
 .sheet button:focus-visible,
 .sheet input:focus-visible,
 .viewer button:focus-visible {
@@ -39,6 +42,80 @@
     max-width: 1600px;
     margin: 0 auto;
     padding: 44px 24px 16px;
+}
+.accountLibrary {
+    --ink: #161616;
+    --secondary: #6f7279;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    height: 100dvh;
+    color: #161616;
+    background: #fff;
+    font-family:
+        -apple-system, BlinkMacSystemFont, "Inter Variable", sans-serif;
+    --mui-palette-background-default: #fff;
+    --mui-palette-background-paper: #fff;
+    --mui-palette-background-paper2: #fff;
+    --mui-palette-text-base: #161616;
+    --mui-palette-text-muted: #6f7279;
+    --mui-palette-text-faint: #6f7279;
+}
+.accountLibrary > .header {
+    width: 100%;
+    box-sizing: border-box;
+}
+.accountLibrary .toolbar {
+    color: #161616;
+}
+.accountLibrary .empty {
+    flex: 1;
+    min-height: 0;
+    padding: 24px 16px 112px;
+    text-align: center;
+    gap: 8px;
+}
+.accountLibrary .empty h2 {
+    margin: 0;
+    font-size: 24px;
+    letter-spacing: -0.03em;
+}
+.accountLibrary .empty p {
+    margin: 0;
+    color: var(--secondary);
+    font-size: 14px;
+}
+.accountControls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.accountControls button {
+    min-height: 44px;
+    padding: 10px;
+    color: #161616;
+    background: transparent;
+}
+.accountButton {
+    width: 44px;
+    height: 44px;
+}
+.syncStatus {
+    font-size: 12px;
+    color: #6f7279;
+}
+.clearSearch {
+    width: 44px;
+    height: 44px;
+    padding: 10px;
+    background: transparent;
+    color: #6f7279;
+}
+.emptyNotice a,
+.localNotice a {
+    color: #2471e8;
+    text-decoration: none;
 }
 .header h1 {
     margin: 0;

@@ -98,6 +98,7 @@ export interface FileListAnnotatedFile {
 type EnteTrashFile = EnteFile & { deleteBy?: number };
 
 export interface FileListProps {
+    appearance?: "fotoro";
     height: number;
     width: number;
     listBorderRadius?: string;
@@ -133,6 +134,7 @@ export interface FileListProps {
 }
 
 export const FileList: React.FC<FileListProps> = ({
+    appearance,
     height,
     width,
     listBorderRadius,
@@ -186,8 +188,8 @@ export const FileList: React.FC<FileListProps> = ({
     const outerRef = useRef<HTMLDivElement | null>(null);
 
     const layoutParams = useMemo(
-        () => computeThumbnailGridLayoutParams(width),
-        [width],
+        () => computeThumbnailGridLayoutParams(width, appearance),
+        [width, appearance],
     );
 
     useEffect(() => {

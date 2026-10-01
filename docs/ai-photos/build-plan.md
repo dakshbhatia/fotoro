@@ -2,6 +2,8 @@
 
 This records the completed initial development slice. For the proposed next
 product work, see [product.md](product.md); for hosting, see [deployment.md](deployment.md).
+The subsequent account-library slice is recorded in
+[durable-library-plan.md](durable-library-plan.md) and [verification.md](verification.md).
 
 Spec: the user's AI Photos requirements in this task; see `architecture.md`
 in this directory for the architecture and full product roadmap.

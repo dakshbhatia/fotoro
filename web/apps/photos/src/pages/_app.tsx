@@ -162,7 +162,12 @@ const App: React.FC<PhotosAppProps> = ({ Component, pageProps }) => {
         ],
     );
 
-    const title = isI18nReady ? t("title_photos") : staticAppTitle;
+    const title =
+        router.pathname === "/library" || router.pathname === "/intelligence"
+            ? "Fotoro"
+            : isI18nReady
+              ? t("title_photos")
+              : staticAppTitle;
 
     return (
         <ThemeProvider theme={photosTheme}>

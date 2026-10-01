@@ -23,7 +23,7 @@ function PlanPage(): JSX.Element {
             if (!haveMasterKeyInSession() || !(await savedAuthToken())) {
                 await router.replace("/");
             } else if (!savedJustSignedUp()) {
-                await router.replace("/gallery");
+                await router.replace("/library");
             } else {
                 setIsReady(true);
             }
@@ -32,7 +32,7 @@ function PlanPage(): JSX.Element {
 
     function handleContinue() {
         getAndClearJustSignedUp();
-        void router.push("/gallery");
+        void router.push("/library");
     }
 
     function handleBeginCheckout() {

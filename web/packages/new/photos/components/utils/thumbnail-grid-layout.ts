@@ -15,7 +15,36 @@ export interface ThumbnailGridLayoutParams {
 
 export const computeThumbnailGridLayoutParams = (
     containerWidth: number,
+    appearance?: "fotoro",
 ): ThumbnailGridLayoutParams => {
+    if (appearance === "fotoro") {
+        const paddingInline = 6;
+        const gap = 3;
+        const columns =
+            containerWidth < 600
+                ? 3
+                : Math.max(
+                      4,
+                      Math.floor(
+                          (containerWidth - 2 * paddingInline + gap) /
+                              (200 + gap),
+                      ),
+                  );
+        const itemWidth = Math.max(
+            0,
+            (containerWidth - 2 * paddingInline - (columns - 1) * gap) /
+                columns,
+        );
+        return {
+            containerWidth,
+            isSmallerLayout: containerWidth < 720,
+            paddingInline,
+            gap,
+            columns,
+            itemWidth,
+            itemHeight: itemWidth,
+        };
+    }
     const isSmallerLayout = !(
         containerWidth >
         thumbnailLayoutMinColumns * thumbnailMaxWidth

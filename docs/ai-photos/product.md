@@ -2,7 +2,9 @@
 
 September 30, 2026. The user selected **Fotoro**, with **fotoro.cloud** as the
 intended domain, and emphasized sharing photos with family and friends. The
-scope and sequence below are proposed next work, not implemented capabilities.
+scope and sequence below define the beta target. The account-connected web
+canvas is implemented; the broader exchange and native acceptance flows remain
+next work. See [verification.md](verification.md) for specific evidence.
 
 ## Product goal
 
@@ -44,9 +46,9 @@ working preview or inherited Ente feature does not prove the whole beta.
 
 ## Deploy and iterate
 
-Code is on GitHub. The current custom experience is a local, session-only web
-preview; the native build uses upstream onboarding. The first deployable demo
-can be a clearly marked static preview. The beta needs Museum/Postgres, private
+Code is on GitHub. The custom account library and separate session-only
+intelligence preview run locally; the native build uses upstream onboarding.
+The static web export now builds. The public beta needs Museum/Postgres, private
 object storage, authenticated sharing, a tested database/configuration backup,
 and a successful clean restore.
 

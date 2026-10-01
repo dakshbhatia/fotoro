@@ -92,7 +92,7 @@ const Page: React.FC = () => {
 
             await updateSessionFromElectronSafeStorageIfNeeded();
             if (haveMasterKeyInSession() && (await savedAuthToken())) {
-                await router.push("/gallery");
+                await router.push("/library");
             } else if (savedPartialLocalUser()?.email) {
                 await router.push("/verify");
             }

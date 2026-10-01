@@ -12,6 +12,7 @@ import ContentCopyRounded from "@mui/icons-material/ContentCopyRounded";
 import { Dialog } from "@mui/material";
 import type { ParsedMetadata } from "ente-media/file-metadata";
 import Head from "next/head";
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 interface LocalPhoto {
@@ -432,7 +433,8 @@ export default function IntelligencePage() {
                         Add photos
                     </button>
                     <p className={styles.emptyNotice}>
-                        Local preview · not backed up
+                        Local preview · not backed up ·{" "}
+                        <Link href="/library">Connect backup</Link>
                     </p>
                 </section>
             ) : (
@@ -471,7 +473,8 @@ export default function IntelligencePage() {
                         <p className={styles.noResults}>No photos found.</p>
                     )}
                     <p className={styles.localNotice}>
-                        Local preview · not backed up
+                        Local preview · not backed up ·{" "}
+                        <Link href="/library">Connect backup</Link>
                     </p>
                 </>
             )}

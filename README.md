@@ -9,10 +9,11 @@ private photo library and sharing with family and friends. Intended domain:
 - [Deployment plan](docs/ai-photos/deployment.md)
 - [Verification and current limits](docs/ai-photos/verification.md)
 
-The new web preview supports selected-file import, EXIF search, exact-copy
-review, optional Gemini enrichment, and a glass photo carousel. Its library is
-session-only. Account-connected persistence and the new trusted-sharing flows
-are planned. Native startup works; the new UI is currently web-only.
+Fotoro's `/library` connects the photo canvas to Ente's encrypted account catalog
+and uploader, with metadata search and visible sync/upload states. The separate
+`/intelligence` preview supports EXIF search, exact-copy review and optional Gemini
+enrichment; that preview's index is session-only. New trusted-sharing flows are
+planned. Native startup works; the new UI is currently web-only.
 
 ## Upstream Ente documentation
 

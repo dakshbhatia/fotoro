@@ -1,5 +1,50 @@
 # Verification — September 30, 2026
 
+## Durable account library
+
+- `/library` reuses Ente's account catalog, encrypted uploader, thumbnail cache,
+  virtualized grid and original viewer. `/gallery` retains its upstream layout;
+  `/intelligence` remains a separate session-only preview.
+- Photos: 16 test files, 160 tests pass. The 12 new tests cover visible-view
+  metadata search, edited names, malformed dates, refresh failure/retry/offline,
+  rejected upload results and optional mobile/desktop grid geometry.
+- TypeScript, changed-file ESLint and production static export pass. `build-web`
+  exports all 23 pages using `.next-fotoro-build`, leaving dev output intact.
+- A throwaway **local** Museum account was seeded through normal email
+  verification and encrypted key attributes with the server's KDF requirements.
+  Browser sign-in used normal forms; no authentication or catalog was injected
+  into browser storage. No personal photos or paid AI calls were used.
+- Uploaded the repository's `singapore.jpg`, `man.jpeg` and `people.jpeg` through
+  the real uploader. All three return after refresh. Metadata search for `man`
+  displays the corresponding photo.
+- Signed in from `127.0.0.1:4300`, a fresh origin with separate browser storage
+  from `localhost:4300`. The same three photos restore from Museum and object
+  storage; this origin logs no browser errors or warnings. This is a browser
+  restore test on one computer, not a physical second-device test.
+- Downloaded `singapore.jpg` from the account viewer after refresh. The browser
+  saved it to Downloads even though the CUA download-event wait timed out.
+  Its fresh file timestamp, size (613,520 bytes) and SHA-256 match the source:
+  `cfc5b98ec69a65f04b0e4bb7c06009ad6d43362773a5b546c19a48e467a8bf95`.
+- Reimporting the same photo skips the duplicate. A zero-byte JPEG remains
+  `Upload needs attention` after catalog reconciliation and progress dismissal.
+  Review opens item details directly and identifies `Empty file`.
+- A malformed JPEG is preserved with Ente's static thumbnail fallback and is
+  correctly unavailable for preview; it was moved to recoverable trash after QA.
+  Trash was not emptied.
+- Mobile 390×844: three columns, readable controls, glass dock and no horizontal
+  overflow. Desktop 1280×720: six-column geometry with three fixture photos.
+  Proof: parent-workspace `outputs/fotoro-account-library-mobile.jpg`.
+- Browser QA caught and fixed two integration bugs: account search started
+  before authentication, and the gallery's collection URL effect forced the
+  Fotoro route back to `/gallery`. The clean-origin flow verifies both repairs.
+
+Production hosting, signed iPhone/Safari interoperability, primary passkey
+unlock, new recipient grants and synced Gemini/OCR descriptions remain unverified
+or unimplemented. Browser cache eviction and unfinished-upload recovery still
+need their acceptance flows; this slice does not add a persistent web upload queue.
+
+## Earlier intelligence preview and native setup
+
 Verified the development slice on `codex/ai-photos`:
 
 - Photos workspace: 14 test files, 148 tests passed, including 9 new intelligence
@@ -32,7 +77,7 @@ Verified the development slice on `codex/ai-photos`:
 
 Live Gemini requests were not made: no paid key was supplied. Provider quality,
 latency, browser CORS, and real billing still require a live smoke test. The
-new preview index is session-only; account sync, semantic embeddings, primary
+new preview index is session-only; its encrypted-index sync, semantic embeddings, primary
 passkey unlock, and nearby trusted sharing are roadmap work in `architecture.md`.
 
 The existing Ente app's broader encrypted sync and storage flows were inherited;
