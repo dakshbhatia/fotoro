@@ -11,7 +11,7 @@ include permanent regressions and were re-reviewed.
 | Worker/D1/R2 API | 27 tests pass: real cryptographic WebAuthn ceremonies, recovery, uploads, renewal, grants, encrypted annotation revisions, capability-bound ciphertext PUTs and Apple association metadata |
 | Web | 115 tests pass: retrieval/evidence, scoped feedback, encrypted retention, cross-instance clear, lazy previews, OCR worker lifecycle, original gating, annotation sync, conflict resolution and stale-page rejection |
 | Web production build | TypeScript/Vite pass; local entry 296.39 kB (93.02 kB gzip). Account/crypto loads after Sync photos; its large chunk warning remains |
-| Native | 85 tests pass; Debug Simulator tests and unsigned generic-device Release build pass with Xcode 27. Includes encrypted annotation exchange, persistent explicit lock, older catalog results, cancellation, local-label preservation, conflict merging and background ciphertext policies. Metadata available only in the iOS 27 SDK is compiler guarded; older SDK CI verification is separate |
+| Native | 88 tests pass with Xcode 27 after the durable Pause fix. Three new controlled regressions failed before the fix and passed afterward; foreground/process restoration, manual imports before Photos opt-in, account isolation and paused annotation publishing are covered. Prior Debug/unsigned generic-device Release builds and iOS 26 CI pass for the 85-test baseline. New-revision older-SDK CI is separate |
 | Shared retrieval fixtures | Both platforms find all 20 predeclared supported tasks; five unsupported visual tasks and five absent terms remain empty. These are development fixtures, not held-out user accuracy |
 | Cross-language media | Swift decrypts frozen TypeScript vectors; TypeScript decrypts checked-in Swift ciphertext and rejects altered binding |
 | Real local HTTP exchange | Three isolated tests cover fresh migrations, recovery sessions, bidirectional contribution/save, revocation, restore, byte-preserved HEIC, background ciphertext staging, encrypted labels/OCR in a fresh account session, cross-account denial and idempotent revision conflicts |
@@ -74,6 +74,16 @@ Public seeded accounts deliberately disable private uploads; their status screen
 is not evidence of personal account sync. The native integration test separately
 used a synthetic real local account and restored encrypted annotations in a fresh
 AppServices instance.
+
+Explicit native Pause now persists separately from Photos backup opt-in. It
+preserves queued media and annotation edits across foreground/process restoration;
+Start/Continue releases the fence. Existing manual Files imports still work before
+Photos opt-in. Three controlled regressions fail before the fix and pass afterward;
+the complete local native suite passes 88 tests. Independent review found no
+actionable P1/P2. Controlled commit probes bypass real staging PUTs; these tests
+prove dispatch/persistence guards, not physical background transfer. Prior iOS 26
+CI passed 85 tests with one expected permission skip. Earlier loopback connection
+losses remain unexplained; failure service diagnostics are retained in CI.
 
 ## Measurements and limits
 
