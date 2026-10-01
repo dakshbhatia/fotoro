@@ -18,7 +18,7 @@ import type { CollectionSummary } from "ente-new/photos/services/collection-summ
 import { PseudoCollectionID } from "ente-new/photos/services/collection-summary";
 import { usePhotosAppContext } from "ente-new/photos/types/context";
 import { t } from "i18next";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AutoSizer from "react-virtualized-auto-sizer";
 import {
     FileList,
@@ -145,6 +145,18 @@ export const FileListWithViewer: React.FC<FileListWithViewerProps> = ({
     onShowMap,
 }) => {
     const [openFileViewer, setOpenFileViewer] = useState(false);
+    const returnFocus = useRef<HTMLElement | null>(null);
+
+    useEffect(() => {
+        if (openFileViewer || appearance !== "fotoro" || !returnFocus.current)
+            return;
+        const element = returnFocus.current;
+        returnFocus.current = null;
+        const frame = requestAnimationFrame(() => {
+            if (element.isConnected) element.focus({ preventScroll: true });
+        });
+        return () => cancelAnimationFrame(frame);
+    }, [openFileViewer, appearance]);
     const [currentIndex, setCurrentIndex] = useState(0);
     const [initialSidebar, setInitialSidebar] = useState<
         FileViewerInitialSidebar | undefined
@@ -205,10 +217,16 @@ export const FileListWithViewer: React.FC<FileListWithViewerProps> = ({
 
     const handleThumbnailClick = useCallback(
         (index: number) => {
+            if (
+                appearance === "fotoro" &&
+                document.activeElement instanceof HTMLElement
+            ) {
+                returnFocus.current = document.activeElement;
+            }
             setCurrentIndex(index);
             updateOpenFileViewer(true);
         },
-        [updateOpenFileViewer],
+        [updateOpenFileViewer, appearance],
     );
 
     const handleTriggerRemotePull = useCallback(
@@ -319,6 +337,7 @@ export const FileListWithViewer: React.FC<FileListWithViewerProps> = ({
                 )}
             </AutoSizer>
             <FileViewer
+                appearance={appearance}
                 open={openFileViewer}
                 onClose={handleCloseFileViewerInternal}
                 initialIndex={currentIndex}

@@ -120,6 +120,7 @@ interface FileViewerAnnotatedFile {
 export type FileViewerInitialSidebar = "likes" | "comments";
 
 export type FileViewerProps = ModalVisibilityProps & {
+    appearance?: "fotoro";
     user?: LocalUser;
     files: EnteFile[];
     initialIndex: number;
@@ -165,6 +166,7 @@ export type FileViewerProps = ModalVisibilityProps & {
     >;
 
 export const FileViewer: React.FC<FileViewerProps> = ({
+    appearance,
     open,
     onClose,
     user,
@@ -1673,6 +1675,7 @@ export const FileViewer: React.FC<FileViewerProps> = ({
             log.debug(() => "Opening file viewer");
 
             const pswp = new FileViewerPhotoSwipe({
+                appearance,
                 initialIndex,
                 haveUser,
                 showSocialButtons,
@@ -1707,6 +1710,7 @@ export const FileViewer: React.FC<FileViewerProps> = ({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [
         open,
+        appearance,
         onClose,
         user,
         initialIndex,

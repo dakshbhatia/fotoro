@@ -1,5 +1,11 @@
 # Fotoro product direction
 
+**Foundation review — October 1:** The user rejected Ente as a required base.
+The existing fork is a working reference. The beta sequence and deployment
+choices below record the earlier approach, not an approved architecture for the
+next build. See [foundation-rethink.md](foundation-rethink.md) for the new
+experience proposal and verified reuse options, pending design review.
+
 September 30, 2026. The user selected **Fotoro**, with **fotoro.cloud** as the
 intended domain, and emphasized sharing photos with family and friends. The
 scope and sequence below define the beta target. The account-connected web
@@ -34,6 +40,10 @@ backend identity remain visible and functional. This simplifies presentation;
 the exchange flow and primary passkey unlock still need implementation.
 
 ## First beta: one complete exchange
+
+See [photo-interactions.md](photo-interactions.md) for the interaction hypotheses
+and abstraction approach, and [library-design.md](library-design.md) for the
+current canvas and control specification.
 
 With two test accounts and public fixtures:
 

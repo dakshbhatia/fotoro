@@ -769,3 +769,173 @@ body:has(
         animation: none;
     }
 }
+
+/* Fotoro keeps the inherited media viewer and gives only its controls glass. */
+.pswp-fotoro {
+    --pswp-bg: #000;
+    --fotoro-dock-bottom: max(28px, env(safe-area-inset-bottom));
+}
+
+.pswp-fotoro:has(.pswp__media-controls--visible) {
+    --fotoro-dock-bottom: max(116px, calc(env(safe-area-inset-bottom) + 92px));
+}
+
+.pswp-fotoro .pswp__top-bar {
+    top: 0;
+    height: 100%;
+    padding: 0;
+    pointer-events: none;
+}
+
+.pswp-fotoro .pswp__top-bar::before {
+    top: auto;
+    left: 50%;
+    right: auto;
+    bottom: var(--fotoro-dock-bottom);
+    width: 160px;
+    height: 52px;
+    transform: translateX(-50%);
+    border: 1px solid #ffffff30;
+    border-radius: 28px;
+    background: #ffffff12;
+    backdrop-filter: blur(24px) saturate(145%);
+    -webkit-backdrop-filter: blur(24px) saturate(145%);
+    box-shadow:
+        inset 0 1px 1px #ffffff26,
+        inset 0 -1px 1px #0000003d,
+        0 6px 24px #0000001a;
+    box-sizing: border-box;
+}
+
+.pswp-fotoro .pswp__counter {
+    position: absolute;
+    top: max(28px, env(safe-area-inset-top));
+    left: 50%;
+    transform: translateX(-50%);
+    height: 20px;
+    margin: 0;
+    color: #ffffffa6;
+    font-size: 12px;
+    line-height: 20px;
+    letter-spacing: 0.02em;
+    text-shadow: 0 1px 4px #000;
+}
+
+.pswp-fotoro .pswp__top-bar .pswp__button--favorite,
+.pswp-fotoro .pswp__top-bar .pswp__button--info,
+.pswp-fotoro .pswp__top-bar .pswp__button--more,
+.pswp-fotoro .pswp__top-bar .pswp__button--close,
+.pswp-fotoro .pswp__button--arrow {
+    position: absolute;
+    top: auto;
+    bottom: calc(var(--fotoro-dock-bottom) + 4px);
+    width: 44px;
+    height: 44px;
+    margin: 0;
+    padding: 0;
+    border-radius: 50%;
+    transition:
+        opacity 160ms ease-out,
+        transform 160ms ease-out,
+        background-color 160ms ease-out;
+}
+
+.pswp-fotoro.pswp--ui-visible .pswp__top-bar .pswp__button {
+    pointer-events: auto;
+}
+
+.pswp-fotoro .pswp__top-bar .pswp__button--favorite {
+    left: calc(50% - 72px);
+}
+
+.pswp-fotoro .pswp__top-bar .pswp__button--info {
+    left: calc(50% - 22px);
+}
+
+.pswp-fotoro .pswp__top-bar .pswp__button--more {
+    left: calc(50% + 28px);
+}
+
+.pswp-fotoro .pswp__top-bar .pswp__button--close {
+    top: max(24px, env(safe-area-inset-top));
+    right: max(20px, env(safe-area-inset-right));
+    bottom: auto;
+}
+
+.pswp-fotoro .pswp__top-bar .pswp__button--close,
+.pswp-fotoro .pswp__button--arrow {
+    border: 1px solid #ffffff30;
+    background: #ffffff12;
+    backdrop-filter: blur(24px) saturate(145%);
+    -webkit-backdrop-filter: blur(24px) saturate(145%);
+    box-shadow:
+        inset 0 1px 1px #ffffff26,
+        0 6px 24px #0000001a;
+}
+
+.pswp-fotoro .pswp__button--arrow--prev {
+    left: max(20px, env(safe-area-inset-left));
+}
+
+.pswp-fotoro.pswp--touch .pswp__button--arrow {
+    visibility: visible;
+}
+
+.pswp-fotoro .pswp__button--arrow--next {
+    right: max(20px, env(safe-area-inset-right));
+}
+
+.pswp-fotoro .pswp__top-bar .pswp__button .pswp__icn,
+.pswp-fotoro .pswp__button--arrow .pswp__icn {
+    width: 24px;
+    height: 24px;
+    top: 10px;
+    left: 10px;
+    margin: 0;
+    transform: none;
+}
+
+.pswp-fotoro .pswp__button--arrow .pswp__icn {
+    color: inherit;
+    fill: none;
+    stroke: currentColor;
+}
+
+.pswp-fotoro .pswp__button--arrow--next .pswp__icn {
+    transform: scaleX(-1);
+}
+
+.pswp-fotoro button:focus-visible {
+    outline: 2px solid #fff;
+    outline-offset: 3px;
+}
+
+.pswp-fotoro .pswp__button:active {
+    transform: scale(0.95);
+}
+
+@supports not (
+    (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))
+) {
+    .pswp-fotoro .pswp__top-bar::before,
+    .pswp-fotoro .pswp__top-bar .pswp__button--close,
+    .pswp-fotoro .pswp__button--arrow {
+        background: #242424;
+    }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+    .pswp-fotoro .pswp__top-bar::before,
+    .pswp-fotoro .pswp__top-bar .pswp__button--close,
+    .pswp-fotoro .pswp__button--arrow {
+        background: #242424;
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .pswp-fotoro .pswp__button {
+        transition: none;
+    }
+}

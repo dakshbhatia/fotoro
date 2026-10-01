@@ -29,7 +29,7 @@ import { formattedDateRelative } from "ente-base/i18n-date";
 import log from "ente-base/log";
 import { downloadManager } from "ente-gallery/services/download";
 import type { EnteFile } from "ente-media/file";
-import { fileDurationString } from "ente-media/file-metadata";
+import { fileDurationString, fileFileName } from "ente-media/file-metadata";
 import { FileType } from "ente-media/file-type";
 import {
     LoadingThumbnail,
@@ -200,6 +200,8 @@ export const FileList: React.FC<FileListProps> = ({
 
         const { isSmallerLayout, columns } = layoutParams;
         const fileItemHeight = layoutParams.itemHeight + layoutParams.gap;
+        const dateItemHeight =
+            appearance === "fotoro" ? 32 : dateListItemHeight;
         if (disableGrouping) {
             items = items.concat(
                 batch(annotatedFiles, columns).map(
@@ -234,7 +236,7 @@ export const FileList: React.FC<FileListProps> = ({
             const pushItemsFromSplits = (splits: FileListAnnotatedFile[][]) => {
                 if (splits.length > 1) {
                     items.push({
-                        height: dateListItemHeight,
+                        height: dateItemHeight,
                         type: "date",
                         groups: splits.map((s) => ({
                             date: s[0]!.timelineDateString,
@@ -244,7 +246,7 @@ export const FileList: React.FC<FileListProps> = ({
                     items.push(createFileItem(splits));
                 } else {
                     items.push({
-                        height: dateListItemHeight,
+                        height: dateItemHeight,
                         type: "date",
                         groups: splits.map((s) => ({
                             date: s[0]!.timelineDateString,
@@ -321,6 +323,7 @@ export const FileList: React.FC<FileListProps> = ({
         setItems(items);
     }, [
         width,
+        appearance,
         height,
         header,
         footer,
@@ -623,7 +626,15 @@ export const FileList: React.FC<FileListProps> = ({
                     return intersperseWithGaps(
                         item.groups,
                         ({ date, dateSpan }) => [
-                            <DateListItem key={date} span={dateSpan}>
+                            <DateListItem
+                                key={date}
+                                span={dateSpan}
+                                style={
+                                    appearance === "fotoro"
+                                        ? { height: item.height, fontSize: 13 }
+                                        : undefined
+                                }
+                            >
                                 {showGroupCheckbox && (
                                     <Checkbox
                                         key={date}
@@ -653,6 +664,7 @@ export const FileList: React.FC<FileListProps> = ({
                                 return (
                                     <FileThumbnail
                                         key={`tile-${file.id}-selected-${selected[file.id] ?? false}`}
+                                        appearance={appearance}
                                         {...{
                                             user,
                                             emailByUserID,
@@ -705,6 +717,7 @@ export const FileList: React.FC<FileListProps> = ({
             }
         },
         [
+            appearance,
             activeCollectionID,
             checkedTimelineDateStrings,
             contextMenu,
@@ -967,6 +980,7 @@ const FileListRow = memo(
 );
 
 type FileThumbnailProps = {
+    appearance?: "fotoro";
     file: EnteFile;
     selected: boolean;
     isRangeSelectActive: boolean;
@@ -984,6 +998,7 @@ type FileThumbnailProps = {
 } & Pick<FileListProps, "user" | "emailByUserID" | "enableSelect">;
 
 const FileThumbnail: React.FC<FileThumbnailProps> = ({
+    appearance,
     file,
     user,
     enableSelect,
@@ -1076,7 +1091,33 @@ const FileThumbnail: React.FC<FileThumbnailProps> = ({
     return (
         <FileThumbnail_
             key={`thumb-${file.id}}`}
-            onClick={handleClick}
+            role={appearance === "fotoro" ? "button" : undefined}
+            tabIndex={appearance === "fotoro" ? (imageURL ? 0 : -1) : undefined}
+            aria-label={
+                appearance === "fotoro"
+                    ? `Open ${fileFileName(file)}`
+                    : undefined
+            }
+            aria-disabled={appearance === "fotoro" ? !imageURL : undefined}
+            data-fotoro-thumbnail={appearance === "fotoro" ? true : undefined}
+            onClick={(event) => {
+                if (appearance === "fotoro")
+                    event.currentTarget.focus({ preventScroll: true });
+                handleClick();
+            }}
+            onKeyDown={
+                appearance === "fotoro"
+                    ? (event) => {
+                          if (
+                              event.target === event.currentTarget &&
+                              (event.key === "Enter" || event.key === " ")
+                          ) {
+                              event.preventDefault();
+                              handleClick();
+                          }
+                      }
+                    : undefined
+            }
             onContextMenu={onContextMenu}
             onMouseEnter={handleHover}
             disabled={!imageURL}
@@ -1086,6 +1127,11 @@ const FileThumbnail: React.FC<FileThumbnailProps> = ({
             {enableSelect && (
                 <Check
                     type="checkbox"
+                    aria-label={
+                        appearance === "fotoro"
+                            ? `Select ${fileFileName(file)}`
+                            : undefined
+                    }
                     checked={selected}
                     onChange={handleSelect}
                     $active={isRangeSelectActive && isInSelectRange}

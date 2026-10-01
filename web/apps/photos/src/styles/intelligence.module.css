@@ -105,6 +105,148 @@
     font-size: 12px;
     color: #6f7279;
 }
+.srOnly {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+}
+.accountLibrary .libraryHeader {
+    min-height: 78px;
+    flex-shrink: 0;
+    align-items: center;
+    padding: max(17px, env(safe-area-inset-top)) 20px 17px;
+    gap: 12px;
+    max-width: none;
+}
+.accountLibrary .libraryHeader h1 {
+    font-size: 25px;
+    font-weight: 600;
+}
+.libraryHeader .accountButton,
+.searchLauncher,
+.dockAdd,
+.searchSurface {
+    border: 1px solid #ffffffdb;
+    background: #ffffffa8;
+    backdrop-filter: blur(24px) saturate(145%);
+    -webkit-backdrop-filter: blur(24px) saturate(145%);
+    box-shadow:
+        0 6px 24px #0000000e,
+        0 1px 3px #00000008,
+        inset 0 1px 0 #fff,
+        inset 0 -1px 1px #00000006;
+}
+.libraryHeader .accountButton {
+    border-radius: 50%;
+    background-color: #f4f4f4a8;
+}
+.libraryHeader .accountButton svg {
+    width: 20px;
+    height: 20px;
+}
+.libraryDock {
+    position: fixed;
+    z-index: 5;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 202px;
+    max-width: calc(100% - 32px);
+    height: 56px;
+    color: var(--ink);
+    transition: width 180ms ease-out;
+}
+.searchLauncher,
+.dockAdd {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    gap: 12px;
+    height: 56px;
+    padding: 0;
+    border-radius: 28px;
+    color: var(--ink);
+    font-size: 15px !important;
+    font-weight: 500 !important;
+    transition:
+        transform 160ms ease-out,
+        background-color 160ms ease-out;
+}
+.searchLauncher {
+    width: 138px;
+}
+.dockAdd {
+    width: 56px;
+}
+.searchLauncher svg,
+.dockAdd svg {
+    width: 22px;
+    height: 22px;
+}
+.searchDock {
+    width: min(540px, calc(100% - 32px));
+}
+.searchSurface {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    width: 100%;
+    height: 56px;
+    padding: 6px;
+    border-radius: 28px;
+    box-sizing: border-box;
+}
+.searchSurface .search {
+    gap: 10px;
+}
+.accountLibrary .searchSurface:focus-within {
+    outline: 2px solid #77aafa;
+    outline-offset: 3px;
+}
+.accountLibrary .searchSurface input:focus-visible {
+    outline: none;
+}
+.closeSearch {
+    min-height: 44px;
+    padding: 0 12px;
+    border-radius: 22px;
+    color: var(--ink);
+    background: transparent;
+    font-size: 14px !important;
+}
+.accountLibrary [data-fotoro-thumbnail] {
+    border-radius: 6px;
+    -webkit-tap-highlight-color: transparent;
+    transition: opacity 160ms ease-out;
+}
+.accountLibrary [data-fotoro-thumbnail]:active {
+    opacity: 0.8;
+}
+.accountLibrary [data-fotoro-thumbnail]:focus-visible {
+    outline: 3px solid #77aafa;
+    outline-offset: -3px;
+}
+@media (hover: hover) {
+    .searchLauncher:hover,
+    .dockAdd:hover,
+    .libraryHeader .accountButton:hover {
+        background-color: #f7f7f7d9;
+    }
+}
+.searchLauncher:active,
+.dockAdd:active,
+.libraryHeader .accountButton:active {
+    transform: scale(0.95);
+}
 .clearSearch {
     width: 44px;
     height: 44px;
@@ -641,6 +783,12 @@
     .toolbar {
         background: #f5f5f5;
     }
+    .libraryHeader .accountButton,
+    .searchLauncher,
+    .dockAdd,
+    .searchSurface {
+        background: #f5f5f5;
+    }
     .share,
     .viewerClose,
     .viewerArrow,
@@ -650,6 +798,14 @@
 }
 @media (prefers-reduced-transparency: reduce) {
     .toolbar {
+        background: #f5f5f5;
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
+    }
+    .libraryHeader .accountButton,
+    .searchLauncher,
+    .dockAdd,
+    .searchSurface {
         background: #f5f5f5;
         backdrop-filter: none;
         -webkit-backdrop-filter: none;
@@ -671,6 +827,7 @@
 }
 @media (prefers-reduced-motion: reduce) {
     .app *,
+    .accountLibrary *,
     .sheet *,
     .viewer * {
         transition: none !important;

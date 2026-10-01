@@ -1887,6 +1887,7 @@ export const GalleryPage: React.FC<{ presentation?: "fotoro" }> = ({
             className={isFotoro ? fotoroStyles.accountLibrary : undefined}
             style={isFotoro ? undefined : { display: "contents" }}
             data-photo-library={isFotoro ? true : undefined}
+            inert={isFotoro && isFileViewerOpen ? true : undefined}
         >
             {isFotoro && (
                 <FotoroLibraryChrome
