@@ -27,7 +27,16 @@ A Worker preview with a different RP creates different passkey credentials. Do n
 October 1, 2026: the active checkout is `/Users/dakshbhatia/Documents/GitHub/Fotoro`.
 The native/web/API development build runs locally, with the web preview at 4310,
 real local API at 8787 and public fixtures at 8790. Production D1/R2 bindings,
-Cloudflare access and Apple signing are still required. No public Fotoro service
+Cloudflare access and Apple provisioning are still required. A valid local Apple
+Development certificate was found, but the generic-device Release preflight fails:
+the available wildcard provisioning profile lacks Associated Domains and the
+`com.apple.developer.associated-domains` entitlement. Configure an app-specific
+profile with the existing webcredentials/applinks domains; do not remove those
+capabilities to make a full-sync build pass. Only a Simulator is currently connected.
+The HTTPS origin also needs an `apple-app-site-association` file that lists the
+signed application identifier under `webcredentials.apps`. The current service
+does not serve that file. Universal-link handling is not implemented in the app.
+Wrangler's normal account check is unauthenticated. No public Fotoro service
 or TestFlight release is claimed. See [verification](verification.md).
 
 Foreground Photos sync is implemented locally. On a deployed/signed build:

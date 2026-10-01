@@ -6,35 +6,49 @@ struct PhotosImage: View {
   let photo: RecentPhoto
   let store: RecentPhotosStore
   var large = false
+  var networkAllowed = true
   @State private var image: UIImage?
   @State private var request: PHImageRequestID?
   @State private var generation = UUID()
   @State private var active = false
+  @State private var unavailable = false
   var body: some View {
     Group {
       if let image {
         Image(uiImage: image).resizable()
       } else {
-        Rectangle().fill(.quaternary).overlay { ProgressView() }
+        Rectangle().fill(.quaternary).overlay {
+          if unavailable {
+            Label("Preview unavailable", systemImage: "icloud.slash").font(.caption)
+          } else {
+            ProgressView()
+          }
+        }
       }
     }
     .task(id: photo.id) {
       if let request { store.images.cancelImageRequest(request) }
+      image = nil
+      unavailable = false
       let token = UUID()
       generation = token
       active = true
       let options = PHImageRequestOptions()
-      options.isNetworkAccessAllowed = true
+      options.isNetworkAccessAllowed = networkAllowed
       options.deliveryMode = .opportunistic
       request = store.images.requestImage(
         for: photo.asset,
-        targetSize: large ? CGSize(width: 1800, height: 1800) : CGSize(width: 360, height: 360),
+        targetSize: large ? CGSize(width: 1600, height: 1600) : CGSize(width: 360, height: 360),
         contentMode: large ? .aspectFit : .aspectFill, options: options
       ) { value, info in
         guard (info?[PHImageCancelledKey] as? Bool) != true else { return }
         Task { @MainActor in
           guard active, generation == token else { return }
-          if let value { image = value }
+          if let value {
+            image = value
+          } else if (info?[PHImageResultIsDegradedKey] as? Bool) != true {
+            unavailable = true
+          }
         }
       }
     }
@@ -50,10 +64,10 @@ struct PhotosImage: View {
 
 struct OriginalShareSheet: UIViewControllerRepresentable {
   let urls: [URL]
-  let completed: () -> Void
+  let completed: (Bool) -> Void
   func makeUIViewController(context: Context) -> UIActivityViewController {
     let controller = UIActivityViewController(activityItems: urls, applicationActivities: nil)
-    controller.completionWithItemsHandler = { _, _, _, _ in completed() }
+    controller.completionWithItemsHandler = { _, success, _, _ in completed(success) }
     return controller
   }
   func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
@@ -63,6 +77,7 @@ struct RecentPhotoViewer: View {
   let store: RecentPhotosStore
   let photos: [RecentPhoto]
   let initialID: String
+  var search: LocalSearchStore? = nil
   var share: (RecentPhoto) -> Void
   @State private var selected = ""
   @State private var scale: CGFloat = 1
@@ -106,17 +121,7 @@ struct RecentPhotoViewer: View {
         }
         .sheet(isPresented: $details) {
           if let current {
-            List {
-              if let date = current.capturedAt {
-                Text(date.formatted(date: .complete, time: .shortened))
-              }
-              if current.isFavorite { Label("Favorite", systemImage: "heart.fill") }
-              if current.isScreenshot { Label("Screenshot", systemImage: "rectangle.on.rectangle") }
-              if current.isLivePhoto {
-                Label("Live Photo · still preview", systemImage: "livephoto")
-              }
-              if let location = current.location { Label(location, systemImage: "location") }
-            }.presentationDetents([.medium])
+            LocalPhotoDetails(photo: current, search: search)
           }
         }
     }
@@ -126,6 +131,10 @@ struct RecentPhotoViewer: View {
 struct RecentPhotosView: View {
   @State private var store = RecentPhotosStore()
   @State private var query = ""
+  @FocusState private var queryFocused: Bool
+  @State private var search = LocalSearchStore()
+  @State private var shareMeaning: String?
+  @State private var sharedPhotoIDs: [String] = []
   @State private var selected: Set<String> = []
   @State private var selecting = false
   @State private var pendingShare: RecentPhoto?
@@ -138,7 +147,7 @@ struct RecentPhotosView: View {
   @State private var services: AppServices?
   @State private var preparingShare = false
   var visible: [RecentPhoto] {
-    store.photos.filter { query.isEmpty || $0.searchText.localizedCaseInsensitiveContains(query) }
+    query.isEmpty ? store.photos : search.matchingPhotos
   }
   var body: some View {
     NavigationStack {
@@ -148,7 +157,12 @@ struct RecentPhotosView: View {
             Image(systemName: "photo.on.rectangle").font(.system(size: 44))
             Text("Your last 30 days").font(.title2)
             Text("Browse photos on this iPhone.").foregroundStyle(.secondary)
-            Button("Open Photos") { Task { await store.open() } }.buttonStyle(.borderedProminent)
+            Button("Open Photos") {
+              Task {
+                await store.open()
+                search.open(status: store.status)
+              }
+            }.buttonStyle(.borderedProminent)
           }.frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if !RecentPhotosPolicy.canRead(store.status) {
           ContentUnavailableView {
@@ -162,38 +176,46 @@ struct RecentPhotosView: View {
           }
         } else {
           ScrollView {
-            LazyVGrid(
-              columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3
-            ) {
-              ForEach(visible) { photo in
-                Button {
-                  if selecting { toggleSelection(photo) } else { viewer = photo }
-                } label: {
-                  GeometryReader { geometry in
-                    PhotosImage(photo: photo, store: store).scaledToFill()
-                      .frame(width: geometry.size.width, height: geometry.size.height).clipped()
-                  }.aspectRatio(1, contentMode: .fit)
-                    .overlay(alignment: .bottomTrailing) {
-                      if selected.contains(photo.id) {
-                        Image(systemName: "checkmark.circle.fill").padding(8)
-                      }
-                    }
-                }.buttonStyle(.plain).id(photo.id)
-                  .onAppear { store.cache([photo.asset], start: true) }
-                  .onDisappear { store.cache([photo.asset], start: false) }
-                  .contextMenu {
-                    Button(selected.contains(photo.id) ? "Deselect" : "Select") {
-                      if selected.contains(photo.id) {
-                        selected.remove(photo.id)
-                      } else {
-                        selected.insert(photo.id)
-                      }
-                    }
-                  }
+            if !query.isEmpty {
+              LocalSearchView(search: search, photos: store, choseMeaning: { queryFocused = false })
+              {
+                queryFocused = false
+                viewer = $0
               }
-            }
-            if visible.isEmpty {
-              ContentUnavailableView("No photos in the last 30 days", systemImage: "photo")
+            } else {
+              LazyVGrid(
+                columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3
+              ) {
+                ForEach(visible) { photo in
+                  Button {
+                    if selecting { toggleSelection(photo) } else { viewer = photo }
+                  } label: {
+                    GeometryReader { geometry in
+                      PhotosImage(photo: photo, store: store).scaledToFill()
+                        .frame(width: geometry.size.width, height: geometry.size.height).clipped()
+                    }.aspectRatio(1, contentMode: .fit)
+                      .overlay(alignment: .bottomTrailing) {
+                        if selected.contains(photo.id) {
+                          Image(systemName: "checkmark.circle.fill").padding(8)
+                        }
+                      }
+                  }.buttonStyle(.plain).id(photo.id)
+                    .onAppear { store.cache([photo.asset], start: true) }
+                    .onDisappear { store.cache([photo.asset], start: false) }
+                    .contextMenu {
+                      Button(selected.contains(photo.id) ? "Deselect" : "Select") {
+                        if selected.contains(photo.id) {
+                          selected.remove(photo.id)
+                        } else {
+                          selected.insert(photo.id)
+                        }
+                      }
+                    }
+                }
+              }
+              if visible.isEmpty {
+                ContentUnavailableView("No photos in the last 30 days", systemImage: "photo")
+              }
             }
             if store.status == .limited {
               Text("Showing photos you’ve allowed.").font(.caption).foregroundStyle(.secondary)
@@ -218,7 +240,16 @@ struct RecentPhotosView: View {
         .safeAreaInset(edge: .bottom) {
           if store.opened, RecentPhotosPolicy.canRead(store.status) {
             HStack {
-              TextField("Search", text: $query).textFieldStyle(.plain)
+              TextField("Search", text: $query).textFieldStyle(.plain).focused($queryFocused)
+                .submitLabel(.search).onSubmit { queryFocused = false }.onChange(of: query) {
+                  search.updateQuery(query)
+                }
+              if !query.isEmpty {
+                Button("Clear search", systemImage: "xmark.circle.fill") {
+                  query = ""
+                  queryFocused = false
+                }.labelStyle(.iconOnly)
+              }
               if !selected.isEmpty {
                 Button("Share", systemImage: "square.and.arrow.up") {
                   share(store.photos.filter { selected.contains($0.id) })
@@ -241,13 +272,19 @@ struct RecentPhotosView: View {
             }
           }
         ) { photo in
-          RecentPhotoViewer(store: store, photos: visible, initialID: photo.id) { photo in
+          RecentPhotoViewer(store: store, photos: visible, initialID: photo.id, search: search) {
+            photo in
             pendingShare = photo
             viewer = nil
           }
         }
         .sheet(isPresented: $showShare, onDismiss: cleanupShare) {
-          OriginalShareSheet(urls: sharing, completed: cleanupShare)
+          OriginalShareSheet(urls: sharing) { success in
+            if success, let meaning = shareMeaning {
+              for id in sharedPhotoIDs { search.confirm(id, meaningID: meaning) }
+            }
+            cleanupShare()
+          }
         }
         .sheet(
           isPresented: $settings,
@@ -270,15 +307,27 @@ struct RecentPhotosView: View {
               if store.opened {
                 Button("Refresh last 30 days") {
                   store.refresh()
+                  search.refresh(status: store.status)
                   settings = false
                 }
               }
             }.navigationTitle("Settings")
           }
         }
-        .onChange(of: scenePhase) {
-          if scenePhase == .active { store.refresh() } else { services?.backup.pause() }
+        .onChange(of: search.libraryGeneration) {
+          viewer = nil
+          store.refresh()
         }
+        .onChange(of: scenePhase) {
+          if scenePhase == .active {
+            store.refresh()
+            search.auditAuthorization()
+          } else {
+            services?.backup.pause()
+            search.pause()
+          }
+        }
+        .task { search.auditAuthorization() }
         .sheet(item: $services) { service in LibraryView(services: service) }
         .alert(
           "Fotoro",
@@ -301,10 +350,14 @@ struct RecentPhotosView: View {
       else { return }
       while let presented = controller.presentedViewController { controller = presented }
       PHPhotoLibrary.shared().presentLimitedLibraryPicker(from: controller) { _ in
-        Task { @MainActor in store.refresh() }
+        Task { @MainActor in
+          store.refresh()
+          search.refresh(status: store.status)
+        }
       }
     } else {
       store.refresh()
+      search.refresh(status: store.status)
     }
   }
   func share(_ photos: [RecentPhoto]) {
@@ -314,6 +367,8 @@ struct RecentPhotosView: View {
       defer { preparingShare = false }
       do {
         sharing = try await store.shareOriginals(photos)
+        shareMeaning = query.isEmpty ? nil : search.response.meaning?.id
+        sharedPhotoIDs = photos.map(\.id)
         showShare = true
       } catch { store.error = error.localizedDescription }
     }
@@ -323,5 +378,7 @@ struct RecentPhotosView: View {
     for root in roots { try? FileManager.default.removeItem(at: root) }
     showShare = false
     sharing = []
+    shareMeaning = nil
+    sharedPhotoIDs = []
   }
 }

@@ -10,11 +10,27 @@ Dates, favorites, screenshots and GPS coordinates come from the Photos library.
 Browsing does not initialize an account or upload photos. Sharing explicitly
 exports the still original through the system share sheet.
 
+Native search covers all permitted non-hidden still photos, including older photos
+outside the 30-day canvas. It indexes supplied labels, available metadata and
+English text using Vision on one bounded local preview at a time. Indexing does
+not download iCloud originals. Labels and search preferences stay in a protected,
+device-local database excluded from backup; they do not sync to the account.
+
 In the browser, Open photos selects JPEG/PNG files for a local session. Search,
-day grouping, zoom and original sharing/download work without an account. Closing
-or reloading clears the session; the browser cannot scan the iPhone Photos library.
+day grouping, zoom and original sharing/download work without an account. The
+browser cannot scan the iPhone Photos library. Settings optionally enables local
+English text recognition and retained search. Retention saves encrypted labels,
+text, preferences and up to 100 MiB of previews using a browser-held key; originals
+are not retained. After reopening, reselecting the matching SHA-256 original
+enables download/share. Browser storage can be cleared or evicted. With retention
+off, reloading clears the selection.
 Unknown image dimensions, including HEIC in this browser slice, are skipped before
 decoding. Thumbnail/preview caches are bounded and generated sequentially.
+
+Search shows one photo with its source evidence and alternative meanings. Add
+labels in Photo details. Choosing a meaning, confirming a photo and pinning its
+representative are separate explicit actions; merely inspecting a preview does
+not teach a preference. Text mentions never establish named face identity.
 
 Settings → Sync photos connects the local canvas to the encrypted account catalog.
 On iOS, explicitly start Sync last 30 days after unlocking your account. Backup
@@ -81,5 +97,5 @@ and the [product roadmap](../docs/ai-photos/roadmap.md).
 
 Next: deploy HTTPS and validate sync on a signed physical iPhone and Safari,
 then measure the large-library targets and implement background scheduling.
-Live Photo motion preservation, OCR, semantic search, faces, cleanup, optional
+Live Photo motion preservation, semantic search, faces, cleanup, optional
 AI enrichment, video and nearby transport remain planned work.

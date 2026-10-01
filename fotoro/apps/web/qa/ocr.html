@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Fotoro local OCR verification</title><style>body{max-width:760px;margin:40px auto;padding:20px;font:16px system-ui}button,input{font:inherit;margin:8px 8px 8px 0;padding:8px}pre{white-space:pre-wrap;background:#f1f1f1;padding:16px}img{max-width:100%;max-height:300px}</style></head><body>
+<h1>Local OCR verification</h1>
+<p>Development harness for public text fixtures. It prepares a preview at most 1600 pixels wide or tall, then runs the pinned local worker. It stores no photo or query.</p>
+<label>Public fixture <input id="fixture" type="file" accept="image/png,image/jpeg"></label>
+<div><button id="run">Recognize selected fixture</button><button id="blank">Recognize blank preview</button><button id="cancel">Cancel OCR</button></div>
+<p id="status" role="status">Ready</p><img id="preview" alt="Selected public fixture preview" hidden>
+<pre id="result" aria-label="OCR result">No result</pre><pre id="paths" aria-label="Local OCR asset paths"></pre>
+<script type="module">
+import {LocalOcrQueue,localOcrOptions,OCR_PROCESSOR} from '/src/local/ocr.ts';
+import {imageDimensions} from '/src/local/resources.ts';
+const status=document.querySelector('#status'), result=document.querySelector('#result'), image=document.querySelector('#preview');
+const options=localOcrOptions(location.origin);
+document.querySelector('#paths').textContent=JSON.stringify({processor:OCR_PROCESSOR,worker:options.workerPath,core:options.corePath,language:options.langPath,cache:options.cacheMethod},null,2);
+let generation=0, url;
+const queue=new LocalOcrQueue({onProgress:event=>{status.textContent=event.photoID+': '+event.status+' '+Math.round(event.progress*100)+'%';}});
+async function bounded(file){
+ if(file.size>50*1024*1024)throw new Error('Choose a public fixture smaller than 50 MiB.');
+ const size=imageDimensions(new Uint8Array(await file.slice(0,256*1024).arrayBuffer()));
+ if(!size||size.width*size.height>80000000)throw new Error('Safe source dimensions are unavailable.');
+ const scale=Math.min(1,1600/Math.max(size.width,size.height));
+ const bitmap=await createImageBitmap(file,{resizeWidth:Math.round(size.width*scale),resizeHeight:Math.round(size.height*scale),resizeQuality:'high'});
+ try{const canvas=document.createElement('canvas');canvas.width=bitmap.width;canvas.height=bitmap.height;canvas.getContext('2d').drawImage(bitmap,0,0);const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));return {blob,width:canvas.width,height:canvas.height};}finally{bitmap.close();}
+}
+async function run(blank){
+ const token=++generation;await queue.cancel();result.textContent='No result';const started=performance.now();
+ try{
+  let preview, name, digest;
+  if(blank){const canvas=document.createElement('canvas');canvas.width=1000;canvas.height=600;canvas.getContext('2d').fillStyle='white';canvas.getContext('2d').fillRect(0,0,1000,600);preview={blob:await new Promise(resolve=>canvas.toBlob(resolve,'image/png')),width:1000,height:600};name='blank-public-preview';digest='blank';}
+  else{const file=document.querySelector('#fixture').files[0];if(!file)throw new Error('Select a public fixture first.');preview=await bounded(file);name=file.name;digest=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',await file.arrayBuffer())),b=>b.toString(16).padStart(2,'0')).join('');}
+  if(token!==generation)return;if(url)URL.revokeObjectURL(url);url=URL.createObjectURL(preview.blob);image.src=url;image.hidden=false;
+  const output=await queue.recognize(name,digest,async()=>preview,()=>token===generation);
+  if(token!==generation)return;status.textContent=output?output.status+' · '+Math.round(performance.now()-started)+' ms including preparation':'Cancelled';
+  result.textContent=JSON.stringify({...output,previewWidth:preview.width,previewHeight:preview.height},null,2);
+ }catch(error){if(token===generation){status.textContent='Failed';result.textContent=String(error);}}
+}
+document.querySelector('#run').onclick=()=>run(false);document.querySelector('#blank').onclick=()=>run(true);
+document.querySelector('#cancel').onclick=()=>{generation++;void queue.cancel();status.textContent='Cancelled';result.textContent='No result';};
+window.addEventListener('pagehide',()=>{generation++;void queue.cancel();if(url)URL.revokeObjectURL(url);});
+</script></body></html>

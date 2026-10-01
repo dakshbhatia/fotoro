@@ -1,62 +1,116 @@
 # Verification — October 1, 2026
 
-The local development slice works. It has not been deployed publicly or released
-through TestFlight. Independent reviews reproduced defects, fixes added permanent
-regressions, and the implemented scope was re-reviewed.
+The native, browser and service development build runs locally. It has not been
+publicly deployed or released through TestFlight. Independent reviews reproduced
+retrieval, permission, cancellation, persistence and navigation defects; fixes
+include permanent regressions and were re-reviewed.
 
-| Check                                   | Evidence                                                                                                                                                                                                                                                                                  |
-| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Contracts, crypto and loopback fixtures | 10 tests; HEIC and PhotoKit date schema boundaries, signature/binding failures, original preservation, independent saves and retry behavior                                                                                                                                               |
-| Worker/D1/R2 API                        | 20 tests; real cryptographic WebAuthn ceremony, challenge replay, recovery, upload crash reconciliation, capability renewal, retained objects, grants and saves                                                                                                                           |
-| Web                                     | 32 tests; exchange/local cache policies plus coalesced sync, account fences, sequential staging, failed-first-source halt and public legacy queue no-network guard                                                                                                                        |
-| Web production build                    | TypeScript and Vite pass; local entry 264.7kB (82.8kB gzip); cloud/libsodium loads only after Sync photos; large cloud chunk warning remains                                                                                                                                              |
-| Native                                  | 27 tests pass; source checkpoints, stable identity, pending digest reuse, cancellation, HEIC preservation, public-account boundaries and moved-sandbox paths; Debug and Release builds pass                                                                                               |
-| Cross-language media                    | Swift decrypts frozen TS vectors; TS decrypts checked-in Swift-produced ciphertext and rejects altered binding                                                                                                                                                                            |
-| Real local HTTP exchange                | 2 tests pass: isolated fresh migrations + recovery sessions + both-way contribute/save + revocation + clean restore; real HEIC upload/fresh-session restore preserves bytes, extension and digest                                                                                         |
-| Actual web UI                           | Import, viewer, share, manual account-card pinning, receive, digest-verified save, lock and sign-out exercised in the in-app browser; real local Worker recovery/session restored the library at localhost, and an interrupted browser import committed after reload/new-session recovery |
-| Actual native UI                        | Simulator onboarding/status/public-account guard captured; decoded square cloud grid restores after sandbox relocation; installed local Photos canvas left open. Prior viewer/exchange and Keychain relaunch checks passed                                                                |
-| Local-only entry                        | Reviewed: no API/account/fixture-key initialization before explicitly opening Sync photos; no automatic local-photo uploads                                                                                                                                                               |
-| Browser sync UI                         | Actual mobile-width setup, real local Worker recovery, status and public-account upload block exercised; all three public local file selections survive setup and return to the canvas                                                                                                    |
-| Actual local browser UI                 | Public JPEG files selected in the in-app browser; thumbnails, filename search, paging/details and viewer exercised. Safari's native chooser, raster decode and viewer also exercised                                                                                                      |
-| Actual local Photos UI                  | Open Photos triggered the genuine OS permission prompt, then rendered public sample assets from Simulator Photos; no personal library tested                                                                                                                                              |
-| Native local policies                   | 4 tests pass: 30-day boundary, authorized/limited access, actual metadata search facts, and current/neighbor viewer bounds                                                                                                                                                                |
+| Check | Evidence |
+| --- | --- |
+| Contracts, crypto and loopback fixtures | 10 tests pass: schema boundaries, signatures, media binding and preservation |
+| Worker/D1/R2 API | 20 tests pass: real cryptographic WebAuthn ceremonies, recovery, uploads, renewal, grants and saves |
+| Web | 97 tests pass: retrieval/evidence, scoped feedback, encrypted retention, cross-instance clear, lazy previews, OCR worker lifecycle, original gating and sync |
+| Web production build | TypeScript/Vite pass; local entry 296.38 kB (93.02 kB gzip). Account/crypto loads after Sync photos; its large chunk warning remains |
+| Native | 57 tests pass; Debug tests and Release build pass with Xcode 27. Metadata available only in the iOS 27 SDK is compiler guarded; older SDK CI verification is separate |
+| Shared retrieval fixtures | Both platforms find all 20 predeclared supported tasks; five unsupported visual tasks and five absent terms remain empty. These are development fixtures, not held-out user accuracy |
+| Cross-language media | Swift decrypts frozen TypeScript vectors; TypeScript decrypts checked-in Swift ciphertext and rejects altered binding |
+| Real local HTTP exchange | Two isolated tests cover fresh migrations, recovery sessions, bidirectional contribution/save, revocation, restore and byte-preserved HEIC |
+| Native local lifecycle | All-age permitted enumeration, limited/denied startup, permission purge, 30-day browse, changed revisions, cancellation rollback and refresh stability are exercised |
+| Browser local lifecycle | Session-only default; retained labels/text/previews; lazy preview hydration; unavailable preview preservation; digest reselection; pending/cross-instance clear fences |
 
-Screenshots: [web library](../apps/web/Evidence/library.jpg),
-[native library](../apps/ios/Evidence/library.png),
-[native viewer](../apps/ios/Evidence/viewer.png).
-Local trial: [web](../apps/web/Evidence/local-trial.jpg),
-[native](../apps/ios/Evidence/local-trial-photos.png). Sync status:
-[browser](../apps/web/Evidence/sync-status-mobile.jpg),
-[native](../apps/ios/Evidence/sync-status.png).
-All shown photos are public samples.
+## Actual app checks
 
-The Node HTTP exchange test exercises the service and shared web crypto, while
-native tests exercise Swift against fixtures and real recovery/device-approval
-routes. This is not a claim of a complete physical iPhone-to-Safari acceptance run.
+In the in-app browser, public receipt and photo samples exercised one leading
+result, evidence, ambiguous meanings, verbatim diacritic labels, all three matching
+photos, navigation away from a pinned representative, and replacing that choice
+from the viewer. Desktop 1265×864 and phone 390×844 checks put the controls above
+the toolbar; at 320×568, scrolling reveals the complete row. Local English OCR found
+`INVOICE 4826` in a neutral-filename receipt. Its recognized text, labels and
+bounded previews survived a controlled reload after Saved locally reported 3/3.
+
+After reload, original download was disabled. Selecting the identical SHA-256
+original enabled sharing. Selecting different bytes with the same filename kept
+the receipt's original disabled. Turning retention off followed by reload returned
+to the empty canvas. Clear during OCR startup returned to the empty canvas. Worker
+initialization, active recognition, rotated text, blank text and cancellation are
+also covered by the OCR harness and protocol tests.
+
+Simulator checks exercised the genuine Photos permission prompt, local grid,
+ambiguous Ro completion, an explicitly chosen meaning surviving prefix extension,
+label persistence after relaunch, an older January 2020 asset outside the 30-day
+canvas, and Clear returning to recent browsing. All screenshots use public samples.
+Native tests also recognize the neutral receipt and rotated boarding-pass fixtures.
+
+Search evidence: [retained browser result](../apps/web/Evidence/local-search-retained.png),
+[phone-size browser result](../apps/web/Evidence/local-search-mobile.png),
+[rotated browser OCR](../apps/web/Evidence/local-ocr-rotated.png),
+[native ambiguity](../apps/ios/Evidence/search-ambiguous-prefix.png),
+[native chosen meaning](../apps/ios/Evidence/search-selected-prefix.png),
+[native older photo](../apps/ios/Evidence/search-older-photo-details.png),
+[native clear](../apps/ios/Evidence/search-clear-recent.png).
+
+Prior sync/exchange checks exercised real local Worker recovery, interrupted
+browser import, native durable journals, restored media after sandbox relocation,
+public-account upload guards, and explicit account setup preserving selected files.
+The HTTP and Simulator checks do not establish a physical iPhone-to-Safari run.
+
+## Measurements and limits
+
+The frozen fixture SHA-256 is
+`e28fb36c55da9b0979665537c2d68e3aedf96ae09b5ace1aadeb75b01413280e`.
+The native resource copy matches it. Retrieval fixtures use supplied synthetic
+metadata/OCR; actual OCR quality is checked separately with public images.
+
+On this Mac with Node 22.23.3, a pure browser index of 10,000 synthetic records
+built in 20.94 ms; 200 warm lookups had p50 4.83 ms and p95 5.33 ms. On iPhone 18
+Pro Simulator with Xcode 27, the native 10,000-record metadata index built in
+5,732.83 ms; 60 warm lookups had p95 12.47 ms. Simulator process footprint rose
+from 119,966,264 to 129,862,200 bytes in that run. These different synthetic corpora
+are not a platform comparison. Neither benchmark includes PhotoKit/image decoding,
+preview delivery, rendering, OCR throughput, physical-device battery or memory.
+
+Browser previews hydrate lazily and are retained up to 100 MiB. Generated raster
+caches are bounded to 48 MiB; this does not bound decoder or total process memory.
+Full OCR text currently hydrates with encrypted photo metadata, and the in-memory
+index is rebuilt from it. Separate persisted postings/detail-text hydration and
+large-library memory scaling remain unverified requirements.
+
+Browser OCR uses pinned Tesseract.js/core 7.0.0 and English data 1.0.0. The generated
+worker/core/language package is 47,797,598 bytes; a worker fetches its selected core
+and English data. Asset preparation records SHA-256 provenance before dev/build.
+All configured runtime paths use this origin; no inference service receives photo
+bytes, queries or recognized text. A recognition quality gate and rotation retries
+are engineering rules, not calibrated accuracy or intent confidence. Physical
+Safari performance and a larger OCR quality corpus remain unverified.
+
+Native search includes all permitted non-hidden still photos, while browsing stays
+at 30 days. Native OCR uses network-disabled local previews, so iCloud-only assets
+can have incomplete text coverage. Labels/history are device-local and excluded
+from backup. Browser search covers explicitly selected or retained records only.
+Neither local index currently syncs through the encrypted account catalog.
 
 ## Remaining release gates
 
-- Cloudflare account access, distinct production D1/R2 bindings, HTTPS and domain
-  routing; Apple signing and associated domains.
-- Physical passkey/PRF and non-PRF flows, original PhotoKit/iCloud resources and
-  native background scheduling. Transfer journals are durable; a production
-  background scheduler is not implemented.
-- A 10,000-item dataset with 1,000 distinct thumbnails and measured library,
-  frame pacing, memory and battery targets on an older supported iPhone and
-  Safari. No performance acceptance is claimed from this small fixture.
+- Cloudflare account access, distinct production D1/R2 bindings, HTTPS and routing.
+- A valid Apple development certificate exists, but the current wildcard profile
+  lacks Associated Domains. An app-specific profile and HTTPS association file
+  listing the signed app under `webcredentials.apps` are needed. No physical phone
+  is connected. Universal-link handling is not implemented.
+- Physical passkey/PRF and non-PRF flows, original PhotoKit/iCloud resources and a
+  complete iPhone-to-Safari restore. See [release setup](deployment.md).
+- Closed-app background scheduling. Transfer journals are durable, but native
+  backup currently requires the app to stay active and unlocked.
+- Older supported iPhone and Safari measurements using 10,000 items and 1,000
+  distinct thumbnails: frame pacing, query-to-visible preview, memory and battery.
 - Final-object garbage collection and deletion/retention races. Final ciphertext
-  is retained conservatively; abandoned staging/final objects can consume storage.
-- Native camera QR scanning and credential-management UI are not implemented.
+  is retained conservatively; abandoned objects can consume storage.
+- Native camera QR scanning and credential-management UI.
 
-Native local browsing supports system-rendered HEIC and Live Photo still previews.
-Native cloud imports preserve JPEG/PNG/HEIC originals up to 50 MiB; thumbnail and
-preview copies are 320/1600 px JPEG at quality 82%. Backup visibly skips Live Photo
-motion pairs and videos. Native sync runs while active/unlocked; Safari refreshes
-its account while the cloud view is visible/online. Browser imports accept JPEG/PNG.
-Browser local decoding skips unknown dimensions (including current HEIC metadata) before decode. The 48MiB web budget
-bounds generated raster caches, not total browser or transient decoder memory.
+Native cloud imports preserve JPEG/PNG/HEIC originals up to 50 MiB. Copies are
+320/1600 px JPEG at quality 82%; they never replace originals. Live Photo stills
+render locally, but backup skips motion pairs and videos. Browser import accepts
+JPEG/PNG and skips unknown dimensions, including current HEIC metadata, before decode.
 
-Video, OCR/AI indexing, face grouping, semantic search, cleanup and nearby transfer
-are outside this slice. Production auth rejects fixture headers; production web
-builds disable fixture mode. Browser local selections are session-only, while the
-cloud catalog uses evictable browser storage.
+Semantic search, inferred face groups, cleanup, video intelligence and nearby
+transfer remain planned. Production auth rejects fixture headers; production web
+builds disable fixture mode. Public fixture accounts block private uploads.

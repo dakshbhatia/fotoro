@@ -1,6 +1,6 @@
 # Fotoro local search implementation plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Native and browser implementation are independent domains assigned under the dispatching-parallel-agents skill; the primary agent integrates and verifies them. Existing user authorization to plan and build governs execution.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking. Native and browser implementation are independent domains assigned under the dispatching-parallel-agents skill; the primary agent integrates and verifies them. Existing user authorization to plan and build governs execution.
 
 **Goal:** Make supplied labels and text in local photos searchable through one leading result, with honest evidence and local persistence.
 
@@ -51,13 +51,13 @@ The implementations may use idiomatic platform types, but share these semantics 
 
 **Interfaces:** Local search is created independently from `AppServices`, observes allowed PhotoKit assets, exposes query/coverage/results and verbatim label editing. Existing viewer/share accepts older eligible search assets without widening the browse canvas.
 
-- [ ] Write failing pure retrieval tests for the shared cases, separate acceptance/use, 30-day decay, pin eligibility, scope before candidate cap, prefix stability and late generations.
-- [ ] Run targeted native tests and record the expected failures before implementation.
-- [ ] Implement indexed two-stage retrieval and durable protected GRDB records/history. Use FTS5/indexed fields; preserve labels across revision-derived OCR invalidation. Exclude the index from device backup.
-- [ ] Write lifecycle tests for all-age authorized enumeration, removed/limited assets, withdrawal and stale OCR completions. Include 100-frame burst completion equality and neutral-filename OCR.
-- [ ] Implement serial off-main-actor Vision OCR on network-disabled bounded previews with processor/revision state. Empty/unavailable OCR is coverage, never a fabricated label. Use iOS 27 caption/keyword properties only when confirmed in the SDK.
-- [ ] Add the one-leading-result presentation and alternatives within the current search field. Details support label editing, explicit wanted-result confirmation and explicit representative selection. Inspection alone creates no use event; share confirms use only on actual successful handoff.
-- [ ] Run native tests, Debug/Release builds and actual Simulator interactions: search, choose interpretation, inspect without feedback, label, reopen, older asset, clear. Capture public-fixture evidence. Report commands, counts and unverified physical-device behavior; do not commit.
+- [x] Write failing pure retrieval tests for the shared cases, separate acceptance/use, 30-day decay, pin eligibility, scope before candidate cap, prefix stability and late generations.
+- [x] Run targeted native tests and record the expected failures before implementation.
+- [x] Implement indexed two-stage retrieval and durable protected GRDB records/history. Use FTS5/indexed fields; preserve labels across revision-derived OCR invalidation. Exclude the index from device backup.
+- [x] Write lifecycle tests for all-age authorized enumeration, removed/limited assets, withdrawal and stale OCR completions. Include 100-frame burst completion equality and neutral-filename OCR.
+- [x] Implement serial off-main-actor Vision OCR on network-disabled bounded previews with processor/revision state. Empty/unavailable OCR is coverage, never a fabricated label. Use iOS 27 caption/keyword properties only when confirmed in the SDK.
+- [x] Add the one-leading-result presentation and alternatives within the current search field. Details support label editing, explicit wanted-result confirmation and explicit representative selection. Inspection alone creates no use event; share confirms use only on actual successful handoff.
+- [x] Run native tests, Debug/Release builds and actual Simulator interactions: search, choose interpretation, inspect without feedback, label, reopen, older asset, clear. Capture public-fixture evidence. Report commands, counts and unverified physical-device behavior; do not commit.
 
 ### Task 2: Browser local search and retention (browser implementation lane)
 
@@ -65,27 +65,50 @@ The implementations may use idiomatic platform types, but share these semantics 
 
 **Interfaces:** Extend `LocalPhoto` with optional original file, content digest and retained preview reference. Existing cloud-selection callback receives only actual selected `File`s. `LocalResources.load` supports bounded retained previews; original operations require a matching live file. Search response/history semantics follow the shared contract.
 
-- [ ] Write failing pure retrieval tests for the shared cases and ranking/history rules, plus persistence tests using fake-indexeddb.
-- [ ] Run `pnpm --filter @fotoro/web test` and record failures before implementation.
-- [ ] Implement in-memory dictionary/postings retrieval with the same two-stage rules and separate deduplicated events. Keep the live path free of hashing/OCR/original reads.
-- [ ] Implement SHA-256 source identity and explicit AES-GCM-encrypted IndexedDB retention using a non-extractable origin key. Hydrate metadata separately from preview blobs. Enforce 100 MiB preview eviction while retaining labels/history, and gate originals after reload until digest match.
-- [ ] Test default reload-empty; opt-in reload preview/labels/history; mismatched file cannot restore originals; quota/ciphertext failure; retention-off removes key/records; cross-tab/clear/generation races cannot resurrect data.
-- [ ] Pin Tesseract.js 7.0.0 and English data 1.0.0; prepare worker/core/language assets locally from installed packages before dev/build. Set all runtime paths explicitly. Add optional OCR control with truthful progress; reuse one worker, terminate and fence work on clear/toggle/unmount.
-- [ ] Test injected OCR queue cancellation/error/version behavior and actual OCR on a neutral-filename public text fixture. All OCR runtime asset requests must stay on this origin.
-- [ ] Add one leading search preview, interpretation/evidence and alternatives; preserve viewer navigation and accessibility. Details edit labels and expose explicit confirmation/pinning without treating preview inspection as success.
-- [ ] Run web tests/typecheck/build and report evidence, dependency provenance and remaining limits; do not commit or control the primary agent's browser.
+- [x] Write failing pure retrieval tests for the shared cases and ranking/history rules, plus persistence tests using fake-indexeddb.
+- [x] Run `pnpm --filter @fotoro/web test` and record failures before implementation.
+- [x] Implement in-memory dictionary/postings retrieval with the same two-stage rules and separate deduplicated events. Keep the live path free of hashing/OCR/original reads.
+- [x] Implement SHA-256 source identity and explicit AES-GCM-encrypted IndexedDB retention using a non-extractable origin key. Hydrate metadata separately from preview blobs. Enforce 100 MiB preview eviction while retaining labels/history, and gate originals after reload until digest match.
+- [x] Test default reload-empty; opt-in reload preview/labels/history; mismatched file cannot restore originals; quota/ciphertext failure; retention-off removes key/records; cross-tab/clear/generation races cannot resurrect data.
+- [x] Pin Tesseract.js 7.0.0 and English data 1.0.0; prepare worker/core/language assets locally from installed packages before dev/build. Set all runtime paths explicitly. Add optional OCR control with truthful progress; reuse one worker, terminate and fence work on clear/toggle/unmount.
+- [x] Test injected OCR queue cancellation/error/version behavior and actual OCR on a neutral-filename public text fixture. All OCR runtime asset requests must stay on this origin.
+- [x] Add one leading search preview, interpretation/evidence and alternatives; preserve viewer navigation and accessibility. Details edit labels and expose explicit confirmation/pinning without treating preview inspection as success.
+- [x] Run web tests/typecheck/build and report evidence, dependency provenance and remaining limits; do not commit or control the primary agent's browser.
 
 ### Task 3: Integration, review and try-now verification (primary lane)
 
 **Files:** Shared public test fixtures, `fotoro/docs/verification.md`, `fotoro/docs/deployment.md`, relevant README files and this plan.
 
-- [ ] Fix expected IDs for 30 retrieval tasks before measuring; include people, text/documents, metadata places/moments, deliberately uncovered visual concepts and absent terms. Do not manufacture visual success through filename hints.
-- [ ] Review both implementation diffs and obtain an independent whole-change review. Address permission/storage/generation and provenance defects before release.
-- [ ] Run required native and workspace checks; measure synthetic lookup and actual query-to-preview separately. Describe hardware/corpus and avoid claiming physical iPhone performance from Simulator results.
-- [ ] Verify in the existing in-app-browser tab with public fixtures: labels, ambiguity/acceptance, actual OCR, retention reload, original gating/reselection, clear/retention-off. Inspect network for local OCR assets and no inference/query data request.
-- [ ] Update exact release blockers: Apple development certificate exists; current provisioning profile lacks Associated Domains; no physical phone connected; Cloudflare account unauthenticated. No TestFlight/cloud deployment claim.
-- [ ] Open the finished local app, commit verified changes to `codex/ai-photos`, push and confirm CI. Report what can be tried and what remains unverified.
+- [x] Fix expected IDs for 30 retrieval tasks before measuring; include people, text/documents, metadata places/moments, deliberately uncovered visual concepts and absent terms. Do not manufacture visual success through filename hints.
+- [x] Review both implementation diffs and obtain an independent whole-change review. Address permission/storage/generation and provenance defects before release.
+- [x] Run required native and workspace checks; measure synthetic lookup and actual query-to-preview separately. Describe hardware/corpus and avoid claiming physical iPhone performance from Simulator results.
+- [x] Verify in the existing in-app-browser tab with public fixtures: labels, ambiguity/acceptance, actual OCR, retention reload, original gating/reselection, clear/retention-off. Verify the pinned same-origin OCR asset configuration and actual recognition; review that no inference/query data request is implemented.
+- [x] Update exact release blockers: Apple development certificate exists; current provisioning profile lacks Associated Domains; no physical phone connected; Cloudflare account unauthenticated. No TestFlight/cloud deployment claim.
+- [x] Open the finished local app, commit verified changes to `codex/ai-photos`, push and confirm CI. Report what can be tried and what remains unverified.
 
 ## Plan self-review
 
 The first-deliverable requirements map to Tasks 1 and 2; integration and held-out checks map to Task 3. Semantic models, automatic face groups, cloud index integration, closed-app backup and physical-device acceptance remain subsequent deliverables. They are documented as gaps, never completion claims. Platform implementations share semantics rather than introducing a cross-platform runtime dependency. No original user-authored design prose is edited by this plan.
+
+## Execution ownership update
+
+The user's separate active chat, “Find top use cases for photo search,” began
+the browser search/retention/UI implementation in this same checkout while this
+plan was being prepared. Its plan is `2026-10-01-fotoro-live-photo-search.md`.
+The user approved coordination between the chats. The other chat owns browser
+retrieval, resources, retention and their tests. This chat owns native search,
+browser OCR/assets, LocalTrial/LocalViewer/LocalSearch, their styles and UI tests,
+and final combined verification. Preview and metadata APIs were handed over
+explicitly; neither chat overwrites the other's files.
+
+## Final evidence and limits
+
+Native: 57 tests and Release build pass locally; browser: 97 tests and production
+build pass; API: 20 tests; core: 10 tests; isolated exchange: two tests. Both
+platforms cover 20/20 frozen supported retrieval cases and leave 10 unsupported
+visual/absent cases empty. Final scoped review reports no confirmed P1/P2 findings.
+Actual browser and Simulator evidence and synthetic measurements are recorded in
+`fotoro/docs/verification.md`. Browser full OCR-detail hydration and physical
+iPhone/Safari performance remain unverified; semantic search, faces and closed-app
+scheduling are subsequent deliverables. Push/CI confirmation is recorded with the
+final handoff after the local verification commit.

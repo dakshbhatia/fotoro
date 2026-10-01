@@ -12,21 +12,22 @@ function Tile({
   onOpen: () => void;
   onFailure: (id: string, message: string) => void;
 }) {
-  const [url, setUrl] = useState("");
+  const [url, setUrl] = useState(""), [error, setError] = useState("");
   useEffect(() => {
     let alive = true;
+    setUrl(""); setError("");
     resources
       .load(photo, "thumbnail")
       .then((value) => {
         if (alive) setUrl(value.url);
       })
       .catch((error) => {
-        if (alive) onFailure(photo.id, error.message);
+        if (alive) {setError(error.message); onFailure(photo.id, error.message);}
       });
     return () => {
       alive = false;
     };
-  }, [photo, resources]);
+  }, [photo.id, photo.file, photo.previewLoader, resources]);
   return (
     <div className="tile">
       <button
@@ -37,6 +38,8 @@ function Tile({
       >
         {url ? (
           <img src={url} alt={photo.filename} />
+        ) : error || (!photo.file && photo.previewAvailable === false) ? (
+          <span className="unavailable-photo">Preview unavailable<br /><small>Open details</small></span>
         ) : (
           <span className="loading-photo" aria-label="Preparing photo" />
         )}
