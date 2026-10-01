@@ -26,16 +26,15 @@ A Worker preview with a different RP creates different passkey credentials. Do n
 
 October 1, 2026: the active checkout is `/Users/dakshbhatia/Documents/GitHub/Fotoro`.
 The native/web/API development build runs locally, with the web preview at 4310,
-real local API at 8787 and public fixtures at 8790. Production D1/R2 bindings,
-Cloudflare access and Apple provisioning are still required. A valid local Apple
-Development certificate was found, but the generic-device Release preflight fails:
-the available wildcard provisioning profile lacks Associated Domains and the
-`com.apple.developer.associated-domains` entitlement. A fresh Release attempt with
-`-allowProvisioningUpdates` also reports `No Accounts: Add a new account in Accounts
-settings.` Sign in through Xcode and configure an app-specific profile with the
-existing webcredentials/applinks domains; do not remove those capabilities to make
-a full-sync build pass. Only a Simulator is currently connected. Unsigned generic
-iOS Release compilation succeeds, but that artifact cannot be installed on a phone.
+real local API at 8787 and public fixtures at 8790. Production D1/R2 bindings and
+Cloudflare access are still required. The owner is signed in to Xcode, an
+app-specific development provisioning profile includes Associated Domains, and
+the signed consumer checkpoint is installed and launched on the connected iPhone.
+Local browsing starts with the last 10 days; local search covers permitted still
+photos of any age. Personal Photos access remains the user's choice.
+Fotoro's App Store Connect record is created (app 6818330547). Archive/upload and
+Apple processing are separate from creating that record. Release artifacts and
+distribution logs must stay outside the repository.
 The service now serves `/.well-known/apple-app-site-association` when
 `APPLE_APP_IDS` contains the signed application identifier, for example
 `APPLICATION_PREFIX.cloud.fotoro.Fotoro`. Use the actual application-identifier
@@ -45,11 +44,11 @@ fall through to the web app. It lists `webcredentials.apps` for passkeys.
 Universal-link handling remains unimplemented. See
 [Apple's associated domains documentation](https://developer.apple.com/documentation/xcode/supporting-associated-domains).
 Wrangler's normal account check is unauthenticated. No public Fotoro service
-or TestFlight release is claimed. See [verification](verification.md).
+or TestFlight release is claimed yet. See [verification](verification.md).
 
 Foreground Photos sync is implemented locally. On a deployed/signed build:
 create or unlock one account on iPhone, save its recovery code, then start
-Sync last 30 days. Open the same HTTPS service in Safari and sign in or recover
+Sync last 10 days. Open the same HTTPS service in Safari and sign in or recover
 that account to load committed photos. Open and unlock the iPhone app to scan and
 prepare more photos and finish catalog commits. An encrypted upload already
 scheduled with iOS can continue in the background. Whole-library background

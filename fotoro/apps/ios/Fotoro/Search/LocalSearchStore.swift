@@ -300,6 +300,26 @@ import UIKit
     assets = Dictionary(uniqueKeysWithValues: photos.map { ($0.id, $0) })
     updateQuery(query)
   }
+  // Uses the same ranking and accepted meaning without recording a new choice or query history.
+  func consumerResults(_ value: String) async throws -> [SearchHit] {
+    guard ready, let index else { return [] }
+    let token = work.generation
+    let library = libraryGeneration
+    let queryToken = queryGeneration
+    let previous = response
+    let accepted = acceptedMeaningID
+    let next = try await Task.detached(priority: .userInitiated) {
+      try index.search(value, acceptedMeaningID: accepted, previous: previous, generation: queryToken)
+    }.value
+    try Task.checkCancellation()
+    guard ready, token == work.generation, library == libraryGeneration else { return [] }
+    guard queryToken == queryGeneration else { throw CancellationError() }
+    return next.results.filter { (try? index.record($0.id)) != nil }
+  }
+  func consumerRecord(_ id: String) throws -> SearchRecord? {
+    guard ready else { return nil }
+    return try index?.record(id)
+  }
   func updateQuery(_ value: String) {
     query = value
     queryGeneration &+= 1

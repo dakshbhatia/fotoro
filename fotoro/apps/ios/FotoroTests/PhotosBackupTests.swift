@@ -54,16 +54,101 @@ final class PhotosBackupTests: XCTestCase {
     try await services.importFiles([context.sample])
     XCTAssertEqual(try services.journal.entries().count, 1, "Pause retains newly selected Files locally")
 
-    // Exercise the same Continue entry point as the UI, cancelling its Photos scan before it runs.
-    try services.startPhotosBackup()
-    services.backup.pause()
-    await services.backup.waitUntilSettled()
+    var scans = 0
+    services.photosBackupSnapshot = { _ in scans += 1; return [] }
+    try await services.continueSync()
     try await services.resumeTransfers()
     XCTAssertTrue(try services.journal.entries().isEmpty)
     await services.syncAnnotations()
     XCTAssertTrue(try services.annotations.ledger.pendingIDs().isEmpty)
     XCTAssertEqual(try services.annotations.ledger.state(photo.id)?.revision, 1)
+    XCTAssertFalse(try services.store.syncEnabled(), "Manual transfer Continue must never opt into Photos")
+    XCTAssertEqual(scans, 0, "Manual transfer Continue must never query Photos")
+    services.vault.lock()
+  }
+
+  @MainActor func testOptedInPausePreservesScope() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore() }
+    let services = try await context.enroll()
+    try services.store.setSyncIntent(enabled: true, uploadsPaused: false)
+    services.pauseSync()
+    XCTAssertTrue(try services.store.syncEnabled(), "Pause must retain previously explicit Photos consent")
+    XCTAssertTrue(try services.store.uploadsPaused())
+    var observedCutoff: Date?
+    services.photosBackupSnapshot = { cutoff in observedCutoff = cutoff; return [] }
+    let before = RecentPhotosPolicy.cutoff(now: Date())
+    try await services.continueSync()
+    await services.backup.waitUntilSettled()
+    XCTAssertFalse(try services.store.uploadsPaused())
     XCTAssertTrue(try services.store.syncEnabled())
+    XCTAssertEqual(try XCTUnwrap(observedCutoff).timeIntervalSince(before), 0, accuracy: 2)
+    services.vault.lock()
+  }
+
+  @MainActor func testContinueWaitsForCancelledRunBeforeRestartingOptedInPhotos() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore() }
+    let services = try await context.enroll()
+    try services.store.setSyncIntent(enabled: true, uploadsPaused: false)
+    let gate = BackupGate()
+    services.backup.start(snapshot: { [BackupCandidate(id: "cancelled-source")] }, valid: { true },
+      stage: { _, _ in await gate.wait() }, upload: { _ in XCTFail("Cancelled run cannot upload") }, checkCatalog: {})
+    while !gate.entered { await Task.yield() }
+    services.pauseSync()
+    var resumedScans = 0
+    services.photosBackupSnapshot = { _ in resumedScans += 1; return [] }
+    let continuing = Task { try await services.continueSync() }
+    while try services.store.uploadsPaused() { await Task.yield() }
+    XCTAssertEqual(resumedScans, 0)
+    gate.open()
+    try await continuing.value
+    await services.backup.waitUntilSettled()
+    XCTAssertEqual(resumedScans, 1, "Continue must restart the opted-in scan after the cancelled task settles")
+    services.vault.lock()
+  }
+
+  @MainActor func testNewPauseWhileContinueWaitsPreventsRestart() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore() }
+    let services = try await context.enroll()
+    try services.store.setSyncIntent(enabled: true, uploadsPaused: false)
+    let gate = BackupGate()
+    services.backup.start(snapshot: { [BackupCandidate(id: "cancelled-source")] }, valid: { true },
+      stage: { _, _ in await gate.wait() }, upload: { _ in XCTFail("Cancelled run cannot upload") }, checkCatalog: {})
+    while !gate.entered { await Task.yield() }
+    services.pauseSync()
+    var resumedScans = 0
+    services.photosBackupSnapshot = { _ in resumedScans += 1; return [] }
+    let continuing = Task { try await services.continueSync() }
+    while try services.store.uploadsPaused() { await Task.yield() }
+    services.pauseSync()
+    gate.open()
+    do { try await continuing.value; XCTFail("Newer Pause must cancel old Continue intent") }
+    catch { XCTAssertTrue(error is CancellationError) }
+    await services.backup.waitUntilSettled()
+    XCTAssertEqual(resumedScans, 0)
+    XCTAssertTrue(try services.store.uploadsPaused())
+    services.vault.lock()
+  }
+
+  @MainActor func testManualContinueWaitsForInflightJournalThenResumesQueue() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore() }
+    let services = try await context.enroll()
+    try await services.importFiles([context.sample])
+    let gate = UploadRequestGate()
+    PausedUploadProtocol.server.reservationGate = gate
+    let oldUpload = Task { try await services.resumeTransfers() }
+    while gate.count == 0 { await Task.yield() }
+    services.pauseSync()
+    let continuing = Task { try await services.continueSync() }
+    while try services.store.uploadsPaused() { await Task.yield() }
+    gate.release.signal()
+    try await oldUpload.value
+    try await continuing.value
+    XCTAssertTrue(try services.journal.entries().isEmpty, "Continue must resume after the cancelled journal pass releases its running guard")
+    XCTAssertFalse(try services.store.syncEnabled())
     services.vault.lock()
   }
 
@@ -418,6 +503,7 @@ private final class PausedUploadServer: @unchecked Sendable {
   private let lock = NSLock()
   private var recorded: [Request] = []
   private var reservations: [String: ReserveUploadV1] = [:]
+  var reservationGate: UploadRequestGate?
   var requests: [Request] {
     lock.lock()
     defer { lock.unlock() }
@@ -428,8 +514,10 @@ private final class PausedUploadServer: @unchecked Sendable {
     defer { lock.unlock() }
     recorded = []
     reservations = [:]
+    reservationGate = nil
   }
   func response(_ request: URLRequest) throws -> Data {
+    if request.url?.path == "/v1/uploads/reserve" { reservationGate?.visit() }
     lock.lock()
     defer { lock.unlock() }
     let path = request.url!.path
@@ -486,4 +574,15 @@ private final class PausedUploadProtocol: URLProtocol, @unchecked Sendable {
     } catch { client?.urlProtocol(self, didFailWithError: error) }
   }
   override func stopLoading() {}
+}
+
+private final class UploadRequestGate: @unchecked Sendable {
+  private let lock = NSLock()
+  private var visits = 0
+  let release = DispatchSemaphore(value: 0)
+  var count: Int { lock.lock(); defer { lock.unlock() }; return visits }
+  func visit() {
+    lock.lock(); visits += 1; let first = visits == 1; lock.unlock()
+    if first { _ = release.wait(timeout: .now() + 10) }
+  }
 }

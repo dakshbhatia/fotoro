@@ -31,6 +31,186 @@ struct PendingSave: Codable {
   var busy = false
   var fixtureAccounts: FixtureAccounts?
   var selectedGrant: GrantV1?
+  #if DEBUG
+    @ObservationIgnored var consumerShareDidWrite: ((URL) -> Void)?
+    @ObservationIgnored var catalogSearchWillRead: (@Sendable () -> Void)?
+    @ObservationIgnored var photosBackupSnapshot: ((Date) throws -> [BackupCandidate])?
+  #endif
+  private(set) var consumerSyncSummary = ConsumerSyncSummary()
+  @ObservationIgnored private var consumerObservation = UUID()
+  @ObservationIgnored private var syncIntent = UUID()
+  private var consumerChecking = false
+  private var consumerOffline = false
+  private var consumerFailure: String?
+  func consumerSearch(_ query: String, local: LocalSearchStore) async throws -> [ConsumerSearchHit] {
+    guard !SearchNormalization.text(query).isEmpty else { return [] }
+    let account = vault.isUnlocked ? session.accountId : nil
+    let generation = vault.generation
+    let catalog = store
+    let libraryGeneration = local.libraryGeneration
+    let deviceHits = try await local.consumerResults(query)
+    try Task.checkCancellation()
+    let saved: [LocalPhoto]
+    if let account {
+      guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account else { throw CancellationError() }
+      saved = try await searchCatalog(query).filter { ["committed", "saved"].contains($0.transferState) }
+      guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account else { throw CancellationError() }
+    } else { saved = [] }
+    try Task.checkCancellation()
+    // Recheck local permission/revision after the cloud lookup; a withdrawn device source cannot hide an owned saved copy.
+    var records: [String: SearchRecord] = [:]
+    var result: [ConsumerSearchHit] = []
+    for hit in deviceHits {
+      for id in [hit.id] + hit.children {
+        guard records[id] == nil, local.libraryGeneration == libraryGeneration,
+          let record = try local.consumerRecord(id) else { continue }
+        records[id] = record
+        result.append(ConsumerSearchHit(photo: .device(id), evidence: hit.reason))
+      }
+    }
+    let sources = account == nil ? [] : try catalog.backupSources()
+    let copies = ConsumerSearchBinding.verifiedCopies(sources: sources, records: records)
+    for photo in saved {
+      if !ConsumerSearchBinding.duplicate(saved: photo, copies: copies) {
+        result.append(ConsumerSearchHit(photo: .saved(photo.id), evidence: "Saved photo"))
+      }
+    }
+    return result
+  }
+  func consumerSavedPhoto(_ id: String) throws -> LocalPhoto? {
+    guard vault.isUnlocked, let account = session.accountId,
+      store.root.lastPathComponent == account, let photo = try store.backupPhoto(id),
+      photo.manifest.ownerAccountId == account, photo.manifest.photoId == id,
+      ["committed", "saved"].contains(photo.transferState) else { return nil }
+    return photo
+  }
+  func consumerShareOriginal(_ photo: LocalPhoto) async throws -> URL {
+    guard let current = try consumerSavedPhoto(photo.id),
+      current.metadata.originalSha256 == photo.metadata.originalSha256,
+      try Wire.encode(current.manifest) == Wire.encode(photo.manifest) else { throw FotoroError("Photo access changed") }
+    let generation = vault.generation
+    let account = session.accountId
+    let catalog = store
+    func check() throws {
+      try Task.checkCancellation()
+      guard vault.isUnlocked, vault.generation == generation, session.accountId == account, store === catalog,
+        let now = try consumerSavedPhoto(photo.id), now.metadata.originalSha256 == photo.metadata.originalSha256,
+        try Wire.encode(now.manifest) == Wire.encode(photo.manifest) else { throw CancellationError() }
+    }
+    func verify(_ bytes: Data) throws {
+      guard bytes.count == current.metadata.originalBytes, bytes.digest == current.metadata.originalSha256 else { throw FotoroError("Original could not be verified") }
+    }
+    func export(_ bytes: Data) throws -> URL {
+      try check()
+      let directory = FileManager.default.temporaryDirectory.appendingPathComponent("fotoro-share-" + Wire.id())
+      do {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.protectionKey: FileProtectionType.complete])
+        let component = URL(fileURLWithPath: current.metadata.filename).lastPathComponent
+        let filename = ["", ".", "..", "/"].contains(component) ? "photo." + PhotoImport.originalExtension(for: current.metadata.mediaType) : component
+        let output = directory.appendingPathComponent(filename)
+        try bytes.write(to: output, options: [.atomic, .completeFileProtection])
+        #if DEBUG
+          consumerShareDidWrite?(output)
+        #endif
+        try check()
+        return output
+      } catch {
+        try? FileManager.default.removeItem(at: directory)
+        throw error
+      }
+    }
+    if let url = current.originalURL, FileManager.default.fileExists(atPath: url.path) {
+      let bytes = try await Task.detached { try Data(contentsOf: url) }.value
+      try check(); try verify(bytes)
+      return try export(bytes)
+    }
+    guard let rep = current.manifest.representations.first(where: { $0.binding.kind == "original" }),
+      let key = current.metadata.representationKeys[rep.binding.representationId] else { throw FotoroError("Original is unavailable") }
+    let ciphertext = try await api.request("/v1/objects/\(rep.objectId)")
+    try check()
+    let secret = try Data(b64: key)
+    let bytes = try await Task.detached { try CryptoAdapter().decrypt(ciphertext, key: secret, representation: rep) }.value
+    try check(); try verify(bytes)
+    var updated = current
+    let url = try catalog.write(bytes, name: "cache-" + current.id + "-original." + PhotoImport.originalExtension(for: current.metadata.mediaType))
+    updated.originalURL = url
+    try catalog.put(updated)
+    if let at = photos.firstIndex(where: { $0.id == current.id }) { photos[at] = updated }
+    return try export(bytes)
+  }
+  func refreshConsumerSyncSummary() {
+    guard vault.isUnlocked, let account = session.accountId, store.root.lastPathComponent == account else {
+      consumerSyncSummary = ConsumerSyncSummary()
+      return
+    }
+    do {
+      let sources = try store.backupSources()
+      let entries = try journal.entries().filter { $0.photo.manifest.ownerAccountId == account }
+      var pendingIDs = Set<String>()
+      for id in sources.filter({ $0.phase != .skipped }).map(\.photoId) + entries.map({ $0.photo.id }) {
+        if let photo = try store.backupPhoto(id), photo.manifest.ownerAccountId == account,
+          ["committed", "saved"].contains(photo.transferState) { continue }
+        pendingIDs.insert(id)
+      }
+      let completed = try store.consumerCommittedCount(accountId: account)
+      let skipped = sources.filter { $0.phase == .skipped }.count
+      var facts = ConsumerSyncFacts()
+      facts.unlocked = true
+      facts.enabled = try store.syncEnabled()
+      facts.paused = try store.uploadsPaused()
+      facts.uploading = journal.running && !entries.isEmpty
+      facts.checking = consumerChecking || annotations.busy
+      facts.preparing = backup.isRunning && !facts.uploading && !facts.checking
+      facts.offline = consumerOffline
+      facts.completed = completed
+      facts.total = backup.status.sourceTotal == nil ? nil : completed + pendingIDs.count + skipped
+      facts.pending = pendingIDs.count
+      facts.failed = backup.status.failed + journal.errors.count + annotations.errors.count + (consumerFailure == nil ? 0 : 1)
+      if sources.contains(where: { $0.phase == .committed && $0.message != nil }) { facts.failed += 1 }
+      facts.skipped = skipped
+      facts.annotationsPending = try store.consumerPendingAnnotations(accountId: account)
+      facts.lastChecked = try store.consumerLastChecked() ?? backup.status.lastChecked
+      facts.detail = consumerFailure ?? sources.first(where: { $0.message != nil })?.message
+      if facts.paused { facts.detail = "Your queued photos are kept. Continue when you’re ready." }
+      else if !NativeBackupPolicy.allowsPrivatePhotos(accountId: account, fixture: session.fixture) {
+        facts.detail = "Public demo accounts cannot back up your private photos."
+      }
+      consumerSyncSummary = ConsumerSyncSummary.derive(facts)
+    } catch {
+      consumerSyncSummary = ConsumerSyncSummary(state: .needsAttention, detail: "Sync status could not be read. Your originals are unchanged.", action: .retry)
+    }
+  }
+  private func observeConsumerSync() {
+    let token = consumerObservation
+    withObservationTracking {
+      _ = backup.status
+      _ = backup.isRunning
+      _ = journal.running
+      _ = journal.errors
+      _ = annotations.busy
+      _ = annotations.errors
+    } onChange: { [weak self] in
+      Task { @MainActor [weak self] in
+        guard let self, self.consumerObservation == token else { return }
+        self.refreshConsumerSyncSummary()
+        self.observeConsumerSync()
+      }
+    }
+  }
+  private func resetConsumerSyncObservation() {
+    consumerObservation = UUID()
+    consumerChecking = false
+    consumerOffline = false
+    consumerFailure = nil
+    refreshConsumerSyncSummary()
+    observeConsumerSync()
+  }
+  private func recordConsumerSyncFailure(_ error: Error) {
+    guard !(error is CancellationError), vault.isUnlocked else { return }
+    consumerOffline = (error as? URLError)?.code == .notConnectedToInternet
+    consumerFailure = consumerOffline ? "You’re offline. Your queued photos are kept." : "Sync needs attention. Your originals are unchanged."
+    refreshConsumerSyncSummary()
+  }
   let crypto = CryptoAdapter()
   init(root: URL? = nil, networkConfiguration: URLSessionConfiguration = .ephemeral) throws {
     session = AccountSession()
@@ -59,6 +239,8 @@ struct PendingSave: Codable {
     }
     ImageCache.shared.costLimit = 48 * 1024 * 1024
     vault.onLock = { [weak self] in
+      self?.consumerObservation = UUID()
+      self?.consumerSyncSummary = ConsumerSyncSummary()
       self?.backup.pause()
       self?.journal.pause()
       self?.photoAnnotations = [:]
@@ -71,6 +253,7 @@ struct PendingSave: Codable {
       self?.deviceTrust.pending = nil
       ImageCache.shared.removeAll()
     }
+    resetConsumerSyncObservation()
   }
   func activateAccount() throws {
     backup.pause()
@@ -87,6 +270,7 @@ struct PendingSave: Codable {
     photoAnnotations = [:]
     try reload()
     try hydrateLocalAnnotations()
+    resetConsumerSyncObservation()
   }
   func startPhotosBackup() throws {
     guard
@@ -97,6 +281,9 @@ struct PendingSave: Codable {
     guard let account = session.accountId else { throw FotoroError("Sign in first") }
     let bundle = try vault.requireBundle()
     try store.setSyncIntent(enabled: true, uploadsPaused: false)
+    consumerOffline = false
+    consumerFailure = nil
+    refreshConsumerSyncSummary()
     let generation = vault.generation
     let catalog = store
     let importWorker = importer
@@ -112,6 +299,9 @@ struct PendingSave: Codable {
           throw FotoroError(
             "An existing upload remains pending. Retry it before syncing more photos.")
         }
+        #if DEBUG
+          if let snapshot = self.photosBackupSnapshot { return try snapshot(RecentPhotosPolicy.cutoff(now: Date())) }
+        #endif
         let permission = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
         guard RecentPhotosPolicy.canRead(permission) else {
           throw FotoroError("Allow Photos access to sync.")
@@ -135,7 +325,7 @@ struct PendingSave: Codable {
         }
         for candidate in candidates where candidate.skipReason == nil {
           var source = try catalog.backupSource(candidate.id)
-          if source.phase == .committed, source.sourceRevision != candidate.sourceRevision,
+          if source.phase == .committed, source.sourceRevision != candidate.sourceRevision || source.originalSha256 == nil,
             let photo = try catalog.backupPhoto(source.photoId) {
             let digest = try await importWorker.sourceDigest(candidate.id)
             try Task.checkCancellation()
@@ -144,6 +334,7 @@ struct PendingSave: Codable {
               RecentPhoto.sourceRevision(current) == candidate.sourceRevision else { throw FotoroError("Photo changed during sync. Try again.") }
             if digest == photo.metadata.originalSha256 {
               source.sourceRevision = candidate.sourceRevision
+              source.originalSha256 = digest
             } else {
               source.sourceRevision = nil
               source.message = "This Photos original changed. Its earlier backup is kept separately."
@@ -193,6 +384,7 @@ struct PendingSave: Codable {
       try await sync()
       if try store.syncEnabled(), try !store.uploadsPaused(), !backup.isRunning { try startPhotosBackup() }
     } catch {
+      recordConsumerSyncFailure(error)
       if vault.isUnlocked { notices = ["Sync will continue when you reconnect."] }
       else { self.error = "Sign in to continue syncing your photos." }
     }
@@ -202,10 +394,43 @@ struct PendingSave: Codable {
     vault.lock()
   }
   func pauseSync() {
-    do { try store.setSyncIntent(enabled: false, uploadsPaused: true) }
+    syncIntent = UUID()
+    do { try store.setSyncIntent(enabled: store.syncEnabled(), uploadsPaused: true) }
     catch { self.error = error.localizedDescription }
     backup.pause()
     journal.pause(cancelBackground: true)
+    refreshConsumerSyncSummary()
+  }
+  func continueSync() async throws {
+    guard vault.isUnlocked, let account = session.accountId else { throw FotoroError("Sign in first") }
+    let generation = vault.generation
+    let catalog = store
+    let coordinator = backup
+    let uploads = journal
+    let optedIn = try catalog.syncEnabled()
+    let intent = UUID()
+    syncIntent = intent
+    try catalog.setSyncIntent(enabled: optedIn, uploadsPaused: false)
+    refreshConsumerSyncSummary()
+    func check() throws {
+      try Task.checkCancellation()
+      guard vault.isUnlocked, vault.generation == generation, store === catalog,
+        backup === coordinator, journal === uploads, session.accountId == account,
+        syncIntent == intent, try !catalog.uploadsPaused() else { throw CancellationError() }
+    }
+    await coordinator.waitUntilSettled()
+    try check()
+    try await uploads.waitUntilSettled()
+    try check()
+    if optedIn {
+      try startPhotosBackup()
+      return
+    }
+    try await resumeTransfers()
+    try check()
+    await syncAnnotations()
+    try check()
+    try await sync()
   }
   func configureAPI(_ value: String) throws {
     guard let url = URL(string: value),
@@ -232,6 +457,7 @@ struct PendingSave: Codable {
       $0.manifest.ownerAccountId == session.accountId
     }
     try reloadAnnotations()
+    refreshConsumerSyncSummary()
   }
   #if DEBUG
     func fixtureUnlock(index: Int) async throws {
@@ -362,6 +588,15 @@ struct PendingSave: Codable {
         session.accountId == authorizedAccount, store === catalog
       else { throw CancellationError() }
     }
+    consumerChecking = true
+    refreshConsumerSyncSummary()
+    defer {
+      if vault.generation == generation, store === catalog, session.accountId == authorizedAccount {
+        consumerChecking = false
+        refreshConsumerSyncSummary()
+      }
+    }
+    do {
     var more = true
     while more {
       try fence()
@@ -408,6 +643,13 @@ struct PendingSave: Codable {
     let inbox: GrantInboxV1 = try await api.get("/v1/grants")
     try fence()
     grants = inbox.grants
+    try catalog.setConsumerLastChecked(Date())
+    consumerOffline = false
+    consumerFailure = nil
+    } catch {
+      if vault.generation == generation, store === catalog, session.accountId == authorizedAccount { recordConsumerSyncFailure(error) }
+      throw error
+    }
   }
   func bindLocalSearch(_ search: LocalSearchStore) {
     localSearch = search
@@ -428,6 +670,7 @@ struct PendingSave: Codable {
       if let value = try annotations.ledger.current(photo: photo, bundle: bundle, card: card) { values[photo.id] = value }
     }
     photoAnnotations = values
+    refreshConsumerSyncSummary()
   }
   func annotation(_ photo: LocalPhoto) -> PhotoAnnotationsV1 {
     if let cached = photoAnnotations[photo.id] { return cached }
@@ -453,13 +696,20 @@ struct PendingSave: Codable {
     let bundle = try vault.requireBundle()
     let card = try session.requireCard(account)
     let ledger = annotations.ledger
-    let result = try await Task.detached(priority: .userInitiated) {
+    #if DEBUG
+      let willRead = catalogSearchWillRead
+    #endif
+    let worker = Task.detached(priority: .userInitiated) {
       var matches: [LocalPhoto] = []
       var after: String?
       while true {
         try Task.checkCancellation()
         let page = try catalog.photos(after: after, limit: 1000)
         for photo in page where photo.manifest.ownerAccountId == account {
+          #if DEBUG
+            willRead?()
+          #endif
+          try Task.checkCancellation()
           let value = try ledger.current(photo: photo, bundle: bundle, card: card)
           let terms = [photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + (value?.facts ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""]
           if terms.contains(where: { $0.localizedCaseInsensitiveContains(query) }) { matches.append(photo) }
@@ -468,7 +718,12 @@ struct PendingSave: Codable {
         after = last.id
       }
       return matches
-    }.value
+    }
+    let result = try await withTaskCancellationHandler {
+      try await worker.value
+    } onCancel: {
+      worker.cancel()
+    }
     try Task.checkCancellation()
     guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account else { throw CancellationError() }
     return result
@@ -479,9 +734,10 @@ struct PendingSave: Codable {
     return ([photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + (value?.facts ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""])
       .contains { $0.localizedCaseInsensitiveContains(query) }
   }
-  private func captureLocalAnnotation(_ record: SearchRecord, labelsChanged: Bool) throws {
+  private func captureLocalAnnotation(_ record: SearchRecord, labelsChanged: Bool, source knownSource: BackupSource? = nil, refreshSummary: Bool = true) throws {
     guard vault.isUnlocked, let account = session.accountId,
-      let source = try store.backupSources().first(where: { $0.id == record.id }),
+      let source = try knownSource ?? store.backupSources().first(where: { $0.id == record.id }),
+      source.id == record.id,
       AnnotationSourceBinding.accepts(sourceRevision: source.sourceRevision, recordRevision: record.revision),
       let photo = try store.backupPhoto(source.photoId) else { return }
     let bundle = try vault.requireBundle()
@@ -497,12 +753,17 @@ struct PendingSave: Codable {
     }
     try annotations.ledger.edit(value, photo: photo, bundle: bundle, card: card)
     photoAnnotations[photo.id] = value
+    if refreshSummary { refreshConsumerSyncSummary() }
     if labelsChanged { Task { await self.syncAnnotations() } }
   }
   private func captureLocalAnnotations() throws {
     guard let localSearch, vault.isUnlocked else { return }
-    for source in try store.backupSources() {
-      if let record = try localSearch.record(source.id) { try captureLocalAnnotation(record, labelsChanged: false) }
+    let sources = try store.backupSources()
+    defer { refreshConsumerSyncSummary() }
+    for source in sources {
+      if let record = try localSearch.record(source.id) {
+        try captureLocalAnnotation(record, labelsChanged: false, source: source, refreshSummary: false)
+      }
     }
   }
   private func hydrateLocalAnnotations() throws {
@@ -801,7 +1062,8 @@ struct PendingSave: Codable {
       guard !busy else { return }
       busy = true
       defer { busy = false }
-      do { try await action() } catch { self.error = error.localizedDescription }
+      do { try await action() } catch { self.recordConsumerSyncFailure(error); self.error = error.localizedDescription }
+      self.refreshConsumerSyncSummary()
     }
   }
 }

@@ -102,6 +102,25 @@ final class LibraryStore: @unchecked Sendable {
       return try rows.map { rebased(try Wire.decode(LocalPhoto.self, $0["value"] as Data)) }
     }
   }
+  func consumerCommittedCount(accountId: String) throws -> Int {
+    try database.read {
+      try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM photos WHERE json_extract(CAST(value AS TEXT),'$.manifest.ownerAccountId')=? AND json_extract(CAST(value AS TEXT),'$.transferState') IN ('committed','saved')", arguments: [accountId]) ?? 0
+    }
+  }
+  func consumerPendingAnnotations(accountId: String) throws -> Int {
+    try database.read {
+      try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM annotations WHERE json_extract(CAST(value AS TEXT),'$.accountId')=? AND (json_extract(CAST(value AS TEXT),'$.draft') IS NOT NULL OR json_extract(CAST(value AS TEXT),'$.conflict')=1)", arguments: [accountId]) ?? 0
+    }
+  }
+  func consumerLastChecked() throws -> Date? {
+    try database.read {
+      guard let value = try String.fetchOne($0, sql: "SELECT value FROM state WHERE key='consumerLastChecked'"), let time = TimeInterval(value) else { return nil }
+      return Date(timeIntervalSince1970: time)
+    }
+  }
+  func setConsumerLastChecked(_ date: Date) throws {
+    try database.write { try $0.execute(sql: "INSERT INTO state(key,value) VALUES('consumerLastChecked',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", arguments: [String(date.timeIntervalSince1970)]) }
+  }
   func ownedOriginal(digest: String, accountId: String) throws -> LocalPhoto? {
     try database.read { db in
       let cursor = try Row.fetchCursor(db, sql: "SELECT value FROM photos")

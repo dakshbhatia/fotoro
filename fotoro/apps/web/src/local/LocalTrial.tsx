@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../library/icons";
 import { LocalLibrary } from "./LocalLibrary";
 import { LocalViewer } from "./LocalViewer";
@@ -7,7 +7,11 @@ import { LocalRetention } from "./retention";
 import { PhotoSearchIndex, emptyFeedback, normalizeSearch, type SearchMeaning, type SearchResult } from "./search";
 import { OCR_PROCESSOR } from "./ocr";
 import { useLocalOcr, type LocalOcrPhoto } from "./useLocalOcr";
-import { inLast30Days, collectLocalFiles, type LocalPhoto, LocalResources } from "./resources";
+import { collectLocalFiles, type LocalPhoto, LocalResources } from "./resources";
+import {ConsumerChoices, loadLocalChoices, saveLocalChoices, shouldOfferLocalChoices, type LocalChoices} from "./ConsumerChoices";
+import {syncStateLabel, type ConsumerSyncSummary} from "../library/consumer-sync";
+import {savedSearchPhotos, combineConsumerSearch, ConsumerPreviewResources, type OwnedPhotoSnapshot} from "../library/consumer-search";
+import {inRecentSelectedRange} from "./consumer-range";
 export function selectedOriginals(photos: LocalPhoto[]): File[] {
   return photos.flatMap(photo => photo.file instanceof File ? [photo.file] : []);
 }
@@ -30,25 +34,31 @@ export function displaySearchResult(predicted: SearchResult, navigation?: Search
     return {...predicted, photoId: navigation.photoID};
   return predicted;
 }
-export function LocalTrial({onBackup, onPhotosChange}: {onBackup: () => void; onPhotosChange?: (photos: LocalPhoto[]) => void}) {
+export function LocalTrial({onBackup, onPhotosChange, syncSummary, ownedPhotos = null, onOpenSaved}: {onBackup: () => void; onPhotosChange?: (photos: LocalPhoto[]) => void; syncSummary?: ConsumerSyncSummary; ownedPhotos?: OwnedPhotoSnapshot | null; onOpenSaved?: (id: string) => void}) {
   const [photos, setPhotos] = useState<LocalOcrPhoto[]>([]), [query, setQuery] = useState(""),
     [viewer, setViewer] = useState<string | null>(null), [settings, setSettings] = useState(false),
     [last30, setLast30] = useState(false), [status, setStatus] = useState(""), [progress, setProgress] = useState(""),
     [retained, setRetained] = useState(false), [retentionBusy, setRetentionBusy] = useState(false), [ready, setReady] = useState(false), [saving, setSaving] = useState(""),
-    [readText, setReadText] = useState(false), [feedback, setFeedback] = useState(emptyFeedback),
+    [readText, setReadText] = useState(() => loadLocalChoices()?.readText ?? false), [feedback, setFeedback] = useState(emptyFeedback),
     [committed, setCommitted] = useState<string>(), [navigation, setNavigation] = useState<SearchNavigation>(), [sourceGeneration, setSourceGeneration] = useState(0);
+  const [choices, setChoices] = useState(loadLocalChoices);
   const input = useRef<HTMLInputElement>(null), settingsPanel = useRef<HTMLElement>(null), generation = useRef(0),
     importing = useRef<number | null>(null), alive = useRef(false), retainedRef = useRef(false), saveVersion = useRef(0),
     previous = useRef<SearchResult | undefined>(undefined), session = useRef(crypto.randomUUID());
-  const [resources] = useState(() => new LocalResources()), [retention] = useState(() => new LocalRetention());
+  const [resources] = useState(() => new LocalResources()), [savedResources] = useState(() => new ConsumerPreviewResources()), [retention] = useState(() => new LocalRetention());
   retainedRef.current = retained;
-  const scope = last30 ? "local:last30" : "local:all";
-  const scoped = useMemo(() => photos.filter(photo => !last30 || inLast30Days(photo)), [photos, last30]);
+  const scope = "local:all";
+  const scoped = useMemo(() => photos.filter(photo => !last30 || inRecentSelectedRange(photo)), [photos, last30]);
+  const savedPhotos = useMemo(() => savedSearchPhotos(ownedPhotos, photos), [ownedPhotos, photos]);
+  const searchPhotos = useMemo(() => [...photos, ...savedPhotos.filter(photo => !photos.some(local => local.id === photo.id))], [photos, savedPhotos]);
   const index = useMemo(() => new PhotoSearchIndex(photos.map(photo => photo.ocr && photo.ocr.processor !== OCR_PROCESSOR ? {...photo, ocr: undefined} : photo), feedback), [photos, feedback]);
-  const predicted = useMemo(() => index.search(query, {scope, allowedIds: new Set(scoped.map(photo => photo.id)), committedMeaning: committed, previous: previous.current}), [index, query, scope, scoped, committed]);
+  const localPredicted = useMemo(() => index.search(query, {scope, committedMeaning: committed, previous: previous.current}), [index, query, committed]);
+  const savedIndex = useMemo(() => new PhotoSearchIndex(savedPhotos), [savedPhotos]);
+  const savedPredicted = useMemo(() => savedIndex.search(query, {scope: "saved:" + (ownedPhotos?.accountId ?? ""), committedMeaning: committed}), [savedIndex, query, ownedPhotos?.accountId, committed]);
+  const predicted = useMemo(() => combineConsumerSearch(localPredicted, savedPredicted, committed), [localPredicted, savedPredicted, committed]);
   const result = useMemo(() => displaySearchResult(predicted, navigation), [predicted, navigation]);
   useEffect(() => {previous.current = result; if (committed && result.meaning?.id !== committed) setCommitted(undefined);}, [result, committed]);
-  const matching = useMemo(() => result.photoIds.flatMap(id => {const photo = photos.find(value => value.id === id); return photo ? [photo] : [];}), [result.photoIds, photos]);
+  const matching = useMemo(() => result.photoIds.flatMap(id => {const photo = searchPhotos.find(value => value.id === id); return photo ? [photo] : [];}), [result.photoIds, searchPhotos]);
   const viewerPhotos = normalizeSearch(query) ? matching : scoped;
   const pin = result.meaning ? feedback.pins[JSON.stringify([scope, result.meaning.id])] : undefined;
   const available = scoped.filter(photo => photo.previewAvailable !== false && (photo.file || photo.preview || photo.previewLoader)).length,
@@ -76,6 +86,12 @@ export function LocalTrial({onBackup, onPhotosChange}: {onBackup: () => void; on
     return () => {alive.current = false; generation.current++; saveVersion.current++; stop(); resources.clear();};
   }, [resources, retention]);
   useEffect(() => {onPhotosChange?.(photos);}, [photos, onPhotosChange]);
+  useEffect(() => {
+    const clearSaved = () => savedResources.clear();
+    window.addEventListener("fotoro-lock", clearSaved);
+    return () => {window.removeEventListener("fotoro-lock", clearSaved); savedResources.clear();};
+  }, [savedResources]);
+  useLayoutEffect(() => {savedResources.clear();}, [ownedPhotos?.token, ownedPhotos?.photos, savedResources]);
   useEffect(() => {
     if (!ready || !retained) return;
     const token = generation.current, version = ++saveVersion.current;
@@ -130,13 +146,14 @@ export function LocalTrial({onBackup, onPhotosChange}: {onBackup: () => void; on
   };
   const accept = (meaning: SearchMeaning) => {
     setNavigation(undefined);
-    index.acceptMeaning(meaning.id, session.current, Date.now(), scope); setFeedback(index.feedback()); setCommitted(meaning.id);
+    if (localPredicted.meanings.some(value => value.id === meaning.id)) {index.acceptMeaning(meaning.id, session.current, Date.now(), scope); setFeedback(index.feedback());}
+    setCommitted(meaning.id);
   };
   const confirm = (id: string, pin = false) => {
-    if (!result.meaning || !result.photoIds.includes(id)) return;
+    if (!result.meaning || localPredicted.meaning?.id !== result.meaning.id || !localPredicted.photoIds.includes(id)) return;
     if (pin) setNavigation(undefined);
     index.choosePhoto(result.meaning.id, id, session.current, Date.now(), pin, scope); setFeedback(index.feedback());
-    setStatus(pin ? "Representative pinned for " + result.meaning.term + "." : "Photo confirmed.");
+    setStatus(pin ? "Preferred photo saved on this device." : "Photo choice saved on this device.");
   };
   const toggleRetention = async (enabled: boolean) => {
     if (retentionBusy) return;
@@ -148,33 +165,39 @@ export function LocalTrial({onBackup, onPhotosChange}: {onBackup: () => void; on
     finally {if (alive.current) setRetentionBusy(false);}
   };
   const clear = async () => {reset(); try {await retention.clear();} catch (error) {setStatus(`Local storage could not be cleared: ${(error as Error).message}`);}};
+  const chooseFeatures = (choice: LocalChoices) => {
+    saveLocalChoices(choice); setChoices(choice); setReadText(choice.readText); void toggleRetention(choice.retain);
+  };
+  const offerChoices = ready && shouldOfferLocalChoices(photos.length > 0, retained, choices);
   return <>
-    <main inert={viewer || settings ? true : undefined} className="local-trial">
-      <header><h1>Fotoro</h1><button className="menu-button glass" aria-label="Settings" onClick={() => setSettings(true)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M3 6h18M3 12h18M3 18h18" /></svg></button></header>
-      {!photos.length ? <section className="local-empty"><button className="open-photos" disabled={!ready || !!progress} onClick={() => input.current?.click()}>Open photos</button><p className="hint">Photos stay on this device.</p>{!ready && <p role="status">Opening saved search…</p>}</section>
-        : normalizeSearch(query) ? <LocalSearch key={sourceGeneration} photos={scoped} result={result} resources={resources} committed={committed} pinned={pin} coverage={coverage} onAccept={accept} onNavigate={id => setNavigation({query, scope, meaningID: result.meaning!.id, photoID: id})} onOpen={setViewer} onConfirm={id => confirm(id)} onPin={id => confirm(id, true)} onFailure={failure} />
+    <main inert={viewer || settings ? true : undefined} className={"local-trial" + (offerChoices ? " with-choices" : "")}>
+      <header><div className="brand"><p className="eyebrow">Your photos</p><h1>Fotoro</h1></div><div className="header-actions"><button className={"sync-pill glass state-" + (syncSummary?.state ?? "notStarted")} onClick={onBackup} aria-label={(syncSummary ? syncStateLabel[syncSummary.state] : "Sync photos") + ". Open sync details"}><span className="sync-dot" aria-hidden="true" /><span>{syncSummary ? syncStateLabel[syncSummary.state] : "Sync photos"}</span></button><button className="menu-button glass" aria-label="Settings" onClick={() => setSettings(true)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M4 7h16M4 12h16M4 17h16" /></svg></button></div></header>
+      {offerChoices && <ConsumerChoices onChoose={chooseFeatures} />}
+      {normalizeSearch(query) && searchPhotos.length ? <LocalSearch key={sourceGeneration} photos={searchPhotos} result={result} resources={result.photoId?.startsWith("saved:") ? savedResources : resources} committed={committed} pinned={pin} canCorrect={!!result.photoId && localPredicted.meaning?.id === result.meaning?.id && localPredicted.photoIds.includes(result.photoId)} coverage={coverage + (savedPhotos.length ? ` · ${savedPhotos.length} saved photos available` : "")} onAccept={accept} onNavigate={id => setNavigation({query, scope, meaningID: result.meaning!.id, photoID: id})} onOpen={id => id.startsWith("saved:") ? onOpenSaved?.(id.slice(6)) : setViewer(id)} onConfirm={id => confirm(id)} onPin={id => confirm(id, true)} onFailure={failure} />
+        : !photos.length ? <section className="local-empty"><h2>Your photos, close by.</h2><p className="hint">Choose photos to browse and search here.{savedPhotos.length > 0 && <> Your saved photos are ready to search.</>}</p><button className="open-photos" disabled={!ready || !!progress} onClick={() => input.current?.click()}>Open photos</button><p className="hint">Photos stay on this device until you choose to sync.<br />This browser opens the files you select.</p>{!ready && <p role="status">Opening saved search…</p>}</section>
         : scoped.length ? <><p className="local-browse-coverage">{coverage}</p><LocalLibrary key={sourceGeneration} photos={scoped} resources={resources} onOpen={setViewer} onFailure={failure} /></>
         : <section className="empty"><p>No photos in this date range</p><button onClick={() => setLast30(false)}>Show all photos</button></section>}
-      {photos.length > 0 && <div className="toolbar glass"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="10" cy="10" r="7" /><path d="m15 15 6 6" /></svg><input aria-label="Search photos" placeholder="Search" value={query} onChange={event => changeQuery(event.target.value)} />{query && <button aria-label="Clear search" onClick={() => changeQuery("")}><Icon kind="close" /></button>}<button aria-label="Add photos" disabled={!!progress || !ready} onClick={() => input.current?.click()}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 3v18M3 12h18" /></svg></button></div>}
-      {last30 && photos.length > 0 && <button className="local-filter" onClick={() => setLast30(false)}>Last 30 days ×</button>}
-      {(progress || ocrProgress) && <p className="busy" role="status">{progress || ocrProgress}</p>}
+      {searchPhotos.length > 0 && <div className="toolbar glass"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="10" cy="10" r="7" /><path d="m15 15 6 6" /></svg><input aria-label="Search photos" placeholder="Search" value={query} onChange={event => changeQuery(event.target.value)} />{query && <button aria-label="Clear search" onClick={() => changeQuery("")}><Icon kind="close" /></button>}<button aria-label="Add photos" disabled={!!progress || !ready} onClick={() => input.current?.click()}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 3v18M3 12h18" /></svg></button></div>}
+      {last30 && photos.length > 0 && !normalizeSearch(query) && <button className="local-filter" onClick={() => setLast30(false)}>Last 10 days ×</button>}
+      {(progress || ocrProgress || saving) && <p className="local-progress" role="status">{progress || ocrProgress || saving}</p>}
+      {syncSummary?.detail && <button className="browse-sync-detail" onClick={onBackup}>{syncSummary.detail}</button>}
       {status && <div className="status" role="status">{status}<button aria-label="Dismiss message" onClick={() => setStatus("")}><Icon kind="close" /></button></div>}
     </main>
     <input ref={input} hidden type="file" accept="image/jpeg,image/png,image/heic,image/heif,.heic,.heif" multiple onChange={event => {const files = Array.from(event.target.files ?? []); event.target.value = ""; void openFiles(files);}} />
     {settings && <aside className="sheet local-settings" ref={settingsPanel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Settings">
       <button className="close" aria-label="Close settings" onClick={closeSettings}><Icon kind="close" /></button><h2>Photos</h2>
-      <label className="local-check"><input type="checkbox" checked={last30} onChange={event => {setLast30(event.target.checked); setCommitted(undefined); previous.current = undefined;}} />Last 30 days</label>
-      <p className="hint">Photos without a capture date stay visible.</p>
-      <label className="local-check"><input type="checkbox" checked={readText} onChange={event => setReadText(event.target.checked)} />Read text in photos</label>
+      <label className="local-check"><input type="checkbox" checked={last30} onChange={event => setLast30(event.target.checked)} />Browse the last 10 days</label>
+      <p className="hint">Photos without a capture date stay visible. Search covers all selected and unlocked saved photos.</p>
+      <label className="local-check"><input type="checkbox" checked={readText} onChange={event => {const choice = {readText: event.target.checked, retain: retained}; saveLocalChoices(choice); setChoices(choice); setReadText(choice.readText);}} />Find words in photos</label>
       <p className="hint">Find photos by English words inside them. Text is read on this device.</p>
-      <label className="local-check"><input type="checkbox" checked={retained} disabled={!ready || retentionBusy} onChange={event => void toggleRetention(event.target.checked)} />Keep local search after reopening</label>
-      <p className="hint">Keep labels, photo text and previews on this browser.</p>
+      <label className="local-check"><input type="checkbox" checked={retained} disabled={!ready || retentionBusy} onChange={event => {const choice = {readText, retain: event.target.checked}; saveLocalChoices(choice); setChoices(choice); void toggleRetention(choice.retain);}} />Remember these photos</label>
+      <p className="hint">Keep search data and bounded previews in this browser. Original files are not retained.</p>
       {saving && <p role="status">{saving}</p>}
       <button onClick={() => {closeSettings(); onBackup();}}>Sync photos</button>
       <p className="hint">Sync selected photos to your account to use them on another device.</p>
       <details><summary>About local storage</summary><p className="hint">Originals stay unchanged and aren’t saved in this browser. Saved previews use up to 100 MB. Browser storage may be cleared, so keep your original files. Choose photos to open; this browser cannot scan your Photos library.</p></details>
       <button disabled={!ready} onClick={() => {void clear(); closeSettings();}}>Clear local search</button>
     </aside>}
-    {viewer && viewerPhotos.length > 0 && <LocalViewer photos={viewerPhotos} initial={viewer} resources={resources} onLabels={(id, labels) => setPhotos(current => current.map(photo => photo.id === id ? {...photo, labels} : photo))} onUse={normalizeSearch(query) ? id => confirm(id) : undefined} onConfirm={normalizeSearch(query) ? id => confirm(id) : undefined} onPin={normalizeSearch(query) ? id => confirm(id, true) : undefined} meaning={result.meaning?.term} onReselect={() => {input.current?.click(); setViewer(null);}} onClose={() => {const id = viewer; setViewer(null); requestAnimationFrame(() => document.getElementById("local-photo-" + id)?.focus({preventScroll: true}));}} />}
+    {viewer && viewerPhotos.some(photo => !photo.id.startsWith("saved:")) && <LocalViewer photos={viewerPhotos.filter(photo => !photo.id.startsWith("saved:"))} initial={viewer} resources={resources} onLabels={(id, labels) => setPhotos(current => current.map(photo => photo.id === id ? {...photo, labels} : photo))} onUse={normalizeSearch(query) ? id => confirm(id) : undefined} onConfirm={normalizeSearch(query) ? id => confirm(id) : undefined} onPin={normalizeSearch(query) ? id => confirm(id, true) : undefined} meaning={result.meaning?.term} onReselect={() => {input.current?.click(); setViewer(null);}} onClose={() => {const id = viewer; setViewer(null); requestAnimationFrame(() => document.getElementById("local-photo-" + id)?.focus({preventScroll: true}));}} />}
   </>;
 }

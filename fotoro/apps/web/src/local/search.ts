@@ -203,15 +203,21 @@ export class PhotoSearchIndex {
     const meaning = candidates.find(candidate => candidate.id === options.committedMeaning) ?? candidates[0];
     if (!meaning) return { ...empty, meanings: candidates.slice(0, 6) };
     const key = meaningKey(scope, meaning.id), pin = this.history.pins[key];
+    const ranks = new Map(meaning.photoIds.map(id => {
+      const photo = this.records.get(id)!, parsed = Date.parse(photo.date);
+      return [id, [
+        Number(id === pin), tier(meaning.evidence[id]), count(this.history.photos[photoKey(key, id)], now),
+        meaning.evidence[id] === "ocr" ? photo.ocr?.confidence ?? 0 : 0,
+        Number(photo.favorite === true), photo.dateSource === "exif" && parsed <= now && Number.isFinite(parsed) ? parsed : 0,
+      ]] as const;
+    }));
     const sorted = [...meaning.photoIds].sort((a, b) => {
-      const captureTime = (id: string) => {
-        const photo = this.records.get(id)!, date = Date.parse(photo.date);
-        return photo.dateSource === "exif" && date <= now && Number.isFinite(date) ? date : 0;
-      };
-      const confidence = (id: string) => meaning.evidence[id] === "ocr" ? this.records.get(id)!.ocr?.confidence ?? 0 : 0;
-      return Number(b === pin) - Number(a === pin) || tier(meaning.evidence[b]) - tier(meaning.evidence[a]) ||
-        count(this.history.photos[photoKey(key, b)], now) - count(this.history.photos[photoKey(key, a)], now) ||
-        confidence(b) - confidence(a) || Number(this.records.get(b)!.favorite === true) - Number(this.records.get(a)!.favorite === true) || captureTime(b) - captureTime(a) || compare(a, b);
+      const left = ranks.get(a)!, right = ranks.get(b)!;
+      for (let position = 0; position < left.length; position++) {
+        const difference = right[position] - left[position];
+        if (difference) return difference;
+      }
+      return compare(a, b);
     });
     const previous = options.previous, extending = previous && prefix.startsWith(normalizeSearch(previous.query));
     const previousId = previous?.photoId;

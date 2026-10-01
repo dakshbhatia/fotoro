@@ -1,6 +1,12 @@
 from pathlib import Path
-import hashlib
+import hashlib,re
 root=Path(__file__).parent
+project_file=root/'Fotoro.xcodeproj/project.pbxproj'
+previous=project_file.read_text() if project_file.exists() else ''
+build_match=re.search(r'CURRENT_PROJECT_VERSION = ([0-9]+);',previous)
+version_match=re.search(r'MARKETING_VERSION = ([0-9.]+);',previous)
+build_number=build_match.group(1) if build_match else '1'
+marketing_version=version_match.group(1) if version_match else '0.1.0'
 objects={}
 def uid(s): return hashlib.sha1(s.encode()).hexdigest()[:24].upper()
 def add(name,body): objects[uid(name)]=body;return uid(name)
@@ -8,8 +14,9 @@ def q(s): return '"'+s+'"'
 files=[];build=[];resources=[];testfiles=[];testres=[]
 for folder in ['Fotoro','FotoroTests']:
  for p in sorted((root/folder).rglob('*')):
-  if not p.is_file() or p.suffix in [".plist",".entitlements"]:continue
-  rel=str(p.relative_to(root)); typ='sourcecode.swift' if p.suffix=='.swift' else 'text.json' if p.suffix=='.json' else 'image.jpeg'
+  if any(parent.suffix=='.xcassets' for parent in p.parents):continue
+  if not (p.is_file() or p.suffix=='.xcassets') or p.suffix in [".plist",".entitlements"]:continue
+  rel=str(p.relative_to(root)); typ='folder.assetcatalog' if p.suffix=='.xcassets' else 'sourcecode.swift' if p.suffix=='.swift' else 'text.json' if p.suffix=='.json' else 'text.xml' if p.suffix=='.xcprivacy' else 'image.jpeg'
   f=add(rel,f'isa = PBXFileReference; lastKnownFileType = {typ}; path = {q(rel)}; sourceTree = SOURCE_ROOT;');files.append(f)
   b=add(rel+'build',f'isa = PBXBuildFile; fileRef = {f};')
   (testfiles if folder=='FotoroTests' and p.suffix=='.swift' else testres if folder=='FotoroTests' else build if p.suffix=='.swift' else resources).append(b)
@@ -26,9 +33,10 @@ for target,sources,res,ptype in [('Fotoro',build,resources,'application'),('Foto
  for kind,items in [('Sources',sources),('Resources',res),('Frameworks',frameworks if target=='Fotoro' else [])]:phases.append(add(target+kind,f'isa = PBX{kind}BuildPhase; buildActionMask = 2147483647; files = ({",".join(items)}); runOnlyForDeploymentPostprocessing = 0;'))
  configs=[]
  for conf in ['Debug','Release']:
-  settings='SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 26.0; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; GENERATE_INFOPLIST_FILE = YES; CODE_SIGN_STYLE = Automatic; PRODUCT_NAME = "$(TARGET_NAME)"; PRODUCT_BUNDLE_IDENTIFIER = cloud.fotoro.'+target+'; '
+  settings='SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 26.0; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; GENERATE_INFOPLIST_FILE = YES; CODE_SIGN_STYLE = Automatic; PRODUCT_NAME = "$(TARGET_NAME)"; PRODUCT_BUNDLE_IDENTIFIER = cloud.fotoro.'+target+'; MARKETING_VERSION = '+marketing_version+'; CURRENT_PROJECT_VERSION = '+build_number+'; '
+  settings+='ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; ' if target=='Fotoro' else ''
   settings+='ENABLE_TESTABILITY = YES; ONLY_ACTIVE_ARCH = YES; SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; ' if conf=='Debug' else ''
-  settings+='INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Browse your last 30 days of photos and share selected originals."; INFOPLIST_FILE = Fotoro/Info.plist; CODE_SIGN_ENTITLEMENTS = Fotoro/Fotoro.entitlements; INFOPLIST_KEY_UILaunchScreen_Generation = YES; ' if target=='Fotoro' else 'TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Fotoro.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Fotoro"; BUNDLE_LOADER = "$(TEST_HOST)"; '
+  settings+='INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Browse your last 10 days of photos and share selected originals."; INFOPLIST_FILE = Fotoro/Info.plist; CODE_SIGN_ENTITLEMENTS = Fotoro/Fotoro.entitlements; INFOPLIST_KEY_UILaunchScreen_Generation = YES; ' if target=='Fotoro' else 'TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Fotoro.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Fotoro"; BUNDLE_LOADER = "$(TEST_HOST)"; '
   configs.append(add(target+conf,f'isa = XCBuildConfiguration; name = {conf}; buildSettings = {{{settings}}};'))
  cl=add(target+'configs',f'isa = XCConfigurationList; buildConfigurations = ({",".join(configs)}); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;')
  dependency=[]

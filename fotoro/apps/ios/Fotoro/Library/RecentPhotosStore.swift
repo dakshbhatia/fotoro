@@ -44,7 +44,7 @@ struct RecentPhoto: Identifiable {
 
 enum RecentPhotosPolicy {
   static func cutoff(now: Date, calendar: Calendar = .current) -> Date {
-    calendar.date(byAdding: .day, value: -30, to: now)!
+    calendar.date(byAdding: .day, value: -10, to: now)!
   }
   static func includes(_ date: Date?, now: Date, calendar: Calendar = .current) -> Bool {
     guard let date else { return false }
@@ -65,10 +65,26 @@ enum RecentPhotosPolicy {
   var error: String?
   var loading = false
   let images = PHCachingImageManager()
+  @ObservationIgnored private let authorization: () -> PHAuthorizationStatus
+  @ObservationIgnored private let requestAccess: () async -> PHAuthorizationStatus
+  @ObservationIgnored private let readPhotos: @MainActor (Date) -> [RecentPhoto]
+  init(
+    authorization: @escaping () -> PHAuthorizationStatus = { PHPhotoLibrary.authorizationStatus(for: .readWrite) },
+    requestAccess: @escaping () async -> PHAuthorizationStatus = { await PHPhotoLibrary.requestAuthorization(for: .readWrite) },
+    readPhotos: @escaping @MainActor (Date) -> [RecentPhoto] = RecentPhotosStore.fetchRecentPhotos
+  ) {
+    self.authorization = authorization
+    self.requestAccess = requestAccess
+    self.readPhotos = readPhotos
+  }
+  func restoreAccess(now: Date = Date()) {
+    status = authorization()
+    opened = status != .notDetermined
+    if opened { refresh(now: now) }
+  }
 
   func open() async {
-    // Permission and PHAsset access occur only after the user's Open Photos action.
-    status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+    status = await requestAccess()
     opened = true
     guard RecentPhotosPolicy.canRead(status) else {
       photos = []
@@ -78,12 +94,15 @@ enum RecentPhotosPolicy {
   }
   func refresh(now: Date = Date()) {
     guard opened else { return }
-    status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+    status = authorization()
+    images.stopCachingImagesForAllAssets()
     guard RecentPhotosPolicy.canRead(status) else {
       photos = []
       return
     }
-    images.stopCachingImagesForAllAssets()
+    photos = readPhotos(now)
+  }
+  private static func fetchRecentPhotos(now: Date) -> [RecentPhoto] {
     let options = PHFetchOptions()
     options.predicate = NSPredicate(
       format: "mediaType == %d AND creationDate >= %@ AND creationDate <= %@",
@@ -92,7 +111,7 @@ enum RecentPhotosPolicy {
     let result = PHAsset.fetchAssets(with: options)
     var values: [RecentPhoto] = []
     result.enumerateObjects { asset, _, _ in values.append(RecentPhoto(asset: asset)) }
-    photos = values
+    return values
   }
   func cache(_ assets: [PHAsset], start: Bool) {
     let target = CGSize(width: 360, height: 360)
@@ -105,6 +124,14 @@ enum RecentPhotosPolicy {
     }
   }
   func shareOriginals(_ photos: [RecentPhoto]) async throws -> [URL] {
+    func checkAccess(_ photo: RecentPhoto) throws {
+      guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+        let current = PHAsset.fetchAssets(withLocalIdentifiers: [photo.id], options: nil).firstObject,
+        !current.isHidden, current.mediaType == .image,
+        RecentPhoto.sourceRevision(current) == photo.sourceRevision else {
+        throw FotoroError("This photo is no longer available. Choose it again from Photos.")
+      }
+    }
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(
       at: directory, withIntermediateDirectories: true,
@@ -113,6 +140,7 @@ enum RecentPhotosPolicy {
       var urls: [URL] = []
       for photo in photos {
         try Task.checkCancellation()
+        try checkAccess(photo)
         guard
           let resource = PHAssetResource.assetResources(for: photo.asset).first(where: {
             $0.type == .photo
@@ -133,6 +161,7 @@ enum RecentPhotosPolicy {
           }
         }
         try Task.checkCancellation()
+        try checkAccess(photo)
         try FileManager.default.setAttributes(
           [.protectionKey: FileProtectionType.complete], ofItemAtPath: url.path)
         urls.append(url)

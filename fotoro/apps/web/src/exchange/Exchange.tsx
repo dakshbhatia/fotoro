@@ -294,12 +294,13 @@ export function Exchange({
       tabIndex={-1}
       role="dialog"
       aria-modal="true"
-      aria-label="Photo exchange"
+      aria-label="Encrypted photo exchange"
     >
       <button className="close" onClick={onClose} aria-label="Close exchange">
         <Icon kind="close" />
       </button>
-      <h2>Share</h2>
+      <h2>Encrypted exchange</h2>
+      <p className="hint">Share with another Fotoro account using a card from a trusted channel.</p>
       <p>{selection.length} selected · explicit access to these photos</p>
       <label>
         Account card received through a trusted channel

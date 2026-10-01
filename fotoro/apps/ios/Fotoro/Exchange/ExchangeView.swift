@@ -7,6 +7,7 @@ struct ExchangeView: View {
   @State private var temporary = false
   @State private var accountCard = ""
   @State private var approvalJSON = ""
+  @Environment(\.dismiss) private var dismiss
   var body: some View {
     NavigationStack {
       List {
@@ -91,7 +92,8 @@ struct ExchangeView: View {
             }
           }
         }
-      }.navigationTitle("Exchange")
+      }.navigationTitle("Encrypted sharing")
+        .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
     }
   }
 }

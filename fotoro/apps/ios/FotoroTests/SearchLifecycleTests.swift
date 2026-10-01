@@ -127,10 +127,12 @@ final class SearchLifecycleTests: XCTestCase {
         request.creationDate = captured
         assetID = request.placeholderForCreatedAsset?.localIdentifier ?? ""
       }
-      let search = LocalSearchStore()
+      // The app host restores its own durable search on launch; this interaction test owns its index.
+      let search = LocalSearchStore(root: FileManager.default.temporaryDirectory.appendingPathComponent("PhotoKitSearch-" + Wire.id()))
       search.open(status: status)
-      for _ in 0..<200 where search.indexing { try await Task.sleep(for: .milliseconds(50)) }
-      XCTAssertFalse(search.indexing)
+      // Label editing needs this asset's verified metadata, while OCR may continue for other photos.
+      for _ in 0..<200 where !search.canEditLabels(assetID) { try await Task.sleep(for: .milliseconds(50)) }
+      XCTAssertTrue(search.canEditLabels(assetID))
       XCTAssertNotNil(search.assets[assetID])
       XCTAssertFalse(RecentPhotosPolicy.includes(captured, now: Date()))
       let suppliedLabel = "Older public receipt \(assetID.prefix(8))"

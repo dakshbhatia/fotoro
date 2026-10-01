@@ -170,3 +170,20 @@ test("literal noisy filenames remain explicitly retrievable without generic auto
   assert.equal(index.search("IMG_123", { now }).photoId, "img");
   assert.equal(index.search("4826", { now }).photoId, "digits");
 });
+test("broad-prefix ranking reads capture dates and photo history at most once per eligible photo", () => {
+  const photos = Array.from({ length: 200 }, (_, i) => photo("photo-" + i.toString().padStart(3, "0"), "IMG_" + i + ".jpg", ["Receipt"], new Date(now - ((i * 7919) % 365) * 86400000).toISOString()));
+  const index = new PhotoSearchIndex(photos), historyKey = JSON.stringify(["local:all", "label:receipt"]);
+  const parse = Date.parse, stringify = JSON.stringify;
+  let dates = 0, photoHistory = 0;
+  Date.parse = value => { dates++; return parse(value); };
+  JSON.stringify = (value, replacer, space) => {
+    if (Array.isArray(value) && value.length === 2 && value[0] === historyKey) photoHistory++;
+    return stringify(value, replacer, space);
+  };
+  try {
+    const result = index.search("Re", { now });
+    assert.equal(result.photoId, "photo-000");
+    assert.equal(result.photoIds.length, 200);
+    assert.ok(dates <= photos.length && photoHistory <= photos.length, `${dates} capture-date parses and ${photoHistory} photo-history keys for ${photos.length} eligible photos`);
+  } finally { Date.parse = parse; JSON.stringify = stringify; }
+});

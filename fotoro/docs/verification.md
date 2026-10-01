@@ -9,16 +9,41 @@ include permanent regressions and were re-reviewed.
 | --- | --- |
 | Contracts, crypto and loopback fixtures | 11 tests pass: schema boundaries, bounded annotations, signatures, media binding and preservation |
 | Worker/D1/R2 API | 27 tests pass: real cryptographic WebAuthn ceremonies, recovery, uploads, renewal, grants, encrypted annotation revisions, capability-bound ciphertext PUTs and Apple association metadata |
-| Web | 115 tests pass: retrieval/evidence, scoped feedback, encrypted retention, cross-instance clear, lazy previews, OCR worker lifecycle, original gating, annotation sync, conflict resolution and stale-page rejection |
-| Web production build | TypeScript/Vite pass; local entry 296.39 kB (93.02 kB gzip). Account/crypto loads after Sync photos; its large chunk warning remains |
-| Native | 88 tests pass with Xcode 27 after the durable Pause fix. Three new controlled regressions failed before the fix and passed afterward; foreground/process restoration, manual imports before Photos opt-in, account isolation and paused annotation publishing are covered. Prior Debug/unsigned generic-device Release builds and iOS 26 CI pass for the 85-test baseline. New-revision older-SDK CI is separate |
+| Web | 128 tests pass: consumer choices/status, account-isolated Pause, combined local/saved search, preview fences, original Share/fallback, rank-key read budget and existing retrieval/retention/annotation checks |
+| Web production build | TypeScript/Vite pass; local entry 306.15 kB (95.75 kB gzip). Account/crypto loads after Sync photos; the large encrypted-media chunk warning remains |
+| Native | 103 tests pass with Xcode 27, zero failures or skips. Consumer source/consent/cancellation tests, held-worker Continue, share-copy eviction/lock/cleanup, real PhotoKit all-age labels and existing crypto/journal/background checks are included. Prior iOS 26 CI passes the 88-test baseline; current-revision older-SDK CI is separate |
 | Shared retrieval fixtures | Both platforms find all 20 predeclared supported tasks; five unsupported visual tasks and five absent terms remain empty. These are development fixtures, not held-out user accuracy |
 | Cross-language media | Swift decrypts frozen TypeScript vectors; TypeScript decrypts checked-in Swift ciphertext and rejects altered binding |
 | Real local HTTP exchange | Three isolated tests cover fresh migrations, recovery sessions, bidirectional contribution/save, revocation, restore, byte-preserved HEIC, background ciphertext staging, encrypted labels/OCR in a fresh account session, cross-account denial and idempotent revision conflicts |
-| Native local lifecycle | All-age permitted enumeration, limited/denied startup, permission purge, 30-day browse, changed revisions, cancellation rollback and refresh stability are exercised |
+| Native local lifecycle | All-age permitted enumeration, limited/denied startup, permission purge, ten-day browse, changed revisions, cancellation rollback and refresh stability are exercised |
 | Browser local lifecycle | Session-only default; retained labels/text/previews; lazy preview hydration; unavailable preview preservation; digest reselection; pending/cross-instance clear fences |
 
 ## Actual app checks
+
+The consumer update was rendered at an actual 689×797 browser viewport. A neutral
+receipt is found by recognized text; opening Sync and returning preserves its
+query. Navigation now clears the floating toolbar. Reopened retained previews
+cannot share absent originals: different bytes with the same filename leave Share
+disabled, and reselecting the exact original digest enables Share. This browser
+session exposed Share rather than Download; its native share destination was not
+inspected. An IAB 390×844 override did not alter the actual dimensions, so this
+update does not add a phone-size Safari rendering claim.
+
+The signed consumer checkpoint is installed and launched on the connected owner's
+iPhone, with Associated Domains intact. Personal Photos access and usability have
+not been inspected. Simulator public samples exercise restored ten-day browsing,
+all-age receipt search, owned saved catalog search and both original system Share
+sheets. Final native consumer fixes pass all 103 tests. Review reproduced a fast
+Continue no-op behind settling workers and share URLs being evicted by subsequent
+downloads. Continue now waits, respects newer Pause/account/cancellation intent,
+and resumes only the previously authorized scope. Originals use protected
+share-owned copies with completion/dismissal/failure/cancellation/lock cleanup.
+Actual held-worker and filesystem regressions fail before and pass after fixes.
+The full test's real PhotoKit interaction now uses its own database and waits for
+metadata/label readiness; it keeps its inserted older-asset and label-query checks
+without waiting for unrelated OCR of all accumulated public samples.
+
+The following earlier rendered evidence describes the preceding search iteration.
 
 In the in-app browser, public receipt and photo samples exercised one leading
 result, evidence, ambiguous meanings, verbatim diacritic labels, all three matching
@@ -100,6 +125,14 @@ from 119,966,264 to 129,862,200 bytes in that run. These different synthetic cor
 are not a platform comparison. Neither benchmark includes PhotoKit/image decoding,
 preview delivery, rendering, OCR throughput, physical-device battery or memory.
 
+A later 10,000-record corpus with 296 OCR characters per photo exposed repeated
+date/history parsing inside browser ranking. Precomputing rank keys once per
+eligible photo preserved 1,440 generated full-result comparisons and all existing
+search regressions. Twelve warm Node samples on this Mac measured receipt lookup
+p95 172.00→16.65 ms; this is a synthetic engine comparison under concurrent load,
+not Safari/iPhone frame latency. Full OCR dictionary rebuild after feedback still
+costs roughly 197–357 ms in that synthetic experiment and remains separate work.
+
 Browser previews hydrate lazily and are retained up to 100 MiB. Generated raster
 caches are bounded to 48 MiB; this does not bound decoder or total process memory.
 Full OCR text currently hydrates with encrypted photo metadata, and the in-memory
@@ -115,7 +148,7 @@ are engineering rules, not calibrated accuracy or intent confidence. Physical
 Safari performance and a larger OCR quality corpus remain unverified.
 
 Native search includes all permitted non-hidden still photos, while browsing stays
-at 30 days. Native OCR uses network-disabled local previews, so iCloud-only assets
+at ten days. Native OCR uses network-disabled local previews, so iCloud-only assets
 can have incomplete text coverage. Local labels/history are excluded from device
 backup. Labels and supported OCR for photos explicitly synced to an account now
 travel as encrypted annotations. History and pinned choices stay device-local.

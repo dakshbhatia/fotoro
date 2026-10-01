@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Deliver one understandable browse/search/share experience with explicit, dependable 30-day backup and same-account Safari restore.
+**Goal:** Deliver one understandable browse/search/share experience with explicit, dependable 10-day backup and same-account Safari restore.
 
 **Architecture:** Preserve the encrypted media/annotation protocols and durable journals. Change consumer presentation independently on native and web; one core owner handles upload policy, shared source adapters and presentation contracts. Release/inference experiments stay outside the UI critical path.
 
@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Preserve original bytes, signed media/source binding and account/vault-generation fences.
-- Browse 30 days; local search may cover all permitted non-hidden still photos.
+- Browse 10 days; local search may cover all permitted non-hidden still photos.
 - Safari selection is explicit; retention and text-reading choices are visible and voluntary.
 - A photo is saved only after verified catalog commit. Skips, pending annotations and failed work stay visible.
 - Pause, Lock and sign out remain distinct. Manual import before Photos backup opt-in remains supported.
@@ -89,7 +89,7 @@ review can run concurrently. UI changes do not require an encryption-schema chan
 **Interfaces:** Consume current permission/search stores and existing auth/backup commands. Add an account-view completion callback that returns the caller to its pending intent; it does not itself opt the Photos library into uploads.
 
 - [ ] Restore already-granted PhotoKit access and search on launch. Verify first use never prompts before Open Photos; relaunch opens gallery; limited/denied states remain correct.
-- [ ] Retain Sync intent through Create/Sign in/Recovery, fetch the owned catalog after unlock, then show explicit last-30-days backup choice and progress. Ordinary sign-in does not start PhotoKit upload.
+- [ ] Retain Sync intent through Create/Sign in/Recovery, fetch the owned catalog after unlock, then show explicit last-10-days backup choice and progress. Ordinary sign-in does not start PhotoKit upload.
 - [ ] Replace search-control overload with matching photos and useful optional alternatives. Move evidence/corrections into Info; preserve prefix stability, permission filtering and existing feedback data.
 - [ ] Present C's authorized local/saved hits through one search surface. Test a cloud-only receipt plus a local older receipt and account/permission changes.
 - [ ] Add standard original sharing to the saved-photo viewer, using the existing verified media path and system activity sheet. Preserve separate encrypted exchange trust checks.
@@ -116,7 +116,7 @@ review can run concurrently. UI changes do not require an encryption-schema chan
 
 - [ ] Complete normal Cloudflare login; create distinct preview/production D1/R2 resources and apply migrations; deploy HTTPS with correct RP/origin/AASA configuration and rollback target.
 - [ ] Sign in through Xcode; obtain app-specific Associated Domains provisioning; connect a physical iPhone. Do not substitute wildcard provisioning or strip entitlements.
-- [ ] Run the spec's 30-day phone-to-Safari corpus scenarios, including recovery, byte-identical originals, interruption, Pause, background lifecycle and same-account annotations.
+- [ ] Run the spec's 10-day phone-to-Safari corpus scenarios, including recovery, byte-identical originals, interruption, Pause, background lifecycle and same-account annotations.
 - [ ] Investigate any reproduced connection loss with retained service/process/transport evidence. Do not hide it behind test skips or indiscriminate mutation retries.
 - [ ] Integrate Tasks 1–3 and run `pnpm check`, `pnpm test:exchange:isolated`, `pnpm test:ios`, unsigned Release compilation and hosted service checks. Record physical checks separately from automated tests.
 

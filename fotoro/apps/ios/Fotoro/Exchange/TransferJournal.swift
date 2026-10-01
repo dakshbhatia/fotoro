@@ -15,6 +15,7 @@ struct TransferEntry: Codable {
   private(set) var running = false
   var errors: [String: String] = [:]
   private var foregroundGeneration = UUID()
+  private var settlementWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
   private let background = BackgroundUploadTransport.shared
   private var sourceAccount: String { store.root.lastPathComponent }
   var backgroundPending: Int {
@@ -77,10 +78,31 @@ struct TransferEntry: Codable {
       try $0.execute(sql: "DELETE FROM transfers WHERE id=?", arguments: [id])
     }
   }
+  func waitUntilSettled() async throws {
+    try Task.checkCancellation()
+    guard running else { return }
+    let id = UUID()
+    try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        if Task.isCancelled { continuation.resume(throwing: CancellationError()) }
+        else if !running { continuation.resume() }
+        else { settlementWaiters[id] = continuation }
+      }
+    } onCancel: {
+      Task { @MainActor [weak self] in
+        self?.settlementWaiters.removeValue(forKey: id)?.resume(throwing: CancellationError())
+      }
+    }
+  }
   func resumePending(only allowedPhotoIDs: Set<String>? = nil) async {
     guard vault.isUnlocked, !running else { return }
     running = true
-    defer { running = false }
+    defer {
+      running = false
+      let waiters = Array(settlementWaiters.values)
+      settlementWaiters.removeAll()
+      for waiter in waiters { waiter.resume() }
+    }
     let generation = vault.generation
     let foreground = foregroundGeneration
     let account = api.session.accountId

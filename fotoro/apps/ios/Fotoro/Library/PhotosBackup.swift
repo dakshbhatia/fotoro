@@ -18,6 +18,7 @@ struct BackupSource: Codable, Identifiable {
   var phase: Phase = .pending
   var message: String?
   var sourceRevision: String?
+  var originalSha256: String?
 }
 
 extension LibraryStore {
@@ -63,6 +64,7 @@ extension LibraryStore {
       var queued = source
       queued.phase = .queued
       queued.message = nil
+      queued.originalSha256 = photo.metadata.originalSha256
       try put(photo, db: db)
       try putBackupSource(queued, db: db)
       try db.execute(
@@ -96,6 +98,7 @@ struct BackupStatus: Codable {
   var skipped = 0
   var message: String?
   var lastChecked: Date?
+  var sourceTotal: Int?
 }
 @MainActor @Observable final class PhotosBackup {
   let store: LibraryStore
@@ -153,6 +156,7 @@ struct BackupStatus: Codable {
         try fence()
         status.phase = .scanning
         status.message = nil
+        status.sourceTotal = nil
         try persist()
         let candidates = try await snapshot()
         try fence()
@@ -177,6 +181,7 @@ struct BackupStatus: Codable {
           $0.phase == .queued
             || (($0.phase == .pending || $0.phase == .failed) && selectedIDs.contains($0.id))
         }.sorted { ($0.phase == .queued ? 0 : 1) < ($1.phase == .queued ? 0 : 1) }
+        status.sourceTotal = try store.backupSources().count
         status.phase = .running
         try refreshCounts()
         for var source in work {
@@ -191,6 +196,7 @@ struct BackupStatus: Codable {
             try fence()
             source.phase = .committed
             source.message = nil
+            source.originalSha256 = try store.backupPhoto(source.photoId)?.metadata.originalSha256
             try store.putBackupSource(source)
           } catch {
             try fence()

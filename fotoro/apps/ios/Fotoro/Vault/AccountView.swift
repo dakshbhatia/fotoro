@@ -2,6 +2,7 @@ import SwiftUI
 
 struct AccountView: View {
   @Bindable var services: AppServices
+  var onSignedIn: () -> Void = {}
   @State private var recovery = ""
   @State private var recovering = false
   @State private var recoverySaved = false
@@ -9,8 +10,8 @@ struct AccountView: View {
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
-        Text("Sync photos").font(.title2)
-        Text("Use the same account on iPhone and in your browser.").foregroundStyle(.secondary)
+        Text("Your photos, everywhere").font(.title2.bold())
+        Text("Create an account or sign in to find your saved photos on any device.").foregroundStyle(.secondary)
         Button("Sign in") {
           services.run {
             if services.session.accountId != nil {
@@ -20,7 +21,7 @@ struct AccountView: View {
             } else {
               try await services.auth.login()
             }
-            try services.activateAccount()
+            try await finishSignIn()
           }
         }.buttonStyle(.borderedProminent)
         Button("Create account") { services.run { try await services.auth.prepareEnrollment() } }
@@ -32,8 +33,7 @@ struct AccountView: View {
             services.run {
               try await services.auth.recover(recovery)
               recovery = ""
-              try services.activateAccount()
-              try await services.sync()
+              try await finishSignIn()
             }
           }
         }
@@ -45,7 +45,7 @@ struct AccountView: View {
           Button("Continue") {
             services.run {
               try await services.auth.completeEnrollment(recoverySaved: recoverySaved)
-              try services.activateAccount()
+              try await finishSignIn()
             }
           }.disabled(!recoverySaved)
         }
@@ -59,7 +59,7 @@ struct AccountView: View {
             Button("Complete approved request") {
               services.run {
                 try await services.deviceTrust.complete()
-                try services.activateAccount()
+                try await finishSignIn()
               }
             }
           }
@@ -69,7 +69,7 @@ struct AccountView: View {
             Button("Unlock with PRF passkey") {
               services.run {
                 try await services.auth.unlockWithPRF()
-                try services.activateAccount()
+                try await finishSignIn()
               }
             }
             TextField("API URL", text: $apiURL).textInputAutocapitalization(.never)
@@ -86,5 +86,10 @@ struct AccountView: View {
         #endif
       }.padding()
     }
+  }
+  func finishSignIn() async throws {
+    try services.activateAccount()
+    try await services.sync()
+    onSignedIn()
   }
 }

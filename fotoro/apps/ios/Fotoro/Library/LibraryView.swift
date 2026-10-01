@@ -16,6 +16,10 @@ struct LibraryView: View {
   @State private var selectedPhotos: [PhotosPickerItem] = []
   @State private var scrollID: String?
   @State private var signingOut = false
+  @State private var originalURLs: [URL] = []
+  @State private var sharingOriginals = false
+  @State private var preparingShare = false
+  @State private var shareTask: Task<Void, Never>?
   private let photoManager = PHCachingImageManager()
   var filtered: [LocalPhoto] {
     if !query.isEmpty, let searchResults { return searchResults }
@@ -73,13 +77,13 @@ struct LibraryView: View {
             }
             .toolbar {
               ToolbarItem(placement: .topBarLeading) {
-                Button("Sync photos", systemImage: "arrow.triangle.2.circlepath") {
+                Button {
                   showingBackup = true
-                }
+                } label: { ConsumerBackupLabel(summary: services.consumerSyncSummary) }
               }
               ToolbarItem(placement: .topBarTrailing) {
-                Menu("Add", systemImage: "plus") {
-                  Button("Shared moments") { showExchange = true }
+                Menu("More", systemImage: "ellipsis") {
+                  Button("Encrypted sharing") { showExchange = true }
                   Button("Lock", systemImage: "lock") { services.lockAccount() }
                   Button("Sign out", systemImage: "person.crop.circle.badge.xmark") {
                     signingOut = true
@@ -102,8 +106,8 @@ struct LibraryView: View {
               if !selection.isEmpty {
                 ToolbarItem(placement: .bottomBar) {
                   Button("Share \(selection.count)", systemImage: "square.and.arrow.up") {
-                    showExchange = true
-                  }
+                    shareOriginals()
+                  }.disabled(preparingShare)
                 }
               }
             }
@@ -120,9 +124,12 @@ struct LibraryView: View {
           else if services.vault.isUnlocked { services.run { try await services.sync() } }
         }
         .sheet(isPresented: $showingBackup) { PhotosBackupView(services: services) }
+        .sheet(isPresented: $sharingOriginals, onDismiss: cleanupShare) {
+          OriginalShareSheet(urls: originalURLs) { _ in cleanupShare() }
+        }
         .sheet(isPresented: $showExchange) {
           ExchangeView(
-            services: services, selected: services.photos.filter { selection.contains($0.id) })
+            services: services, selected: filtered.filter { selection.contains($0.id) })
         }
         .fileImporter(
           isPresented: $showingFiles, allowedContentTypes: [.jpeg, .png, .heic],
@@ -155,10 +162,14 @@ struct LibraryView: View {
             viewer = nil
             showExchange = false
             showingBackup = false
+            shareTask?.cancel()
+            cleanupShare()
             selection = []
             searchResults = nil
           }
         }
+        .onChange(of: services.vault.generation) { shareTask?.cancel(); cleanupShare() }
+        .onDisappear { shareTask?.cancel(); cleanupShare() }
         .alert("Sign out?", isPresented: $signingOut) {
           Button("Sign out and remove local data", role: .destructive) {
             services.run { try services.signOut(discardPending: true) }
@@ -191,6 +202,42 @@ struct LibraryView: View {
     } else {
       selection.insert(photoID)
     }
+  }
+  private func shareOriginals() {
+    let selected = filtered.filter { selection.contains($0.id) }
+    guard !selected.isEmpty, !preparingShare, !sharingOriginals else { return }
+    let generation = services.vault.generation
+    let account = services.session.accountId
+    let catalog = services.store
+    preparingShare = true
+    shareTask = Task {
+      var urls: [URL] = []
+      defer {
+        ConsumerShareExports.remove(urls)
+        preparingShare = false
+        shareTask = nil
+      }
+      do {
+        for photo in selected {
+          urls.append(try await services.consumerShareOriginal(photo))
+          try Task.checkCancellation()
+        }
+        guard services.vault.isUnlocked, services.vault.generation == generation,
+          services.session.accountId == account, services.store === catalog else { throw CancellationError() }
+        for photo in selected {
+          guard let current = try services.consumerSavedPhoto(photo.id),
+            current.metadata == photo.metadata, current.manifest == photo.manifest else { throw CancellationError() }
+        }
+        originalURLs = urls
+        sharingOriginals = true
+        urls = []
+      } catch is CancellationError {} catch { services.error = error.localizedDescription }
+    }
+  }
+  private func cleanupShare() {
+    ConsumerShareExports.remove(originalURLs)
+    sharingOriginals = false
+    originalURLs = []
   }
 }
 

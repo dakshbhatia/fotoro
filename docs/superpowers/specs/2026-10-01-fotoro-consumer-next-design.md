@@ -28,7 +28,7 @@ work. It does not promise parity with every Apple/Google feature in one release.
 
 **Open -> see photos -> search -> open the right picture -> share.**
 
-**Enable backup -> choose last 30 days -> see progress -> find the same photo in Safari.**
+**Enable backup -> choose last 10 days -> see progress -> find the same photo in Safari.**
 
 Local browsing works before account creation. Signing in alone does not start
 uploading the Photos library. A first-time backup scope choice is explicit.
@@ -130,7 +130,7 @@ selection already handles every iPhone format.
 
 ## Release acceptance
 
-Use a consented physical iPhone corpus containing at least 30 days of photos,
+Use a consented physical iPhone corpus containing at least 10 days of photos,
 including receipts, screenshots, an older searchable picture, HEIC, an iCloud-only
 asset and unsupported video/Live Photo cases. Verify:
 

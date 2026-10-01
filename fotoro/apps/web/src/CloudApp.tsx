@@ -3,7 +3,7 @@ import type { GrantV1 } from "@fotoro/contracts";
 import { ready } from "@fotoro/crypto";
 import { Library } from "./library/Library";
 import { Viewer } from "./library/Viewer";
-import { cachedCatalog, syncCatalog, type Photo } from "./library/catalog";
+import { cachedCatalog, photoBytes, syncCatalog, type Photo } from "./library/catalog";
 import {
   lockVault,
   requireVault,
@@ -50,6 +50,9 @@ import { localOriginalDigest, queueAnnotations, queueLocalAnnotations, pendingAn
 import { PhotoSearchIndex, normalizeSearch } from "./local/search";
 import type { LocalPhoto } from "./local/resources";
 import { cloudSearchRecords } from "./library/search";
+import {deriveConsumerSyncSummary, syncStateLabel, type ConsumerSyncSummary} from "./library/consumer-sync";
+import {loadUploadPause, saveUploadPause} from "./library/consumer-preferences";
+import type {OwnedPhotoSnapshot} from "./library/consumer-search";
 const noLocalPhotos: LocalPhoto[] = [];
 const SearchIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -66,10 +69,14 @@ export default function CloudApp({
   onBack,
   localPhotos = noLocalPhotos,
   active = true,
+  onSyncSummary,
+  onOwnedPhotos,
 }: {
   onBack: () => void;
   localPhotos?: LocalPhoto[];
   active?: boolean;
+  onSyncSummary?: (summary: ConsumerSyncSummary) => void;
+  onOwnedPhotos?: (snapshot: OwnedPhotoSnapshot | null) => void;
 }) {
   const [account, setAccount] = useState(() => {
       try {
@@ -106,15 +113,28 @@ export default function CloudApp({
     [pickedFiles, setPickedFiles] = useState<File[]>([]),
     [needsAttention, setNeedsAttention] = useState(false),
     [annotationPending, setAnnotationPending] = useState<PendingAnnotation[]>([]),
-    [committedMeaning, setCommittedMeaning] = useState<string>();
+    [committedMeaning, setCommittedMeaning] = useState<string>(),
+    [selecting, setSelecting] = useState(false),
+    [online, setOnline] = useState(() => navigator.onLine !== false),
+    [pauseReady, setPauseReady] = useState(false);
   const running = useRef(false),
-    pausedRef = useRef(false),
+    pausedRef = useRef(true),
+    intentVersion = useRef(0),
     uploadAbort = useRef<AbortController | null>(null),
     localSynced = useRef(new WeakMap<File, string>());
   const input = useRef<HTMLInputElement>(null);
+  const accountPanel = useRef<HTMLElement>(null);
   const localPhotosRef = useRef(localPhotos);
   localPhotosRef.current = localPhotos;
+  const currentCatalog = useRef(photos);
+  currentCatalog.current = photos;
   const allLocalFiles = [...new Set([...localPhotos.flatMap(photo => photo.file ? [photo.file] : []), ...pickedFiles])];
+  const catalogDigests = new Set(photos.map(photo => photo.metadata.originalSha256));
+  const localSources = new Map(localPhotos.flatMap(photo => photo.file ? [[photo.file, photo] as const] : []));
+  const unsavedLocalFiles = allLocalFiles.filter(file => {
+    const source = localSources.get(file), digest = source ? localOriginalDigest(source) : undefined;
+    return localSynced.current.get(file) !== account && (!digest || !catalogDigests.has(digest));
+  });
   const unlocked = !!account;
   const publicDemo = fixtureMode || isPublicDemoAccount(account);
   const clear = () => {
@@ -124,6 +144,9 @@ export default function CloudApp({
     setPhotos([]);
     setReceived(null);
     setSelected(new Set());
+    setSelecting(false);
+    setPickedFiles([]);
+    localSynced.current = new WeakMap();
     setViewer(null);
     setExchange(false);
     setPending([]);
@@ -137,7 +160,21 @@ export default function CloudApp({
     setSkipped(0);
     pausedRef.current = true;
     setPaused(true);
+    setPauseReady(false);
+    intentVersion.current++;
     uploadAbort.current?.abort();
+  };
+  const restorePause = async (session = requireVault()) => {
+    const version = intentVersion.current;
+    const value = await loadUploadPause(session);
+    if (!sameVault(session) || intentVersion.current !== version) return;
+    pausedRef.current = value; setPaused(value); setPauseReady(true);
+  };
+  const continueSync = async (session = requireVault()) => {
+    const version = ++intentVersion.current;
+    await saveUploadPause(false, session);
+    if (!sameVault(session) || intentVersion.current !== version) throw new DOMException("Sync paused", "AbortError");
+    pausedRef.current = false; setPaused(false); setPauseReady(true);
   };
   useEffect(() => {
     let observed: ReturnType<typeof requireVault> | undefined;
@@ -169,7 +206,7 @@ export default function CloudApp({
     if (!sameVault(session)) return;
     setSkipped((value) => (sameVault(session) ? skip : value));
     if (pausedRef.current) {
-      setStatus("Sync is paused. Retry when you’re ready.");
+      setStatus("Sync is paused. Continue when you’re ready.");
       return;
     }
     if (!navigator.onLine) {
@@ -227,8 +264,6 @@ export default function CloudApp({
     run(async () => {
       await fn();
       setAuthenticated(true);
-      pausedRef.current = false;
-      setPaused(false);
       try {
         setAccount(requireVault().accountId);
         setAuthStep("welcome");
@@ -239,28 +274,48 @@ export default function CloudApp({
         );
         return;
       }
+      await restorePause();
       await refresh();
     });
   useEffect(() => {
-    if (!account || !active) return;
+    if (!account) return;
+    void run(async () => {await restorePause(); await refresh();});
+  }, [account]);
+  useEffect(() => {
+    if (!account) return;
     const update = () => {
       if (document.visibilityState === "visible" && !pausedRef.current)
         void run(refresh);
     };
-    update();
     window.addEventListener("online", update);
     document.addEventListener("visibilitychange", update);
     return () => {
       window.removeEventListener("online", update);
       document.removeEventListener("visibilitychange", update);
     };
-  }, [account, active]);
+  }, [account]);
+  useEffect(() => {
+    const update = () => setOnline(navigator.onLine !== false);
+    window.addEventListener("online", update); window.addEventListener("offline", update);
+    return () => {window.removeEventListener("online", update); window.removeEventListener("offline", update);};
+  }, []);
+  useEffect(() => {
+    if (!menu) return;
+    accountPanel.current?.focus();
+    const key = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenu(false);
+      if (event.key !== "Tab") return;
+      const controls = Array.from(accountPanel.current?.querySelectorAll<HTMLElement>("button:not(:disabled),input:not(:disabled),textarea,select,summary") ?? []).filter(element => element.getClientRects().length > 0);
+      if (event.shiftKey && (document.activeElement === controls[0] || document.activeElement === accountPanel.current)) {event.preventDefault(); controls.at(-1)?.focus();}
+      else if (!event.shiftKey && document.activeElement === controls.at(-1)) {event.preventDefault(); controls[0]?.focus();}
+    };
+    window.addEventListener("keydown", key); return () => window.removeEventListener("keydown", key);
+  }, [menu]);
   const syncLocal = () =>
     run(async () => {
       const session = requireVault();
       if (publicDemo) throw new Error("PUBLIC_TEST_ACCOUNT_UPLOAD_DISABLED");
-      pausedRef.current = false;
-      setPaused(false);
+      await continueSync(session);
       const controller = new AbortController();
       uploadAbort.current = controller;
       let failures = 0;
@@ -317,27 +372,47 @@ export default function CloudApp({
     pending,
     lastSuccessfulSync,
     skipped,
-    allLocalFiles.filter((file) => localSynced.current.get(file) !== account)
-      .length,
+    unsavedLocalFiles.length,
   );
   const pause = () => {
+    intentVersion.current++;
     pausedRef.current = true;
     setPaused(true);
     uploadAbort.current?.abort();
     try {
       pauseSync();
     } catch {}
-    setStatus("Pausing sync. Your originals are unchanged.");
+    setStatus("Sync paused. Your originals are unchanged.");
+    const session = requireVault();
+    void saveUploadPause(true, session).catch(error => {if (sameVault(session)) {setStatus("Pause could not be saved in this browser. Keep it open and try again."); setNeedsAttention(true);}});
   };
   const retry = () =>
     run(async () => {
-      pausedRef.current = false;
-      setPaused(false);
+      await continueSync();
       await refresh();
     });
-  const localCount = allLocalFiles.filter(
-    (file) => localSynced.current.get(file) !== account,
-  ).length;
+  const localCount = unsavedLocalFiles.length;
+  const consumerSummary = useMemo(() => deriveConsumerSyncSummary({
+    unlocked, paused, online, preparing: staging > 0, busy, needsAttention,
+    committedPhotos: photos.length, queuedPhotos: summary.pending, failedPhotos: summary.failed, skippedPhotos: skipped,
+    pendingEdits: annotationPending.filter(edit => !edit.conflict).length, conflictingEdits: annotationPending.filter(edit => edit.conflict).length,
+    localPhotos: localCount, lastCheckedAt: lastSuccessfulSync,
+  }), [unlocked, paused, online, staging, busy, needsAttention, photos.length, summary.pending, summary.failed, skipped, annotationPending, localCount, lastSuccessfulSync]);
+  useEffect(() => {onSyncSummary?.(consumerSummary);}, [consumerSummary, onSyncSummary]);
+  const ownedSnapshot = useMemo<OwnedPhotoSnapshot | null>(() => {
+    if (!account) return null;
+    let session;
+    try {session = requireVault();} catch {return null;}
+    if (session.accountId !== account) return null;
+    const current = () => sameVault(session) && currentCatalog.current === photos;
+    return {accountId: account, token: session, photos, current, preview: async photo => {
+      if (!current() || !photos.includes(photo) || photo.manifest.ownerAccountId !== account || photo.grantId) throw new Error("VAULT_LOCKED");
+      const bytes = await photoBytes(photo, "preview");
+      try {if (!current()) throw new Error("VAULT_LOCKED"); return new Blob([new Uint8Array(bytes)], {type: "image/jpeg"});}
+      finally {bytes.fill(0);}
+    }};
+  }, [account, photos]);
+  useEffect(() => {onOwnedPhotos?.(ownedSnapshot);}, [ownedSnapshot, onOwnedPhotos]);
   const searchable = received ?? photos;
   const index = useMemo(() => new PhotoSearchIndex(cloudSearchRecords(searchable)), [searchable]);
   const searchResult = useMemo(() => index.search(query, {scope: "account:" + account, committedMeaning}), [index, query, account, committedMeaning]);
@@ -375,18 +450,19 @@ export default function CloudApp({
     return () => {alive = false;};
   }, [account, localPhotos, photos, publicDemo]);
   useEffect(() => {
-    if (!account || !active || busy || paused || needsAttention || !annotationPending.some(edit => !edit.conflict)) return;
+    if (!account || !pauseReady || busy || paused || needsAttention || !annotationPending.some(edit => !edit.conflict)) return;
     const timeout = setTimeout(() => {
       if (navigator.onLine && !running.current && !pausedRef.current) void run(refresh);
     }, 1000);
     return () => clearTimeout(timeout);
-  }, [account, active, busy, paused, needsAttention, annotationPending]);
+  }, [account, pauseReady, busy, paused, needsAttention, annotationPending]);
   const chosen = photos.filter((p) => selected.has(p.manifest.photoId));
   return (
     <>
-      <main inert={viewer || exchange ? true : undefined}>
+      <main className={"cloud-library" + (selecting ? " exchange-selection" : "")} inert={viewer || exchange || menu ? true : undefined}>
         <header>
-          <h1>Fotoro</h1>
+          <div className="brand"><p className="eyebrow">Saved photos</p><h1>Fotoro</h1></div>
+          <div className="header-actions">
           <button
             onClick={() => {
               if (!account) {
@@ -397,12 +473,12 @@ export default function CloudApp({
               onBack();
             }}
           >
-            Local photos
+            Back to photos
           </button>
           {unlocked && (
             <button
               className="menu-button glass"
-              aria-label="Account and exchanges"
+              aria-label="Sync and account"
               onClick={() => setMenu(!menu)}
             >
               <svg
@@ -415,6 +491,7 @@ export default function CloudApp({
               </svg>
             </button>
           )}
+          </div>
         </header>
         {!unlocked ? (
           <section className="unlock sync-onboarding">
@@ -572,16 +649,14 @@ export default function CloudApp({
                 photos. Pending uploads are kept here but will not be sent.
               </p>
             )}
-            {localCount > 0 && !received && (
+            {unlocked && !received && (
               <button
-                className="sync-local-button"
-                disabled={busy || publicDemo}
-                onClick={syncLocal}
+                className={"cloud-sync-status state-" + consumerSummary.state}
+                onClick={() => setMenu(true)}
               >
-                Sync selected photos · {localCount}
+                <span className="sync-dot" aria-hidden="true" />{syncStateLabel[consumerSummary.state]}<small>{consumerSummary.detail}</small>
               </button>
             )}
-            {annotationPending.some(edit => edit.conflict) && !received && <button className="sync-local-button" onClick={() => setMenu(true)}>Review photo edits</button>}
             {received && (
               <div className="received-bar">
                 <span>Received · explicit save required</span>
@@ -595,9 +670,9 @@ export default function CloudApp({
                 </button>
               </div>
             )}
-            {normalizeSearch(query) && searchResult.meanings.length > 0 && (
+            {normalizeSearch(query) && searchResult.meanings.some(meaning => meaning.id !== searchResult.meaning?.id && meaning.photoIds.some(id => !searchResult.photoIds.includes(id))) && (
               <div className="cloud-search-meanings local-labels glass">
-                {searchResult.meanings.map(meaning => <button key={meaning.id} aria-pressed={meaning.id === searchResult.meaning?.id} onClick={() => setCommittedMeaning(meaning.id)}>{meaning.term} · {meaning.photoIds.length}</button>)}
+                <span>Also try</span>{searchResult.meanings.filter(meaning => meaning.id !== searchResult.meaning?.id && meaning.photoIds.some(id => !searchResult.photoIds.includes(id))).slice(0, 3).map(meaning => <button key={meaning.id} onClick={() => setCommittedMeaning(meaning.id)}>{meaning.term}</button>)}
               </div>
             )}
             {shown.length ? (
@@ -654,7 +729,7 @@ export default function CloudApp({
                 className="share-button glass"
                 onClick={() => setExchange(true)}
               >
-                Share · {selected.size}
+                Encrypted exchange · {selected.size}
               </button>
             )}
             <input
@@ -673,8 +748,7 @@ export default function CloudApp({
                       throw new Error("PUBLIC_TEST_ACCOUNT_UPLOAD_DISABLED");
                     await stageImport(files[0], reselect);
                     setReselect(undefined);
-                    pausedRef.current = false;
-                    setPaused(false);
+                    await continueSync();
                     await refresh();
                   });
                   return;
@@ -694,11 +768,12 @@ export default function CloudApp({
         )}
         {busy && (
           <p className="busy" role="status">
-            Working…
+            {syncStateLabel[consumerSummary.state]}
           </p>
         )}
+      </main>
         {menu && unlocked && (
-          <aside className="account-sheet sheet">
+          <aside className="account-sheet sheet" ref={accountPanel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Sync and account">
             <button
               className="close"
               aria-label="Close account"
@@ -711,23 +786,10 @@ export default function CloudApp({
               Originals, labels and photo text are encrypted. Keep this browser open while syncing.
             </p>
             <p role="status">
-              {paused
-                ? "Paused"
-                : needsAttention
-                  ? "Sync needs attention"
-                  : staging
-                    ? "Preparing one photo…"
-                    : busy
-                      ? "Checking photos…"
-                      : annotationPending.some(edit => edit.conflict)
-                        ? "Review label or text changes"
-                        : annotationPending.length
-                          ? `${annotationPending.length} photo edits pending`
-                          : summary.label}
+              {syncStateLabel[consumerSummary.state]}
             </p>
             <p className="hint">
-              Browser uploads: {summary.synced} synced · {summary.pending}{" "}
-              pending · {summary.failed} failed · {summary.skipped} skipped
+              {consumerSummary.detail}
             </p>
             <p className="hint">
               {lastSuccessfulSync
@@ -737,9 +799,6 @@ export default function CloudApp({
             </p>
             {localCount > 0 && (
               <>
-                <button disabled={busy || publicDemo} onClick={syncLocal}>
-                  Sync selected photos · {localCount}
-                </button>
                 <p className="hint">
                   Only these selected files will be encrypted and uploaded.
                   Originals stay unchanged. Browser imports support JPEG and
@@ -753,18 +812,10 @@ export default function CloudApp({
                 : "Encrypted library"}
             </p>
             <div className="actions">
-              <button
-                onClick={() => {
-                  setExchange(true);
-                  setMenu(false);
-                }}
-              >
-                Exchanges
+              <button className="primary-action" disabled={busy || (localCount > 0 && publicDemo)} onClick={localCount > 0 ? syncLocal : retry}>
+                {paused ? "Continue sync" : localCount > 0 ? `Sync ${localCount} selected ${localCount === 1 ? "photo" : "photos"}` : needsAttention || summary.pending || summary.failed ? "Retry sync" : "Check for photos"}
               </button>
-              <button disabled={busy} onClick={retry}>
-                {paused ? "Resume sync" : "Sync now"}
-              </button>
-              {busy && <button onClick={pause}>Pause</button>}
+              {!paused && (busy || summary.pending > 0 || annotationPending.length > 0) && <button onClick={pause}>Pause sync</button>}
               <button
                 onClick={() => {
                   lockVault();
@@ -775,7 +826,9 @@ export default function CloudApp({
               </button>
             </div>
             <details>
-              <summary>Sharing & device options</summary>
+              <summary>Advanced · encrypted exchanges and devices</summary>
+              <p className="hint">For ordinary sharing, open a photo and choose Share. Encrypted exchanges require a trusted account card.</p>
+              <div className="actions"><button onClick={() => {setExchange(true); setMenu(false);}}>Open encrypted exchanges</button><button onClick={() => {setSelecting(true); setMenu(false);}}>Choose photos for an exchange</button>{selecting && <button onClick={() => {setSelecting(false); setSelected(new Set());}}>Finish choosing photos</button>}</div>
               <label>
                 Your account card
                 <textarea
@@ -901,7 +954,6 @@ export default function CloudApp({
             </button>
           </aside>
         )}
-      </main>
       {exchange && unlocked && (
         <Exchange
           selection={chosen}

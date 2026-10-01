@@ -26,7 +26,7 @@ struct PhotosImage: View {
         }
       }
     }
-    .task(id: photo.id) {
+    .task(id: photo.id + "|" + photo.sourceRevision) {
       if let request { store.images.cancelImageRequest(request) }
       image = nil
       unavailable = false
@@ -106,7 +106,7 @@ struct RecentPhotoViewer: View {
           )
           .onTapGesture(count: 2) { scale = scale == 1 ? 2 : 1 }.tag(photo.id)
         }
-      }.tabViewStyle(.page).background(.black).onAppear { selected = initialID }
+      }.tabViewStyle(.page(indexDisplayMode: .never)).background(.black).onAppear { selected = initialID }
         .onChange(of: selected) { scale = 1 }
         .toolbar {
           ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() } }
@@ -124,169 +124,80 @@ struct RecentPhotoViewer: View {
             LocalPhotoDetails(photo: current, search: search)
           }
         }
-    }
+    }.preferredColorScheme(.dark)
+  }
+}
+
+enum RecentPhotosContentMode {
+  case openPhotos, accessOff, gallery, search
+
+  static func select(query: String, opened: Bool, status: PHAuthorizationStatus) -> Self {
+    if !query.isEmpty { return .search }
+    if !opened { return .openPhotos }
+    if !RecentPhotosPolicy.canRead(status) { return .accessOff }
+    return .gallery
   }
 }
 
 struct RecentPhotosView: View {
   @State private var store = RecentPhotosStore()
+  @State private var search = LocalSearchStore()
   @State private var query = ""
   @FocusState private var queryFocused: Bool
-  @State private var search = LocalSearchStore()
-  @State private var shareMeaning: String?
-  @State private var sharedPhotoIDs: [String] = []
+  @State private var services: AppServices?
+  @State private var backupAccount: AppServices?
+  @State private var searchHits: [ConsumerSearchHit] = []
+  @State private var savedResults: [String: LocalPhoto] = [:]
   @State private var selected: Set<String> = []
   @State private var selecting = false
-  @State private var pendingShare: RecentPhoto?
-  @State private var pendingBackup = false
-  @Environment(\.scenePhase) private var scenePhase
   @State private var viewer: RecentPhoto?
+  @State private var savedViewer: LocalPhoto?
+  @State private var pendingShare: RecentPhoto?
+  @State private var shareTask: Task<Void, Never>?
   @State private var sharing: [URL] = []
   @State private var showShare = false
-  @State private var settings = false
-  @State private var services: AppServices?
-  @State private var showingAccount = false
   @State private var preparingShare = false
-  var visible: [RecentPhoto] {
-    query.isEmpty ? store.photos : search.matchingPhotos
+  @State private var shareMeaning: String?
+  @State private var sharedPhotoIDs: [String] = []
+  @State private var settings = false
+  @State private var pendingBackup = false
+  @Environment(\.scenePhase) private var scenePhase
+
+  private var visible: [RecentPhoto] {
+    query.isEmpty ? store.photos : searchHits.compactMap {
+      if case .device(let id) = $0.photo { return search.assets[id] }
+      return nil
+    }
+  }
+  private var savedPhotos: [LocalPhoto] {
+    searchHits.compactMap {
+      if case .saved(let id) = $0.photo { return savedResults[id] }
+      return nil
+    }
+  }
+  private var searchTaskID: ConsumerSearchPresentationID {
+    ConsumerSearchPresentationID(query: query, library: search.libraryGeneration,
+      results: search.response.results.map(\.id), indexed: search.response.indexed,
+      account: services?.session.accountId, vault: services?.vault.generation)
   }
   var body: some View {
     NavigationStack {
-      Group {
-        if !store.opened {
-          VStack(spacing: 18) {
-            Image(systemName: "photo.on.rectangle").font(.system(size: 44))
-            Text("Your last 30 days").font(.title2)
-            Text("Browse photos on this iPhone.").foregroundStyle(.secondary)
-            Button("Open Photos") {
-              Task {
-                await store.open()
-                search.open(status: store.status)
-              }
-            }.buttonStyle(.borderedProminent)
-          }.frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if !RecentPhotosPolicy.canRead(store.status) {
-          ContentUnavailableView {
-            Label("Photos access is off", systemImage: "photo")
-          } description: {
-            Text("Allow selected photos or full access in Settings to browse here.")
-          } actions: {
-            Button("Open Settings") {
-              UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
-            }
-          }
-        } else {
-          ScrollView {
-            if !query.isEmpty {
-              LocalSearchView(search: search, photos: store, choseMeaning: { queryFocused = false })
-              {
-                queryFocused = false
-                viewer = $0
-              }
-            } else {
-              LazyVGrid(
-                columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3
-              ) {
-                ForEach(visible) { photo in
-                  Button {
-                    if selecting { toggleSelection(photo) } else { viewer = photo }
-                  } label: {
-                    GeometryReader { geometry in
-                      PhotosImage(photo: photo, store: store).scaledToFill()
-                        .frame(width: geometry.size.width, height: geometry.size.height).clipped()
-                    }.aspectRatio(1, contentMode: .fit)
-                      .overlay(alignment: .bottomTrailing) {
-                        if selected.contains(photo.id) {
-                          Image(systemName: "checkmark.circle.fill").padding(8)
-                        }
-                      }
-                  }.buttonStyle(.plain).id(photo.id)
-                    .onAppear { store.cache([photo.asset], start: true) }
-                    .onDisappear { store.cache([photo.asset], start: false) }
-                    .contextMenu {
-                      Button(selected.contains(photo.id) ? "Deselect" : "Select") {
-                        if selected.contains(photo.id) {
-                          selected.remove(photo.id)
-                        } else {
-                          selected.insert(photo.id)
-                        }
-                      }
-                    }
-                }
-              }
-              if visible.isEmpty {
-                ContentUnavailableView("No photos in the last 30 days", systemImage: "photo")
-              }
-            }
-            if store.status == .limited {
-              Text("Showing photos you’ve allowed.").font(.caption).foregroundStyle(.secondary)
-                .padding()
-            }
-          }
-        }
-      }.navigationTitle("Fotoro")
-        .toolbar {
-          if store.opened, !store.photos.isEmpty {
-            ToolbarItem(placement: .topBarTrailing) {
-              Button(selecting ? "Done" : "Select") {
-                selecting.toggle()
-                if !selecting { selected.removeAll() }
-              }.disabled(preparingShare)
-            }
-          }
-          ToolbarItem(placement: .topBarLeading) {
-            Button("Sync", systemImage: "icloud") {
-              do {
-                if services == nil { services = try AppServices() }
-                services?.bindLocalSearch(search)
-                showingAccount = true
-              } catch { store.error = error.localizedDescription }
-            }
-          }
-          ToolbarItem(placement: .topBarTrailing) {
-            Button("Settings", systemImage: "gearshape") { settings = true }
-          }
-        }
-        .safeAreaInset(edge: .bottom) {
-          if store.opened, RecentPhotosPolicy.canRead(store.status) {
-            HStack {
-              TextField("Search", text: $query).textFieldStyle(.plain).focused($queryFocused)
-                .submitLabel(.search).onSubmit { queryFocused = false }.onChange(of: query) {
-                  search.updateQuery(query)
-                }
-              if !query.isEmpty {
-                Button("Clear search", systemImage: "xmark.circle.fill") {
-                  query = ""
-                  queryFocused = false
-                }.labelStyle(.iconOnly)
-              }
-              if !selected.isEmpty {
-                Button("Share", systemImage: "square.and.arrow.up") {
-                  share(store.photos.filter { selected.contains($0.id) })
-                }.disabled(preparingShare || showShare)
-              }
-              Button(action: addPhotos) { Image(systemName: "plus") }
-                .accessibilityLabel("Add photos")
-            }.padding().glassEffect(.regular.interactive()).padding(.horizontal)
-          }
-        }
+      content.navigationTitle("Photos")
+        .toolbar { homeToolbar }
+        .safeAreaInset(edge: .bottom) { searchBar }
         .overlay {
-          if preparingShare { ProgressView("Preparing originals…").padding().glassEffect() }
+          if preparingShare { ProgressView("Preparing original…").padding().glassEffect() }
         }
-        .sheet(
-          item: $viewer,
-          onDismiss: {
-            if let photo = pendingShare {
-              pendingShare = nil
-              share([photo])
-            }
-          }
-        ) { photo in
+        .sheet(item: $viewer, onDismiss: {
+          if let photo = pendingShare { pendingShare = nil; share([photo]) }
+        }) { photo in
           RecentPhotoViewer(store: store, photos: visible, initialID: photo.id, search: search) {
-            photo in
-            pendingShare = photo
+            pendingShare = $0
             viewer = nil
           }
+        }
+        .sheet(item: $savedViewer) { photo in
+          if let services { PhotoViewer(services: services, initialID: photo.id, displayedPhotos: savedPhotos) }
         }
         .sheet(isPresented: $showShare, onDismiss: cleanupShare) {
           OriginalShareSheet(urls: sharing) { success in
@@ -296,111 +207,259 @@ struct RecentPhotosView: View {
             cleanupShare()
           }
         }
-        .sheet(
-          isPresented: $settings,
-          onDismiss: {
-            if pendingBackup {
-              pendingBackup = false
-              do {
-                if services == nil { services = try AppServices() }
-                services?.bindLocalSearch(search)
-                showingAccount = true
-              } catch { store.error = error.localizedDescription }
-            }
-          }
-        ) {
-          NavigationStack {
-            List {
-              Text("Photos stay in your library. Fotoro does not upload them while you browse.")
-              Button("Sync photos") {
-                pendingBackup = true
-                settings = false
-              }
-              if store.opened {
-                Button("Refresh last 30 days") {
-                  store.refresh()
-                  search.refresh(status: store.status)
-                  settings = false
-                }
-              }
-            }.navigationTitle("Settings")
-          }
-        }
+        .sheet(item: $backupAccount) { PhotosBackupView(services: $0) }
+        .sheet(isPresented: $settings, onDismiss: {
+          if pendingBackup { pendingBackup = false; openBackup() }
+        }) { settingsView }
+        .onChange(of: query) { search.updateQuery(query) }
+        .task(id: searchTaskID) { await updateSearch() }
         .onChange(of: search.libraryGeneration) {
           viewer = nil
+          selected = []
+          shareTask?.cancel()
+          cleanupShare()
+          searchHits = []
+          savedResults = [:]
           store.refresh()
+        }
+        .onChange(of: services?.vault.generation) {
+          savedViewer = nil
+          searchHits.removeAll { if case .saved = $0.photo { return true }; return false }
+          savedResults = [:]
         }
         .onChange(of: scenePhase) {
           if scenePhase == .active {
-            store.refresh()
-            search.auditAuthorization()
+            restorePhotos()
             if let services { Task { await services.resumeSavedAccount() } }
-          } else {
-            services?.backup.pause()
-            search.pause()
-          }
+          } else { services?.backup.pause(); search.pause() }
         }
         .task {
-          search.auditAuthorization()
+          restorePhotos()
           do {
             if services == nil { services = try AppServices() }
             services?.bindLocalSearch(search)
             await services?.resumeSavedAccount(initialRestoration: true)
           } catch { store.error = error.localizedDescription }
         }
-        .sheet(isPresented: $showingAccount) {
-          if let services { LibraryView(services: services) }
-        }
-        .alert(
-          "Fotoro",
-          isPresented: Binding(get: { store.error != nil }, set: { if !$0 { store.error = nil } })
-        ) {
+        .alert("Fotoro", isPresented: Binding(get: { store.error != nil }, set: { if !$0 { store.error = nil } })) {
           Button("OK") { store.error = nil }
-        } message: {
-          Text(store.error ?? "")
-        }
+        } message: { Text(store.error ?? "") }
     }
   }
-  func toggleSelection(_ photo: RecentPhoto) {
-    if selected.contains(photo.id) { selected.remove(photo.id) } else { selected.insert(photo.id) }
-  }
-  func addPhotos() {
-    if store.status == .limited {
-      guard
-        let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
-        var controller = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController
-      else { return }
-      while let presented = controller.presentedViewController { controller = presented }
-      PHPhotoLibrary.shared().presentLimitedLibraryPicker(from: controller) { _ in
-        Task { @MainActor in
-          store.refresh()
-          search.refresh(status: store.status)
+  @ViewBuilder private var content: some View {
+    let mode = RecentPhotosContentMode.select(query: query, opened: store.opened, status: store.status)
+    if mode == .openPhotos {
+      VStack(spacing: 18) {
+        Image(systemName: "photo.on.rectangle").font(.system(size: 44))
+        Text("Your last 10 days").font(.title2.bold())
+        Text("Find a photo. Keep a moment.").foregroundStyle(.secondary)
+        Button("Open Photos") {
+          Task { await store.open(); search.open(status: store.status) }
+        }.buttonStyle(.borderedProminent)
+      }.padding().frame(maxWidth: .infinity, maxHeight: .infinity)
+    } else if mode == .accessOff {
+      ContentUnavailableView {
+        Label("Photos access is off", systemImage: "photo")
+      } description: {
+        Text("Allow selected photos or full access in Settings. Your saved account photos are still searchable after signing in.")
+      } actions: { Button("Open Settings", action: openSettings) }
+    } else {
+      ScrollView {
+        if mode == .search {
+          ConsumerSearchResultsView(hits: searchHits, saved: savedResults, search: search, photos: store,
+            inspectDevice: { queryFocused = false; viewer = $0 },
+            inspectSaved: { queryFocused = false; savedViewer = $0 },
+            choseAlternative: { queryFocused = false })
+        } else {
+          HStack {
+            Text("Last 10 days").font(.subheadline.weight(.medium))
+            Spacer()
+            Text("\(store.photos.count) photos").font(.subheadline).foregroundStyle(.secondary)
+          }.padding(.horizontal).padding(.vertical, 10)
+          gallery
+          if store.photos.isEmpty {
+            ContentUnavailableView("No recent photos", systemImage: "photo", description: Text("Search to find older photos, too."))
+          }
+        }
+        if store.status == .limited {
+          Button("Manage selected photos", action: addPhotos)
+            .font(.footnote).padding().accessibilityHint("Choose more photos Fotoro may access")
         }
       }
-    } else {
-      store.refresh()
-      search.refresh(status: store.status)
+      .scrollDismissesKeyboard(.interactively)
     }
   }
-  func share(_ photos: [RecentPhoto]) {
+  private var gallery: some View {
+    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3) {
+      ForEach(store.photos) { photo in
+        RecentPhotoCell(photo: photo, store: store, selected: selected.contains(photo.id), open: {
+          if selecting { toggleSelection(photo) } else { viewer = photo }
+        }, toggle: { toggleSelection(photo) })
+      }
+    }
+  }
+  @ToolbarContentBuilder private var homeToolbar: some ToolbarContent {
+    ToolbarItem(placement: .topBarLeading) {
+      Button(action: openBackup) { ConsumerBackupLabel(summary: services?.consumerSyncSummary ?? ConsumerSyncSummary()) }
+        .accessibilityLabel("Backup status")
+    }
+    ToolbarItem(placement: .topBarTrailing) {
+      if store.opened, !store.photos.isEmpty {
+        Button(selecting ? "Done" : "Select") {
+          selecting.toggle()
+          if !selecting { selected = [] }
+        }.disabled(preparingShare)
+      }
+    }
+    ToolbarItem(placement: .topBarTrailing) {
+      Button("Settings", systemImage: "gearshape") { settings = true }
+    }
+  }
+  @ViewBuilder private var searchBar: some View {
+    if store.opened || services?.vault.isUnlocked == true {
+      HStack(spacing: 12) {
+        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+        TextField("Search photos", text: $query).focused($queryFocused)
+          .submitLabel(.search).onSubmit { queryFocused = false }
+          .accessibilityHint("Find labels, dates and words in your photos")
+        if !query.isEmpty {
+          Button("Clear search", systemImage: "xmark.circle.fill") { query = ""; queryFocused = false }
+            .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+        }
+        if !selected.isEmpty {
+          Button("Share", systemImage: "square.and.arrow.up") { share(store.photos.filter { selected.contains($0.id) }) }
+            .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44).disabled(preparingShare || showShare)
+        }
+      }.padding(.leading, 18).padding(.trailing, 8).frame(minHeight: 56)
+        .glassEffect(.regular.interactive()).padding(.horizontal).padding(.bottom, 6)
+    }
+  }
+  private var settingsView: some View {
+    NavigationStack {
+      List {
+        Section {
+          Text("Photos stay in your library. Browsing does not upload them.")
+          Button("Backup status") { pendingBackup = true; settings = false }
+        }
+        Section("Photos access") {
+          Button("Refresh last 10 days") { restorePhotos(); settings = false }
+          if store.status == .limited { Button("Manage selected photos") { settings = false; addPhotos() } }
+          Button("Open system settings", action: openSettings)
+        }
+      }.navigationTitle("Settings").navigationBarTitleDisplayMode(.inline)
+        .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { settings = false } } }
+    }
+  }
+  private func restorePhotos() {
+    store.restoreAccess()
+    if RecentPhotosPolicy.canRead(store.status) { search.open(status: store.status) }
+    else { search.auditAuthorization() }
+  }
+  private func openBackup() {
+    queryFocused = false
+    do {
+      if services == nil { services = try AppServices() }
+      services?.bindLocalSearch(search)
+      backupAccount = services
+    } catch { store.error = error.localizedDescription }
+  }
+  private func updateSearch() async {
+    guard !query.isEmpty else { searchHits = []; savedResults = [:]; return }
+    let token = searchTaskID
+    do {
+      try await Task.sleep(for: .milliseconds(100))
+      guard let services else { return }
+      let hits = try await services.consumerSearch(query, local: search)
+      try Task.checkCancellation()
+      guard token == searchTaskID else { return }
+      var saved: [String: LocalPhoto] = [:]
+      for hit in hits {
+        if case .saved(let id) = hit.photo { saved[id] = try services.consumerSavedPhoto(id) }
+      }
+      searchHits = hits
+      savedResults = saved
+    } catch is CancellationError {} catch {
+      searchHits = []
+      savedResults = [:]
+      store.error = error.localizedDescription
+    }
+  }
+  private func toggleSelection(_ photo: RecentPhoto) {
+    if selected.contains(photo.id) { selected.remove(photo.id) } else { selected.insert(photo.id) }
+  }
+  private func openSettings() {
+    UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
+  }
+  private func addPhotos() {
+    if store.status == .limited {
+      guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
+        var controller = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController else { return }
+      while let presented = controller.presentedViewController { controller = presented }
+      PHPhotoLibrary.shared().presentLimitedLibraryPicker(from: controller) { _ in
+        Task { @MainActor in store.refresh(); search.refresh(status: store.status) }
+      }
+    } else { restorePhotos() }
+  }
+  private func share(_ photos: [RecentPhoto]) {
     guard !preparingShare, !showShare, !photos.isEmpty else { return }
     preparingShare = true
-    Task {
-      defer { preparingShare = false }
+    let generation = search.libraryGeneration
+    shareTask = Task {
+      defer { preparingShare = false; shareTask = nil }
+      var exported: [URL] = []
       do {
-        sharing = try await store.shareOriginals(photos)
+        exported = try await store.shareOriginals(photos)
+        try Task.checkCancellation()
+        guard generation == search.libraryGeneration, RecentPhotosPolicy.canRead(store.status) else { throw CancellationError() }
+        sharing = exported
         shareMeaning = query.isEmpty ? nil : search.response.meaning?.id
         sharedPhotoIDs = photos.map(\.id)
         showShare = true
-      } catch { store.error = error.localizedDescription }
+      } catch is CancellationError { removeShareFiles(exported) }
+      catch { removeShareFiles(exported); store.error = error.localizedDescription }
     }
   }
-  func cleanupShare() {
-    let roots = Set(sharing.map { $0.deletingLastPathComponent().deletingLastPathComponent() })
-    for root in roots { try? FileManager.default.removeItem(at: root) }
-    showShare = false
+  private func removeShareFiles(_ urls: [URL]) {
+    for root in Set(urls.map { $0.deletingLastPathComponent().deletingLastPathComponent() }) {
+      try? FileManager.default.removeItem(at: root)
+    }
+  }
+  private func cleanupShare() {
+    removeShareFiles(sharing)
     sharing = []
+    showShare = false
     shareMeaning = nil
     sharedPhotoIDs = []
+  }
+}
+
+private struct ConsumerSearchPresentationID: Equatable {
+  var query: String
+  var library: UInt64
+  var results: [String]
+  var indexed: Int
+  var account: String?
+  var vault: UUID?
+}
+
+private struct RecentPhotoCell: View {
+  let photo: RecentPhoto
+  let store: RecentPhotosStore
+  let selected: Bool
+  let open: () -> Void
+  let toggle: () -> Void
+  var body: some View {
+    Button(action: open) {
+      GeometryReader { geometry in
+        PhotosImage(photo: photo, store: store).scaledToFill()
+          .frame(width: geometry.size.width, height: geometry.size.height).clipped()
+      }.aspectRatio(1, contentMode: .fit)
+        .overlay(alignment: .bottomTrailing) {
+          if selected { Image(systemName: "checkmark.circle.fill").padding(8) }
+        }
+    }.buttonStyle(.plain).id(photo.id)
+      .onAppear { store.cache([photo.asset], start: true) }
+      .onDisappear { store.cache([photo.asset], start: false) }
+      .contextMenu { Button(selected ? "Deselect" : "Select", action: toggle) }
   }
 }
