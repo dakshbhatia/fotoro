@@ -143,6 +143,35 @@ Above-the-fold copy comparison has no unexplained additions. All remaining
 differences above are data, capability or reference-raster differences. The web
 library and viewer were faithfully verified against their visual references.
 
+## Simplified authentication — October 1, 2026
+
+- Replaced only the Photos authentication shell with a flat Fotoro canvas and
+  one form. Removed the promotional illustration, brand panel, decorative
+  framing and entrance animations. Existing password, recovery, validation,
+  autofill and backend identity controls remain.
+- Privacy details expand with the keyboard and disclose pre-upload encryption,
+  the Fotoro source repository and Ente attribution. The disclosure has no
+  network effect. Password visibility toggles both ways; autocomplete remains
+  `current-password`.
+- Verified the existing synthetic account through normal password unlock. It
+  reaches `/library` and restores the three public fixture photos. Recovery
+  navigation opens the recovery-key form and returns to credentials; no
+  recovery key was entered and no credential was changed.
+- Checked dark and light origins, 390×844 mobile, 1280×800 desktop and 390×500
+  compact layout. Mobile has no horizontal overflow; compact layout scrolls
+  with an expanded disclosure. Temporary viewport overrides were reset.
+- Fresh-origin authentication and recovery had no browser warnings or errors.
+  The existing dev tab retained two earlier i18next Fast Refresh warnings;
+  neither recurred in the fresh tab. No physical-device keyboard or password
+  manager integration is claimed.
+- All 160 photo tests, Photos TypeScript, changed-file ESLint, Prettier and
+  production export (23 pages) pass. Screenshot evidence is in the parent
+  workspace: `outputs/fotoro-unlock-before.jpg`,
+  `outputs/fotoro-unlock-mobile.jpg`, `outputs/fotoro-unlock-desktop.jpg` and
+  `outputs/fotoro-unlock-simple.jpg`.
+- This is an authentication presentation change. The proposed pick/send/receive
+  exchange and primary passkey unlock remain separate implementation work.
+
 ## Native compatibility
 
 Initial iOS 27 launch failed in UIKit's no-scene-lifecycle check. Manual adoption

@@ -23,7 +23,7 @@ import {
     isLocalStorageAndIndexedDBMismatch,
     savedLocalUser,
 } from "ente-accounts/services/accounts-db";
-import { isDesktop, staticAppTitle } from "ente-base/app";
+import { isDesktop } from "ente-base/app";
 import { CenteredRow } from "ente-base/components/containers";
 import { CustomHeadPhotos } from "ente-base/components/Head";
 import {
@@ -162,12 +162,7 @@ const App: React.FC<PhotosAppProps> = ({ Component, pageProps }) => {
         ],
     );
 
-    const title =
-        router.pathname === "/library" || router.pathname === "/intelligence"
-            ? "Fotoro"
-            : isI18nReady
-              ? t("title_photos")
-              : staticAppTitle;
+    const title = "Fotoro";
 
     return (
         <ThemeProvider theme={photosTheme}>

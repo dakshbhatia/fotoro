@@ -13,6 +13,26 @@ friends effortless. Open your photos immediately, keep originals safe across
 devices, find shared moments, and send the right photos to the right people.
 Local indexing improves search in the background; cloud enrichment is optional.
 
+## Consumer experience direction — October 1
+
+The core loop is **pick photos → send to someone → receive them**. The first
+useful moment is a person receiving the photos they wanted. Measure time to that
+moment, rather than onboarding completion or the number of intelligence features.
+This is our application of Nikita Bier's advice to demonstrate value immediately
+and cut the path to it ([interview](https://www.lennysnewsletter.com/p/how-to-consistently-go-viral-nikita-bier)).
+
+The home surface should be photos with contextual selection and sharing. AI,
+indexing and sync support this loop in the background. Recipient selection should
+work without mandatory address-book access; invitations should name the sender
+and show the shared moment before asking for optional setup. Private originals
+must still require the appropriate account and decryption access.
+
+Privacy is a foundation, with source and encryption details available on demand.
+The Fotoro authentication shell now has one form on a flat canvas, with a small
+privacy disclosure and upstream attribution. Password unlock, recovery, and the
+backend identity remain visible and functional. This simplifies presentation;
+the exchange flow and primary passkey unlock still need implementation.
+
 ## First beta: one complete exchange
 
 With two test accounts and public fixtures:

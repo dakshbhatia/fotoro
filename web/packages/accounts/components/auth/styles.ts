@@ -21,7 +21,12 @@ export interface AuthPresentationConfig {
     };
 }
 
-export const createAuthColorVariables = (theme: AuthPresentationConfig) => ({
+export type AuthColorConfig = Omit<
+    AuthPresentationConfig,
+    "mobileBrandHeight" | "illustrationHeights"
+>;
+
+export const createAuthColorVariables = (theme: AuthColorConfig) => ({
     ":where(:root)": {
         "--auth-ui-primary": theme.primary,
         "--auth-ui-primary-hover": theme.primaryHover,
