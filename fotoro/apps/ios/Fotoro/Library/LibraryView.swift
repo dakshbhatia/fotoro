@@ -44,38 +44,12 @@ struct LibraryView: View {
               ForEach(days, id: \.0) { day in
                 Section {
                   ForEach(day.1) { photo in
-                    Button {
-                      viewer = photo
-
-                    } label: {
-                      ZStack(alignment: .bottomTrailing) {
-                        GeometryReader { geometry in
-                          LazyImage(url: photo.thumbnailURL) { state in
-                            if let image = state.image {
-                              image.resizable().scaledToFill()
-                            } else {
-                              Rectangle().fill(.quaternary)
-                            }
-                          }.frame(width: geometry.size.width, height: geometry.size.height)
-                            .clipped()
-                        }
-                        if selection.contains(photo.id) {
-                          Image(systemName: "checkmark.circle.fill").padding(8)
-                        }
-                      }.aspectRatio(1, contentMode: .fit)
-                    }.buttonStyle(.plain).id(photo.id).accessibilityLabel(photo.metadata.filename)
-                      .onAppear {
-                        if photo.id == services.photos.last?.id { try? services.loadMore() }
-                      }
-                      .contextMenu {
-                        Button(selection.contains(photo.id) ? "Deselect" : "Select") {
-                          if selection.contains(photo.id) {
-                            selection.remove(photo.id)
-                          } else {
-                            selection.insert(photo.id)
-                          }
-                        }
-                      }
+                    LibraryPhotoCell(
+                      photo: photo, isSelected: selection.contains(photo.id),
+                      open: { viewer = photo },
+                      toggleSelection: { toggleSelection(photoID: photo.id) },
+                      appeared: { loadMoreIfNeeded(photoID: photo.id) }
+                    ).id(photo.id)
                   }
                 } header: {
                   Text(day.0).font(.headline).frame(maxWidth: .infinity, alignment: .leading)
@@ -205,5 +179,49 @@ struct LibraryView: View {
           Text(services.error ?? "")
         }
     }
+  }
+
+  private func loadMoreIfNeeded(photoID: String) {
+    if photoID == services.photos.last?.id { try? services.loadMore() }
+  }
+
+  private func toggleSelection(photoID: String) {
+    if selection.contains(photoID) {
+      selection.remove(photoID)
+    } else {
+      selection.insert(photoID)
+    }
+  }
+}
+
+private struct LibraryPhotoCell: View {
+  let photo: LocalPhoto
+  let isSelected: Bool
+  let open: () -> Void
+  let toggleSelection: () -> Void
+  let appeared: () -> Void
+
+  var body: some View {
+    Button(action: open) {
+      ZStack(alignment: .bottomTrailing) {
+        GeometryReader { geometry in
+          LazyImage(url: photo.thumbnailURL) { state in
+            if let image = state.image {
+              image.resizable().scaledToFill()
+            } else {
+              Rectangle().fill(.quaternary)
+            }
+          }.frame(width: geometry.size.width, height: geometry.size.height)
+            .clipped()
+        }
+        if isSelected {
+          Image(systemName: "checkmark.circle.fill").padding(8)
+        }
+      }.aspectRatio(1, contentMode: .fit)
+    }.buttonStyle(.plain).accessibilityLabel(photo.metadata.filename)
+      .onAppear(perform: appeared)
+      .contextMenu {
+        Button(isSelected ? "Deselect" : "Select", action: toggleSelection)
+      }
   }
 }
