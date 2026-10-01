@@ -152,7 +152,7 @@ export class LocalRetention {
           }
           if (!current()) return false;
           if (photo.file) files.set(photo.id, photo.file);
-          const size = preview?.size ?? (photo.previewAvailable ? photo.previewSize ?? 0 : this.knownPreviews.get(photo.id) ?? 0);
+          const size = preview?.size ?? (photo.previewAvailable === false ? 0 : photo.previewSize ?? this.knownPreviews.get(photo.id) ?? 0);
           const hasPreview = size > 0 && retained + size <= this.budget;
           if (hasPreview) {
             retained += size; keep.add(photo.id); sizes.set(photo.id, size);

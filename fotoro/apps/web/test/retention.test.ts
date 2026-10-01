@@ -161,3 +161,15 @@ test("stale derived OCR is discarded without losing the user's durable labels", 
   assert.equal(await (await restored.previewLoader!()).text(), "bounded jpeg");
   await saved.clear();
 });
+test("a failed retained preview stays unavailable instead of being revived from cached coverage", async () => {
+  const saved = store();
+  await saved.save([fixture()], emptyFeedback());
+  const restored = (await saved.load()).photos[0];
+  await saved.save([{ ...restored, previewAvailable: false }], emptyFeedback());
+  const again = (await saved.load()).photos[0];
+  assert.equal(again.previewAvailable, false);
+  assert.deepEqual(again.labels, ["Ronald"]);
+  assert.deepEqual(saved.previewCoverage, { count: 0, bytes: 0 });
+  await assert.rejects(again.previewLoader!());
+  await saved.clear();
+});

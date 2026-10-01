@@ -84,6 +84,15 @@ test("same-meaning prefix extension stays steady and ordering is deterministic",
   assert.equal(index.search("Ro", { now, previous: first }).photoId, "a");
   assert.equal(new PhotoSearchIndex([...photos].reverse()).search("R", { now }).photoId, "a");
 });
+test("a stable displayed photo does not reorder Next/Previous navigation", () => {
+  const index = new PhotoSearchIndex([photo("a", "a.jpg", ["Ronald"]), photo("b", "b.jpg", ["Ronald"]), photo("c", "c.jpg", ["Ronald"])]);
+  const first = index.search("R", { now });
+  const displayed = { ...first, photoId: "b" };
+  const extended = index.search("Ro", { now, previous: displayed });
+  assert.equal(extended.photoId, "b");
+  assert.deepEqual(extended.photoIds, ["a", "b", "c"]);
+  assert.equal(extended.photoIds[extended.photoIds.indexOf(extended.photoId!) + 1], "c");
+});
 test("an incompatible accepted completion releases to a supported longer word", () => {
   const index = new PhotoSearchIndex([photo("short", "a.jpg", ["Ron"]), photo("long", "b.jpg", ["Ronald"])]);
   const committed = index.search("Ron", { now }).meaning!.id;
@@ -130,4 +139,34 @@ test("a newer same-id revision removes obsolete searchable labels", () => {
   const index = new PhotoSearchIndex([photo("same", "a.jpg", ["Ronald"]), photo("same", "a.jpg", ["Rome"])]);
   assert.equal(index.search("Ron", { now }).photoId, undefined);
   assert.equal(index.search("Rom", { now }).photoId, "same");
+});
+test("a phrase prefix retrieves adjacent OCR words without joining unrelated fields", () => {
+  const ocr = { photoID: "doc", revision: "doc", processor: "fixture-v1", status: "complete" as const, text: "BOARDING PASS FLIGHT BOSTON", confidence: .94 };
+  const index = new PhotoSearchIndex([{ ...photo("doc", "neutral.png"), ocr }, { ...photo("spread", "Boarding.jpg"), caption: "pass" }]);
+  for (const query of ["Boarding p", "Boarding pass", "pass fl"]) {
+    const result = index.search(query, { now });
+    assert.equal(result.photoId, "doc");
+    assert.equal(result.meaning?.evidence.doc, "ocr");
+    assert.ok(!result.photoIds.includes("spread"));
+  }
+});
+test("phrase completions can be accepted, confirmed and pinned with truthful source evidence", () => {
+  const photos = ["a", "b"].map(id => ({ ...photo(id, "neutral.png"), caption: "Boarding pass to Boston" }));
+  const index = new PhotoSearchIndex(photos);
+  const result = index.search("boarding p", { now });
+  assert.equal(result.meaning?.term, "Boarding pass");
+  const meaning = result.meaning!.id;
+  index.acceptMeaning(meaning, "accept", now);
+  index.choosePhoto(meaning, "b", "use", now, true);
+  const reopened = new PhotoSearchIndex(photos, index.feedback()).search("boarding pa", { now, committedMeaning: meaning });
+  assert.equal(reopened.photoId, "b");
+  assert.equal(reopened.meaning?.evidence.b, "caption");
+});
+test("literal noisy filenames remain explicitly retrievable without generic autocomplete noise", () => {
+  const index = new PhotoSearchIndex([photo("img", "IMG_1234.jpg"), photo("digits", "4826.png")]);
+  assert.equal(index.search("img", { now }).photoId, undefined);
+  assert.equal(index.search("jpg", { now }).photoId, undefined);
+  assert.equal(index.search("IMG_1234.jpg", { now }).photoId, "img");
+  assert.equal(index.search("IMG_123", { now }).photoId, "img");
+  assert.equal(index.search("4826", { now }).photoId, "digits");
 });
