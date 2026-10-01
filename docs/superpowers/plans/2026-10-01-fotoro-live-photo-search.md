@@ -6,7 +6,9 @@
 
 **Architecture:** A pure search index separates completion meanings from photo ranking. React reuses the existing local raster/viewer flow. A separate encrypted IndexedDB store retains optional previews and search metadata without retaining originals.
 
-**Tech Stack:** Existing TypeScript, React, Web Crypto, IndexedDB and node:test/fake-indexeddb; no added runtime dependencies.
+**Tech Stack:** Existing TypeScript, React, Web Crypto, IndexedDB and node:test/fake-indexeddb. The core adds no runtime dependencies; the coordinated OCR implementation uses locally bundled Tesseract.
+
+**Coordination:** With verified human authorization, the existing “Plan AI photo iOS app” chat owns browser UI/OCR and native integration. This chat owns `search.ts`, `retention.ts`, `resources.ts` and their tests. The core now consumes supplied captions, keywords, facts, favorites and versioned OCR results. UI work below is tracked jointly instead of edited twice.
 
 **Spec:** ../specs/2026-10-01-fotoro-live-photo-search-design.md
 
@@ -18,7 +20,7 @@
 - Bound retained browser previews to 100 MiB and the existing decoded cache to 48 MiB.
 - No photo bytes, OCR text, queries or preferences are sent to a service.
 - Opening a preview for inspection is not a successful search signal.
-- This first browser increment implements labels/metadata search and retention. OCR enrichment, the native index, semantic models and face grouping remain distinct follow-up deliverables in the spec; do not claim they are implemented.
+- This core implements labels/metadata/OCR retrieval and retention. The coordinated lane implements OCR perception and native/UI integration. Semantic models and face grouping remain outside this increment; device latency and ranking quality require separate measurement.
 - The user explicitly instructed implementation after the written design was presented. Proceed with reversible local development in this session; this plan records the execution choices and is not represented as separately reviewed.
 
 ## Review Focus
@@ -37,10 +39,10 @@
 
 **Interfaces:** `PhotoSearchIndex` consumes `SearchPhoto[]` (id, filename, date, dateSource, labels). `search(query, {allowedIds, committedMeaning, previous, now})` returns meanings, predicted meaning and ranked matching photo IDs. `acceptMeaning` and `choosePhoto` update distinct histories. Export versioned serializable feedback and an injected clock.
 
-- [ ] Write failing tests for Ronald/Rome/Rosa narrowing, label versus filename provenance, accents, noisy filenames, exact words, non-insertion-order ranking, small explicit scopes, a previously unshown completion, inspection neutrality, feedback decay and incompatible/stable prefix transitions.
-- [ ] Run the focused test with the existing `tsx --test` runner and observe failure before implementation.
-- [ ] Implement prefix dictionary retrieval over all candidate terms, hard eligibility, separate label/text meanings, ordered relevance tiers, explicit choice history and stable same-meaning preview behavior. Keep determinism independent of input array ordering.
-- [ ] Run the focused tests and the existing web tests; commit only these files.
+- [x] Write failing tests for Ronald/Rome/Rosa narrowing, label versus filename provenance, accents, noisy filenames, exact words, non-insertion-order ranking, small explicit scopes, a previously unshown completion, inspection neutrality, feedback decay and incompatible/stable prefix transitions.
+- [x] Run the focused test with the existing `tsx --test` runner and observe failure before implementation.
+- [x] Implement prefix dictionary retrieval over all candidate terms, hard eligibility, separate label/text meanings, ordered relevance tiers, explicit choice history and stable same-meaning preview behavior. Keep determinism independent of input array ordering.
+- [x] Run the focused tests and the existing web tests; commit only these files.
 
 ### Task 2: Optional encrypted retained previews
 
@@ -48,11 +50,11 @@
 
 **Interfaces:** `LocalPhoto` supports an available original File or a retained preview Blob, stores original size and content digest, and carries supplied labels. `LocalRetention` exposes `load()`, `save(photos, feedback)`, and `clear()`. `LocalResources.load` returns its prepared Blob alongside URL/dimensions so retention can reuse bounded raster generation. Content SHA-256 reconnects originals; search uses stable content identity.
 
-- [ ] Write failing tests using fake-indexeddb and real Web Crypto for reload restoration, ciphertext records, digest reconnection, original absence, preview budget eviction, corruption, and Clear racing a save.
-- [ ] Run focused tests and observe the expected failures.
-- [ ] Implement a separate database with a non-extractable AES-GCM key, authenticated encrypted record/feedback envelopes, serialized generation-fenced writes, a 100 MiB preview cap and honest storage errors. Preserve labels when preview bytes are evicted. Never persist a source File.
-- [ ] Update bounded raster loading for retained previews without changing original bytes. Keep bitmap/URL cleanup and stale-generation protection.
-- [ ] Run retention/local/search tests; commit only changed task files.
+- [x] Write failing tests using fake-indexeddb and real Web Crypto for reload restoration, ciphertext records, digest reconnection, original absence, preview budget eviction, corruption, and Clear racing a save.
+- [x] Run focused tests and observe the expected failures.
+- [x] Implement a separate database with a non-extractable AES-GCM key, authenticated encrypted record/feedback envelopes, serialized generation-fenced writes, a 100 MiB preview cap and honest storage errors. Preserve labels when preview bytes are evicted. Never persist a source File.
+- [x] Update bounded raster loading for retained previews without changing original bytes. Keep bitmap/URL cleanup and stale-generation protection.
+- [x] Run retention/local/search tests; commit only changed task files.
 
 ### Task 3: Working single-photo interaction
 
@@ -69,4 +71,4 @@
 
 ## Self-review
 
-The tasks cover this explicitly phased browser increment and each Review Focus condition. They preserve the spec's source/permission, evidence, original-byte and bounded-preview requirements. Full-library native indexing, OCR and visual semantics have no task in this plan and remain unimplemented; they must not be represented as delivered by this increment. No latency or ranking-quality release gate is claimed from a developer-browser check.
+The core preserves source evidence, original bytes and bounded previews. It accepts derived OCR supplied by the coordinated lane, discards stale OCR without losing labels, scopes feedback, and fences cross-tab Clear. The integrated web suite passed 90/90 and production build passed on 2026-10-01. Native/OCR/UI implementation and final combined verification are owned by the coordinated chat. No latency or ranking-quality release gate is claimed from a developer-browser check.

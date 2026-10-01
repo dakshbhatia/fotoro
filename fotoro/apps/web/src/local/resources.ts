@@ -1,7 +1,20 @@
 import { captureDate } from "../library/exif";
+import type { SearchOcr } from "./search";
 export interface LocalPhoto {
   id: string;
-  file: File;
+  file?: File;
+  digest?: string;
+  originalSize?: number;
+  preview?: Blob;
+  previewLoader?: () => Promise<Blob>;
+  previewAvailable?: boolean;
+  previewSize?: number;
+  labels?: string[];
+  caption?: string;
+  keywords?: string[];
+  facts?: string[];
+  favorite?: boolean;
+  ocr?: SearchOcr;
   filename: string;
   date: string;
   dateSource: "exif" | "selected";
@@ -98,7 +111,7 @@ function jpegOrientation(bytes: Uint8Array): number {
   } catch {}
   return 1;
 }
-export async function localPhoto(file: File): Promise<LocalPhoto> {
+export async function localPhoto(file: File): Promise<LocalPhoto & { file: File }> {
   const format = localFormat(file);
   const bytes = new Uint8Array(await file.slice(0, 256 * 1024).arrayBuffer());
   if (format === "jpeg" && (bytes[0] !== 255 || bytes[1] !== 216))
@@ -122,8 +135,11 @@ export async function localPhoto(file: File): Promise<LocalPhoto> {
     throw new Error(
       "This photo is too large to open safely in this browser. It was skipped.",
     );
+  const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", await file.arrayBuffer())), value => value.toString(16).padStart(2, "0")).join("");
   return {
-    id: crypto.randomUUID(),
+    id: digest,
+    digest,
+    originalSize: file.size,
     file,
     filename: file.name,
     date: captured ?? new Date().toISOString(),
@@ -133,6 +149,7 @@ export async function localPhoto(file: File): Promise<LocalPhoto> {
 }
 interface Raster {
   url: string;
+  blob: Blob;
   bytes: number;
   decoded: number;
   width: number;
@@ -167,14 +184,18 @@ export class LocalResources {
         if (!photo.width || !photo.height)
           throw new Error("Photo dimensions are unavailable.");
         const ratio = Math.min(1, max / Math.max(photo.width, photo.height));
-        image = await createImageBitmap(photo.file, {
+        const source = photo.file ?? photo.preview ?? await photo.previewLoader?.();
+        if (!source) throw new Error("Preview unavailable. Reselect this photo.");
+        image = await createImageBitmap(source, {
           resizeWidth: Math.max(1, Math.round(photo.width * ratio)),
           resizeHeight: Math.max(1, Math.round(photo.height * ratio)),
           resizeQuality: "high",
         });
       } catch {
         throw new Error(
-          localFormat(photo.file) === "heic"
+          !photo.file
+            ? "Preview unavailable. Reselect this photo."
+            : photo.file && localFormat(photo.file) === "heic"
             ? "HEIC is not supported by this browser. It was skipped."
             : "This photo could not be opened. It was skipped.",
         );
@@ -217,10 +238,11 @@ export class LocalResources {
         }
         const value = {
           url: URL.createObjectURL(blob),
+          blob,
           bytes: blob.size,
           decoded,
-          width: photo.width,
-          height: photo.height,
+          width: canvas.width,
+          height: canvas.height,
           used: Date.now(),
         };
         this.cache.set(key, value);

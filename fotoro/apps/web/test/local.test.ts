@@ -123,10 +123,12 @@ test("raster queue is sequential, bounded, and clears/revokes session resources"
       filename: "photo.png",
       date: new Date().toISOString(),
       dateSource: "selected" as const,
-      width: 1600,
-      height: 1600,
+      width: 4000,
+      height: 4000,
     }));
-    await Promise.all(photos.map((photo) => manager.load(photo, "preview")));
+    const rasters = await Promise.all(photos.map((photo) => manager.load(photo, "preview")));
+    assert.ok(rasters.every(raster => raster.width === 1600 && raster.height === 1600));
+    assert.ok(photos.every(photo => photo.width === 4000 && photo.height === 4000));
     assert.equal(peak, 1);
     assert.equal(closed, 5);
     assert.ok(manager.decodedBytes <= LOCAL_RASTER_BUDGET);

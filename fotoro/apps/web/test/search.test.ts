@@ -53,7 +53,7 @@ test("inspection creates no feedback; accepted meanings and explicit choices lea
   index.acceptMeaning(rome.id, "session", now);
   index.acceptMeaning(rome.id, "session", now + 1);
   assert.equal(index.search("R", { now }).photoId, "rome");
-  assert.equal(index.feedback().meanings[rome.id].length, 1);
+  assert.equal(Object.values(index.feedback().meanings)[0].length, 1);
   assert.deepEqual(index.feedback().photos, {});
   assert.equal(new PhotoSearchIndex(photos, index.feedback()).search("R", { now }).photoId, "rome");
 });
@@ -83,4 +83,51 @@ test("same-meaning prefix extension stays steady and ordering is deterministic",
   assert.equal(first.photoId, "a");
   assert.equal(index.search("Ro", { now, previous: first }).photoId, "a");
   assert.equal(new PhotoSearchIndex([...photos].reverse()).search("R", { now }).photoId, "a");
+});
+test("an incompatible accepted completion releases to a supported longer word", () => {
+  const index = new PhotoSearchIndex([photo("short", "a.jpg", ["Ron"]), photo("long", "b.jpg", ["Ronald"])]);
+  const committed = index.search("Ron", { now }).meaning!.id;
+  assert.equal(index.search("Rona", { now, committedMeaning: committed }).photoId, "long");
+});
+test("the 200-result cap cannot evict an eligible stable preview during prefix extension", () => {
+  const old = photo("old", "a.jpg", ["Ronald"]);
+  const previous = new PhotoSearchIndex([old]).search("R", { now });
+  const index = new PhotoSearchIndex([old, ...Array.from({ length: 220 }, (_, n) => photo("new" + n, "b.jpg", ["Ronald"], "2026-09-30T00:00:00Z"))]);
+  const result = index.search("Ro", { now, previous });
+  assert.equal(result.photoId, "old");
+  assert.equal(result.photoIds.length, 200);
+  assert.ok(result.photoIds.includes("old"));
+});
+test("accepted meanings do not leak between explicit search scopes", () => {
+  const index = new PhotoSearchIndex([photo("ra", "a.jpg", ["Ronald"]), photo("sa", "b.jpg", ["Rosa"]), photo("rb", "c.jpg", ["Ronald"]), photo("sb", "d.jpg", ["Rosa"])]);
+  const rosa = index.search("Rosa", { now }).meaning!.id;
+  index.acceptMeaning(rosa, "session", now, "scope-a");
+  assert.equal(index.search("R", { now, scope: "scope-a", allowedIds: new Set(["ra", "sa"]) }).photoId, "sa");
+  assert.equal(index.search("R", { now, scope: "scope-b", allowedIds: new Set(["rb", "sb"]) }).photoId, "rb");
+});
+test("successful OCR retrieves a neutral filename with text provenance", () => {
+  const receipt = { ...photo("receipt", "neutral-a.png"), ocr: { photoID: "receipt", revision: "receipt", processor: "fixture-v1", status: "complete" as const, text: "RECEIPT INVOICE 4826", confidence: .94 } };
+  const result = new PhotoSearchIndex([receipt]).search("Recei", { now });
+  assert.equal(result.photoId, "receipt"); assert.equal(result.meaning?.kind, "ocr");
+});
+test("failed or stale OCR cannot supply a searchable name", () => {
+  const base = { ...photo("receipt", "neutral.png"), ocr: { photoID: "receipt", revision: "old", processor: "fixture-v1", status: "complete" as const, text: "Ronald", confidence: .94 } };
+  assert.equal(new PhotoSearchIndex([base]).search("Ron", { now }).photoId, undefined);
+  assert.equal(new PhotoSearchIndex([{ ...base, ocr: { ...base.ocr, revision: "receipt", status: "failed" as const } }]).search("Ron", { now }).photoId, undefined);
+});
+test("keywords and captions outrank filename/OCR mentions within one text meaning", () => {
+  const photos = [photo("filename", "Rome.jpg", [], "2026-10-01T00:00:00Z"), { ...photo("caption", "a.jpg"), caption: "Rome" }, { ...photo("keyword", "b.jpg"), keywords: ["Rome"] }];
+  const result = new PhotoSearchIndex(photos).search("Rome", { now });
+  assert.equal(result.photoId, "keyword"); assert.equal(result.meaning?.kind, "keyword");
+  assert.equal(result.meanings.length, 1);
+  assert.equal(result.meaning?.evidence["filename"], "filename");
+});
+test("a favorite helps only among equally supported photos", () => {
+  const index = new PhotoSearchIndex([{ ...photo("old", "a.jpg", ["Ronald"]), favorite: true }, photo("new", "b.jpg", ["Ronald"], "2026-09-30T00:00:00Z")]);
+  assert.equal(index.search("Ron", { now }).photoId, "old");
+});
+test("a newer same-id revision removes obsolete searchable labels", () => {
+  const index = new PhotoSearchIndex([photo("same", "a.jpg", ["Ronald"]), photo("same", "a.jpg", ["Rome"])]);
+  assert.equal(index.search("Ron", { now }).photoId, undefined);
+  assert.equal(index.search("Rom", { now }).photoId, "same");
 });
