@@ -267,8 +267,14 @@ final class AnnotationTests: XCTestCase {
     let (store, prototype, bundle, card) = try context()
     let service = try AppServices(root: store.root.deletingLastPathComponent().appendingPathComponent(Wire.id()))
     let secret = try fixture(FixtureAccounts.self, "accounts").testSecrets[0]
-    try service.configureAPI("http://127.0.0.1:8787")
-    try await service.auth.recover("fotoro1.\(secret.accountId).\(secret.recoverySecret)")
+    // Keep this catalog regression offline; the separate second-device test covers real authentication.
+    service.api.baseURL = URL(string: "http://127.0.0.1:1")!
+    service.session.accountId = card.accountId
+    service.session.bearerToken = nil
+    service.session.fixture = true
+    try service.session.pin(card)
+    try await service.vault.unlock(.recoveryEnvelope(
+      secret: Data(b64: secret.recoverySecret), wrapper: secret.encryptedBundle))
     try service.activateAccount()
     var oldest = prototype
     for index in 0...1000 {
