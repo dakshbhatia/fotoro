@@ -63,3 +63,8 @@ jobs:
             sleep 0.2
           done
           pnpm test:ios
+      - name: Local service diagnostics on failure
+        if: failure()
+        run: |
+          tail -n 120 /tmp/fotoro-api.log || true
+          tail -n 80 /tmp/fotoro-fixtures.log || true
