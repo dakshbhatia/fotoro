@@ -128,8 +128,8 @@ migration is required. Canonical API and exact signed association checks pass.
 Native automatic picks and picks-only new sync work pass 131 full-app and 49
 local-preview tests. Development-signed Release 0.1.0 (5) is built for iPhoneOS,
 with the exact production association intact and no local-preview encryption
-exemption. The physical iPhone is disconnected, so build 5 installation remains
-pending. Build 4's TestFlight compliance gate remains unchanged. See
+exemption. Build 5 was subsequently installed on the physical iPhone; CoreDevice read back
+0.1.0 (5) and launched the exact bundle successfully. Build 4's TestFlight compliance gate remains unchanged. See
 [verification](verification.md) for the consumer acceptance evidence.
 
 ## Full build 4 checkpoint

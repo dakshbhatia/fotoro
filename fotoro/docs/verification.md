@@ -76,8 +76,9 @@ in-app browser and public fixtures; personal physical Safari acceptance is open.
 Production Worker `82df2ca2-b808-42f8-a38c-ac26779ac157`, tagged
 `consumer-finish-20261002`, serves the new web/API build at `fotoro.cloud`.
 Release iPhoneOS build 0.1.0 (5) compiles and passes signature, bundle/version and
-exact Associated Domains checks. Physical installation remains pending device
-connection; this is separate from the unchanged TestFlight compliance gate.
+exact Associated Domains checks. CoreDevice verifies physical installation as 0.1.0 (5) and successful launch.
+Personal sync and original restore remain separate from automated checks and
+the unchanged TestFlight compliance gate.
 
 ## Actual app checks
 
