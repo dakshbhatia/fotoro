@@ -3,10 +3,10 @@
 The web app and API are live at [fotoro.cloud](https://fotoro.cloud). The separate
 local Photos preview 0.1.0 (3) is uploaded and in internal TestFlight. Its matching
 development build was installed and launched on the physical iPhone;
-personal Photos access remains uninspected. Full encrypted build 10 is installed,
+personal Photos access remains uninspected. Full encrypted build 11 is installed,
 its exact version is read back, and its running process and protected diagnostic
 file are verified on the unlocked physical iPhone. The owner's screenshots show
-local Photos and a signed-out Sync screen. Build 10's protected account-state event
+local Photos and a signed-out Sync screen. Build 11's protected account-state event
 independently reports signed out; real-account authentication remains unverified.
 Apple has processed full build 4; its
 TestFlight access awaits an export-compliance declaration. Independent reviews reproduced

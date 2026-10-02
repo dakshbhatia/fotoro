@@ -31,11 +31,12 @@ Bounded failure fields and stored Worker logs remain enabled.
 All production bindings remain the existing isolated D1/R2 resources. No new
 migration is required. Canonical API and exact signed association checks pass.
 
-Native manual saving and account entry pass 184 full-app and 50 local-preview
-tests. Development-signed Release 0.1.0 (10) is built for iPhoneOS,
+The password release passed 184 full-app and 50 local-preview tests. Build 11's
+account-screen cleanup also passes all 29 account tests. Development-signed
+Release 0.1.0 (11) is built for iPhoneOS,
 with the exact production association intact and no local-preview encryption
-exemption. Build 10 is installed and launched on the physical iPhone; CoreDevice
-read back 0.1.0 (10) and its running executable. The initial protected account-state
+exemption. Build 11 is installed and launched on the physical iPhone; CoreDevice
+read back 0.1.0 (11) and its running executable. The initial protected account-state
 event reports signed out. The owner can create or open an account with one Fotoro
 password; owner authentication and private-photo saving remain acceptance checks.
 Build 4's TestFlight compliance gate remains unchanged. See
