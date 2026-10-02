@@ -101,6 +101,17 @@ metadata. Unexpected bundled binaries, account resources or background/domain
 entitlements fail the audit. Actual processing and tester access still need
 App Store Connect verification after upload.
 
+The final version0.1.0(build3) signed preview archive passed its artifact audit.
+It has not uploaded: the pre-upload app-store IPA export returns exit70,
+`No Accounts` and no `iOS Distribution` certificate. An explicit team retry
+returns the same errors; this Mac has a development identity and no local
+distribution identity. Build2 used Apple cloud signing for its upload workflow.
+The Mac is locked, so Xcode signing/Organizer inspection requires the owner to
+unlock it. No certificate was created/revoked and no weaker audit was substituted.
+The physical preview installation also failed with CoreDevice4016 while the
+paired phone transport was unavailable. The working public Simulator preview is
+at `http://localhost:3200/`; personal phone or TestFlight access is not claimed.
+
 Foreground Photos sync is implemented locally. On a deployed/signed build:
 create or unlock one account on iPhone, save its recovery code, then start
 Sync last 10 days. Open the same HTTPS service in Safari and sign in or recover
