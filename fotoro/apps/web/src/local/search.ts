@@ -66,7 +66,7 @@ const photoKey = (meaning: string, id: string) => JSON.stringify([meaning, id]);
 const meaningKey = (scope: string, meaning: string) => JSON.stringify([scope, meaning]);
 const words = (text: string): string[] => text.match(/[\p{L}\p{N}]+/gu) ?? [];
 
-/** Perception happens elsewhere. Typing only retrieves supported local meanings. */
+/* Perception happens elsewhere. Typing only retrieves supported local meanings. */
 export class PhotoSearchIndex {
   private records: Map<string, SearchPhoto>;
   private dictionary: IndexedMeaning[];

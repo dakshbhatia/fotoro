@@ -86,7 +86,7 @@ function createSigned(identity: AnnotationIdentity, value: PhotoAnnotationsV1, r
   const update = validateWire<PhotoAnnotationsUpdateV1>("PhotoAnnotationsUpdateV1", {version: 1, photoId: identity.photoId, revision, encrypted: encryptPrivate(value)});
   return signPayload("photo-annotations", session.accountId, utf8(update), session.signingSecretKey);
 }
-/** Keeps signed ciphertext in the account cache. Source digest is checked against immutable metadata before use. */
+/* Keeps signed ciphertext in the account cache. Source digest is checked against immutable metadata before use. */
 export async function annotationCacheWrite(signed: SignedPayloadV1, photoId: string, session = requireVault(), staged?: SignedPayloadV1) {
   const incoming = decode(signed, photoId, session);
   const stored = staged ? undefined : await get<WrappedKeyV1>("settings", cacheKey(session, photoId));
@@ -204,7 +204,7 @@ export async function resolveAnnotationConflict(photoId: string, choice: "local"
     assertVault(session);
   });
 }
-/** Preserve local hex IDs while comparing the shared base64url SHA-256 wire identity. */
+/* Preserve local hex IDs while comparing the shared base64url SHA-256 wire identity. */
 export function localOriginalDigest(local: Pick<LocalPhoto, "digest">) {
   const value = local.digest;
   if (!value) return undefined;
@@ -218,7 +218,7 @@ function localFields(local: LocalPhoto): AnnotationPatch {
     value.ocr = {text: ocr.text, confidence: ocr.confidence, processor: ocr.processor};
   return value;
 }
-/** Local source snapshots only detect later source edits; no choice history or pins enter account sync. */
+/* Local source snapshots only detect later source edits; no choice history or pins enter account sync. */
 export async function queueLocalAnnotations(identity: AnnotationIdentity, local: LocalPhoto, session = requireVault(), initial = true) {
   if (localOriginalDigest(local) !== identity.originalSha256) return false;
   const key = session.accountId + ":annotation-source:" + identity.photoId;

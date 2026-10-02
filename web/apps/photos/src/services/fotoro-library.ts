@@ -11,7 +11,7 @@ export type CatalogRefreshPhase =
 
 export type UploadActivityPhase = "idle" | "uploading" | "error";
 
-/** Rejected files still need attention even if the catalog itself is current. */
+/* Rejected files still need attention even if the catalog itself is current. */
 export function uploadOutcome(results: UploadResult[]): "idle" | "error" {
     return results.some((result) => !("file" in result)) ? "error" : "idle";
 }
@@ -22,7 +22,7 @@ const searchable = (text: string) =>
         .replace(/[\u0300-\u036f]/g, "")
         .toLowerCase();
 
-/** Search only the visibility-filtered, ordered view supplied by Ente's reducer. */
+/* Search only the visibility-filtered, ordered view supplied by Ente's reducer. */
 export function searchFotoroFiles(
     files: EnteFile[],
     query: string,
@@ -53,7 +53,7 @@ export function searchFotoroFiles(
     });
 }
 
-/** A pending/failed reconciliation must never look like a successful sync. */
+/* A pending/failed reconciliation must never look like a successful sync. */
 export async function trackCatalogRefresh(
     online: boolean,
     pull: () => Promise<void>,

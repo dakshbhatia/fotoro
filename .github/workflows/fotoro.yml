@@ -2,10 +2,10 @@ name: Fotoro
 
 on:
   pull_request:
-    paths: ["fotoro/**", ".github/workflows/fotoro.yml"]
+    paths: [".github/workflows/fotoro.yml", "fotoro/**"]
   push:
     branches: ["main", "codex/ai-photos"]
-    paths: ["fotoro/**", ".github/workflows/fotoro.yml"]
+    paths: [".github/workflows/fotoro.yml", "fotoro/**"]
   workflow_dispatch:
 
 permissions:

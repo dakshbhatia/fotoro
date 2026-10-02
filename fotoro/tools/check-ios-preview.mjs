@@ -247,7 +247,7 @@ function extractIpa(ipa, directory) {
   return singleApp(join(directory, "Payload"));
 }
 
-/**
+/*
  * Synchronously audit the signed local preview archive and, when supplied, its
  * exported IPA. Archive-only validation is permitted, but callers must require
  * ipaAudited === true before uploading. No build, signing or upload is performed.

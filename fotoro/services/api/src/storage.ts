@@ -114,7 +114,7 @@ export async function putStaging(
   if (result.meta.changes !== 1) fail("VERSION_CONFLICT", 409);
   return { version: 1 };
 }
-/** A reserve-created, expiring capability can write only its encrypted staging object. */
+/* A reserve-created, expiring capability can write only its encrypted staging object. */
 export async function putBackgroundStaging(env: Env, id: string, cap: string, request: Request) {
   if (!/^[A-Za-z0-9_-]{43}$/.test(cap)) fail("FORBIDDEN", 403);
   const row = await env.DB.prepare("SELECT * FROM uploads WHERE id=? AND cap=? AND expires>? AND state='reserved'")

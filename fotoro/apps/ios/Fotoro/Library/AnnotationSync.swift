@@ -123,7 +123,7 @@ struct AnnotationState: Codable, Sendable {
   var remoteChoice: WrappedKeyV1?
   var conflictingFields: [String]?
 }
-/// Account scoped state keeps both local edits and the exact retry payload encrypted at rest.
+// Account scoped state keeps both local edits and the exact retry payload encrypted at rest.
 final class AnnotationLedger: @unchecked Sendable {
   let store: LibraryStore
   let accountId: String

@@ -1,6 +1,6 @@
 import type { Photo } from "./catalog";
 import type { SearchPhoto } from "../local/search";
-/** Only owner annotations validated against immutable original identity enter account search. */
+/* Only owner annotations validated against immutable original identity enter account search. */
 export function cloudSearchRecords(photos: Photo[]): SearchPhoto[] {
   return photos.map(photo => {
     const annotation = !photo.grantId && photo.annotations?.photoId === photo.manifest.photoId && photo.annotations.originalSha256 === photo.metadata.originalSha256 ? photo.annotations : undefined;

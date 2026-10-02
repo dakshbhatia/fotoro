@@ -11,7 +11,7 @@ export function downloadOriginal(file: File) {
 export function canShareOriginal(file: File, environment: Pick<ShareEnvironment, "canShare" | "share"> = navigator) {
   try {return typeof environment.share === "function" && environment.canShare?.({files: [file]}) === true;} catch {return false;}
 }
-/** Call with a verified original from a fresh user gesture; no asynchronous preparation precedes share(). */
+/* Call with a verified original from a fresh user gesture; no asynchronous preparation precedes share(). */
 export async function shareOriginal(file: File, current: () => boolean, environment: ShareEnvironment = {
   canShare: data => navigator.canShare?.(data) ?? false,
   share: data => navigator.share(data),

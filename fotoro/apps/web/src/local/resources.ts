@@ -156,7 +156,7 @@ interface Raster {
   height: number;
   used: number;
 }
-/** File references stay in memory. Raster generation is sequential and caches are bounded. */
+/* File references stay in memory. Raster generation is sequential and caches are bounded. */
 export class LocalResources {
   private cache = new Map<string, Raster>();
   private queue: Promise<unknown> = Promise.resolve();

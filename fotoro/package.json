@@ -29,7 +29,7 @@
     "check": "pnpm check:core && pnpm check:api && pnpm test:web && pnpm build:web"
   },
   "dependencies": {
-    "ajv": "8.17.1",
+    "ajv": "8.18.0",
     "ajv-formats": "3.0.1",
     "libsodium-wrappers-sumo": "0.7.15"
   },

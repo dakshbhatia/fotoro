@@ -29,7 +29,7 @@ export interface PhotoMetadataV1 {
   originalSha256: Base64Url;
   representationKeys: Record<UUID, Base64Url>;
 }
-/** Account-private search data. Encrypted separately from shared photo metadata. */
+/* Account-private search data. Encrypted separately from shared photo metadata. */
 export interface PhotoAnnotationsV1 {
   version: 1;
   photoId: UUID;

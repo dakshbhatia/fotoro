@@ -1,5 +1,5 @@
 import { imageDimensions } from './resources';
-/** Optional OCR. Every runtime asset is served by this origin. */
+/* Optional OCR. Every runtime asset is served by this origin. */
 export const OCR_PROCESSOR = 'tesseract.js-7.0.0/eng-1.0.0/lstm-orientation-v2';
 export const OCR_ASSET_PATH = '/ocr/v1';
 // Engineering gate for OCR coverage, not a calibrated probability of intent or accuracy.
@@ -26,7 +26,7 @@ export function localOcrOptions(origin: string, logger: (message: WorkerProgress
   };
 }
 export type OcrWorkerFactory = (options: ReturnType<typeof localOcrOptions>, signal: AbortSignal) => Promise<OcrWorker>;
-/**
+/*
  * Minimal host for the pinned 7.0.0 worker protocol (src/createWorker.js).
  * Owning Worker before initialization lets cancellation terminate it immediately;
  * upstream's public createWorker only exposes its handle after initialization.
@@ -111,7 +111,7 @@ function untilCancelled<T>(promise: Promise<T>, signal: AbortSignal): Promise<T>
     promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', cancel));
   });
 }
-/** One serial reusable worker. Cancel fences preview, initialization and recognition completions. */
+/* One serial reusable worker. Cancel fences preview, initialization and recognition completions. */
 export class LocalOcrQueue {
   private generation = 0;
   private controller = new AbortController();
@@ -214,7 +214,7 @@ export class LocalOcrQueue {
     this.tail = operation.catch(() => {});
     return operation;
   }
-  /** Clear, toggle-off and unmount use this fence; initialization is retired when it resolves. */
+  /* Clear, toggle-off and unmount use this fence; initialization is retired when it resolves. */
   cancel(): Promise<void> {
     this.generation++;
     this.report = undefined;

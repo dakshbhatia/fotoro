@@ -1,7 +1,7 @@
 import Foundation
 import GRDB
 
-/// A device-local index. Network synchronization is handled by the owner annotation journal.
+// A device-local index. Network synchronization is handled by the owner annotation journal.
 final class SearchIndex: @unchecked Sendable {
   let database: DatabaseQueue
   private let generationLock = NSLock()

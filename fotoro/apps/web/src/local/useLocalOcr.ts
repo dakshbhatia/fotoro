@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { LocalOcrQueue, OCR_PROCESSOR, type OcrResult } from "./ocr";
 import { imageDimensions, type LocalPhoto, LocalResources } from "./resources";
 export type LocalOcrPhoto = LocalPhoto;
-/** Queue on source changes, never on queries. Results are fenced against the latest permitted digest. */
+/* Queue on source changes, never on queries. Results are fenced against the latest permitted digest. */
 export function useLocalOcr(photos: LocalOcrPhoto[], enabled: boolean, resources: LocalResources, sourceGeneration: number, onResult: (result: OcrResult) => void) {
   const latest = useRef({photos, enabled, sourceGeneration, onResult});
   latest.current = {photos, enabled, sourceGeneration, onResult};

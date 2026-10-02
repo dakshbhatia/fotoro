@@ -1,4 +1,4 @@
-/** Selected-photo development slice. No account keys or synced assets are used. */
+/* Selected-photo development slice. No account keys or synced assets are used. */
 export const photoModel = "gemini-3.8-flash";
 export interface PhotoDescription {
     summary: string;
@@ -60,7 +60,7 @@ export function parseDescription(value: unknown): PhotoDescription {
     };
 }
 
-/** Caller must supply a re-encoded, metadata-free JPEG, never the original file. */
+/* Caller must supply a re-encoded, metadata-free JPEG, never the original file. */
 export async function describePhoto({
     jpeg,
     apiKey,
@@ -176,7 +176,7 @@ const stopWords = new Set(
         " ",
     ),
 );
-/** Fast lexical index; embeddings will add semantic recall in the production adapter. */
+/* Fast lexical index; embeddings will add semantic recall in the production adapter. */
 export function searchPhotos<T extends SearchablePhoto>(
     photos: T[],
     query: string,
@@ -198,7 +198,7 @@ export function searchPhotos<T extends SearchablePhoto>(
     });
 }
 
-/** SHA-256 hashes of originals identify exact duplicates, never near duplicates. */
+/* SHA-256 hashes of originals identify exact duplicates, never near duplicates. */
 export function duplicateGroups(
     photos: { id: string; hash: string }[],
 ): string[][] {

@@ -19,7 +19,7 @@ export interface ViewerPhoto {
     error?: string;
 }
 
-/** Uses Ente's existing PhotoSwipe dependency for touch, zoom and focus handling. */
+/* Uses Ente's existing PhotoSwipe dependency for touch, zoom and focus handling. */
 export function LocalPhotoViewer({
     photos,
     initialID,

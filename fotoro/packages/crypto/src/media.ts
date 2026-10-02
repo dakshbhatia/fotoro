@@ -42,7 +42,7 @@ export async function* encryptMedia(
     current = next;
   }
 }
-/** Chunk boundaries are transport arbitrary. At most one 4 MiB record is buffered. */
+/* Chunk boundaries are transport arbitrary. At most one 4 MiB record is buffered. */
 export async function* decryptMedia(
   container: AsyncIterable<Uint8Array>,
   key: Uint8Array,

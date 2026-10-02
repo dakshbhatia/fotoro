@@ -15,7 +15,7 @@ import {inRecentSelectedRange} from "./consumer-range";
 export function selectedOriginals(photos: LocalPhoto[]): File[] {
   return photos.flatMap(photo => photo.file instanceof File ? [photo.file] : []);
 }
-/** The digest, never a filename, reconnects original operations and supplied labels. */
+/* The digest, never a filename, reconnects original operations and supplied labels. */
 export function mergeSelectedPhotos(existing: LocalPhoto[], selected: LocalPhoto[]): LocalPhoto[] {
   const result = new Map(existing.map(photo => [photo.id, photo]));
   for (const photo of selected) {
@@ -28,7 +28,7 @@ export function mergeSelectedPhotos(existing: LocalPhoto[], selected: LocalPhoto
   return [...result.values()].sort((a, b) => b.date.localeCompare(a.date));
 }
 export interface SearchNavigation { query: string; scope: string; meaningID: string; photoID: string }
-/** Manual browsing changes the visible photo, while the ranked hit list and default pin remain intact. */
+/* Manual browsing changes the visible photo, while the ranked hit list and default pin remain intact. */
 export function displaySearchResult(predicted: SearchResult, navigation?: SearchNavigation): SearchResult {
   if (navigation && navigation.query === predicted.query && navigation.scope === predicted.scope && navigation.meaningID === predicted.meaning?.id && predicted.photoIds.includes(navigation.photoID))
     return {...predicted, photoId: navigation.photoID};

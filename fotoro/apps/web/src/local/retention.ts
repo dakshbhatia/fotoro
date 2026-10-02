@@ -40,7 +40,7 @@ function validFeedback(value: any): value is SearchFeedback {
   return value?.version === 1 && events(value.meanings) && events(value.photos) && value.pins && typeof value.pins === "object" && !Array.isArray(value.pins) && Object.values(value.pins).every(id => typeof id === "string");
 }
 
-/** Optional origin-local encryption. Metadata hydrates independently of bounded image bytes. */
+/* Optional origin-local encryption. Metadata hydrates independently of bounded image bytes. */
 export class LocalRetention {
   readonly name: string;
   private budget: number;

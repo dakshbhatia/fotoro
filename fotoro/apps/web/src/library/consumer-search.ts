@@ -32,7 +32,7 @@ function comparableDigest(photo: LocalPhoto) {
   if (!/^[a-f0-9]{64}$/i.test(digest)) return digest;
   return btoa(String.fromCharCode(...digest.match(/../g)!.map(value => parseInt(value, 16)))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
-/** This adapter consumes verified owned catalog records. Account records never enter local retention. */
+/* This adapter consumes verified owned catalog records. Account records never enter local retention. */
 export function savedSearchPhotos(snapshot: OwnedPhotoSnapshot | null, local: LocalPhoto[]): LocalPhoto[] {
   if (!snapshot?.current()) return [];
   const selected = new Map(local.filter(photo => photo.file).map(photo => [comparableDigest(photo), photo.id]));

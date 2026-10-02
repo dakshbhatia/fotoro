@@ -1,4 +1,4 @@
-/** Small outline symbols for the photo control layer. */
+/* Small outline symbols for the photo control layer. */
 export function PhotoSymbol({
     name,
 }: {

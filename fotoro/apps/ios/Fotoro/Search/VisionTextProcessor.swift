@@ -11,7 +11,7 @@ struct SearchPreview: @unchecked Sendable {
   var image: CGImage
   var orientation = CGImagePropertyOrientation.up
 }
-/// Synchronous actor work runs off the main actor and cannot overlap another OCR request.
+// Synchronous actor work runs off the main actor and cannot overlap another OCR request.
 actor VisionTextProcessor {
   static func boundedSize(width: Int, height: Int) -> (Int, Int) {
     let scale = min(1, 1600 / Double(max(1, width, height)))

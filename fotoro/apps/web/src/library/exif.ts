@@ -1,4 +1,4 @@
-/** Minimal bounded JPEG EXIF reader. Missing/invalid dates retain import provenance. */
+/* Minimal bounded JPEG EXIF reader. Missing/invalid dates retain import provenance. */
 export function captureDate(bytes: Uint8Array): string | undefined {
   try {
     if (bytes[0] !== 255 || bytes[1] !== 216) return;

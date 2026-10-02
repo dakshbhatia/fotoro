@@ -1,4 +1,4 @@
-/** Reconcile the prior original before allowing another source into durable staging. */
+/* Reconcile the prior original before allowing another source into durable staging. */
 export async function syncSelectedSequential<T>(
   files: T[],
   options: {
