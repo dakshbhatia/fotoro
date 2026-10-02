@@ -24,26 +24,43 @@ A Worker preview with a different RP creates different passkey credentials. Do n
 
 ## Current state
 
-October 2 release checkpoint: [PR 1](https://github.com/dakshbhatia/fotoro/pull/1)
-is merged into `main` at `deb751e0c9`. Both the
-[main CI run](https://github.com/dakshbhatia/fotoro/actions/runs/36953464488)
-and [PR CI run](https://github.com/dakshbhatia/fotoro/actions/runs/36953408124)
+October 2 release checkpoint: [PR 2](https://github.com/dakshbhatia/fotoro/pull/2)
+is merged into `main` at `adb35ae652`. Both the
+[main CI run](https://github.com/dakshbhatia/fotoro/actions/runs/36960016617)
+and [PR CI run](https://github.com/dakshbhatia/fotoro/actions/runs/36958905612)
 passed, including the native, web/API and repository checks.
+
+The local-only version 0.1.0, build 3 is uploaded. Xcode Organizer used the
+existing account's cloud-managed Apple distribution certificate to produce its
+IPA. The signed archive and distribution IPA passed the strict preview artifact
+audit, and Apple package validation passed before that exact audited IPA uploaded
+successfully at 00:39 Eastern. The API reports `VALID`,
+`usesNonExemptEncryption=false` and internal `IN_BETA_TESTING`. Build-specific
+local-preview test notes were saved and read back. This build browses recent
+Photos, searches permitted photos/text and shares originals; hosted backup is
+excluded. Actual owner TestFlight installation remains a device check.
+App Store Connect also verifies the existing internal group has one tester and
+one build: 0.1.0 (3) is `Testing`, and the requested owner tester is `Invited`.
+The owner can accept that TestFlight invitation and install the preview. Inbox
+delivery and device installation have not been inspected.
 
 An existing local individual App Store Connect key was verified against this
 exact Fotoro app record and copied into private storage outside the repositories.
 It can read Fotoro build and group metadata. As described in
 [Apple's API key documentation](https://developer.apple.com/documentation/appstoreconnectapi/creating-api-keys-for-app-store-connect-api),
 individual keys cannot use Apple's provisioning endpoints; they do not replace
-the Xcode signing account or a distribution certificate. The existing build 2 is `VALID` in the API, with its
+the Xcode signing account or a distribution certificate. Xcode 27's installed
+`altool` supports `--api-key-subject user`: this existing individual key validated
+and uploaded the already distribution-signed build 3 IPA. The existing build 2 is `VALID` in the API, with its
 encryption declaration unset; this is not an installable beta claim.
 
 An existing Cloudflare account token is active and can list Workers. D1, R2 and
 Workers Domains requests are denied, and it cannot confirm the `fotoro.cloud`
 zone. It is insufficient for this production deployment. Another configured
 Cloudflare token is invalid. No resources in another application were changed.
-The owner still needs to unlock this Mac for Xcode signing and authenticate the
-intended Cloudflare account with access to Fotoro's domain, D1, R2 and Worker.
+The owner still needs to authenticate the intended Cloudflare account with
+access to Fotoro's domain, D1, R2 and Worker. A fresh Wrangler account check remains
+unauthenticated; the open Cloudflare sign-in has not completed.
 
 October 1, 2026: the active checkout is `/Users/dakshbhatia/Documents/GitHub/Fotoro`.
 The native/web/API development build runs locally, with the web preview at 4310,
@@ -71,9 +88,10 @@ fall through to the web app. It lists `webcredentials.apps` for passkeys.
 Universal-link handling remains unimplemented. See
 [Apple's associated domains documentation](https://developer.apple.com/documentation/xcode/supporting-associated-domains).
 Wrangler's normal account check is unauthenticated. No public Fotoro service
-or TestFlight release is claimed yet. See [verification](verification.md).
+is claimed yet. The separate local Photos preview is in internal TestFlight.
+See [verification](verification.md).
 
-## Internal TestFlight checkpoint
+## Encrypted build 2 checkpoint
 
 Version 0.1.0, build 2 is uploaded and processed. `Fotoro Internal` has automatic
 distribution enabled and the requested existing owner tester; no account roles
@@ -147,18 +165,38 @@ The helper verifies the exact Fotoro app/bundle and selected build before the
 notes write, then reads back the saved notes. `--notes-file` preserves explicitly
 supplied wording. Processing, encryption and beta states are reported separately;
 group assignment and actual tester access still require their own verification.
-The current read-only check finds build 2 and returns `BUILD_NOT_FOUND` for build 3.
+The current read-only check finds build 3 as `VALID` and `IN_BETA_TESTING`; its
+local-preview notes are verified. Build 2 remains `MISSING_EXPORT_COMPLIANCE`.
 
-The final version0.1.0(build3) signed preview archive passed its artifact audit.
-It has not uploaded: the pre-upload app-store IPA export returns exit70,
-`No Accounts` and no `iOS Distribution` certificate. An explicit team retry
-returns the same errors; this Mac has a development identity and no local
-distribution identity. Build2 used Apple cloud signing for its upload workflow.
-The Mac is locked, so Xcode signing/Organizer inspection requires the owner to
-unlock it. No certificate was created/revoked and no weaker audit was substituted.
-The physical preview installation also failed with CoreDevice4016 while the
-paired phone transport was unavailable. The working public Simulator preview is
-at `http://localhost:3200/`; personal phone or TestFlight access is not claimed.
+The final version 0.1.0 (build 3) signed preview archive and distribution IPA
+passed their artifact audits. Terminal `xcodebuild` export still returns exit 70
+with `No Accounts` and no local distribution identity, while the unlocked Xcode
+Organizer can use its existing account and cloud-managed distribution certificate.
+The signed IPA was copied from Xcode staging into private release storage and
+audited against the unchanged archive and link map before validation/upload.
+No preview audit was bypassed. A preceding physical preview installation failed
+with CoreDevice4016 while its phone transport was unavailable; no personal phone
+installation is inferred from the TestFlight API state.
+
+For an individual key, keep metadata authentication (`ASC_KEY_SUBJECT=user`,
+no `ASC_ISSUER_ID`) separate from `altool`'s arguments. Its parser requires an
+issuer argument even with `--api-key-subject user`; use the actual observed team
+issuer in a separate private `ASC_UPLOAD_ISSUER_ID`, never a guessed value.
+After the immutable archive/distribution IPA audit passes, Xcode 27 supports:
+
+```sh
+xcrun altool --validate-app "$FOTORO_AUDITED_IPA" \
+  --api-key "$ASC_KEY_ID" --api-issuer "$ASC_UPLOAD_ISSUER_ID" \
+  --api-key-subject user --p8-file-path "$ASC_KEY_PATH"
+xcrun altool --upload-package "$FOTORO_AUDITED_IPA" \
+  --api-key "$ASC_KEY_ID" --api-issuer "$ASC_UPLOAD_ISSUER_ID" \
+  --api-key-subject user --p8-file-path "$ASC_KEY_PATH"
+```
+
+Require validation/upload exit 0 and their `VERIFY SUCCEEDED` / `UPLOAD SUCCEEDED`
+markers. Keep credentials and receipts outside Git. Verify the exact app, iOS
+marketing version/build, beta state and internal group through App Store Connect;
+an upload receipt alone does not establish tester availability.
 
 Foreground Photos sync is implemented locally. On a deployed/signed build:
 create or unlock one account on iPhone, save its recovery code, then start

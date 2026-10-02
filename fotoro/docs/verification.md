@@ -1,18 +1,19 @@
 # Verification — October 2, 2026
 
-The native, browser and service development build runs locally. It has not been
-publicly deployed or released through TestFlight. Independent reviews reproduced
+The native, browser and service development build runs locally. The separate
+local Photos preview 0.1.0 (3) is uploaded and in internal TestFlight; the hosted
+service remains undeployed. Independent reviews reproduced
 retrieval, permission, cancellation, persistence and navigation defects; fixes
 include permanent regressions and were re-reviewed.
 
 The completed release tree is merged in
-[PR 1](https://github.com/dakshbhatia/fotoro/pull/1). Both the
-[main CI run](https://github.com/dakshbhatia/fotoro/actions/runs/36953464488)
-and [PR CI run](https://github.com/dakshbhatia/fotoro/actions/runs/36953408124)
+[PR 2](https://github.com/dakshbhatia/fotoro/pull/2). Both the
+[main CI run](https://github.com/dakshbhatia/fotoro/actions/runs/36960016617)
+and [PR CI run](https://github.com/dakshbhatia/fotoro/actions/runs/36958905612)
 passed. A reused individual Apple API key verifies Fotoro's app/build records,
 but cannot provision signing certificates. The existing active Cloudflare
 account token cannot access the required D1, R2 or domain resources. These
-credential checks do not establish deployment or TestFlight availability.
+credential checks do not establish a deployed service or physical installation.
 
 | Check | Evidence |
 | --- | --- |
@@ -21,7 +22,9 @@ credential checks do not establish deployment or TestFlight availability.
 | Web | 128 tests pass: consumer choices/status, account-isolated Pause, combined local/saved search, preview fences, original Share/fallback, rank-key read budget and existing retrieval/retention/annotation checks |
 | Web production build | TypeScript/Vite pass; local entry 306.15 kB (95.75 kB gzip). Account/crypto loads after Sync photos; the large encrypted-media chunk warning remains |
 | Native | Full app 104 tests and local preview 31 tests pass locally with Xcode 27, zero failures or skips. The merged release passes native CI; remote full/preview suites each have one expected Photos-permission interaction skip, which passes in the permitted local Simulator. Consumer cancellation/Continue, original-share cleanup, all-age PhotoKit labels, isolated preview storage and existing crypto/journal/background checks are included |
-| TestFlight metadata | 28 tests pass for team/individual authentication, exact app/build ownership, sparse Apple responses, notes readback and credential-safe errors. A live build 2 update preserved every existing test-note character and verified its build relationship; its processing state is VALID and beta states remain MISSING_EXPORT_COMPLIANCE. Build 3 is absent |
+| TestFlight metadata | 28 tests pass for team/individual authentication, exact app/build ownership, sparse Apple responses, notes readback and credential-safe errors. A live build 2 update preserved every existing test-note character and verified its build relationship; its processing state is VALID and beta states remain MISSING_EXPORT_COMPLIANCE. Build 3 is VALID / IN_BETA_TESTING with encryption metadata false and verified local-preview test notes |
+| Distribution IPA | Actual build 3 archive and distribution IPA pass the strict preview audit. Xcode Organizer used its existing cloud-managed certificate; the copied IPA matches the unchanged archive/dSYM/link map. Apple validation and exact-IPA upload both exit 0 with success markers |
+| Internal tester access | App Store Connect shows the existing internal group with one tester and one build; iOS 0.1.0 (3) is Testing and the requested sole owner tester is Invited. Association was automatic; no new tester/role/invitation mutation was needed. Inbox delivery and installation remain unverified |
 | Shared retrieval fixtures | Both platforms find all 20 predeclared supported tasks; five unsupported visual tasks and five absent terms remain empty. These are development fixtures, not held-out user accuracy |
 | Cross-language media | Swift decrypts frozen TypeScript vectors; TypeScript decrypts checked-in Swift ciphertext and rejects altered binding |
 | Real local HTTP exchange | Three isolated tests cover fresh migrations, recovery sessions, bidirectional contribution/save, revocation, restore, byte-preserved HEIC, background ciphertext staging, encrypted labels/OCR in a fresh account session, cross-account denial and idempotent revision conflicts |
@@ -170,15 +173,18 @@ records; it cannot enumerate an iPhone photo library automatically.
 ## Remaining release gates
 
 - Cloudflare account access, distinct production D1/R2 bindings, HTTPS and routing.
-- Xcode is signed in and the physical iPhone is connected. The app-specific
-  development profile preserves Associated Domains, and the final Debug build
-  installs. Build 1's signed Release archive passed, but Apple upload validation
+- Xcode's existing account can sign through Organizer; terminal export still
+  reports No Accounts. The local Photos preview build 3 has uploaded and is
+  VALID / IN_BETA_TESTING. Personal TestFlight installation remains unverified.
+  The preceding app-specific development profile preserved Associated Domains,
+  and its Debug checkpoint installed. Build 1's signed Release archive passed, but Apple upload validation
   rejected its missing orientation metadata after the export's mixed rsync
   toolchain was corrected. Build 2's signed Release archive includes standard
   iPhone/iPad orientation arrays and uploaded successfully at 19:10 Eastern
   (`EXPORT SUCCEEDED`, exit 0). Apple has finished processing and displays
   Missing Compliance. The encryption declaration remains open; the internal
-  tester group is prepared, with no available TestFlight build yet.
+  tester group is prepared. Build 2 remains unavailable due to its compliance
+  gate; build 3 is the separate local-only preview.
   The HTTPS association file still needs deployment. Universal-link handling is
   not implemented. The read-only `check:service https://fotoro.cloud` currently
   fails: vault and association endpoints both return 404.
@@ -235,5 +241,7 @@ artifact harness passed24/24; native full104 and preview31 executed with zero
 failures and one Photos-permission interaction skip in each remote suite. That
 older public PhotoKit test passed in both permitted local suites. The final
 preview rebuild after the toolbar sizing fix also passed its rendered check.
-Build3 remains a signed, audited archive awaiting distribution signing/export;
-it is not uploaded or available to TestFlight testers. See [signing handoff](deployment.md).
+On October 2, build 3's actual distribution IPA passed the unchanged archive/IPA
+audit, Apple validation and exact-IPA upload. The API now reports VALID and
+IN_BETA_TESTING with verified local-preview notes. Personal installation remains
+unverified. See [release setup](deployment.md).
