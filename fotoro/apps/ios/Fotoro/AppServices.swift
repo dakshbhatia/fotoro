@@ -309,6 +309,7 @@ enum PhotoPicksBackupPolicy {
       self?.grants = []
       self?.selectedGrant = nil
       self?.auth.pending = nil
+      self?.auth.cancelStart()
       self?.deviceTrust.pending = nil
       ImageCache.shared.removeAll()
     }

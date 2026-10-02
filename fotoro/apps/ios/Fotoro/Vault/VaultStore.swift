@@ -24,10 +24,13 @@ enum UnlockMethod {
   private let session: AccountSession
   private let api: APIClient
   private let crypto = CryptoAdapter()
+  private let storeBundle: @MainActor (Data, String) throws -> Void
   var onLock: (() -> Void)?
-  init(session: AccountSession, api: APIClient) {
+  init(session: AccountSession, api: APIClient,
+    storeBundle: (@MainActor (Data, String) throws -> Void)? = nil) {
     self.session = session
     self.api = api
+    self.storeBundle = storeBundle ?? { bytes, id in try Keychain.write(bytes, id: id) }
   }
   func unlock(_ method: UnlockMethod) async throws {
     guard let id = session.accountId else { throw FotoroError("Authenticate before unlocking") }
@@ -85,7 +88,7 @@ enum UnlockMethod {
     guard session.accountId == id, generation == unlockingGeneration else {
       throw CancellationError()
     }
-    try Keychain.write(bytes, id: id)
+    try storeBundle(bytes, id)
     generation = UUID()
     bundle = candidate
   }
@@ -96,7 +99,10 @@ enum UnlockMethod {
     onLock?()
   }
   func signOut() throws {
-    if let id = session.accountId { Keychain.remove(id) }
+    if let id = session.accountId {
+      Keychain.remove(id)
+      Keychain.remove("password-" + id)
+    }
     lock()
     session.accountId = nil
     session.bearerToken = nil

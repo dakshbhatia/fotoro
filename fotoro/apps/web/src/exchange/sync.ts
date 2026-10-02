@@ -167,18 +167,24 @@ export function readableSyncError(error: unknown) {
   if (/GRANT_INACTIVE/.test(code))
     return "Access to these shared photos has ended.";
   if (
-    /INVALID_RECOVERY|wrong secret|ciphertext cannot|invalid ciphertext/i.test(
+    /FOTORO_PASSWORD_NOT_FOUND|INVALID_FOTORO_PASSWORD|INVALID_RECOVERY|wrong secret|ciphertext cannot|invalid ciphertext/i.test(
       code,
     )
   )
-    return "That recovery code could not unlock your library. Check the complete code.";
+    return "That Fotoro password could not unlock your library. Check the complete password.";
+  if (/PASSWORD_ACCOUNT_MISMATCH/.test(code))
+    return "That account could not be verified. Try signing in again.";
+  if (/ACCOUNT_SETUP_NOT_STARTED/.test(code))
+    return "Create an account to get your Fotoro password.";
+  if (/PASSWORD_COPY_UNAVAILABLE/.test(code))
+    return "Select your password to copy it, or choose Save password.";
   if (/NotAllowedError|cancelled|canceled|not completed/i.test(code))
     return "Sign-in was cancelled. Your photos have not changed.";
   if (/REAL_AUTH_REQUIRED/.test(code))
-    return "Passkey setup is unavailable on this local test service.";
+    return "Account setup is unavailable on this local test service.";
   if (/DIGEST|CIPHERTEXT|AUTHENTICATION/.test(code))
     return "This photo could not be verified. It has not been marked as synced.";
   if (/PRF_UNAVAILABLE|AUTHENTICATED_USE_RECOVERY/.test(code))
-    return "Use your saved recovery code to unlock photos on this device.";
+    return "Enter your Fotoro password to unlock photos on this device.";
   return "Sync could not finish. Your originals are unchanged. Try again when online.";
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct RecoveryCodeAcknowledgement {
   private var savedCode: String?
@@ -29,124 +30,99 @@ struct AccountView: View {
   @Bindable var services: AppServices
   var onSignedIn: () -> Void = {}
   var onSignOut: (() -> Void)?
-  @State private var recovery = ""
-  @State private var recoveryAcknowledgement = RecoveryCodeAcknowledgement()
+  @State private var password = ""
   @State private var apiURL = ""
-  private var needsRecovery: Bool { services.auth.needsRecovery }
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
         AccountIdentityView(session: services.session, unlocked: services.vault.isUnlocked)
-        Text(services.auth.pending != nil ? "Create your account" : needsRecovery ? "Unlock your saved photos" : services.session.isSignedIn ? "Welcome back" : "Sign in to Fotoro")
-          .font(.title2.bold())
-        Text(needsRecovery
-          ? "Use your recovery code or a trusted device to open your saved photos."
-          : "Save photos when you choose. Automatic sync is off.").foregroundStyle(.secondary)
+        if let code = services.auth.startPassword {
+          Text("Your Fotoro password").font(.title2.bold())
+          Text("Save this password. Use it to open your Fotoro on any device.").foregroundStyle(.secondary)
+          Text(code).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
+            .privacySensitive()
+          HStack {
+            Button("Copy password", systemImage: "doc.on.doc") { UIPasteboard.general.string = code }
+            ShareLink("Save password", item: code)
+          }
+          Button("Continue") {
+            services.run(phase: .auth) {
+              try await services.auth.completeStart(code: code)
+              try await finishSignIn()
+            }
+          }.buttonStyle(.borderedProminent).disabled(services.busy)
+          Button("Cancel") { services.auth.cancelStart(); services.error = nil }.disabled(services.busy)
+        } else if services.session.isSignedIn && services.vault.canUnlockLocally {
+          Button("Unlock photos") {
+            services.run(phase: .auth) {
+              try await services.vault.unlock(.localKeychain)
+              try await finishSignIn()
+            }
+          }.buttonStyle(.borderedProminent).disabled(services.busy)
+            .accessibilityIdentifier("account.unlock")
+        } else {
+          Text("Open your Fotoro").font(.title2.bold())
+          SecureField("Fotoro password", text: $password)
+            .textFieldStyle(.roundedBorder)
+            .textContentType(.password).textInputAutocapitalization(.never)
+            .autocorrectionDisabled().submitLabel(.go).onSubmit(signIn)
+            .disabled(services.busy).accessibilityIdentifier("account.password")
+          Button("Sign in", action: signIn).buttonStyle(.borderedProminent)
+            .disabled(services.busy || password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .accessibilityIdentifier("account.signIn")
+          Button("New Fotoro") {
+            services.run(phase: .auth) { try await services.auth.prepareStart() }
+          }.disabled(services.busy)
+            .accessibilityIdentifier("account.create")
+        }
         if let error = services.error {
           Text(error).foregroundStyle(.red).accessibilityIdentifier("account.error")
         }
         if services.busy {
-          ProgressView("Connecting your account…").accessibilityIdentifier("account.connecting")
+          ProgressView("Opening your Fotoro…").accessibilityIdentifier("account.connecting")
         }
-        if !needsRecovery && services.auth.pending == nil {
-          Button(services.session.isSignedIn ? "Unlock photos" : "Sign in") {
-            services.run(phase: .auth) {
-              if services.session.isSignedIn {
-                do { try await services.vault.unlock(.localKeychain) } catch {
-                  _ = try await services.auth.login()
-                }
-              } else {
+        if services.auth.startPassword == nil {
+          DisclosureGroup("Other ways to sign in") {
+            Button("Use a passkey") {
+              services.run(phase: .auth) {
                 _ = try await services.auth.login()
+                try await finishSignIn()
               }
-              try await finishSignIn()
             }
-          }.buttonStyle(.borderedProminent).disabled(services.busy)
-            .accessibilityIdentifier("account.signIn")
-          if !services.session.isSignedIn {
-            Text("Use your Fotoro passkey.").font(.footnote).foregroundStyle(.secondary)
-            Button("Create account") { services.run(phase: .auth) { try await services.auth.prepareEnrollment() } }
-              .disabled(services.busy)
-          }
-        }
-        if needsRecovery { recoveryForm }
-        if let code = services.auth.recoveryCode {
-          Text("Save your recovery code").font(.headline)
-          Text(code).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-          ShareLink("Save recovery code", item: code)
-          Toggle("I saved this recovery code", isOn: Binding(
-            get: { recoveryAcknowledgement.isSaved(code) },
-            set: { recoveryAcknowledgement.setSaved($0, code: code) })).disabled(services.busy)
-          Button("Continue") {
-            services.run(phase: .auth) {
-              try await services.auth.completeEnrollment(recoverySaved: recoveryAcknowledgement.isSaved(services.auth.recoveryCode))
-              try await finishSignIn()
+            DisclosureGroup("Use a trusted device") {
+              Button("Request approval") { services.run(phase: .auth) { try await services.deviceTrust.begin() } }
+              if let request = services.deviceTrust.challengeJSON { ShareLink("Send request", item: request) }
+              Button("Complete approved request") {
+                services.run(phase: .auth) {
+                  try await services.deviceTrust.complete()
+                  try await finishSignIn()
+                }
+              }
             }
-          }.disabled(services.busy || !recoveryAcknowledgement.isSaved(code))
-          Button("Cancel") {
-            services.auth.pending = nil
-            recoveryAcknowledgement.setSaved(false, code: nil)
-            services.error = nil
           }.disabled(services.busy)
-        }
-        if services.auth.pending == nil {
-          if needsRecovery {
-            DisclosureGroup("Use a trusted device") { trustedDeviceForm }.disabled(services.busy)
-          } else {
-            DisclosureGroup("Other ways to sign in") {
-              recoveryForm
-              DisclosureGroup("Use a trusted device") { trustedDeviceForm }
-            }.disabled(services.busy)
-          }
         }
         if services.session.accountId != nil, let onSignOut {
           Button("Sign out", role: .destructive, action: onSignOut).disabled(services.busy)
         }
         #if DEBUG
           DisclosureGroup("Advanced · development") {
-            Button("Unlock with PRF passkey") {
-              services.run {
-                try await services.auth.unlockWithPRF()
-                try await finishSignIn()
-              }
-            }
             TextField("API URL", text: $apiURL).textInputAutocapitalization(.never)
               .autocorrectionDisabled().keyboardType(.URL)
             Button("Use API") { services.run { try services.configureAPI(apiURL) } }
             Text(services.api.baseURL.absoluteString).font(.caption)
-            Button("Public fixture · account 1") {
-              services.run { try await services.fixtureUnlock(index: 0) }
-            }
-            Button("Public fixture · account 2") {
-              services.run { try await services.fixtureUnlock(index: 1) }
-            }
+            Button("Public fixture · account 1") { services.run { try await services.fixtureUnlock(index: 0) } }
+            Button("Public fixture · account 2") { services.run { try await services.fixtureUnlock(index: 1) } }
           }
         #endif
       }.padding()
     }
   }
-  private var trustedDeviceForm: some View {
-    VStack(alignment: .leading, spacing: 12) {
-      Button("Request approval") { services.run(phase: .auth) { try await services.deviceTrust.begin() } }
-      if let request = services.deviceTrust.challengeJSON { ShareLink("Send request", item: request) }
-      Button("Complete approved request") {
-        services.run(phase: .auth) {
-          try await services.deviceTrust.complete()
-          try await finishSignIn()
-        }
-      }
-    }
-  }
-  private var recoveryForm: some View {
-    VStack(alignment: .leading, spacing: 12) {
-      SecureField("Recovery code", text: $recovery).textInputAutocapitalization(.never)
-        .autocorrectionDisabled().disabled(services.busy)
-      Button("Unlock with recovery code") {
-        services.run(phase: .auth) {
-          try await services.auth.recover(recovery)
-          recovery = ""
-          try await finishSignIn()
-        }
-      }.disabled(services.busy || recovery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+  private func signIn() {
+    guard !password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    services.run(phase: .auth) {
+      try await services.auth.loginWithCode(password)
+      password = ""
+      try await finishSignIn()
     }
   }
   func finishSignIn() async throws {

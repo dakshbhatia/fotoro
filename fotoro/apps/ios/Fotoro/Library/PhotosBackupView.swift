@@ -16,6 +16,7 @@ struct PhotosBackupView: View {
   @State private var savedPhotos = false
   @State private var exchange = false
   @State private var signingOut = false
+  @State private var savedPassword: SavedAccountPassword?
   @State private var photosPermission = PHPhotoLibrary.authorizationStatus(for: .readWrite)
   @Environment(\.dismiss) private var dismiss
   @Environment(\.scenePhase) private var scenePhase
@@ -23,13 +24,19 @@ struct PhotosBackupView: View {
   var body: some View {
     NavigationStack {
       Group {
-        if !services.vault.isUnlocked || (!services.session.isSignedIn && !services.session.fixture) {
+        if services.auth.startPassword != nil || !services.vault.isUnlocked || (!services.session.isSignedIn && !services.session.fixture) {
           AccountView(services: services, onSignOut: { signingOut = true })
         } else {
           List {
             Section {
               AccountIdentityView(session: services.session, unlocked: services.vault.isUnlocked)
                 .padding(.vertical, 4)
+              if services.auth.hasSavedPassword {
+                Button("Your Fotoro password", systemImage: "key") {
+                  do { savedPassword = SavedAccountPassword(value: try services.auth.savedPassword()) }
+                  catch { services.error = error.localizedDescription }
+                }.accessibilityIdentifier("account.showPassword")
+              }
             }
             overview
             if summary.state == .needsAttention || summary.skippedPhotos > 0 {
@@ -62,12 +69,29 @@ struct PhotosBackupView: View {
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         .sheet(isPresented: $savedPhotos) { LibraryView(services: services) }
         .sheet(isPresented: $exchange) { ExchangeView(services: services, selected: []) }
+        .sheet(item: $savedPassword) { password in
+          NavigationStack {
+            VStack(alignment: .leading, spacing: 20) {
+              Text("Use this password to open your Fotoro on any device.").foregroundStyle(.secondary)
+              Text(password.value).font(.system(.callout, design: .monospaced))
+                .textSelection(.enabled).privacySensitive()
+              Button("Copy password", systemImage: "doc.on.doc") { UIPasteboard.general.string = password.value }
+              ShareLink("Save password", item: password.value)
+              Spacer()
+            }.padding().navigationTitle("Fotoro password").navigationBarTitleDisplayMode(.inline)
+              .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { savedPassword = nil } } }
+          }
+        }
         .onAppear { refreshPhotosPermission() }
+        .onDisappear { services.auth.cancelStart(); savedPassword = nil }
         .onChange(of: scenePhase) { _, phase in
           if phase == .active { refreshPhotosPermission() }
         }
         .onChange(of: services.vault.isUnlocked) { _, unlocked in
-          if !unlocked { savedPhotos = false; exchange = false }
+          if !unlocked { savedPhotos = false; exchange = false; savedPassword = nil }
+        }
+        .onChange(of: scenePhase) { _, phase in
+          if phase != .active { savedPassword = nil }
         }
         .alert("Sign out?", isPresented: $signingOut) {
           Button("Sign out and remove local data", role: .destructive) {
@@ -175,4 +199,9 @@ struct PhotosBackupView: View {
     case .needsAttention: return "Some photos need attention"
     }
   }
+}
+
+private struct SavedAccountPassword: Identifiable {
+  let id = UUID()
+  let value: String
 }

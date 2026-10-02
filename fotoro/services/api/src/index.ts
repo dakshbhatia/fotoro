@@ -69,7 +69,7 @@ app.use("/v1/*", async (c, next) => {
   }
   await next();
 });
-for (const kind of ["register", "login", "recovery"]) {
+for (const kind of ["register", "login", "recovery", "start"]) {
   app.post(`/v1/auth/${kind}/options`, async (c) =>
     c.json(await auth.options(c.env, c.req.raw, kind, await readJson<any>(c.req.raw))),
   );

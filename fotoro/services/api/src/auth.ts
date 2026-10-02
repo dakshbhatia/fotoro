@@ -105,13 +105,13 @@ export async function vault(env: Env, accountId: string) {
 }
 export async function options(env: Env, r: Request, kind: string, input: any) {
   validateWire(
-    kind === "recovery" ? "RecoveryOptionsRequestV1" : "AuthOptionsRequestV1",
+    kind === "start" ? "StartOptionsRequestV1" : kind === "recovery" ? "RecoveryOptionsRequestV1" : "AuthOptionsRequestV1",
     input,
   );
   const o = origin(env, r),
     id = crypto.randomUUID(),
     account =
-      kind === "register"
+      kind === "register" || kind === "start"
         ? input.accountId || crypto.randomUUID()
         : input.accountId || null;
   if (kind === "register" && input.accountId) {
@@ -119,7 +119,9 @@ export async function options(env: Env, r: Request, kind: string, input: any) {
     if (actor.accountId !== input.accountId) fail("FORBIDDEN", 403);
   }
   let result: any;
-  if (kind === "recovery") {
+  if (kind === "start") {
+    result = { challenge: b64(crypto.getRandomValues(new Uint8Array(32))) };
+  } else if (kind === "recovery") {
     result = {
       challenge: b64(crypto.getRandomValues(new Uint8Array(32))),
       vault: await vault(env, account),
@@ -163,7 +165,10 @@ export async function options(env: Env, r: Request, kind: string, input: any) {
   )
     .bind(id, account, result.challenge, kind, input.client, expires, o)
     .run();
-  return kind === "recovery"
+  return kind === "start"
+    ? { version: 1, accountId: account, challengeId: id, challenge: result.challenge,
+        expiresAt: new Date(expires).toISOString() }
+    : kind === "recovery"
     ? {
         version: 1,
         challengeId: id,
@@ -180,7 +185,7 @@ export async function options(env: Env, r: Request, kind: string, input: any) {
 }
 export async function verify(env: Env, r: Request, kind: string, input: any) {
   validateWire(
-    kind === "recovery" ? "RecoveryVerifyRequestV1" : "AuthVerifyRequestV1",
+    kind === "start" ? "StartVerifyRequestV1" : kind === "recovery" ? "RecoveryVerifyRequestV1" : "AuthVerifyRequestV1",
     input,
   );
   const o = origin(env, r);
@@ -194,7 +199,28 @@ export async function verify(env: Env, r: Request, kind: string, input: any) {
   const writes: D1PreparedStatement[] = [];
   let credentialGuard = "";
   let credentialArgs: unknown[] = [];
-  if (kind === "recovery") {
+  if (kind === "start") {
+    const e = validateWire<any>("AccountEnrollmentV1", input.enrollment);
+    if (e.accountCard.accountId !== account || e.recoveryWrapper.kind !== "recovery" ||
+      !e.recoveryWrapper.verified || e.recoveryWrapper.credentialId !== null || e.recoveryWrapper.prfSalt !== null)
+      fail("BODY_MISMATCH");
+    const enrollmentBody = JSON.parse(new TextDecoder().decode(await verifySigned(
+      e.proof, e.accountCard.signingPublicKey, "account-enrollment", account)));
+    if (json(enrollmentBody) !== json({ accountCard: e.accountCard, recoveryWrapper: e.recoveryWrapper }))
+      fail("BODY_MISMATCH");
+    const proof = JSON.parse(new TextDecoder().decode(await verifySigned(
+      input.signedPayload, e.accountCard.signingPublicKey, "start-enrollment", account)));
+    validateWire("RecoverySessionProofV1", proof);
+    if (json(proof) !== json({ version: 1, challengeId: c.id, challenge: c.challenge,
+      accountId: account, client: c.client, origin: o })) fail("BODY_MISMATCH");
+    // A start code enrolls a new identity only. Conflicts abort every account/wrapper write.
+    credentialGuard = " AND NOT EXISTS(SELECT 1 FROM accounts WHERE id=?) AND NOT EXISTS(SELECT 1 FROM wrappers WHERE id=?)";
+    credentialArgs = [account, e.recoveryWrapper.wrapperId];
+    writes.push(
+      env.DB.prepare("INSERT INTO accounts VALUES(?,?)").bind(account, json(e.accountCard)),
+      env.DB.prepare("INSERT INTO wrappers VALUES(?,?,?)").bind(e.recoveryWrapper.wrapperId, account, json(e.recoveryWrapper)),
+    );
+  } else if (kind === "recovery") {
     const v = await vault(env, account);
     const body = JSON.parse(
       new TextDecoder().decode(

@@ -1413,6 +1413,30 @@
           ]
         }
       }
+    },
+    "StartOptionsRequestV1": {
+      "type": "object", "additionalProperties": false, "required": ["version", "client"],
+      "properties": { "version": { "const": 1 }, "client": { "enum": ["web", "native"] } }
+    },
+    "StartOptionsV1": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "accountId", "challengeId", "challenge", "expiresAt"],
+      "properties": {
+        "version": { "const": 1 }, "accountId": { "type": "string", "format": "uuid" },
+        "challengeId": { "type": "string", "format": "uuid" },
+        "challenge": { "type": "string", "pattern": "^[A-Za-z0-9_-]*$", "minLength": 43, "maxLength": 43 },
+        "expiresAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "StartVerifyRequestV1": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "challengeId", "client", "enrollment", "signedPayload"],
+      "properties": {
+        "version": { "const": 1 }, "challengeId": { "type": "string", "format": "uuid" },
+        "client": { "enum": ["web", "native"] },
+        "enrollment": { "$ref": "#/$defs/AccountEnrollmentV1" },
+        "signedPayload": { "$ref": "#/$defs/SignedPayloadV1" }
+      }
     }
   }
 }

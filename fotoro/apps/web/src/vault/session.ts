@@ -1,12 +1,11 @@
-import {
-  startAuthentication,
-  startRegistration,
-} from "@simplewebauthn/browser";
+import { startAuthentication } from "@simplewebauthn/browser";
 import type {
   VaultV1,
   RecoveryOptionsV1,
   AccountCardV1,
   VaultWrapperV1,
+  StartOptionsV1,
+  SessionV1,
 } from "@fotoro/contracts";
 import {
   ready,
@@ -18,7 +17,7 @@ import {
   signPayload,
   utf8,
 } from "@fotoro/crypto";
-import { api, setFixtureAccount, fixtureMode } from "../exchange/api";
+import { api, ApiError, setFixtureAccount, fixtureMode } from "../exchange/api";
 import { get, put } from "../exchange/cache";
 import {
   configureVault,
@@ -26,7 +25,9 @@ import {
   unlockVault,
   requireVault,
   lockVault,
+  vaultGeneration,
 } from "./vault";
+import { formatFotoroPassword, parseFotoroPassword } from "./password";
 export async function fixtureAccounts() {
   if (!fixtureMode) throw new Error("FIXTURE_DISABLED");
   return api<{
@@ -34,9 +35,13 @@ export async function fixtureAccounts() {
     testSecrets: { accountId: string; recoverySecret: string }[];
   }>("/__fixtures/accounts");
 }
-async function remember(vault: VaultV1) {
+async function remember(vault: VaultV1, current = () => true) {
+  const checkCurrent = () => { if (!current()) throw new DOMException("Sign-in cancelled", "AbortError"); };
+  checkCurrent();
   await put("settings", vault.accountCard.accountId + ":vault", vault);
+  checkCurrent();
   await put("settings", "last-account", vault.accountCard.accountId);
+  checkCurrent();
 }
 export async function publicTestSession(accountId: string) {
   lockVault();
@@ -109,30 +114,44 @@ export async function passkeyLogin() {
   if (output) await unlockVault({ kind: "prf" });
   return session;
 }
-export async function recover(code: string) {
+export async function recover(code: string, current = () => true) {
+  let opened: ReturnType<typeof requireVault> | undefined;
+  let generation = vaultGeneration();
+  const checkCurrent = () => { if (!current() || vaultGeneration() !== generation) throw new DOMException("Sign-in cancelled", "AbortError"); };
+  const checkUnlock = () => {
+    if (!current() || vaultGeneration() !== generation + 1) throw new DOMException("Sign-in cancelled", "AbortError");
+    generation = vaultGeneration();
+  };
   await ready;
+  checkCurrent();
   setFixtureAccount();
-  const parts = code.trim().split(".");
-  if (parts.length !== 3 || parts[0] !== "fotoro1")
-    throw new Error("INVALID_RECOVERY_CODE");
-  const secret = unb64(parts[2]);
+  const { accountId, secret } = parseFotoroPassword(code);
   try {
     if (!navigator.onLine) {
-      const cached = await get<VaultV1>("settings", parts[1] + ":vault");
+      const cached = await get<VaultV1>("settings", accountId + ":vault");
+      checkCurrent();
       if (!cached) throw new Error("NO_CACHED_VAULT");
+      if (cached.accountCard.accountId !== accountId) throw new Error("PASSWORD_ACCOUNT_MISMATCH");
       configureVault(cached);
-      await unlockVault({ kind: "recovery", secret });
+      opened = await unlockVault({ kind: "recovery", secret });
+      checkUnlock();
       return;
     }
     const options = await api<RecoveryOptionsV1>(
       "/v1/auth/recovery/options",
-      { version: 1, accountId: parts[1], client: "web" },
+      { version: 1, accountId, client: "web" },
       "RecoveryOptionsV1",
-    );
+    ).catch(error => {
+      if (error instanceof ApiError && error.code === "NOT_FOUND") throw new Error("FOTORO_PASSWORD_NOT_FOUND");
+      throw error;
+    });
+    checkCurrent();
+    if (options.vault.accountCard.accountId !== accountId) throw new Error("PASSWORD_ACCOUNT_MISMATCH");
     configureVault(options.vault);
-    await unlockVault({ kind: "recovery", secret });
+    opened = await unlockVault({ kind: "recovery", secret });
+    checkUnlock();
     const v = requireVault();
-    const session = await api<any>(
+    const session = await api<SessionV1>(
       "/v1/auth/recovery/verify",
       {
         version: 1,
@@ -154,24 +173,30 @@ export async function recover(code: string) {
       },
       "SessionV1",
     );
+    checkCurrent();
+    if (session.accountId !== accountId) throw new Error("PASSWORD_ACCOUNT_MISMATCH");
     configureDevice(session.deviceId);
-    await remember(options.vault);
+    await remember(options.vault, () => current() && vaultGeneration() === generation);
+    checkCurrent();
   } catch (e) {
-    lockVault();
+    if (opened) closeIfCurrent(opened);
     throw e;
   } finally {
     secret.fill(0);
   }
 }
+function closeIfCurrent(opened: ReturnType<typeof requireVault>) {
+  try { if (requireVault() === opened) lockVault(); } catch {}
+}
 let enrollment:
   | {
-      options: any;
+      options: StartOptionsV1;
       card: AccountCardV1;
       wrapper: VaultWrapperV1;
       bundle: Uint8Array;
       recovery: Uint8Array;
       signing: Uint8Array;
-      prfSalt: Uint8Array;
+      verificationAttempted: boolean;
     }
   | undefined;
 let enrollmentEpoch = 0;
@@ -182,17 +207,16 @@ export async function prepareEnrollment() {
   if (epoch !== enrollmentEpoch)
     throw new DOMException("Setup cancelled", "AbortError");
   setFixtureAccount();
-  const options = await api<any>("/v1/auth/register/options", {
+  const options = await api<StartOptionsV1>("/v1/auth/start/options", {
     version: 1,
     client: "web",
-  });
+  }, "StartOptionsV1");
   if (epoch !== enrollmentEpoch)
     throw new DOMException("Setup cancelled", "AbortError");
   const box = sodium.crypto_box_keypair(),
     signing = sodium.crypto_sign_keypair(),
     vault = sodium.randombytes_buf(32),
-    recovery = sodium.randombytes_buf(32),
-    prfSalt = sodium.randombytes_buf(32);
+    recovery = sodium.randombytes_buf(32);
   const card: AccountCardV1 = {
     version: 1,
     accountId: options.accountId,
@@ -226,9 +250,9 @@ export async function prepareEnrollment() {
     bundle,
     recovery,
     signing: signing.privateKey,
-    prfSalt,
+    verificationAttempted: false,
   };
-  return "fotoro1." + card.accountId + "." + b64(recovery);
+  return formatFotoroPassword(card.accountId, recovery);
 }
 export function cancelEnrollment() {
   enrollmentEpoch++;
@@ -236,76 +260,70 @@ export function cancelEnrollment() {
     enrollment.bundle.fill(0);
     enrollment.recovery.fill(0);
     enrollment.signing.fill(0);
-    enrollment.prfSalt.fill(0);
     enrollment = undefined;
   }
 }
-export async function completeEnrollment(recoverySaved: boolean) {
-  if (!enrollment || !recoverySaved)
-    throw new Error("SAVE_RECOVERY_CODE_FIRST");
+export async function completeEnrollment() {
+  if (!enrollment) throw new Error("ACCOUNT_SETUP_NOT_STARTED");
   const e = enrollment;
-  try {
-    e.options.options.extensions = {
-      ...e.options.options.extensions,
-      prf: { eval: { first: e.prfSalt } },
-    };
-    const response = await startRegistration({
-      optionsJSON: e.options.options,
-    });
-    if (enrollment !== e)
-      throw new DOMException("Setup cancelled", "AbortError");
-    const output = prfOutput(response);
-    const session = await api<any>(
-      "/v1/auth/register/verify",
-      {
-        version: 1,
-        challengeId: e.options.challengeId,
-        response: publicResponse(response),
-        client: "web",
-        enrollment: {
-          accountCard: e.card,
-          recoveryWrapper: e.wrapper,
-          proof: signPayload(
-            "account-enrollment",
-            e.card.accountId,
-            utf8({ accountCard: e.card, recoveryWrapper: e.wrapper }),
-            e.signing,
-          ),
-        },
-      },
-      "SessionV1",
-    );
-    if (enrollment !== e)
-      throw new DOMException("Setup cancelled", "AbortError");
-    configureDevice(session.deviceId);
-    const vault: VaultV1 = {
-      version: 1,
-      accountCard: e.card,
-      wrappers: [e.wrapper],
-    };
-    if (output) {
-      const wrapper: VaultWrapperV1 = {
-        version: 1,
-        wrapperId: crypto.randomUUID(),
-        kind: "prf",
-        credentialId: response.id,
-        prfSalt: b64(e.prfSalt),
-        wrappedBundle: wrapKey(e.bundle, output),
-        verified: false,
-      };
-      await api(
-        "/v1/vault/wrappers/" + wrapper.wrapperId,
-        wrapper,
-        "VaultWrapperV1",
-        "PUT",
-      );
-      vault.wrappers.push(wrapper);
-      output.fill(0);
+  const current = () => enrollment === e;
+  // A lost response may have committed this identity and consumed its signup challenge.
+  if (e.verificationAttempted) {
+    try {
+      await recover(formatFotoroPassword(e.card.accountId, e.recovery), current);
+      if (current()) cancelEnrollment();
+      return;
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== "FOTORO_PASSWORD_NOT_FOUND") throw error;
+      if (!current()) throw new DOMException("Setup cancelled", "AbortError");
     }
-    configureVault(vault);
-    await unlockVault({ kind: "recovery", secret: e.recovery });
-    await remember(vault);
-  } finally {
-    if (enrollment === e) cancelEnrollment();
+  }
+  e.verificationAttempted = true;
+  const generation = vaultGeneration();
+  const session = await api<SessionV1>(
+    "/v1/auth/start/verify",
+    {
+      version: 1,
+      challengeId: e.options.challengeId,
+      client: "web",
+      enrollment: {
+        version: 1,
+        accountCard: e.card,
+        recoveryWrapper: e.wrapper,
+        proof: signPayload(
+          "account-enrollment",
+          e.card.accountId,
+          utf8({ accountCard: e.card, recoveryWrapper: e.wrapper }),
+          e.signing,
+        ),
+      },
+      signedPayload: signPayload(
+        "start-enrollment",
+        e.card.accountId,
+        utf8({ version: 1, challengeId: e.options.challengeId, challenge: e.options.challenge,
+          accountId: e.card.accountId, client: "web", origin: location.origin }),
+        e.signing,
+      ),
+    },
+    "SessionV1",
+  );
+  if (!current() || vaultGeneration() !== generation) throw new DOMException("Setup cancelled", "AbortError");
+  if (session.accountId !== e.card.accountId) throw new Error("PASSWORD_ACCOUNT_MISMATCH");
+  configureDevice(session.deviceId);
+  const vault: VaultV1 = {
+    version: 1,
+    accountCard: e.card,
+    wrappers: [e.wrapper],
+  };
+  configureVault(vault);
+  const opened = await unlockVault({ kind: "recovery", secret: e.recovery });
+  if (!current() || vaultGeneration() !== generation + 1) { closeIfCurrent(opened); throw new DOMException("Setup cancelled", "AbortError"); }
+  try {
+    await remember(vault, () => current() && vaultGeneration() === generation + 1);
+    if (!current() || vaultGeneration() !== generation + 1) throw new DOMException("Setup cancelled", "AbortError");
+    cancelEnrollment();
+  } catch (error) {
+    closeIfCurrent(opened);
+    throw error;
   }
 }

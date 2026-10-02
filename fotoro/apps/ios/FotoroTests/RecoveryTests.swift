@@ -4,6 +4,241 @@ import XCTest
 @testable import Fotoro
 
 final class RecoveryTests: XCTestCase {
+  func testCompactPasswordMatchesWebVectorAndAcceptsLegacyCodes() throws {
+    let account = "00112233-4455-6677-8899-aabbccddeeff"
+    let secret = Data((0..<32).map(UInt8.init))
+    let expected = "foto_ABEiM0RVZneImaq7zN3u_wABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f"
+    XCTAssertEqual(try RecoveryCode.format(accountId: account, secret: secret), expected)
+    XCTAssertEqual(expected.count, 69)
+    for value in [expected, " \n" + expected + "\n", "fotoro1." + account.uppercased() + "." + secret.b64] {
+      let password = try RecoveryCode(value)
+      XCTAssertEqual(password.accountId, account)
+      XCTAssertEqual(password.secret, secret)
+    }
+    for value in ["", "a-short-password", "foto_AA", expected + "=", String(expected.dropLast()), expected + "A"] {
+      XCTAssertThrowsError(try RecoveryCode(value))
+    }
+  }
+  @MainActor func testStartPasswordCreatesAccountOnlyAfterConfirmationWithoutPasskeyOrPlaintextSecret() async throws {
+    var ceremonies = 0
+    try await withIsolatedLogin(ceremony: { _ in
+      ceremonies += 1; throw FotoroError("Unexpected passkey ceremony")
+    }) { auth, session, vault, responses in
+      try await auth.prepareStart()
+      let password = try XCTUnwrap(auth.startPassword)
+      let code = try RecoveryCode(password)
+      XCTAssertFalse(session.isSignedIn)
+      XCTAssertFalse(vault.isUnlocked)
+      XCTAssertEqual(responses.paths, ["/v1/auth/start/options"])
+      let wrong = try RecoveryCode.format(accountId: code.accountId, secret: Data(repeating: 0, count: 32))
+      do { try await auth.completeStart(code: wrong); XCTFail("Different password created an account") }
+      catch let error as FotoroError { XCTAssertEqual(error.message, "Check your Fotoro password and try again.") }
+      XCTAssertEqual(responses.paths, ["/v1/auth/start/options"])
+      try await auth.completeStart(code: "\n" + password + "\n")
+      XCTAssertTrue(session.isSignedIn)
+      XCTAssertTrue(vault.isUnlocked)
+      XCTAssertEqual(session.accountId, code.accountId)
+      XCTAssertNil(auth.startPassword)
+      XCTAssertEqual(try auth.savedPassword(), password)
+      XCTAssertEqual(ceremonies, 0)
+      XCTAssertEqual(responses.paths, ["/v1/auth/start/options", "/v1/auth/start/verify"])
+      let wire = try XCTUnwrap(responses.body(for: "/v1/auth/start/verify"))
+      let request = try Wire.decode(StartVerify.self, wire)
+      let crypto = CryptoAdapter()
+      let bundle = try Wire.decode(AccountBundle.self,
+        crypto.unwrap(request.enrollment.recoveryWrapper.wrappedBundle, key: code.secret))
+      XCTAssertEqual(bundle.vaultKey, try vault.requireBundle().vaultKey)
+      let json = try XCTUnwrap(String(data: wire, encoding: .utf8))
+      XCTAssertFalse(json.contains(password))
+      XCTAssertFalse(json.contains(code.secret.b64))
+      XCTAssertFalse(json.contains(bundle.vaultKey))
+      XCTAssertFalse(json.contains(bundle.signingSecretKey))
+      XCTAssertFalse(json.contains("\"response\""))
+      let wrapperJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: Wire.encode(request.enrollment.recoveryWrapper)) as? [String: Any])
+      XCTAssertTrue(wrapperJSON["credentialId"] is NSNull)
+      XCTAssertTrue(wrapperJSON["prfSalt"] is NSNull)
+      do { try await auth.completeStart(code: password); XCTFail("Completed account was enrolled twice") } catch {}
+      XCTAssertEqual(responses.paths.filter { $0 == "/v1/auth/start/verify" }.count, 1)
+    }
+  }
+  @MainActor func testCompactAndLegacyPasswordsBothAuthenticateAndUnlockOnFreshDeviceWithoutPasskey() async throws {
+    try await withIsolatedLogin(ceremony: { _ in throw FotoroError("Unexpected passkey ceremony") }) {
+      auth, session, vault, responses in
+      try await auth.prepareStart()
+      let password = try XCTUnwrap(auth.startPassword), code = try RecoveryCode(password)
+      try await auth.completeStart(code: password)
+      let key = try vault.requireBundle().vaultKey
+      for value in [password, "fotoro1.\(code.accountId).\(code.secret.b64)"] {
+        try vault.signOut()
+        XCTAssertFalse(Keychain.contains(code.accountId))
+        XCTAssertFalse(Keychain.contains("password-" + code.accountId))
+        XCTAssertThrowsError(try auth.savedPassword())
+        session.pinnedCards = [:]
+        let restoredVault = VaultStore(session: session, api: auth.api)
+        let restoredAuth = NativeAuth(session: session, api: auth.api, vault: restoredVault,
+          credentialCeremony: { _ in throw FotoroError("Unexpected passkey ceremony") })
+        try await restoredAuth.loginWithCode(value)
+        XCTAssertTrue(session.isSignedIn)
+        XCTAssertTrue(restoredVault.isUnlocked)
+        XCTAssertEqual(try restoredVault.requireBundle().vaultKey, key)
+        XCTAssertEqual(try restoredAuth.savedPassword(), password)
+        restoredVault.lock()
+      }
+      XCTAssertEqual(responses.paths.filter { $0 == "/v1/auth/recovery/options" }.count, 2)
+      XCTAssertEqual(responses.paths.filter { $0 == "/v1/auth/recovery/verify" }.count, 2)
+      XCTAssertFalse(responses.paths.contains { $0.contains("login/") || $0.contains("register/") || $0 == "/v1/vault" })
+    }
+  }
+  @MainActor func testWrongPasswordCannotVerifyOrReplaceUnlockedAccountAndNetworkFailureStaysActionable() async throws {
+    try await withIsolatedLogin(ceremony: { _ in throw FotoroError("Unexpected passkey ceremony") }) {
+      auth, session, vault, responses in
+      try await auth.prepareStart()
+      let password = try XCTUnwrap(auth.startPassword), code = try RecoveryCode(password)
+      try await auth.completeStart(code: password)
+      let key = try vault.requireBundle().vaultKey
+      let wrong = try RecoveryCode.format(accountId: code.accountId, secret: Data(repeating: 0, count: 32))
+      for value in ["simple-weak-password", wrong,
+        try RecoveryCode.format(accountId: Wire.id(), secret: code.secret)] {
+        do { try await auth.loginWithCode(value); XCTFail("Invalid password authenticated") }
+        catch let error as FotoroError { XCTAssertEqual(error.message, "Check your Fotoro password and try again.") }
+        XCTAssertEqual(session.accountId, code.accountId)
+        XCTAssertEqual(try vault.requireBundle().vaultKey, key)
+        XCTAssertEqual(try auth.savedPassword(), password)
+      }
+      XCTAssertFalse(responses.paths.contains("/v1/auth/recovery/verify"))
+      responses.recoveryUnavailable = true
+      do { try await auth.loginWithCode(password); XCTFail("Failed request authenticated") }
+      catch let error as FotoroError { XCTAssertEqual(error.message, "CONTROLLED_RECOVERY_UNAVAILABLE") }
+      XCTAssertEqual(try vault.requireBundle().vaultKey, key)
+    }
+  }
+  @MainActor func testCancelledStartNeverPublishesGeneratedPasswordOrAcceptsLateSession() async throws {
+    for path in ["/v1/auth/start/options", "/v1/auth/start/verify", "/v1/auth/recovery/options", "/v1/auth/recovery/verify"] {
+      let gate = NativeLoginVaultGate(started: expectation(description: path + " is pending"))
+      defer { gate.release.signal() }
+      try await withIsolatedLogin(startGate: gate, startGatePath: path,
+        ceremony: { _ in throw FotoroError("Unexpected passkey ceremony") }) { auth, session, vault, responses in
+        let task: Task<Void, Error>
+        if path == "/v1/auth/start/options" { task = Task { try await auth.prepareStart() } }
+        else {
+          try await auth.prepareStart()
+          let password = try XCTUnwrap(auth.startPassword)
+          if path.contains("/recovery/") {
+            responses.loseStartResponse = true
+            do { try await auth.completeStart(code: password); XCTFail("Controlled response loss was hidden") }
+            catch let error as URLError { XCTAssertEqual(error.code, .networkConnectionLost) }
+          }
+          task = Task { try await auth.completeStart(code: password) }
+        }
+        await fulfillment(of: [gate.started], timeout: 3)
+        let count = responses.paths.count
+        do {
+          if path == "/v1/auth/start/options" { try await auth.prepareStart() }
+          else { try await auth.completeStart(code: try XCTUnwrap(auth.startPassword)) }
+          XCTFail("Duplicate action started while a request was pending")
+        } catch let error as FotoroError { XCTAssertEqual(error.message, "Account setup is already in progress") }
+        XCTAssertEqual(responses.paths.count, count)
+        auth.cancelStart()
+        gate.release.signal()
+        do { try await task.value; XCTFail("Cancelled setup completed") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertNil(auth.startPassword)
+        XCTAssertFalse(session.isSignedIn)
+        XCTAssertFalse(vault.isUnlocked)
+        XCTAssertFalse(Keychain.contains("password-" + responses.card.accountId))
+      }
+    }
+  }
+  @MainActor func testProtectedPasswordSaveFailureKeepsCompletedAccountAndRetriesWithoutEnrollment() async throws {
+    var writes = 0
+    try await withIsolatedLogin(rememberPassword: { bytes, id in
+      writes += 1
+      if writes == 1 { throw FotoroError("Controlled protected-storage failure") }
+      try Keychain.write(bytes, id: id)
+    }, ceremony: { _ in throw FotoroError("Unexpected passkey ceremony") }) { auth, session, vault, responses in
+      try await auth.prepareStart()
+      let password = try XCTUnwrap(auth.startPassword)
+      do { try await auth.completeStart(code: password); XCTFail("Storage failure was hidden") }
+      catch let error as FotoroError { XCTAssertTrue(error.message.contains("Keep a copy")) }
+      XCTAssertTrue(session.isSignedIn)
+      XCTAssertTrue(vault.isUnlocked)
+      XCTAssertEqual(auth.startPassword, password)
+      XCTAssertThrowsError(try auth.savedPassword())
+      try await auth.completeStart(code: password)
+      XCTAssertEqual(try auth.savedPassword(), password)
+      XCTAssertNil(auth.startPassword)
+      XCTAssertEqual(writes, 2)
+      XCTAssertEqual(responses.paths.filter { $0 == "/v1/auth/start/verify" }.count, 1)
+    }
+  }
+  @MainActor func testLostEnrollmentResponseContinuesWithSamePasswordWithoutSubmittingConsumedChallenge() async throws {
+    try await withIsolatedLogin(ceremony: { _ in throw FotoroError("Unexpected passkey ceremony") }) {
+      auth, session, vault, responses in
+      try await auth.prepareStart()
+      let password = try XCTUnwrap(auth.startPassword)
+      responses.loseStartResponse = true
+      do { try await auth.completeStart(code: password); XCTFail("Controlled response loss was hidden") }
+      catch let error as URLError { XCTAssertEqual(error.code, .networkConnectionLost) }
+      XCTAssertFalse(session.isSignedIn)
+      XCTAssertFalse(vault.isUnlocked)
+      XCTAssertEqual(auth.startPassword, password)
+      try await auth.completeStart(code: password)
+      XCTAssertTrue(session.isSignedIn)
+      XCTAssertTrue(vault.isUnlocked)
+      XCTAssertEqual(try auth.savedPassword(), password)
+      XCTAssertNil(auth.startPassword)
+      XCTAssertEqual(responses.paths, ["/v1/auth/start/options", "/v1/auth/start/verify",
+        "/v1/auth/recovery/options", "/v1/auth/recovery/verify"])
+    }
+  }
+  @MainActor func testSessionStorageFailureAfterServerEnrollmentContinuesSameAccountWithoutCreatingAgain() async throws {
+    var writes = 0
+    try await withIsolatedLogin(persistSession: { bytes in
+      writes += 1
+      if writes == 1 { throw FotoroError("Controlled session storage failure") }
+      try Keychain.write(bytes, id: "session")
+    }, ceremony: { _ in throw FotoroError("Unexpected passkey ceremony") }) { auth, session, vault, responses in
+      try await auth.prepareStart()
+      let password = try XCTUnwrap(auth.startPassword), code = try RecoveryCode(password)
+      do { try await auth.completeStart(code: password); XCTFail("Controlled session failure was hidden") }
+      catch let error as FotoroError { XCTAssertEqual(error.message, "Controlled session storage failure") }
+      XCTAssertFalse(session.isSignedIn)
+      XCTAssertEqual(auth.startPassword, password)
+      try await auth.completeStart(code: password)
+      XCTAssertTrue(vault.isUnlocked)
+      XCTAssertEqual(session.accountId, code.accountId)
+      XCTAssertEqual(try auth.savedPassword(), password)
+      XCTAssertEqual(writes, 2)
+      XCTAssertEqual(responses.paths.filter { $0 == "/v1/auth/start/verify" }.count, 1)
+      XCTAssertEqual(responses.paths.filter { $0 == "/v1/auth/recovery/verify" }.count, 1)
+    }
+  }
+  @MainActor func testLocalBundleFailureDuringLostResponseRecoveryPreservesPasswordAndRetriesOnlyLocalUnlock() async throws {
+    var writes = 0
+    try await withIsolatedLogin(storeBundle: { bytes, id in
+      writes += 1
+      if writes == 1 { throw FotoroError("Controlled local bundle failure") }
+      try Keychain.write(bytes, id: id)
+    }, ceremony: { _ in throw FotoroError("Unexpected passkey ceremony") }) { auth, session, vault, responses in
+      try await auth.prepareStart()
+      let password = try XCTUnwrap(auth.startPassword)
+      responses.loseStartResponse = true
+      do { try await auth.completeStart(code: password); XCTFail("Controlled response loss was hidden") }
+      catch let error as URLError { XCTAssertEqual(error.code, .networkConnectionLost) }
+      do { try await auth.completeStart(code: password); XCTFail("Controlled bundle failure was hidden") }
+      catch let error as FotoroError { XCTAssertEqual(error.message, "Controlled local bundle failure") }
+      XCTAssertTrue(session.isSignedIn)
+      XCTAssertFalse(vault.isUnlocked)
+      XCTAssertEqual(auth.startPassword, password)
+      let requests = responses.paths
+      try await auth.completeStart(code: password)
+      XCTAssertTrue(vault.isUnlocked)
+      XCTAssertEqual(try auth.savedPassword(), password)
+      XCTAssertEqual(writes, 2)
+      XCTAssertEqual(responses.paths, requests)
+      XCTAssertEqual(responses.paths.filter { $0 == "/v1/auth/start/verify" }.count, 1)
+    }
+  }
   @MainActor func testSessionPersistenceFailurePreservesActiveIdentityAndCredentials() throws {
     let remembered = UserDefaults.standard.object(forKey: "fotoro.account")
     defer {
@@ -327,6 +562,10 @@ final class RecoveryTests: XCTestCase {
   @MainActor private func withIsolatedLogin(optionsFail: Bool = false, enrolled: Bool = false,
     allowedCredentials: [[String: Any]]? = nil,
     vaultGate: NativeLoginVaultGate? = nil, wrapperFail: Bool = false,
+    startGate: NativeLoginVaultGate? = nil, startGatePath: String? = nil,
+    persistSession: ((Data) throws -> Void)? = nil,
+    storeBundle: (@MainActor (Data, String) throws -> Void)? = nil,
+    rememberPassword: (@MainActor (Data, String) throws -> Void)? = nil,
     ceremony: @escaping NativeCredentialCeremony,
     check: @MainActor (NativeAuth, AccountSession, VaultStore, NativeLoginResponses) async throws -> Void) async throws {
     let defaults = UserDefaults.standard
@@ -339,6 +578,7 @@ final class RecoveryTests: XCTestCase {
     defer {
       NativeLoginProtocol.responses.remove(host)
       Keychain.remove(card.accountId)
+      Keychain.remove("password-" + card.accountId)
       Keychain.remove("session")
       if let savedSession {
         do { try Keychain.write(savedSession, id: "session") }
@@ -350,9 +590,10 @@ final class RecoveryTests: XCTestCase {
       else { defaults.removeObject(forKey: "fotoro.pinnedCards") }
     }
     let responses = try NativeLoginResponses(card: card, optionsFail: optionsFail,
-      allowedCredentials: allowedCredentials, vaultGate: vaultGate, wrapperFail: wrapperFail)
+      allowedCredentials: allowedCredentials, vaultGate: vaultGate, wrapperFail: wrapperFail,
+      startGate: startGate, startGatePath: startGatePath)
     NativeLoginProtocol.responses.insert(responses, for: host)
-    let session = AccountSession()
+    let session = AccountSession(persistSession: persistSession ?? { try Keychain.write($0, id: "session") })
     session.accountId = nil
     session.bearerToken = nil
     session.deviceId = nil
@@ -370,8 +611,10 @@ final class RecoveryTests: XCTestCase {
     configuration.protocolClasses = [NativeLoginProtocol.self]
     let api = APIClient(session: session, baseURL: URL(string: "https://" + host)!,
       networkConfiguration: configuration, diagnostics: NativeDiagnostics(fileURL: nil, emitSystemLog: false))
-    let vault = VaultStore(session: session, api: api)
-    let auth = NativeAuth(session: session, api: api, vault: vault, credentialCeremony: ceremony)
+    let vault = VaultStore(session: session, api: api, storeBundle: storeBundle)
+    let auth = NativeAuth(session: session, api: api, vault: vault, credentialCeremony: ceremony,
+      rememberPassword: rememberPassword)
+    vault.onLock = { [weak auth] in auth?.cancelStart() }
     auth.fallbackMessage = "Stale recovery guidance"
     try await check(auth, session, vault, responses)
     vault.lock()
@@ -430,13 +673,27 @@ private final class NativeLoginResponses: @unchecked Sendable {
   private let optionsBytes: Data
   private let vaultGate: NativeLoginVaultGate?
   private let wrapperFail: Bool
+  private let startGate: NativeLoginVaultGate?
+  private let startGatePath: String?
+  private let startOptions: StartOptionsResponse
+  private let recoveryChallengeId = Wire.id()
+  private let recoveryChallenge = Data(repeating: 19, count: 32).b64
   private let lock = NSLock()
   private var requestedPaths: [String] = []
+  private var requestBodies: [String: Data] = [:]
+  private var enrolledVault: VaultV1?
+  private var unavailable = false
+  private var loseResponse = false
   init(card: AccountCardV1, optionsFail: Bool, allowedCredentials: [[String: Any]]?,
-    vaultGate: NativeLoginVaultGate?, wrapperFail: Bool) throws {
+    vaultGate: NativeLoginVaultGate?, wrapperFail: Bool,
+    startGate: NativeLoginVaultGate?, startGatePath: String?) throws {
     self.card = card
     self.optionsFail = optionsFail
     self.vaultGate = vaultGate; self.wrapperFail = wrapperFail
+    self.startGate = startGate; self.startGatePath = startGatePath
+    startOptions = StartOptionsResponse(version: 1, accountId: card.accountId,
+      challengeId: Wire.id(), challenge: Data(repeating: 13, count: 32).b64,
+      expiresAt: "2099-01-01T00:00:00Z")
     sessionBytes = try Wire.encode(SessionV1(version: 1, accountId: card.accountId,
       deviceId: Wire.id(), expiresAt: "2099-01-01T00:00:00Z", token: "public-controlled-session"))
     vaultBytes = try Wire.encode(VaultV1(version: 1, accountCard: card, wrappers: []))
@@ -448,10 +705,90 @@ private final class NativeLoginResponses: @unchecked Sendable {
     lock.lock(); defer { lock.unlock() }
     return requestedPaths
   }
+  var recoveryUnavailable: Bool {
+    get { lock.lock(); defer { lock.unlock() }; return unavailable }
+    set { lock.lock(); unavailable = newValue; lock.unlock() }
+  }
+  var loseStartResponse: Bool {
+    get { lock.lock(); defer { lock.unlock() }; return loseResponse }
+    set { lock.lock(); loseResponse = newValue; lock.unlock() }
+  }
+  func body(for path: String) -> Data? {
+    lock.lock(); defer { lock.unlock() }
+    return requestBodies[path]
+  }
+  private func requestBody(_ request: URLRequest) throws -> Data {
+    if let body = request.httpBody { return body }
+    guard let stream = request.httpBodyStream else { throw FotoroError("Missing controlled request body") }
+    stream.open()
+    defer { stream.close() }
+    var body = Data(), buffer = [UInt8](repeating: 0, count: 4096)
+    while true {
+      let count = stream.read(&buffer, maxLength: buffer.count)
+      if count < 0 { throw stream.streamError ?? FotoroError("Cannot read controlled request") }
+      if count == 0 { return body }
+      body.append(contentsOf: buffer.prefix(count))
+    }
+  }
   func response(to request: URLRequest) throws -> (Int, Data) {
     let path = request.url!.path
     lock.lock(); requestedPaths.append(path); lock.unlock()
+    if path == startGatePath {
+      startGate?.started.fulfill()
+      if let startGate { _ = startGate.release.wait(timeout: .now() + 5) }
+    }
     switch (request.httpMethod, path) {
+    case ("POST", "/v1/auth/start/options"):
+      let body = try requestBody(request)
+      let value = try Wire.decode(StartOptionsRequest.self, body)
+      guard value.version == 1, value.client == "native" else { throw FotoroError("Incorrect start options request") }
+      return (200, try Wire.encode(startOptions))
+    case ("POST", "/v1/auth/start/verify"):
+      let bytes = try requestBody(request), value = try Wire.decode(StartVerify.self, bytes)
+      let enrollment = value.enrollment, crypto = CryptoAdapter()
+      guard value.version == 1, value.client == "native", value.challengeId == startOptions.challengeId,
+        enrollment.version == 1, enrollment.accountCard.accountId == card.accountId,
+        enrollment.recoveryWrapper.kind == "recovery", enrollment.recoveryWrapper.verified,
+        enrollment.recoveryWrapper.credentialId == nil, enrollment.recoveryWrapper.prfSalt == nil
+      else { throw FotoroError("Incorrect start enrollment") }
+      let enrollmentProof = try Wire.decode(EnrollmentProof.self,
+        crypto.verify(enrollment.proof, card: enrollment.accountCard, kind: "account-enrollment"))
+      guard enrollmentProof.accountCard == enrollment.accountCard,
+        try Wire.encode(enrollmentProof.recoveryWrapper) == Wire.encode(enrollment.recoveryWrapper)
+      else { throw FotoroError("Enrollment proof binding failed") }
+      let proof = try Wire.decode(RecoveryProof.self,
+        crypto.verify(value.signedPayload, card: enrollment.accountCard, kind: "start-enrollment"))
+      guard proof.version == 1, proof.client == "native", proof.accountId == card.accountId,
+        proof.challengeId == startOptions.challengeId, proof.challenge == startOptions.challenge,
+        proof.origin == request.value(forHTTPHeaderField: "Origin")
+      else { throw FotoroError("Start proof binding failed") }
+      lock.lock()
+      requestBodies[path] = bytes
+      enrolledVault = VaultV1(version: 1, accountCard: enrollment.accountCard, wrappers: [enrollment.recoveryWrapper])
+      lock.unlock()
+      if loseStartResponse { throw URLError(.networkConnectionLost) }
+      return (200, sessionBytes)
+    case ("POST", "/v1/auth/recovery/options"):
+      if recoveryUnavailable { return (503, Data(#"{"code":"CONTROLLED_RECOVERY_UNAVAILABLE","retryable":true}"#.utf8)) }
+      let value = try Wire.decode(AuthOptionsRequest.self, requestBody(request))
+      guard value.accountId == card.accountId else { return (404, Data(#"{"code":"NOT_FOUND","retryable":false}"#.utf8)) }
+      lock.lock(); let vault = enrolledVault; lock.unlock()
+      guard let vault else { return (404, Data(#"{"code":"NOT_FOUND","retryable":false}"#.utf8)) }
+      return (200, try Wire.encode(RecoveryOptionsResponse(version: 1,
+        challengeId: recoveryChallengeId, challenge: recoveryChallenge,
+        expiresAt: "2099-01-01T00:00:00Z", vault: vault)))
+    case ("POST", "/v1/auth/recovery/verify"):
+      let value = try Wire.decode(RecoveryVerify.self, requestBody(request))
+      lock.lock(); let vault = enrolledVault; lock.unlock()
+      guard let vault else { throw FotoroError("No controlled account enrolled") }
+      let proof = try Wire.decode(RecoveryProof.self,
+        CryptoAdapter().verify(value.signedPayload, card: vault.accountCard, kind: "recovery-session"))
+      guard value.version == 1, value.client == "native", value.challengeId == recoveryChallengeId,
+        proof.version == 1, proof.client == "native", proof.accountId == card.accountId,
+        proof.challengeId == recoveryChallengeId, proof.challenge == recoveryChallenge,
+        proof.origin == request.value(forHTTPHeaderField: "Origin")
+      else { throw FotoroError("Recovery proof binding failed") }
+      return (200, sessionBytes)
     case ("POST", "/v1/auth/login/options"):
       if optionsFail { return (503, Data(#"{"code":"LOGIN_OPTIONS_BLOCKED","retryable":true}"#.utf8)) }
       return (200, optionsBytes)

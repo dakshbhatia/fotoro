@@ -24,17 +24,21 @@ A Worker preview with a different RP creates different passkey credentials. Do n
 
 ## Current state
 
-Worker `dc276b07-ef33-4d12-b8ae-d053bf3b692b`, tagged
-`smooth-diagnostics-20261002`, now serves the stable gallery, guarded sharing and
-upload-failure fixes, with bounded failure fields and stored Worker logs.
+Worker `4fe935ab-892b-43e3-b8ee-8b586196c3cc`, tagged
+`password-entry-20261002`, serves one-password account entry on iPhone and web,
+alongside the stable gallery, guarded sharing and upload-failure fixes.
+Bounded failure fields and stored Worker logs remain enabled.
 All production bindings remain the existing isolated D1/R2 resources. No new
 migration is required. Canonical API and exact signed association checks pass.
 
-Native automatic picks, sync consent and diagnostics pass 139 full-app and 49
-local-preview tests. Development-signed Release 0.1.0 (6) is built for iPhoneOS,
+Native manual saving and account entry pass 184 full-app and 50 local-preview
+tests. Development-signed Release 0.1.0 (10) is built for iPhoneOS,
 with the exact production association intact and no local-preview encryption
-exemption. Build 6 is installed on the physical iPhone; CoreDevice read back
-0.1.0 (6). iOS blocked launch while the device was locked. Build 4's TestFlight compliance gate remains unchanged. See
+exemption. Build 10 is installed and launched on the physical iPhone; CoreDevice
+read back 0.1.0 (10) and its running executable. The initial protected account-state
+event reports signed out. The owner can create or open an account with one Fotoro
+password; owner authentication and private-photo saving remain acceptance checks.
+Build 4's TestFlight compliance gate remains unchanged. See
 [verification](verification.md) for the consumer acceptance evidence.
 
 ## Earlier release checkpoints

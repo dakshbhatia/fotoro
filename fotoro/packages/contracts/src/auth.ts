@@ -29,6 +29,24 @@ export interface AuthVerifyRequestV1 {
   enrollment?: AccountEnrollmentV1;
   client: "web" | "native";
 }
+export interface StartOptionsRequestV1 {
+  version: 1;
+  client: "web" | "native";
+}
+export interface StartOptionsV1 {
+  version: 1;
+  accountId: UUID;
+  challengeId: UUID;
+  challenge: Base64Url;
+  expiresAt: string;
+}
+export interface StartVerifyRequestV1 {
+  version: 1;
+  challengeId: UUID;
+  client: "web" | "native";
+  enrollment: AccountEnrollmentV1;
+  signedPayload: SignedPayloadV1;
+}
 export interface SessionV1 {
   version: 1;
   accountId: UUID;

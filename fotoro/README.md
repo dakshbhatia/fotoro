@@ -17,6 +17,13 @@ representative. All Photos and search still include the originals. Account shows
 the signed-in account reference. Save picks adds the current suggestions from the
 last 10 days once, after account unlock. Automatic sync is off.
 
+Account uses one generated Fotoro password. New Fotoro creates that password;
+Continue opens the account. Enter the same password on iPhone or the web to sign
+in and unlock saved photos. The iPhone keeps its password in protected Keychain;
+Account → Your Fotoro password lets you copy or save it later. Existing passkeys
+remain available under Other ways to sign in, and existing recovery codes work in
+the password field.
+
 Native search covers all permitted non-hidden still photos, including older photos
 outside the 10-day canvas. It indexes supplied labels, available metadata and
 English text using Vision on one bounded local preview at a time. Indexing does
@@ -76,7 +83,7 @@ and downloads the untouched HEIC. Browser imports accept JPEG/PNG. Live Photo
 motion pairs and videos are visibly skipped by backup.
 
 The encrypted exchange also provides encrypted metadata,
-metadata search, passkey/recovery/device-approval protocols, explicit sharing,
+metadata search, password/passkey/device-approval protocols, explicit sharing,
 15-minute or ongoing grants, view/save/contribute, revocation, and recipient-owned
 saved copies. Exchanges accept up to 100 photos. Originals are verified by digest.
 
@@ -107,7 +114,7 @@ The seed command uses local storage only. Recover with a public code printed by
 the command. Do not store personal photographs in either public test account.
 
 Open `apps/ios/Fotoro.xcodeproj`, scheme `Fotoro`, on an iOS 26+ Simulator.
-Open Photos starts local browsing. Settings → Sync photos opens account
+Open Photos starts local browsing. Account opens password entry and account
 setup; developer controls are inside Advanced in DEBUG builds. Physical-device
 passkeys require HTTPS, signing, and associated domains.
 
