@@ -4,14 +4,14 @@ Native SwiftUI app, React web app, and Hono API using private R2 objects and D1.
 The default screen is a private local photo browser. The Ente tree at repository
 root remains a reference; the new app lives here. See [what we reuse](docs/foundation.md).
 
-On iOS, Open Photos requests access and shows the last 30 days using PhotoKit and
+On iOS, Open Photos requests access and shows the last 10 days using PhotoKit and
 Apple's thumbnail cache. HEIC and Live Photo still previews use the system decoder.
 Dates, favorites, screenshots and GPS coordinates come from the Photos library.
 Browsing does not initialize an account or upload photos. Sharing explicitly
 exports the still original through the system share sheet.
 
 Native search covers all permitted non-hidden still photos, including older photos
-outside the 30-day canvas. It indexes supplied labels, available metadata and
+outside the 10-day canvas. It indexes supplied labels, available metadata and
 English text using Vision on one bounded local preview at a time. Indexing does
 not download iCloud originals. Local search lives in a protected database excluded
 from device backup. Labels and completed recognized text attached to synced
@@ -29,13 +29,23 @@ off, reloading clears the selection.
 Unknown image dimensions, including HEIC in this browser slice, are skipped before
 decoding. Thumbnail/preview caches are bounded and generated sequentially.
 
+Browser imports automatically suggest roughly 10% of viable unique groups using
+small local previews, clarity/exposure, favorites and verified capture-date variety.
+Only visually similar bursts with verified original capture times are grouped;
+ambiguous dates stay separate. Review lets you change picks, select all or restore
+the suggestions. Every original stays unchanged and every imported photo remains
+searchable. The reviewed subset reaches account setup only when you open Sync;
+upload still requires Sync selected photos. Picks are session-only, and retained
+previews require reselecting the original before upload. This selector is currently
+implemented in the browser; native automatic picks remain separate work.
+
 Search shows one photo with its source evidence and alternative meanings. Add
 labels in Photo details. Choosing a meaning, confirming a photo and pinning its
 representative are separate explicit actions; merely inspecting a preview does
 not teach a preference. Text mentions never establish named face identity.
 
 Settings → Sync photos connects the local canvas to the encrypted account catalog.
-On iOS, explicitly start Sync last 30 days after unlocking your account. Backup
+On iOS, explicitly start Sync last 10 days after unlocking your account. Backup
 processes one original at a time, resumes durable pending work, and shows synced,
 pending, failed and skipped counts. Scheduled encrypted file uploads can continue
 through iOS background transfer. Open and unlock Fotoro to scan/encrypt more photos
