@@ -125,8 +125,11 @@ iPhone and its exact version is read back. Launch was blocked by the locked
 phone. The full archive passes strict signature, metadata, entitlement and
 matching-dSYM checks; it retains the production service URL and includes sync.
 It does not carry the local-preview encryption exemption. The distribution
-IPA is exported and audited; Apple validation and upload are in progress.
-No build 4 beta availability is claimed.
+IPA passed its audit and Apple validation, and that exact IPA uploaded. App
+Store Connect reports iOS 0.1.0 (4) as `VALID` and `MISSING_EXPORT_COMPLIANCE`,
+with `usesNonExemptEncryption` unset. The owner’s France distribution answer
+and the actual encryption declaration remain open; no beta availability is
+claimed.
 
 ## Encrypted build 2 checkpoint
 
