@@ -219,3 +219,11 @@ scope, receipt OCR including an older photo, local label persistence after reope
 and the original PNG in the system share sheet. Dismissing the sheet removed its
 share-owned temporary copy. These checks do not establish personal Photos, iCloud
 network, physical share destinations or hosted backup acceptance.
+
+Source3462930f01 also passed both remote CI jobs in run36947146042. The
+artifact harness passed24/24; native full104 and preview31 executed with zero
+failures and one Photos-permission interaction skip in each remote suite. That
+older public PhotoKit test passed in both permitted local suites. The final
+preview rebuild after the toolbar sizing fix also passed its rendered check.
+Build3 remains a signed, audited archive awaiting distribution signing/export;
+it is not uploaded or available to TestFlight testers. See [signing handoff](deployment.md).
