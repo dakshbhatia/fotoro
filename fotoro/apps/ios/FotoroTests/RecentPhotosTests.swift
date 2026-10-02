@@ -4,6 +4,43 @@ import XCTest
 @testable import Fotoro
 
 final class RecentPhotosTests: XCTestCase {
+  func testViewerZoomContinuesFromPinchAndDoubleTap() {
+    var zoom = PhotoViewerZoom()
+    zoom.settle(2)
+    zoom.change(1.25)
+    XCTAssertEqual(zoom.scale, 2.5)
+    zoom.settle(1.5)
+    XCTAssertEqual(zoom.scale, 3)
+    zoom.change(10)
+    XCTAssertEqual(zoom.scale, 5)
+    zoom.reset()
+    zoom.toggle()
+    zoom.settle(1.5)
+    XCTAssertEqual(zoom.scale, 3)
+    zoom.toggle()
+    XCTAssertEqual(zoom.scale, 1)
+    zoom.settle(0.5)
+    XCTAssertEqual(zoom.scale, 1)
+  }
+  func testMergedSearchRefreshTracksChildrenMeaningAndCatalog() {
+    var original = ConsumerSearchPresentationID(query: "receipt", library: 1,
+      results: [SearchHit(id: "parent", evidenceClass: 1, reason: "Supplied label")],
+      indexed: 1, response: 1, acceptedMeaning: nil, catalog: 1, account: "account", vault: UUID())
+    var next = original
+    next.results[0].children = ["new-child"]
+    XCTAssertNotEqual(next, original)
+    next = original
+    next.acceptedMeaning = "another-meaning"
+    XCTAssertNotEqual(next, original)
+    next = original
+    next.catalog = 2
+    XCTAssertNotEqual(next, original)
+    next = original
+    next.response = 2
+    XCTAssertNotEqual(next, original)
+    original.response = 2
+    XCTAssertEqual(next, original)
+  }
   func testOwnedShareCleanupRemovesOnlyTemporaryExports() throws {
     let temporary = FileManager.default.temporaryDirectory
     let export = temporary.appendingPathComponent("fotoro-share-" + Wire.id())
@@ -114,6 +151,19 @@ final class RecentPhotosTests: XCTestCase {
         XCTAssertEqual(requests, 1)
       }
     }
+  }
+  @MainActor func testOpeningAgainDoesNotRequestPhotosPermissionAgain() async {
+    var permission = PHAuthorizationStatus.notDetermined
+    var requests = 0
+    let store = RecentPhotosStore(authorization: { permission }, requestAccess: {
+      requests += 1
+      permission = .limited
+      return permission
+    }, readPhotos: { _ in [] })
+    await store.open()
+    await store.open()
+    XCTAssertEqual(requests, 1)
+    XCTAssertEqual(store.status, .limited)
   }
   func testViewerLoadsOnlyCurrentAndNeighboringPages() {
     XCTAssertTrue(RecentPhotosPolicy.shouldLoadPage(4, current: 5))

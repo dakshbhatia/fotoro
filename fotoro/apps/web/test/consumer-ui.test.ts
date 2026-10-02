@@ -44,13 +44,20 @@ test("skipped photos and pending or conflicting edits prevent an unconditional c
     assert.equal(summary.state, "needsAttention"); assert.notEqual(summary.action, "none");
   }
 });
-test("local choice offer is voluntary and does not reappear for saved records or an earlier decision", async () => {
-  const {shouldOfferLocalChoices} = await import("../src/local/ConsumerChoices");
-  assert.equal(shouldOfferLocalChoices(false, false, undefined), false);
-  assert.equal(shouldOfferLocalChoices(true, false, undefined), true);
-  assert.equal(shouldOfferLocalChoices(true, true, undefined), false);
-  assert.equal(shouldOfferLocalChoices(true, false, {readText: false, retain: false}), false);
+test("local optional features have no implicit choice or storage write", async () => {
+  const {loadLocalChoices,saveLocalChoices}=await import("../src/local/preferences");
+  const previous=globalThis.localStorage;
+  let value:string|null=null,writes=0;
+  globalThis.localStorage={getItem:()=>value,setItem:(_key:string,next:string)=>{writes++;value=next;}} as Storage;
+  try {
+    assert.equal(loadLocalChoices(),undefined);assert.equal(writes,0);
+    value='{"readText":true}';assert.equal(loadLocalChoices(),undefined);assert.equal(writes,0);
+    saveLocalChoices({readText:false,retain:false});assert.deepEqual(loadLocalChoices(),{readText:false,retain:false});
+    saveLocalChoices({readText:true,retain:true});assert.deepEqual(loadLocalChoices(),{readText:true,retain:true});
+    assert.equal(writes,2);
+  } finally {globalThis.localStorage=previous;}
 });
+
 test("saved search joins local ordering and deduplicates only a matching original digest", async () => {
   const {savedSearchPhotos, combineConsumerSearch} = await import("../src/library/consumer-search");
   const local: LocalPhoto = {id: "00".repeat(32), digest: "00".repeat(32), file: new File(["original"], "same.png"), filename: "same.png", date: "2026-10-01", dateSource: "selected", labels: ["receipt"]};

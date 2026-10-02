@@ -68,6 +68,9 @@ export async function complete(
   i: any,
 ) {
   if (
+    !i ||
+    typeof i !== "object" ||
+    Array.isArray(i) ||
     i.version !== 1 ||
     typeof i.challenge !== "string" ||
     Object.keys(i).length !== 2

@@ -175,6 +175,53 @@ final class PhotosBackupTests: XCTestCase {
     second.vault.lock()
   }
 
+  @MainActor func testOnlyCompletedCurrentPicksCreateNewIntakeAndQueuedUploadsSurvive() async throws {
+    let store = try LibraryStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
+    let candidates = [BackupCandidate(id: "picked", sourceRevision: "1"), BackupCandidate(id: "not-picked", sourceRevision: "1"), BackupCandidate(id: "changed", sourceRevision: "2")]
+    let pickSources = candidates.map { AutomaticPhotoPickCandidate(id: $0.id, sourceRevision: "1", capturedAt: nil, width: 100, height: 100, favorite: false, isScreenshot: false) }
+    let snapshot = PhotoPicksSnapshot(candidates: pickSources, recommendations: AutomaticPhotoPickRecommendations(ids: ["picked", "changed"], reasons: [:], groupCount: 3, duplicateCount: 0, unassessed: 0))
+    XCTAssertTrue(PhotoPicksBackupPolicy.select(candidates, snapshot: nil).isEmpty, "Incomplete analysis must never mean upload all")
+    XCTAssertEqual(PhotoPicksBackupPolicy.select(candidates, snapshot: snapshot).map(\.id), ["picked"])
+    var queued = try store.backupSource("previously-accepted")
+    queued.phase = .queued
+    try store.putBackupSource(queued)
+    var previous = try store.backupSource("old-unselected-failure")
+    previous.phase = .failed
+    try store.putBackupSource(previous)
+    let backup = try PhotosBackup(store: store)
+    var staged: [String] = []
+    var uploaded: [String] = []
+    backup.start(snapshot: { PhotoPicksBackupPolicy.select(candidates, snapshot: snapshot) }, valid: { true },
+      stage: { source, _ in staged.append(source.id) }, upload: { uploaded.append($0.id) }, checkCatalog: {})
+    await backup.waitUntilSettled()
+    XCTAssertEqual(staged, ["picked"])
+    XCTAssertEqual(uploaded, ["previously-accepted", "picked"])
+    XCTAssertEqual(try store.backupSources().map(\.id).sorted(), ["old-unselected-failure", "picked", "previously-accepted"])
+    XCTAssertEqual(backup.status.sourceTotal, 2)
+    XCTAssertEqual(backup.status.failed, 0)
+    XCTAssertEqual(backup.status.phase, .complete)
+    XCTAssertEqual(try store.backupSource(previous.id).phase, .failed, "Excluded historical work is preserved")
+  }
+  @MainActor func testNewBackupCannotStageAfterConsentChangesDuringOriginalRead() async throws {
+    let store = try LibraryStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
+    let gate = BackupGate()
+    let bytes = try Data(contentsOf: Bundle.main.url(forResource: "singapore", withExtension: "jpg")!)
+    let secret = try fixture(FixtureAccounts.self, "accounts").testSecrets[0]
+    let importer = PhotoImport(store: store, sourceReader: { _ in await gate.wait(); return (bytes, "source.jpg", false) })
+    let source = try store.backupSource("source")
+    let run = Task {
+      try await importer.stageBackup(source, accountId: secret.accountId,
+        bundle: AccountBundle(vaultKey: secret.vaultKey, boxSecretKey: secret.boxSecretKey, signingSecretKey: secret.signingSecretKey), valid: { await gate.allowed })
+    }
+    while !gate.entered { await Task.yield() }
+    gate.allowed = false
+    gate.open()
+    do { _ = try await run.value; XCTFail("Stale consent cannot create durable ciphertext or queue") }
+    catch { XCTAssertTrue(error is CancellationError) }
+    XCTAssertTrue(try store.photos().isEmpty)
+    let queuedCount = try await store.database.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM transfers") }
+    XCTAssertEqual(queuedCount, 0)
+  }
   func testPublicSeedAccountsNeverAcceptPrivatePhotoSync() {
     for id in ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002"] {
       XCTAssertFalse(NativeBackupPolicy.allowsPrivatePhotos(accountId: id, fixture: false))

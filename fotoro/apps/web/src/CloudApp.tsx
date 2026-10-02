@@ -3,7 +3,7 @@ import type { GrantV1 } from "@fotoro/contracts";
 import { ready } from "@fotoro/crypto";
 import { Library } from "./library/Library";
 import { Viewer } from "./library/Viewer";
-import { cachedCatalog, photoBytes, syncCatalog, type Photo } from "./library/catalog";
+import { cachedCatalog, photoBytes, type Photo } from "./library/catalog";
 import {
   lockVault,
   requireVault,
@@ -29,7 +29,6 @@ import {
 import { Exchange } from "./exchange/Exchange";
 import {
   stageImport,
-  resumePendingImports,
   pendingImports,
   type PendingImport,
 } from "./exchange/journal";
@@ -53,6 +52,7 @@ import { cloudSearchRecords } from "./library/search";
 import {deriveConsumerSyncSummary, syncStateLabel, type ConsumerSyncSummary} from "./library/consumer-sync";
 import {loadUploadPause, saveUploadPause} from "./library/consumer-preferences";
 import type {OwnedPhotoSnapshot} from "./library/consumer-search";
+import {useDialogFocus} from "./library/dialog-focus";
 const noLocalPhotos: LocalPhoto[] = [];
 const SearchIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -98,10 +98,7 @@ export default function CloudApp({
     [pending, setPending] = useState<PendingImport[]>([]);
   const [recoveryNew, setRecoveryNew] = useState(""),
     [recoverySaved, setRecoverySaved] = useState(false),
-    [deviceChallenge, setDeviceChallenge] = useState(""),
-    [enrollmentId, setEnrollmentId] = useState(""),
     [approvalText, setApprovalText] = useState(""),
-    [authenticated, setAuthenticated] = useState(false),
     [reselect, setReselect] = useState<PendingImport | undefined>(undefined);
   const [authStep, setAuthStep] = useState<
       "welcome" | "recovery" | "newRecovery"
@@ -124,6 +121,14 @@ export default function CloudApp({
     localSynced = useRef(new WeakMap<File, string>());
   const input = useRef<HTMLInputElement>(null);
   const accountPanel = useRef<HTMLElement>(null);
+  useDialogFocus(accountPanel, () => setMenu(false), menu && active && !!account);
+  useEffect(() => {
+    const picker = input.current;
+    if (!picker) return;
+    const cancelled = () => setReselect(undefined);
+    picker.addEventListener("cancel", cancelled);
+    return () => picker.removeEventListener("cancel", cancelled);
+  }, [account]);
   const localPhotosRef = useRef(localPhotos);
   localPhotosRef.current = localPhotos;
   const currentCatalog = useRef(photos);
@@ -149,6 +154,8 @@ export default function CloudApp({
     localSynced.current = new WeakMap();
     setViewer(null);
     setExchange(false);
+    setMenu(false);
+    setReselect(undefined);
     setPending([]);
     setAnnotationPending([]);
     setCommittedMeaning(undefined);
@@ -263,7 +270,6 @@ export default function CloudApp({
   const login = async (fn: () => Promise<unknown>) =>
     run(async () => {
       await fn();
-      setAuthenticated(true);
       try {
         setAccount(requireVault().accountId);
         setAuthStep("welcome");
@@ -299,18 +305,6 @@ export default function CloudApp({
     window.addEventListener("online", update); window.addEventListener("offline", update);
     return () => {window.removeEventListener("online", update); window.removeEventListener("offline", update);};
   }, []);
-  useEffect(() => {
-    if (!menu) return;
-    accountPanel.current?.focus();
-    const key = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMenu(false);
-      if (event.key !== "Tab") return;
-      const controls = Array.from(accountPanel.current?.querySelectorAll<HTMLElement>("button:not(:disabled),input:not(:disabled),textarea,select,summary") ?? []).filter(element => element.getClientRects().length > 0);
-      if (event.shiftKey && (document.activeElement === controls[0] || document.activeElement === accountPanel.current)) {event.preventDefault(); controls.at(-1)?.focus();}
-      else if (!event.shiftKey && document.activeElement === controls.at(-1)) {event.preventDefault(); controls[0]?.focus();}
-    };
-    window.addEventListener("keydown", key); return () => window.removeEventListener("keydown", key);
-  }, [menu]);
   const syncLocal = () =>
     run(async () => {
       const session = requireVault();
@@ -417,6 +411,8 @@ export default function CloudApp({
   const index = useMemo(() => new PhotoSearchIndex(cloudSearchRecords(searchable)), [searchable]);
   const searchResult = useMemo(() => index.search(query, {scope: "account:" + account, committedMeaning}), [index, query, account, committedMeaning]);
   const shown = normalizeSearch(query) ? searchResult.photoIds.flatMap(id => {const photo = searchable.find(photo => photo.manifest.photoId === id); return photo ? [photo] : [];}) : searchable;
+  const viewing = !!viewer && shown.length > 0;
+  useEffect(() => {if (viewer && !viewing) setViewer(null);}, [viewer, viewing]);
   const editLabels = async (photo: Photo, labels: string[]) => {
     const session = requireVault();
     try {
@@ -459,7 +455,7 @@ export default function CloudApp({
   const chosen = photos.filter((p) => selected.has(p.manifest.photoId));
   return (
     <>
-      <main className={"cloud-library" + (selecting ? " exchange-selection" : "")} inert={viewer || exchange || menu ? true : undefined}>
+      <main className={"cloud-library" + (selecting ? " exchange-selection" : "")} inert={viewing || exchange || menu ? true : undefined}>
         <header>
           <div className="brand"><p className="eyebrow">Saved photos</p><h1>Fotoro</h1></div>
           <div className="header-actions">
@@ -579,7 +575,11 @@ export default function CloudApp({
               </>
             )}
             {authStep === "recovery" && (
-              <>
+              <form onSubmit={event => {
+                event.preventDefault();
+                if (busy || !recovery.trim()) return;
+                void login(async () => {await recover(recovery); setRecovery("");});
+              }}>
                 <h3>Unlock photos on this device</h3>
                 <p className="hint">
                   Enter the recovery code you saved when creating your account.
@@ -596,20 +596,15 @@ export default function CloudApp({
                   />
                 </label>
                 <button
-                  disabled={busy || !recovery}
-                  onClick={() =>
-                    login(async () => {
-                      await recover(recovery);
-                      setRecovery("");
-                    })
-                  }
+                  type="submit"
+                  disabled={busy || !recovery.trim()}
                 >
                   Continue
                 </button>
-                <button disabled={busy} onClick={() => setAuthStep("welcome")}>
+                <button type="button" disabled={busy} onClick={() => setAuthStep("welcome")}>
                   Back
                 </button>
-              </>
+              </form>
             )}
             {fixtureMode && (
               <details>
@@ -716,7 +711,7 @@ export default function CloudApp({
                 </button>
               )}
               <button
-                onClick={() => input.current?.click()}
+                onClick={() => {setReselect(undefined); input.current?.click();}}
                 aria-label="Add photos"
                 disabled={busy || publicDemo}
               >
@@ -741,13 +736,14 @@ export default function CloudApp({
               onChange={(e) => {
                 const files = Array.from(e.target.files ?? []);
                 e.target.value = "";
+                const pendingReselection = reselect;
+                setReselect(undefined);
                 if (!files.length) return;
-                if (reselect) {
+                if (pendingReselection) {
                   void run(async () => {
                     if (publicDemo)
                       throw new Error("PUBLIC_TEST_ACCOUNT_UPLOAD_DISABLED");
-                    await stageImport(files[0], reselect);
-                    setReselect(undefined);
+                    await stageImport(files[0], pendingReselection);
                     await continueSync();
                     await refresh();
                   });
@@ -772,7 +768,7 @@ export default function CloudApp({
           </p>
         )}
       </main>
-        {menu && unlocked && (
+        {active && menu && unlocked && (
           <aside className="account-sheet sheet" ref={accountPanel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Sync and account">
             <button
               className="close"
@@ -943,7 +939,6 @@ export default function CloudApp({
                     return;
                   if (!fixtureMode) await api("/v1/auth/logout", {});
                   await clearAccount(account);
-                  setAuthenticated(false);
                   setFixtureAccount();
                   lockVault();
                   setMenu(false);
@@ -954,15 +949,10 @@ export default function CloudApp({
             </button>
           </aside>
         )}
-      {exchange && unlocked && (
+      {active && exchange && unlocked && (
         <Exchange
           selection={chosen}
-          onClose={() => {
-            setExchange(false);
-            requestAnimationFrame(() =>
-              document.getElementById("share-selected")?.focus(),
-            );
-          }}
+          onClose={() => setExchange(false)}
           onRefresh={() => run(refresh)}
           onReceived={(items: Photo[], _grant: GrantV1) => {
             setReceived(items);
@@ -971,21 +961,13 @@ export default function CloudApp({
           }}
         />
       )}
-      {viewer && unlocked && (
+      {active && viewing && viewer && unlocked && (
         <Viewer
           photos={shown}
           initial={viewer}
           onSaved={() => run(refresh)}
           onLabels={!received && !publicDemo ? (photo, labels) => {void editLabels(photo, labels);} : undefined}
-          onClose={() => {
-            const id = viewer;
-            setViewer(null);
-            requestAnimationFrame(() =>
-              document
-                .getElementById("photo-" + id)
-                ?.focus({ preventScroll: true }),
-            );
-          }}
+          onClose={() => setViewer(null)}
         />
       )}
     </>

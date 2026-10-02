@@ -79,6 +79,9 @@ struct ConsumerSearchResultsView: View {
         Label("Preparing photo search…", systemImage: "text.viewfinder")
           .font(.caption).foregroundStyle(.secondary).padding(.horizontal)
       }
+      if let error = search.error {
+        Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+      }
     }
   }
 }

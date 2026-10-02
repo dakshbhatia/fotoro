@@ -23,6 +23,9 @@ check aborts the entire transaction. Photo-insert triggers retain all objects.
 Signed bodies are parsed only after Ed25519 verification and validated with the
 shared precompiled schema. Account signing/box cards cannot be replaced through
 this API: replacing an identity requires a future explicit trust-renewal flow.
+JSON request bodies are capped at 2 MiB while annotation PUTs retain their 512 KiB
+cap. Both declared and streamed sizes are checked before parsing. Encrypted media
+uploads use the separately reserved ciphertext byte limit.
 
 Upload staging PUT is a session-and-capability-authorized Worker route. Its
 FixedLengthStream bounds bytes. Commit incrementally hashes the observed staging

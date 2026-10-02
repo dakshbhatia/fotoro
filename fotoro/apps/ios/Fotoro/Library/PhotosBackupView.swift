@@ -6,16 +6,7 @@ struct ConsumerBackupLabel: View {
   var body: some View {
     Label(title, systemImage: symbol).font(.subheadline.weight(.medium))
   }
-  private var title: String {
-    switch summary.state {
-    case .preparing, .uploading, .checking: return "Backing up"
-    case .upToDate: return "Backed up"
-    case .paused: return "Paused"
-    case .offline: return "Offline"
-    case .needsAttention: return "Backup"
-    case .notStarted: return "Backup"
-    }
-  }
+  private var title: String { "Sync" }
   private var symbol: String {
     switch summary.state {
     case .upToDate: return "checkmark.icloud"
@@ -66,7 +57,7 @@ struct PhotosBackupView: View {
             }
           }
         }
-      }.navigationTitle("Backup").navigationBarTitleDisplayMode(.inline)
+      }.navigationTitle("Sync").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         .sheet(isPresented: $savedPhotos) { LibraryView(services: services) }
         .sheet(isPresented: $exchange) { ExchangeView(services: services, selected: []) }
@@ -91,7 +82,7 @@ struct PhotosBackupView: View {
       VStack(alignment: .leading, spacing: 14) {
         Image(systemName: symbol).font(.system(size: 30)).foregroundStyle(.tint)
         Text(title).font(.title2.bold())
-        Text("Your last 10 days, saved privately.").foregroundStyle(.secondary)
+        Text("Only your picks from the last 10 days are added. Previously queued photos still finish syncing.").foregroundStyle(.secondary)
         if let completed = summary.completedPhotos {
           if let total = summary.totalPhotos {
             Text("\(completed) of \(total) photos saved").font(.headline).monospacedDigit()
@@ -107,7 +98,7 @@ struct PhotosBackupView: View {
         }
         action
         if ![.notStarted, .paused].contains(summary.state) || services.journal.backgroundPending > 0 {
-          Button("Pause backup") { services.pauseSync() }
+          Button("Pause sync") { services.pauseSync() }
         }
         if !NativeBackupPolicy.allowsPrivatePhotos(accountId: services.session.accountId, fixture: services.session.fixture) {
           Text("Use your own account to back up personal photos.").font(.footnote).foregroundStyle(.secondary)
@@ -120,12 +111,12 @@ struct PhotosBackupView: View {
   @ViewBuilder private var action: some View {
     switch summary.action {
     case .start:
-      Button("Back up last 10 days") {
+      Button("Sync your picks") {
         do { try services.startPhotosBackup() } catch { services.error = error.localizedDescription }
       }.buttonStyle(.borderedProminent)
         .disabled(!NativeBackupPolicy.allowsPrivatePhotos(accountId: services.session.accountId, fixture: services.session.fixture))
     case .continue:
-      Button("Continue backup") {
+      Button("Continue sync") {
         services.run { try await services.continueSync() }
       }.buttonStyle(.borderedProminent)
     case .retry:
@@ -150,11 +141,11 @@ struct PhotosBackupView: View {
   }
   private var title: String {
     switch summary.state {
-    case .notStarted: return "Keep your photos with you"
-    case .preparing: return "Preparing your photos"
+    case .notStarted: return "Keep your picks with you"
+    case .preparing: return "Preparing your picks"
     case .uploading: return "Backing up your photos"
     case .checking: return "Checking your backup"
-    case .upToDate: return "Your photos are backed up"
+    case .upToDate: return "Your saved photos are up to date"
     case .paused: return "Backup paused"
     case .offline: return "Waiting for a connection"
     case .needsAttention: return "Some photos need attention"

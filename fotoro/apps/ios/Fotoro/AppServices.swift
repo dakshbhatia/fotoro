@@ -8,6 +8,16 @@ struct PendingSave: Codable {
   var local: LocalPhoto
 }
 
+enum PhotoPicksBackupPolicy {
+  static func select(_ candidates: [BackupCandidate], snapshot: PhotoPicksSnapshot?) -> [BackupCandidate] {
+    guard let snapshot else { return [] }
+    return candidates.filter { candidate in
+      guard let expected = snapshot.revision(for: candidate.id) else { return false }
+      return candidate.sourceRevision == expected
+    }
+  }
+}
+
 @MainActor @Observable final class AppServices: Identifiable {
   let id = UUID()
   let deviceTrust: DeviceTrust
@@ -21,6 +31,8 @@ struct PendingSave: Codable {
   var journal: TransferJournal
   var annotations: AnnotationSync
   var photoAnnotations: [String: PhotoAnnotationsV1] = [:]
+  @ObservationIgnored private weak var recentPhotos: RecentPhotosStore?
+  func bindRecentPhotos(_ recent: RecentPhotosStore) { recentPhotos = recent }
   @ObservationIgnored private weak var localSearch: LocalSearchStore?
   let storageRoot: URL
   var photos: [LocalPhoto] = []
@@ -37,6 +49,7 @@ struct PendingSave: Codable {
     @ObservationIgnored var photosBackupSnapshot: ((Date) throws -> [BackupCandidate])?
   #endif
   private(set) var consumerSyncSummary = ConsumerSyncSummary()
+  private(set) var consumerCatalogGeneration: UInt64 = 0
   @ObservationIgnored private var consumerObservation = UUID()
   @ObservationIgnored private var syncIntent = UUID()
   private var consumerChecking = false
@@ -288,6 +301,7 @@ struct PendingSave: Codable {
     let catalog = store
     let importWorker = importer
     let uploadJournal = journal
+    var acceptedPicks: PhotoPicksSnapshot?
     backup.start(
       snapshot: {
         await uploadJournal.resumePending()
@@ -302,10 +316,19 @@ struct PendingSave: Codable {
         #if DEBUG
           if let snapshot = self.photosBackupSnapshot { return try snapshot(RecentPhotosPolicy.cutoff(now: Date())) }
         #endif
-        let permission = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+        let permission = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard RecentPhotosPolicy.canRead(permission) else {
           throw FotoroError("Allow Photos access to sync.")
         }
+        guard let recent = self.recentPhotos else {
+          throw FotoroError("Open Photos to find your picks before syncing.")
+        }
+        let picks = try await recent.completedPicks()
+        try Task.checkCancellation()
+        guard self.vault.generation == generation, self.session.accountId == account,
+          self.store === catalog, picks.matches(recent.pickCandidates),
+          PhotoPickAnalyzer.isCurrent(picks.candidates) else { throw CancellationError() }
+        acceptedPicks = picks
         let now = Date()
         let options = PHFetchOptions()
         options.predicate = NSPredicate(
@@ -323,6 +346,7 @@ struct PendingSave: Codable {
               id: asset.localIdentifier, capturedAt: asset.creationDate, skipReason: skip,
               sourceRevision: RecentPhoto.sourceRevision(asset)))
         }
+        candidates = PhotoPicksBackupPolicy.select(candidates, snapshot: picks)
         for candidate in candidates where candidate.skipReason == nil {
           var source = try catalog.backupSource(candidate.id)
           if source.phase == .committed, source.sourceRevision != candidate.sourceRevision || source.originalSha256 == nil,
@@ -349,9 +373,22 @@ struct PendingSave: Codable {
         return self.vault.isUnlocked && self.vault.generation == generation
           && self.session.accountId == account && self.store === catalog
       },
-      stage: { source, date in
+      stage: { [weak self] source, date in
         _ = try await importWorker.stageBackup(
-          source, accountId: account, bundle: bundle, capturedAt: date)
+          source, accountId: account, bundle: bundle, capturedAt: date,
+          valid: { @MainActor [weak self] in
+            guard let self, self.vault.isUnlocked, self.vault.generation == generation,
+              self.session.accountId == account, self.store === catalog,
+              (try? catalog.uploadsPaused()) == false else { return false }
+            #if DEBUG
+              if self.photosBackupSnapshot != nil { return true }
+            #endif
+            guard let picks = acceptedPicks, let recent = self.recentPhotos,
+              picks.matches(recent.pickCandidates),
+              let candidate = picks.candidates.first(where: { $0.id == source.id }),
+              picks.revision(for: source.id) == source.sourceRevision else { return false }
+            return PhotoPickAnalyzer.isCurrent([candidate])
+          })
       },
       upload: { source in
         await uploadJournal.resumePending()
@@ -670,6 +707,7 @@ struct PendingSave: Codable {
       if let value = try annotations.ledger.current(photo: photo, bundle: bundle, card: card) { values[photo.id] = value }
     }
     photoAnnotations = values
+    consumerCatalogGeneration &+= 1
     refreshConsumerSyncSummary()
   }
   func annotation(_ photo: LocalPhoto) -> PhotoAnnotationsV1 {

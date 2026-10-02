@@ -34,6 +34,8 @@ def preview_files(paths, target):
 preview_sources=preview_files([
  'Fotoro/FotoroApp.swift',
  'Fotoro/Library/RecentPhotosStore.swift',
+ 'Fotoro/Library/AutomaticPhotoPicks.swift',
+ 'Fotoro/Library/PhotoPickAnalyzer.swift',
  'Fotoro/Library/RecentPhotosView.swift',
  'Fotoro/Search/LocalSearchStore.swift',
  'Fotoro/Search/LocalSearchView.swift',
@@ -49,6 +51,7 @@ preview_tests=preview_files([
  'FotoroTests/SearchTests.swift', 'FotoroTests/SearchStoreTests.swift',
  'FotoroTests/SearchPerformanceTests.swift', 'FotoroTests/SearchLifecycleTests.swift',
  'FotoroTests/LocalPreviewIsolationTests.swift',
+ 'FotoroTests/AutomaticPhotoPicksTests.swift', 'FotoroTests/PhotoPickLifecycleTests.swift',
 ], 'FotoroLocalPreviewTests')
 preview_test_resources=preview_files([
  'FotoroTests/search-cases.json', 'FotoroTests/neutral-a.png', 'FotoroTests/neutral-c.png',

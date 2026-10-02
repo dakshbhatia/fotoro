@@ -1,7 +1,8 @@
-# Fotoro hosting and next ten improvements
+# Historical Ente hosting proposal
 
-Decision recorded September 30, 2026. This is a proposed deployment, not an
-already provisioned service.
+Recorded September 30, 2026 for the earlier Ente experiment. The active SwiftUI,
+React and Worker build uses [the current deployment setup](../../fotoro/docs/deployment.md).
+The proposal below is retained as reference.
 
 ## What exists
 

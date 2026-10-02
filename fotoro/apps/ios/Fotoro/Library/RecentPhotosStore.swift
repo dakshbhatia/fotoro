@@ -58,12 +58,44 @@ enum RecentPhotosPolicy {
   }
 }
 
-@MainActor @Observable final class RecentPhotosStore {
+struct PhotoViewerZoom {
+  private(set) var scale: CGFloat = 1
+  private var settledScale: CGFloat = 1
+  mutating func change(_ magnification: CGFloat) {
+    scale = min(5, max(1, settledScale * magnification))
+  }
+  mutating func settle(_ magnification: CGFloat) {
+    change(magnification)
+    settledScale = scale
+  }
+  mutating func toggle() {
+    scale = scale == 1 ? 2 : 1
+    settledScale = scale
+  }
+  mutating func reset() {
+    scale = 1
+    settledScale = 1
+  }
+}
+
+@MainActor @Observable final class RecentPhotosStore: NSObject, PHPhotoLibraryChangeObserver {
   private(set) var photos: [RecentPhoto] = []
   private(set) var status = PHAuthorizationStatus.notDetermined
   private(set) var opened = false
   var error: String?
   var loading = false
+  let picks: PhotoPickAnalyzer
+  private(set) var picksSnapshot: PhotoPicksSnapshot?
+  var pickedPhotos: [RecentPhoto] { photos.filter { picksSnapshot?.recommendations.ids.contains($0.id) == true } }
+  var pickCandidates: [AutomaticPhotoPickCandidate] {
+    photos.map { AutomaticPhotoPickCandidate(id: $0.id, sourceRevision: $0.sourceRevision, capturedAt: $0.capturedAt,
+      width: $0.asset.pixelWidth, height: $0.asset.pixelHeight, favorite: $0.isFavorite, isScreenshot: $0.isScreenshot) }
+  }
+  @ObservationIgnored private var analysisTask: Task<Void, Never>?
+  @ObservationIgnored private var settlingAnalysis: Task<Void, Never>?
+  @ObservationIgnored private var analysisGeneration = UUID()
+  @ObservationIgnored private var observing = false
+  @ObservationIgnored private var analysisPermitted = true
   let images = PHCachingImageManager()
   @ObservationIgnored private let authorization: () -> PHAuthorizationStatus
   @ObservationIgnored private let requestAccess: () async -> PHAuthorizationStatus
@@ -71,22 +103,81 @@ enum RecentPhotosPolicy {
   init(
     authorization: @escaping () -> PHAuthorizationStatus = { PHPhotoLibrary.authorizationStatus(for: .readWrite) },
     requestAccess: @escaping () async -> PHAuthorizationStatus = { await PHPhotoLibrary.requestAuthorization(for: .readWrite) },
-    readPhotos: @escaping @MainActor (Date) -> [RecentPhoto] = RecentPhotosStore.fetchRecentPhotos
+    readPhotos: @escaping @MainActor (Date) -> [RecentPhoto] = RecentPhotosStore.fetchRecentPhotos,
+    picks: PhotoPickAnalyzer? = nil
   ) {
     self.authorization = authorization
     self.requestAccess = requestAccess
     self.readPhotos = readPhotos
+    self.picks = picks ?? PhotoPickAnalyzer()
+    super.init()
+  }
+  deinit { PHPhotoLibrary.shared().unregisterChangeObserver(self) }
+  nonisolated func photoLibraryDidChange(_ changeInstance: PHChange) {
+    Task { @MainActor [weak self] in self?.refresh() }
+  }
+  func pauseAnalysis() {
+    analysisPermitted = false
+    cancelAnalysis()
+  }
+  private func cancelAnalysis() {
+    analysisGeneration = UUID()
+    analysisTask?.cancel()
+    settlingAnalysis = analysisTask ?? settlingAnalysis
+    analysisTask = nil
+    picks.invalidate()
+  }
+  func restartAnalysis() { cancelAnalysis(); picksSnapshot = nil; if RecentPhotosPolicy.canRead(status) { beginAnalysis() } }
+  private func beginAnalysis() {
+    guard analysisPermitted, analysisTask == nil else { return }
+    let candidates = pickCandidates
+    let token = UUID()
+    analysisGeneration = token
+    let previous = settlingAnalysis
+    analysisTask = Task { [weak self] in
+      guard let self else { return }
+      defer { if analysisGeneration == token { analysisTask = nil } }
+      do {
+        await previous?.value
+        try Task.checkCancellation()
+        guard analysisGeneration == token else { throw CancellationError() }
+        let result = try await picks.snapshot(candidates, valid: { [weak self] in
+          guard let self else { return false }
+          return analysisGeneration == token && RecentPhotosPolicy.canRead(authorization())
+        })
+        try Task.checkCancellation()
+        guard analysisGeneration == token, result.matches(pickCandidates) else { throw CancellationError() }
+        picksSnapshot = result
+      } catch is CancellationError {} catch { self.error = error.localizedDescription }
+    }
+  }
+  func completedPicks() async throws -> PhotoPicksSnapshot {
+    guard RecentPhotosPolicy.canRead(authorization()) else { throw FotoroError("Allow Photos access to find your picks.") }
+    if let result = picksSnapshot, result.recommendations.unassessed == 0,
+      result.matches(pickCandidates), PhotoPickAnalyzer.isCurrent(result.candidates) { return result }
+    if analysisTask == nil { beginAnalysis() }
+    await analysisTask?.value
+    try Task.checkCancellation()
+    guard let result = picksSnapshot, result.matches(pickCandidates), PhotoPickAnalyzer.isCurrent(result.candidates) else {
+      throw FotoroError("Your picks aren't ready. Open Photos and try again after analysis finishes.")
+    }
+    return result
   }
   func restoreAccess(now: Date = Date()) {
+    analysisPermitted = true
     status = authorization()
     opened = status != .notDetermined
     if opened { refresh(now: now) }
   }
 
   func open() async {
-    status = await requestAccess()
+    analysisPermitted = true
+    status = authorization()
+    if status == .notDetermined { status = await requestAccess() }
     opened = true
     guard RecentPhotosPolicy.canRead(status) else {
+      pauseAnalysis()
+      picksSnapshot = nil
       photos = []
       return
     }
@@ -97,10 +188,18 @@ enum RecentPhotosPolicy {
     status = authorization()
     images.stopCachingImagesForAllAssets()
     guard RecentPhotosPolicy.canRead(status) else {
+      pauseAnalysis()
+      picksSnapshot = nil
       photos = []
       return
     }
+    if !observing { PHPhotoLibrary.shared().register(self); observing = true }
     photos = readPhotos(now)
+    if let snapshot = picksSnapshot, snapshot.recommendations.unassessed == 0,
+      snapshot.matches(pickCandidates) { return }
+    cancelAnalysis()
+    picksSnapshot = nil
+    beginAnalysis()
   }
   private static func fetchRecentPhotos(now: Date) -> [RecentPhoto] {
     let options = PHFetchOptions()

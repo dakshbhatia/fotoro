@@ -71,7 +71,7 @@ disabled. All five production migrations applied and were read back after the
 application association identifier and `fotoro.cloud` custom-domain route are
 explicit in `services/api/wrangler.toml`.
 
-Worker version `d04b80fc-b484-4d57-b1df-846c12182ed1` is active at 100%, tagged
+The preceding Worker version `d04b80fc-b484-4d57-b1df-846c12182ed1` was active at 100%, tagged
 `48780562ca`. The `fotoro.cloud` custom domain is attached to that existing Worker
 and read back; no code re-upload was needed. `workers_dev` remains false. The
 production dry-run packages all five bindings without warnings; it is not proof
@@ -117,6 +117,20 @@ Universal-link handling remains unimplemented. See
 Wrangler OAuth is authorized and the production service is live at
 `https://fotoro.cloud`. The separate local Photos preview is in internal TestFlight.
 See [verification](verification.md).
+
+## October 2 consumer finish
+
+Worker `82df2ca2-b808-42f8-a38c-ac26779ac157`, tagged
+`consumer-finish-20261002`, now serves the compact gallery and retry-safe API.
+All production bindings remain the existing isolated D1/R2 resources. No new
+migration is required. Canonical API and exact signed association checks pass.
+
+Native automatic picks and picks-only new sync work pass 131 full-app and 49
+local-preview tests. Development-signed Release 0.1.0 (5) is built for iPhoneOS,
+with the exact production association intact and no local-preview encryption
+exemption. The physical iPhone is disconnected, so build 5 installation remains
+pending. Build 4's TestFlight compliance gate remains unchanged. See
+[verification](verification.md) for the consumer acceptance evidence.
 
 ## Full build 4 checkpoint
 

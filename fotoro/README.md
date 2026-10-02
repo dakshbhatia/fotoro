@@ -10,6 +10,12 @@ Dates, favorites, screenshots and GPS coordinates come from the Photos library.
 Browsing does not initialize an account or upload photos. Sharing explicitly
 exports the still original through the system share sheet.
 
+The native home suggests roughly 10% of viable recent photo groups from small
+on-device previews. Clarity, exposure, favorites and capture-date variety guide
+the picks; similar shots within a short verified capture window share a
+representative. All Photos and search still include the originals. Sync your
+picks explicitly adds the suggestions from the last 10 days after account unlock.
+
 Native search covers all permitted non-hidden still photos, including older photos
 outside the 10-day canvas. It indexes supplied labels, available metadata and
 English text using Vision on one bounded local preview at a time. Indexing does
@@ -37,7 +43,8 @@ the suggestions. Every original stays unchanged and every imported photo remains
 searchable. The reviewed subset reaches account setup only when you open Sync;
 upload still requires Sync selected photos. Picks are session-only, and retained
 previews require reselecting the original before upload. This selector is currently
-implemented in the browser; native automatic picks remain separate work.
+implemented in both the browser and native app. Browser selection is editable;
+native sync uses the current suggestions.
 
 Search shows one photo with its source evidence and alternative meanings. Add
 labels in Photo details. Choosing a meaning, confirming a photo and pinning its
@@ -45,7 +52,7 @@ representative are separate explicit actions; merely inspecting a preview does
 not teach a preference. Text mentions never establish named face identity.
 
 Settings → Sync photos connects the local canvas to the encrypted account catalog.
-On iOS, explicitly start Sync last 10 days after unlocking your account. Backup
+On iOS, explicitly start Sync your picks after unlocking your account. Backup
 processes one original at a time, resumes durable pending work, and shows synced,
 pending, failed and skipped counts. Scheduled encrypted file uploads can continue
 through iOS background transfer. Open and unlock Fotoro to scan/encrypt more photos
@@ -115,7 +122,8 @@ The isolated exchange check creates and removes its own local D1/R2 state.
 See [verification](docs/verification.md), [release setup](docs/deployment.md),
 and the [product roadmap](../docs/ai-photos/roadmap.md).
 
-Next: deploy HTTPS and validate sync on a signed physical iPhone and Safari,
-then measure the large-library targets and implement background scheduling.
+The web app and API are live at [fotoro.cloud](https://fotoro.cloud). Validate
+personal sync and original restore on a signed physical iPhone and Safari,
+then measure the large-library targets.
 Live Photo motion preservation, semantic search, faces, cleanup, optional
 AI enrichment, video and nearby transport remain planned work.

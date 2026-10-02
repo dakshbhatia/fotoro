@@ -1,18 +1,30 @@
 import NukeUI
 import SwiftUI
 
+struct SavedPhotoViewerPresentation: Identifiable {
+  let initial: LocalPhoto
+  let photos: [LocalPhoto]
+  var id: String { initial.id }
+}
+
 struct PhotoViewer: View {
   @Bindable var services: AppServices
   let initialID: String
   var displayedPhotos: [LocalPhoto]? = nil
   @State private var selected = ""
-  @State private var scale: CGFloat = 1
+  @State private var zoom = PhotoViewerZoom()
   @State private var details: LocalPhoto?
   @State private var sharedOriginal: ConsumerSharedOriginal?
   @State private var originalExports: [URL] = []
   @State private var preparingShare = false
   @State private var shareTask: Task<Void, Never>?
   @Environment(\.dismiss) private var dismiss
+  init(services: AppServices, initialID: String, displayedPhotos: [LocalPhoto]? = nil) {
+    self.services = services
+    self.initialID = initialID
+    self.displayedPhotos = displayedPhotos
+    _selected = State(initialValue: initialID)
+  }
   private var photos: [LocalPhoto] { displayedPhotos ?? services.photos }
   private var current: LocalPhoto? { photos.first { $0.id == (selected.isEmpty ? initialID : selected) } }
   var body: some View {
@@ -22,13 +34,14 @@ struct PhotoViewer: View {
           Group {
             if shouldLoad(photo) { SavedPhotoPage(services: services, photo: photo) }
             else { Color.black }
-          }.scaleEffect(scale)
-            .gesture(MagnifyGesture().onChanged { scale = min(5, max(1, $0.magnification)) })
-            .onTapGesture(count: 2) { scale = scale == 1 ? 2 : 1 }
+          }.scaleEffect(zoom.scale)
+            .gesture(MagnifyGesture().onChanged { zoom.change($0.magnification) }
+              .onEnded { zoom.settle($0.magnification) })
+            .onTapGesture(count: 2) { zoom.toggle() }
             .tag(photo.id)
         }
       }.tabViewStyle(.page(indexDisplayMode: .never)).background(.black)
-        .onAppear { selected = initialID }.onChange(of: selected) { scale = 1 }
+        .onChange(of: selected) { zoom.reset() }
         .toolbar {
           ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() } }
           ToolbarItem(placement: .bottomBar) {
@@ -114,7 +127,9 @@ private struct SavedPhotoPage: View {
   var body: some View {
     LazyImage(url: (loaded ?? photo).previewURL ?? (loaded ?? photo).originalURL ?? photo.thumbnailURL) { state in
       if let image = state.image { image.resizable().scaledToFit() }
-      else if failed { Label("Preview unavailable", systemImage: "icloud.slash").foregroundStyle(.white) }
+      else if failed || state.error != nil {
+        Label("Preview unavailable", systemImage: "icloud.slash").foregroundStyle(.white)
+      }
       else { ProgressView().tint(.white) }
     }.accessibilityLabel(photo.metadata.filename)
       .task(id: photo.id) {

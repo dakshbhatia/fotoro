@@ -1,5 +1,6 @@
 import type { PhotoAnnotationsUpdateV1, SignedPayloadV1 } from "@fotoro/contracts";
 import { type Env, type Actor, fail, json, signedBody } from "./errors";
+import { readJson } from "./requests";
 
 async function requireOwner(env: Env, actor: Actor, id: string) {
   if (!await env.DB.prepare("SELECT 1 FROM photos WHERE id=? AND account_id=?")
@@ -39,23 +40,5 @@ export async function putAnnotations(env: Env, actor: Actor, id: string, payload
 }
 
 export async function readAnnotationRequest(request: Request): Promise<SignedPayloadV1> {
-  const limit = 512 * 1024;
-  if (Number(request.headers.get("content-length")) > limit) fail("TOO_LARGE", 413);
-  if (!request.body) fail("INVALID_WIRE");
-  const reader = request.body!.getReader();
-  const chunks: Uint8Array[] = [];
-  let length = 0;
-  try {
-    while (true) {
-      const {done, value} = await reader.read();
-      if (done) break;
-      length += value.length;
-      if (length > limit) { await reader.cancel(); fail("TOO_LARGE", 413); }
-      chunks.push(value);
-    }
-  } finally { reader.releaseLock(); }
-  const bytes = new Uint8Array(length);
-  let at = 0;
-  for (const chunk of chunks) { bytes.set(chunk, at); at += chunk.length; }
-  return JSON.parse(new TextDecoder().decode(bytes));
+  return readJson(request, 512 * 1024);
 }
