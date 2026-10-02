@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useRef } from "react";
 import type {
   AccountCardV1,
   GrantV1,
@@ -23,6 +23,7 @@ import { api } from "./api";
 import { get, put } from "./cache";
 import { requireVault, encryptPrivate, decryptPrivate } from "../vault/vault";
 import { readPhoto, photoBytes, type Photo } from "../library/catalog";
+import {useDialogFocus} from "../library/dialog-focus";
 export const MOMENT = "00000000-0000-4000-8000-000000000030";
 const pinned = new Map<string, AccountCardV1>();
 export async function pinCard(text: string) {
@@ -248,28 +249,7 @@ export function Exchange({
   onRefresh: () => void;
 }) {
   const panel = useRef<HTMLElement>(null);
-  useEffect(() => {
-    panel.current?.focus();
-    const key = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-      if (e.key === "Tab") {
-        const controls = Array.from(
-          panel.current?.querySelectorAll<HTMLElement>(
-            "button:not(:disabled),textarea,select,input",
-          ) ?? [],
-        );
-        if (e.shiftKey && document.activeElement === controls[0]) {
-          e.preventDefault();
-          controls.at(-1)?.focus();
-        } else if (!e.shiftKey && document.activeElement === controls.at(-1)) {
-          e.preventDefault();
-          controls[0]?.focus();
-        }
-      }
-    };
-    window.addEventListener("keydown", key);
-    return () => window.removeEventListener("keydown", key);
-  }, []);
+  useDialogFocus(panel, onClose);
   const [card, setCard] = useState(""),
     [recipient, setRecipient] = useState<AccountCardV1>(),
     [access, setAccess] = useState<"ongoing" | "temporary">("ongoing"),

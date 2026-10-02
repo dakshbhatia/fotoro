@@ -103,10 +103,16 @@ struct BackupStatus: Codable {
 @MainActor @Observable final class PhotosBackup {
   let store: LibraryStore
   private(set) var status: BackupStatus
+  private var selectionIDs: Set<String>?
   private var task: Task<Void, Never>?
   var isRunning: Bool { task != nil }
   init(store: LibraryStore) throws {
     self.store = store
+    selectionIDs = try store.database.read { db in
+      try String.fetchOne(db, sql: "SELECT value FROM state WHERE key='backupSelection'").map {
+        Set(try Wire.decode([String].self, Data(b64: $0)))
+      }
+    }
     status = try store.database.read { db in
       guard
         let value = try String.fetchOne(
@@ -121,6 +127,11 @@ struct BackupStatus: Codable {
   private func persist() throws {
     let encoded = try Wire.encode(status).base64EncodedString()
     try store.database.write { db in
+      if let selectionIDs {
+        try db.execute(
+          sql: "INSERT INTO state(key,value) VALUES('backupSelection',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+          arguments: [try Wire.encode(selectionIDs.sorted()).base64EncodedString()])
+      }
       try db.execute(
         sql:
           "INSERT INTO state(key,value) VALUES('backupStatus',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -128,13 +139,19 @@ struct BackupStatus: Codable {
     }
   }
   func refreshCounts() throws {
-    let sources = try store.backupSources()
+    let sources = try countedSources()
     status.completed = sources.filter { $0.phase == .committed }.count
     status.pending = sources.filter { $0.phase == .pending || $0.phase == .queued }.count
     status.failed =
       sources.filter { $0.phase == .failed || ($0.phase == .queued && $0.message != nil) }.count
     status.skipped = sources.filter { $0.phase == .skipped }.count
     try persist()
+  }
+  private func countedSources() throws -> [BackupSource] {
+    try store.backupSources().filter {
+      selectionIDs == nil || selectionIDs?.contains($0.id) == true
+        || $0.phase == .queued || $0.phase == .committed
+    }
   }
   func pause() { task?.cancel() }
   func waitUntilSettled() async { await task?.value }
@@ -160,6 +177,7 @@ struct BackupStatus: Codable {
         try persist()
         let candidates = try await snapshot()
         try fence()
+        selectionIDs = Set(candidates.map(\.id))
         var dates: [String: Date] = [:]
         for candidate in candidates {
           var source = try store.backupSource(candidate.id)
@@ -181,7 +199,7 @@ struct BackupStatus: Codable {
           $0.phase == .queued
             || (($0.phase == .pending || $0.phase == .failed) && selectedIDs.contains($0.id))
         }.sorted { ($0.phase == .queued ? 0 : 1) < ($1.phase == .queued ? 0 : 1) }
-        status.sourceTotal = try store.backupSources().count
+        status.sourceTotal = try countedSources().count
         status.phase = .running
         try refreshCounts()
         for var source in work {

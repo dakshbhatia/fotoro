@@ -81,9 +81,18 @@ struct RecentPhotoViewer: View {
   var search: LocalSearchStore? = nil
   var share: (RecentPhoto) -> Void
   @State private var selected = ""
-  @State private var scale: CGFloat = 1
+  @State private var zoom = PhotoViewerZoom()
   @State private var details = false
   @Environment(\.dismiss) private var dismiss
+  init(store: RecentPhotosStore, photos: [RecentPhoto], initialID: String,
+    search: LocalSearchStore? = nil, share: @escaping (RecentPhoto) -> Void) {
+    self.store = store
+    self.photos = photos
+    self.initialID = initialID
+    self.search = search
+    self.share = share
+    _selected = State(initialValue: initialID)
+  }
   func shouldLoad(_ photo: RecentPhoto) -> Bool {
     guard let index = photos.firstIndex(where: { $0.id == photo.id }),
       let current = photos.firstIndex(where: { $0.id == (selected.isEmpty ? initialID : selected) })
@@ -102,13 +111,14 @@ struct RecentPhotoViewer: View {
               Color.black
             }
           }
-          .scaleEffect(scale).gesture(
-            MagnifyGesture().onChanged { scale = min(5, max(1, $0.magnification)) }
+          .scaleEffect(zoom.scale).gesture(
+            MagnifyGesture().onChanged { zoom.change($0.magnification) }
+              .onEnded { zoom.settle($0.magnification) }
           )
-          .onTapGesture(count: 2) { scale = scale == 1 ? 2 : 1 }.tag(photo.id)
+          .onTapGesture(count: 2) { zoom.toggle() }.tag(photo.id)
         }
-      }.tabViewStyle(.page(indexDisplayMode: .never)).background(.black).onAppear { selected = initialID }
-        .onChange(of: selected) { scale = 1 }
+      }.tabViewStyle(.page(indexDisplayMode: .never)).background(.black)
+        .onChange(of: selected) { zoom.reset() }
         .toolbar {
           ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() } }
           ToolbarItem(placement: .bottomBar) {
@@ -127,6 +137,12 @@ struct RecentPhotoViewer: View {
         }
     }.preferredColorScheme(.dark)
   }
+}
+
+private struct RecentPhotoViewerPresentation: Identifiable {
+  let initial: RecentPhoto
+  let photos: [RecentPhoto]
+  var id: String { initial.id }
 }
 
 enum RecentPhotosContentMode {
@@ -150,12 +166,13 @@ struct RecentPhotosView: View {
   @State private var backupAccount: AppServices?
   @State private var searchHits: [ConsumerSearchHit] = []
   @State private var savedResults: [String: LocalPhoto] = [:]
-  @State private var savedViewer: LocalPhoto?
+  @State private var savedViewer: SavedPhotoViewerPresentation?
   @State private var pendingBackup = false
 #endif
   @State private var selected: Set<String> = []
   @State private var selecting = false
-  @State private var viewer: RecentPhoto?
+  @State private var allPhotos = false
+  @State private var viewer: RecentPhotoViewerPresentation?
   @State private var pendingShare: RecentPhoto?
   @State private var shareTask: Task<Void, Never>?
   @State private var sharing: [URL] = []
@@ -166,11 +183,12 @@ struct RecentPhotosView: View {
   @State private var settings = false
   @Environment(\.scenePhase) private var scenePhase
 
+  private var homePhotos: [RecentPhoto] { allPhotos ? store.photos : store.pickedPhotos }
   private var visible: [RecentPhoto] {
 #if FOTORO_LOCAL_PREVIEW
-    query.isEmpty ? store.photos : search.matchingPhotos
+    query.isEmpty ? homePhotos : search.matchingPhotos
 #else
-    query.isEmpty ? store.photos : searchHits.compactMap {
+    query.isEmpty ? homePhotos : searchHits.compactMap {
       if case .device(let id) = $0.photo { return search.assets[id] }
       return nil
     }
@@ -185,7 +203,9 @@ struct RecentPhotosView: View {
   }
   private var searchTaskID: ConsumerSearchPresentationID {
     ConsumerSearchPresentationID(query: query, library: search.libraryGeneration,
-      results: search.response.results.map(\.id), indexed: search.response.indexed,
+      results: search.response.results, indexed: search.response.indexed,
+      response: search.response.generation, acceptedMeaning: search.acceptedMeaningID,
+      catalog: services?.consumerCatalogGeneration,
       account: services?.session.accountId, vault: services?.vault.generation)
   }
 #endif
@@ -201,12 +221,13 @@ struct RecentPhotosView: View {
 #if !FOTORO_LOCAL_PREVIEW
   private var accountHome: some View {
     sharedHome
-      .sheet(item: $savedViewer) { photo in
-        if let services { PhotoViewer(services: services, initialID: photo.id, displayedPhotos: savedPhotos) }
+      .sheet(item: $savedViewer) { presentation in
+        if let services { PhotoViewer(services: services, initialID: presentation.initial.id, displayedPhotos: presentation.photos) }
       }
       .sheet(item: $backupAccount) { PhotosBackupView(services: $0) }
       .task(id: searchTaskID) { await updateSearch() }
       .onChange(of: services?.vault.generation) {
+        store.restartAnalysis()
         savedViewer = nil
         searchHits.removeAll { if case .saved = $0.photo { return true }; return false }
         savedResults = [:]
@@ -214,7 +235,7 @@ struct RecentPhotosView: View {
   }
 #endif
   private var sharedHome: some View {
-    content.navigationTitle("Photos")
+    content.navigationTitle("Fotoro")
         .toolbar { homeToolbar }
         .safeAreaInset(edge: .bottom) { searchBar }
         .overlay {
@@ -222,8 +243,8 @@ struct RecentPhotosView: View {
         }
         .sheet(item: $viewer, onDismiss: {
           if let photo = pendingShare { pendingShare = nil; share([photo]) }
-        }) { photo in
-          RecentPhotoViewer(store: store, photos: visible, initialID: photo.id, search: search) {
+        }) { presentation in
+          RecentPhotoViewer(store: store, photos: presentation.photos, initialID: presentation.initial.id, search: search) {
             pendingShare = $0
             viewer = nil
           }
@@ -263,6 +284,7 @@ struct RecentPhotosView: View {
 #if !FOTORO_LOCAL_PREVIEW
             services?.backup.pause()
 #endif
+            store.pauseAnalysis()
             search.pause()
           }
         }
@@ -272,6 +294,7 @@ struct RecentPhotosView: View {
           do {
             if services == nil { services = try AppServices() }
             services?.bindLocalSearch(search)
+            services?.bindRecentPhotos(store)
             await services?.resumeSavedAccount(initialRestoration: true)
           } catch { store.error = error.localizedDescription }
 #endif
@@ -285,11 +308,11 @@ struct RecentPhotosView: View {
     if mode == .openPhotos {
       VStack(spacing: 18) {
         Image(systemName: "photo.on.rectangle").font(.system(size: 44))
-        Text("Your last 10 days").font(.title2.bold())
+        Text("Picked for you").font(.title2.bold())
 #if FOTORO_LOCAL_PREVIEW
         Text("Local-only beta").font(.subheadline).foregroundStyle(.secondary)
 #endif
-        Text("Find a photo. Keep a moment.").foregroundStyle(.secondary)
+        Text("A few photos from your last 10 days. Your originals stay in Photos.").foregroundStyle(.secondary).multilineTextAlignment(.center)
         Button("Open Photos") {
           Task { await store.open(); search.open(status: store.status) }
         }.buttonStyle(.borderedProminent)
@@ -310,23 +333,24 @@ struct RecentPhotosView: View {
 #if FOTORO_LOCAL_PREVIEW
           LocalSearchView(search: search, photos: store, choseMeaning: { queryFocused = false }) {
             queryFocused = false
-            viewer = $0
+            openViewer($0)
           }
 #else
           ConsumerSearchResultsView(hits: searchHits, saved: savedResults, search: search, photos: store,
-            inspectDevice: { queryFocused = false; viewer = $0 },
-            inspectSaved: { queryFocused = false; savedViewer = $0 },
+            inspectDevice: { queryFocused = false; openViewer($0) },
+            inspectSaved: { photo in
+              queryFocused = false
+              savedViewer = SavedPhotoViewerPresentation(initial: photo, photos: savedPhotos)
+            },
             choseAlternative: { queryFocused = false })
 #endif
         } else {
-          HStack {
-            Text("Last 10 days").font(.subheadline.weight(.medium))
-            Spacer()
-            Text("\(store.photos.count) photos").font(.subheadline).foregroundStyle(.secondary)
-          }.padding(.horizontal).padding(.vertical, 10)
+          galleryHeader
           gallery
           if store.photos.isEmpty {
             ContentUnavailableView("No recent photos", systemImage: "photo", description: Text("Search to find older photos, too."))
+          } else if !allPhotos, store.picksSnapshot != nil, homePhotos.isEmpty {
+            ContentUnavailableView("No picks yet", systemImage: "photo", description: Text("Open All Photos to browse every recent photo you’ve allowed. Some previews may be unavailable on this device."))
           }
         }
         if store.status == .limited {
@@ -337,11 +361,41 @@ struct RecentPhotosView: View {
       .scrollDismissesKeyboard(.interactively)
     }
   }
+  private var galleryHeader: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      HStack(alignment: .firstTextBaseline) {
+        Text(allPhotos ? "All Photos" : "Picked for you").font(.title2.bold())
+        Spacer()
+        Button(allPhotos ? "Your picks" : "All Photos") {
+          allPhotos.toggle()
+          selecting = false
+          selected = []
+        }.font(.subheadline).frame(minHeight: 44)
+      }
+      HStack {
+        Text("Last 10 days").foregroundStyle(.secondary)
+        Spacer()
+        if allPhotos {
+          Text("\(store.photos.count) \(store.photos.count == 1 ? "photo" : "photos")").foregroundStyle(.secondary)
+        } else if store.picksSnapshot != nil {
+          Text("\(store.pickedPhotos.count) \(store.pickedPhotos.count == 1 ? "pick" : "picks")").foregroundStyle(.secondary)
+        }
+      }.font(.subheadline)
+      if !allPhotos, store.picks.analyzing {
+        ProgressView(value: Double(store.picks.completed), total: Double(max(1, store.picks.total)))
+        Text("Finding your picks · \(store.picks.completed) of \(store.picks.total)")
+          .font(.footnote).foregroundStyle(.secondary).monospacedDigit()
+      } else if !allPhotos, let missing = store.picksSnapshot?.recommendations.unassessed, missing > 0 {
+        Text("\(missing) previews unavailable · All Photos keeps every recent photo accessible.")
+          .font(.footnote).foregroundStyle(.secondary)
+      }
+    }.padding(.horizontal).padding(.bottom, 14)
+  }
   private var gallery: some View {
-    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3) {
-      ForEach(store.photos) { photo in
+    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: allPhotos ? 3 : 2), spacing: 3) {
+      ForEach(homePhotos) { photo in
         RecentPhotoCell(photo: photo, store: store, selected: selected.contains(photo.id), open: {
-          if selecting { toggleSelection(photo) } else { viewer = photo }
+          if selecting { toggleSelection(photo) } else { openViewer(photo) }
         }, toggle: { toggleSelection(photo) })
       }
     }
@@ -353,15 +407,18 @@ struct RecentPhotosView: View {
         .fixedSize(horizontal: true, vertical: false)
 #else
       Button(action: openBackup) { ConsumerBackupLabel(summary: services?.consumerSyncSummary ?? ConsumerSyncSummary()) }
-        .accessibilityLabel("Backup status")
+        .accessibilityLabel("Sync status")
 #endif
     }
     ToolbarItem(placement: .topBarTrailing) {
       if store.opened, !store.photos.isEmpty {
-        Button(selecting ? "Done" : "Select") {
-          selecting.toggle()
-          if !selecting { selected = [] }
-        }.disabled(preparingShare)
+        if selecting {
+          Button("Done") { selecting = false; selected = [] }.disabled(preparingShare)
+        } else {
+          Menu {
+            Button("Select photos", systemImage: "checkmark.circle") { selecting = true }
+          } label: { Label("Review", systemImage: "ellipsis") }.disabled(preparingShare)
+        }
       }
     }
     ToolbarItem(placement: .topBarTrailing) {
@@ -383,7 +440,7 @@ struct RecentPhotosView: View {
           Button("Share", systemImage: "square.and.arrow.up") { share(store.photos.filter { selected.contains($0.id) }) }
             .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44).disabled(preparingShare || showShare)
         }
-      }.padding(.leading, 18).padding(.trailing, 8).frame(minHeight: 56)
+      }.padding(.leading, 18).padding(.trailing, 8).frame(minHeight: 44)
         .glassEffect(.regular.interactive()).padding(.horizontal).padding(.bottom, 6)
     }
   }
@@ -403,7 +460,7 @@ struct RecentPhotosView: View {
           Text("Browse and search your Photos library on this device. Labels stay on this device. Nothing is backed up to Fotoro.")
 #else
           Text("Photos stay in your library. Browsing does not upload them.")
-          Button("Backup status") { pendingBackup = true; settings = false }
+          Button("Sync status") { pendingBackup = true; settings = false }
 #endif
         }
         Section("Photos access") {
@@ -426,6 +483,7 @@ struct RecentPhotosView: View {
     do {
       if services == nil { services = try AppServices() }
       services?.bindLocalSearch(search)
+      services?.bindRecentPhotos(store)
       backupAccount = services
     } catch { store.error = error.localizedDescription }
   }
@@ -445,13 +503,18 @@ struct RecentPhotosView: View {
       searchHits = hits
       savedResults = saved
     } catch is CancellationError {} catch {
+      guard !Task.isCancelled, token == searchTaskID else { return }
       searchHits = []
       savedResults = [:]
       store.error = error.localizedDescription
     }
   }
 #endif
+  private func openViewer(_ photo: RecentPhoto) {
+    viewer = RecentPhotoViewerPresentation(initial: photo, photos: visible)
+  }
   private func toggleSelection(_ photo: RecentPhoto) {
+    selecting = true
     if selected.contains(photo.id) { selected.remove(photo.id) } else { selected.insert(photo.id) }
   }
   private func openSettings() {
@@ -501,11 +564,14 @@ struct RecentPhotosView: View {
 }
 
 #if !FOTORO_LOCAL_PREVIEW
-private struct ConsumerSearchPresentationID: Equatable {
+struct ConsumerSearchPresentationID: Equatable {
   var query: String
   var library: UInt64
-  var results: [String]
+  var results: [SearchHit]
   var indexed: Int
+  var response: UInt64
+  var acceptedMeaning: String?
+  var catalog: UInt64?
   var account: String?
   var vault: UUID?
 }

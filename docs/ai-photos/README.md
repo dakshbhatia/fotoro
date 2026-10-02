@@ -1,18 +1,14 @@
-# Fotoro development
+# Earlier Ente reference experiment
 
 The active build has moved to [fotoro/](../../fotoro/README.md): native SwiftUI,
 React and a Cloudflare Worker. The instructions below describe the earlier
 Ente reference experiment, not the current app. Use the new run instructions.
 
-Fork: https://github.com/dakshbhatia/fotoro · branch: `codex/ai-photos`.
-
-Selected product name: **Fotoro**. Intended domain: **fotoro.cloud**; domain
-ownership and public deployment have not been established. See [product.md](product.md)
-for the proposed first beta and ordered product work.
-
-The code is published on that branch. The app currently runs locally; there is
-no public app deployment or TestFlight release. See [deployment.md](deployment.md)
-for the hosting decision, launch sequence, and next ten product improvements.
+Reference branch: `codex/ai-photos`. The current web app and API are live at
+[fotoro.cloud](https://fotoro.cloud). Current native releases and open acceptance
+checks are recorded in [release setup](../../fotoro/docs/deployment.md) and
+[verification](../../fotoro/docs/verification.md). The instructions and milestones
+below belong to the earlier experiment.
 
 This fork retains Ente's Flutter iOS app, React web app, Go Museum server,
 encrypted storage and sync, album sharing, cleanup, and video playback.

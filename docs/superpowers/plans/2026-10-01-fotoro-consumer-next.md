@@ -114,7 +114,7 @@ review can run concurrently. UI changes do not require an encryption-schema chan
 
 **Files:** `fotoro/docs/deployment.md`, `verification.md`, `tools/check-service.mjs`; service configuration/migrations and signing configuration only when actual resources are available.
 
-- [ ] Complete normal Cloudflare login; create distinct preview/production D1/R2 resources and apply migrations; deploy HTTPS with correct RP/origin/AASA configuration and rollback target.
+- [x] Complete normal Cloudflare login; create isolated production D1/R2 resources and apply migrations; deploy HTTPS with correct RP/origin/AASA configuration and retained DNS rollback target. October 2 canonical API and signed association checks pass; a separate preview environment remains optional follow-up.
 - [x] Sign in through Xcode; obtain app-specific Associated Domains provisioning; connect a physical iPhone. Do not substitute wildcard provisioning or strip entitlements.
 - [ ] Run the spec's 10-day phone-to-Safari corpus scenarios, including recovery, byte-identical originals, interruption, Pause, background lifecycle and same-account annotations.
 - [ ] Investigate any reproduced connection loss with retained service/process/transport evidence. Do not hide it behind test skips or indiscriminate mutation retries.

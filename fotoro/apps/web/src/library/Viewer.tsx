@@ -6,6 +6,10 @@ import { saveReceivedPhoto } from "../exchange/Exchange";
 import {requireVault, type UnlockedVault} from "../vault/vault";
 import {sameVault} from "../vault/scope";
 import {canShareOriginal, downloadOriginal, shareOriginal} from "./system-share";
+import {useDialogFocus} from "./dialog-focus";
+export function viewerPhotoIndex(photos: Photo[], selected: string) {
+  return Math.max(0, photos.findIndex(photo => photo.manifest.photoId === selected));
+}
 export function Viewer({
   photos,
   initial,
@@ -19,55 +23,35 @@ export function Viewer({
   onSaved: () => void;
   onLabels?: (photo: Photo, labels: string[]) => void;
 }) {
-  const [index, setIndex] = useState(
-      Math.max(
-        0,
-        photos.findIndex((p) => p.manifest.photoId === initial),
-      ),
-    ),
+  const [selected, setSelected] = useState(initial),
     [url, setUrl] = useState(""),
     [zoom, setZoom] = useState(false),
     [details, setDetails] = useState(false),
     [status, setStatus] = useState(""),
     [label, setLabel] = useState(""),
+    [saving, setSaving] = useState(false),
     [preparingShare, setPreparingShare] = useState(false),
     [prepared, setPrepared] = useState<{file: File; photo: Photo; session: UnlockedVault} | null>(null);
   const touch = useRef<{ x: number; y: number } | undefined>(undefined);
   const panel = useRef<HTMLDivElement>(null);
-  const photo = photos[Math.min(index, photos.length - 1)];
-  const currentPhoto = useRef(photo), mounted = useRef(false), shareGeneration = useRef(0);
+  const index = viewerPhotoIndex(photos, selected), photo = photos[index];
+  const currentPhoto = useRef(photo), mounted = useRef(false), shareGeneration = useRef(0), savingRef = useRef(false);
   currentPhoto.current = photo;
   const authorized = (source: Photo, session: UnlockedVault) => mounted.current && currentPhoto.current === source && sameVault(session);
+  useDialogFocus(panel, () => prepared ? setPrepared(null) : onClose());
   useEffect(() => {
     mounted.current = true;
     return () => {mounted.current = false; shareGeneration.current++;};
   }, []);
   useEffect(() => {
-    panel.current?.focus();
     const key = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
       const editing = (e.target as HTMLElement)?.matches("input,textarea,select");
-      if (!editing && e.key === "ArrowRight")
-        setIndex((i) => Math.min(photos.length - 1, i + 1));
-      if (!editing && e.key === "ArrowLeft") setIndex((i) => Math.max(0, i - 1));
-      if (e.key === "Tab") {
-        const buttons = Array.from(
-          panel.current?.querySelectorAll<HTMLElement>(
-            "button:not(:disabled),input,textarea,summary",
-          ) ?? [],
-        );
-        if (e.shiftKey && (document.activeElement === buttons[0] || document.activeElement === panel.current)) {
-          e.preventDefault();
-          buttons.at(-1)?.focus();
-        } else if (!e.shiftKey && document.activeElement === buttons.at(-1)) {
-          e.preventDefault();
-          buttons[0]?.focus();
-        }
-      }
+      if (!editing && !prepared && e.key === "ArrowRight") {e.preventDefault(); setSelected(photos[Math.min(photos.length - 1, index + 1)]?.manifest.photoId ?? selected);}
+      if (!editing && !prepared && e.key === "ArrowLeft") {e.preventDefault(); setSelected(photos[Math.max(0, index - 1)]?.manifest.photoId ?? selected);}
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [photos, onClose]);
+  }, [photos, index, selected, prepared]);
   useEffect(() => {
     shareGeneration.current++; setPrepared(null); setPreparingShare(false);
   }, [photo]);
@@ -111,6 +95,19 @@ export function Viewer({
     } catch (error) {if (authorized(photo, session) && shareGeneration.current === generation) setStatus((error as Error).message);}
     finally {if (authorized(photo, session) && shareGeneration.current === generation) setPreparingShare(false);}
   };
+  const save = async () => {
+    if (!photo.grantId || savingRef.current) return;
+    const session = requireVault();
+    savingRef.current = true; setSaving(true); setStatus("Verifying original…");
+    try {
+      await saveReceivedPhoto(photo.grantId, photo.manifest.photoId);
+      if (mounted.current && sameVault(session)) {
+        if (currentPhoto.current === photo) setStatus("Saved · original digest verified");
+        onSaved();
+      }
+    } catch (error) {if (authorized(photo, session)) setStatus((error as Error).message);}
+    finally {savingRef.current = false; if (mounted.current) setSaving(false);}
+  };
   return (
     <div
       className="viewer"
@@ -146,9 +143,7 @@ export function Viewer({
             const dx = e.changedTouches[0].clientX - touch.current.x,
               dy = e.changedTouches[0].clientY - touch.current.y;
             if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.5)
-              setIndex((i) =>
-                Math.max(0, Math.min(photos.length - 1, i + (dx < 0 ? 1 : -1))),
-              );
+              setSelected(photos[Math.max(0, Math.min(photos.length - 1, index + (dx < 0 ? 1 : -1)))].manifest.photoId);
           }
           touch.current = undefined;
         }}
@@ -165,7 +160,7 @@ export function Viewer({
       <div className="viewer-bottom glass">
         <button
           disabled={index === 0}
-          onClick={() => setIndex(index - 1)}
+          onClick={() => setSelected(photos[index - 1].manifest.photoId)}
           aria-label="Previous photo"
         >
           <Icon kind="previous" />
@@ -179,23 +174,15 @@ export function Viewer({
         </button>
         {photo.grantId && (
           <button
-            onClick={async () => {
-              try {
-                setStatus("Verifying original…");
-                await saveReceivedPhoto(photo.grantId!, photo.manifest.photoId);
-                setStatus("Saved · original digest verified");
-                onSaved();
-              } catch (e) {
-                setStatus((e as Error).message);
-              }
-            }}
+            disabled={saving}
+            onClick={() => void save()}
           >
-            Save to library
+            {saving ? "Saving…" : "Save to library"}
           </button>
         )}
         <button
           disabled={index === photos.length - 1}
-          onClick={() => setIndex(index + 1)}
+          onClick={() => setSelected(photos[index + 1].manifest.photoId)}
           aria-label="Next photo"
         >
           <Icon kind="next" />

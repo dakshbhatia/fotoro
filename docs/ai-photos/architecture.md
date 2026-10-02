@@ -1,5 +1,8 @@
 **Fotoro — iPhone, cross-device sync, Safari, and trusted sharing**
 
+Historical Ente architecture proposal from September 30, 2026. Current deployment
+and native release status is recorded in [the active release setup](../../fotoro/docs/deployment.md).
+
 Updated September 30, 2026. The fork is published on `dakshbhatia/fotoro`, branch
 `codex/ai-photos`. The account-connected Fotoro web canvas, separate intelligence
 preview and Museum/Postgres/object-storage stack run. Local upload, browser

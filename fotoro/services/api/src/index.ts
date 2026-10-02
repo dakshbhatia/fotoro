@@ -8,6 +8,7 @@ import * as grants from "./grants";
 import { savePhoto } from "./saves";
 import * as annotations from "./annotations";
 import {diagnosticMethod} from "./diagnostics";
+import { readJson } from "./requests";
 const app = new Hono<{ Bindings: Env; Variables: { actor: Actor } }>();
 app.onError((error, c) => {
   const e =
@@ -68,10 +69,10 @@ app.use("/v1/*", async (c, next) => {
 });
 for (const kind of ["register", "login", "recovery"]) {
   app.post(`/v1/auth/${kind}/options`, async (c) =>
-    c.json(await auth.options(c.env, c.req.raw, kind, await c.req.json())),
+    c.json(await auth.options(c.env, c.req.raw, kind, await readJson<any>(c.req.raw))),
   );
   app.post(`/v1/auth/${kind}/verify`, async (c) => {
-    const s = await auth.verify(c.env, c.req.raw, kind, await c.req.json());
+    const s = await auth.verify(c.env, c.req.raw, kind, await readJson<any>(c.req.raw));
     if (s.cookie) c.header("Set-Cookie", s.cookie);
     return c.json(s.body);
   });
@@ -93,7 +94,7 @@ app.put("/v1/vault/wrappers/:id", async (c) =>
       c.env,
       c.get("actor"),
       c.req.param("id"),
-      await c.req.json(),
+      await readJson<any>(c.req.raw),
     ),
   ),
 );
@@ -102,7 +103,7 @@ app.delete("/v1/credentials/:id", async (c) =>
 );
 app.post("/v1/devices/enroll", async (c) =>
   c.json(
-    await devices.enroll(c.env, c.get("actor"), c.req.raw, await c.req.json()),
+    await devices.enroll(c.env, c.get("actor"), c.req.raw, await readJson<any>(c.req.raw)),
   ),
 );
 app.post("/v1/devices/enroll/:id/approve", async (c) =>
@@ -112,7 +113,7 @@ app.post("/v1/devices/enroll/:id/approve", async (c) =>
       c.get("actor"),
       c.req.raw,
       c.req.param("id"),
-      await c.req.json(),
+      await readJson<any>(c.req.raw),
     ),
   ),
 );
@@ -123,7 +124,7 @@ app.post("/v1/devices/enroll/:id/complete", async (c) =>
       c.get("actor"),
       c.req.raw,
       c.req.param("id"),
-      await c.req.json(),
+      await readJson<any>(c.req.raw),
     ),
   ),
 );
@@ -132,7 +133,7 @@ app.post("/v1/uploads/reserve", async (c) =>
     await storage.reserveUpload(
       c.env,
       c.get("actor"),
-      await c.req.json(),
+      await readJson<any>(c.req.raw),
       new URL(c.req.url).origin,
     ),
   ),
@@ -160,7 +161,7 @@ app.get("/v1/objects/:id", (c) =>
   storage.getObject(c.env, c.get("actor"), c.req.param("id")),
 );
 app.post("/v1/photos", async (c) =>
-  c.json(await catalog.addPhoto(c.env, c.get("actor"), await c.req.json())),
+  c.json(await catalog.addPhoto(c.env, c.get("actor"), await readJson<any>(c.req.raw))),
 );
 app.get("/v1/photos/:id/annotations", async (c) => {
   c.header("Cache-Control", "no-store");
@@ -186,7 +187,7 @@ app.post("/v1/moments/:id/grants/options", async (c) =>
       c.env,
       c.get("actor"),
       c.req.param("id"),
-      await c.req.json(),
+      await readJson<any>(c.req.raw),
     ),
   ),
 );
@@ -196,7 +197,7 @@ app.post("/v1/moments/:id/grants", async (c) =>
       c.env,
       c.get("actor"),
       c.req.param("id"),
-      await c.req.json(),
+      await readJson<any>(c.req.raw),
     ),
   ),
 );
@@ -213,7 +214,7 @@ app.post("/v1/grants/:id/viewed", async (c) =>
   c.json(await grants.viewed(c.env, c.get("actor"), c.req.param("id"))),
 );
 app.post("/v1/saves", async (c) =>
-  c.json(await savePhoto(c.env, c.get("actor"), await c.req.json())),
+  c.json(await savePhoto(c.env, c.get("actor"), await readJson<any>(c.req.raw))),
 );
 app.post("/v1/moments/:id/contributions", async (c) =>
   c.json(
@@ -221,7 +222,7 @@ app.post("/v1/moments/:id/contributions", async (c) =>
       c.env,
       c.get("actor"),
       c.req.param("id"),
-      await c.req.json(),
+      await readJson<any>(c.req.raw),
     ),
   ),
 );

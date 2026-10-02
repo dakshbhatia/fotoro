@@ -3,6 +3,7 @@ import { Icon } from "../library/icons";
 import { type LocalPhoto, LocalResources } from "./resources";
 import type { LocalOcrPhoto } from "./useLocalOcr";
 import {canShareOriginal, downloadOriginal, shareOriginal} from "../library/system-share";
+import {useDialogFocus} from "../library/dialog-focus";
 export function LocalViewer({photos, initial, resources, onClose, onLabels, onUse, onConfirm, onPin, meaning, onReselect}: {
   photos: LocalPhoto[]; initial: string; resources: LocalResources; onClose: () => void;
   onLabels?: (id: string, labels: string[]) => void;
@@ -15,22 +16,17 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onUs
   const index = Math.max(0, photos.findIndex(p => p.id === selected)), photo = photos[index] as LocalOcrPhoto | undefined;
   const currentPhoto = useRef(photo), alive = useRef(false);
   currentPhoto.current = photo;
-  useEffect(() => {alive.current = true; panel.current?.focus(); return () => {alive.current = false;};}, []);
+  useDialogFocus(panel, onClose);
+  useEffect(() => {alive.current = true; return () => {alive.current = false;};}, []);
   useEffect(() => {
     const key = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
       const editing = (event.target as HTMLElement)?.matches("input,textarea,select");
-      if (!editing && event.key === "ArrowRight") setSelected(photos[Math.min(photos.length - 1, index + 1)]?.id ?? selected);
-      if (!editing && event.key === "ArrowLeft") setSelected(photos[Math.max(0, index - 1)]?.id ?? selected);
-      if (event.key === "Tab") {
-        const controls = Array.from(panel.current?.querySelectorAll<HTMLElement>("button:not(:disabled),input,textarea,summary") ?? []);
-        if (event.shiftKey && (document.activeElement === controls[0] || document.activeElement === panel.current)) {event.preventDefault(); controls.at(-1)?.focus();}
-        else if (!event.shiftKey && document.activeElement === controls.at(-1)) {event.preventDefault(); controls[0]?.focus();}
-      }
+      if (!editing && event.key === "ArrowRight") {event.preventDefault(); setSelected(photos[Math.min(photos.length - 1, index + 1)]?.id ?? selected);}
+      if (!editing && event.key === "ArrowLeft") {event.preventDefault(); setSelected(photos[Math.max(0, index - 1)]?.id ?? selected);}
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [index, photos, selected, onClose]);
+  }, [index, photos, selected]);
   useEffect(() => {
     if (!photo) return;
     let alive = true;
@@ -55,7 +51,7 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onUs
     <div className="view-image" onDoubleClick={() => setZoom(!zoom)}
       onTouchStart={event => {touch.current = event.touches.length === 1 ? {x: event.touches[0].clientX, y: event.touches[0].clientY} : undefined;}}
       onTouchEnd={event => {
-        if (touch.current && !zoom) {
+        if (touch.current && !zoom && event.changedTouches.length === 1) {
           const dx = event.changedTouches[0].clientX - touch.current.x, dy = event.changedTouches[0].clientY - touch.current.y;
           if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.5) setSelected(photos[Math.max(0, Math.min(photos.length - 1, index + (dx < 0 ? 1 : -1)))].id);
         }

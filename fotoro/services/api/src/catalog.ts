@@ -41,16 +41,15 @@ export async function addPhoto(env: Env, actor: Actor, s: SignedPayloadV1) {
     fail("SOURCE_MISMATCH");
   if (m.ownerAccountId !== actor.accountId) fail("FORBIDDEN", 403);
   await checkObjects(env, actor, m);
-  const prior = await env.DB.prepare("SELECT signed FROM photos WHERE id=?")
-    .bind(m.photoId)
-    .first<any>();
-  if (prior) {
-    if (prior.signed !== json(s)) fail("IDEMPOTENCY_CONFLICT", 409);
-    return m;
-  }
-  await env.DB.prepare("INSERT INTO photos VALUES(?,?,?,?)")
+  const result = await env.DB.prepare("INSERT INTO photos VALUES(?,?,?,?) ON CONFLICT(id) DO NOTHING")
     .bind(m.photoId, actor.accountId, json(m), json(s))
     .run();
+  if (result.meta.changes !== 1) {
+    const prior = await env.DB.prepare("SELECT signed FROM photos WHERE id=?")
+      .bind(m.photoId)
+      .first<{ signed: string }>();
+    if (prior?.signed !== json(s)) fail("IDEMPOTENCY_CONFLICT", 409);
+  }
   return m;
 }
 export async function changes(

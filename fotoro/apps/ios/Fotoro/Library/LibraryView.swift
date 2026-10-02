@@ -8,7 +8,7 @@ struct LibraryView: View {
   @State private var searchResults: [LocalPhoto]?
   @State private var selection: Set<String> = []
   @State private var showingFiles = false
-  @State private var viewer: LocalPhoto?
+  @State private var viewer: SavedPhotoViewerPresentation?
   @State private var showExchange = false
   @State private var showingBackup = false
   @Environment(\.scenePhase) private var scenePhase
@@ -50,7 +50,7 @@ struct LibraryView: View {
                   ForEach(day.1) { photo in
                     LibraryPhotoCell(
                       photo: photo, isSelected: selection.contains(photo.id),
-                      open: { viewer = photo },
+                      open: { viewer = SavedPhotoViewerPresentation(initial: photo, photos: filtered) },
                       toggleSelection: { toggleSelection(photoID: photo.id) },
                       appeared: { loadMoreIfNeeded(photoID: photo.id) }
                     ).id(photo.id)
@@ -70,10 +70,21 @@ struct LibraryView: View {
             ForEach(services.notices, id: \.self) { Text($0).font(.caption).padding() }
           }.scrollPosition(id: $scrollID, anchor: .top)
             .searchable(text: $query, prompt: "Search")
-            .task(id: query) {
+            .task(id: SavedCatalogSearchPresentationID(query: query,
+              catalog: services.consumerCatalogGeneration, vault: services.vault.generation)) {
               guard !query.isEmpty else { searchResults = nil; return }
-              do { searchResults = try await services.searchCatalog(query) }
-              catch is CancellationError {} catch { services.error = error.localizedDescription }
+              let searchedQuery = query
+              let generation = services.consumerCatalogGeneration
+              do {
+                let results = try await services.searchCatalog(searchedQuery)
+                guard !Task.isCancelled, searchedQuery == query,
+                  generation == services.consumerCatalogGeneration else { return }
+                searchResults = results
+              } catch is CancellationError {} catch {
+                guard !Task.isCancelled, searchedQuery == query,
+                  generation == services.consumerCatalogGeneration else { return }
+                services.error = error.localizedDescription
+              }
             }
             .toolbar {
               ToolbarItem(placement: .topBarLeading) {
@@ -115,9 +126,9 @@ struct LibraryView: View {
       }.navigationTitle("Saved photos")
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         .overlay { if services.busy { ProgressView().padding().glassEffect() } }
-        .sheet(item: $viewer, onDismiss: { viewer = nil }) { photo in
+        .sheet(item: $viewer, onDismiss: { viewer = nil }) { presentation in
           PhotoViewer(
-            services: services, initialID: photo.id, displayedPhotos: filtered)
+            services: services, initialID: presentation.initial.id, displayedPhotos: presentation.photos)
         }
         .onChange(of: scenePhase) {
           if scenePhase != .active { services.backup.pause() }
@@ -239,6 +250,12 @@ struct LibraryView: View {
     sharingOriginals = false
     originalURLs = []
   }
+}
+
+private struct SavedCatalogSearchPresentationID: Equatable {
+  var query: String
+  var catalog: UInt64
+  var vault: UUID
 }
 
 private struct LibraryPhotoCell: View {

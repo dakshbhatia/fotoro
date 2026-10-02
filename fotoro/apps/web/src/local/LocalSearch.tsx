@@ -51,7 +51,7 @@ export function LocalSearch({photos, result, resources, committed, pinned, canCo
       <button className="local-leading" id={"local-photo-" + photo.id} aria-label={"Open " + photo.filename}
         onClick={() => {if (swiped.current) {swiped.current = false; return;} onOpen(photo.id);}} onTouchStart={event => {swiped.current = false; touch.current = event.touches.length === 1 ? {x: event.touches[0].clientX, y: event.touches[0].clientY} : undefined;}}
         onTouchEnd={event => {
-          if (touch.current) {
+          if (touch.current && event.changedTouches.length === 1) {
             const dx = event.changedTouches[0].clientX - touch.current.x, dy = event.changedTouches[0].clientY - touch.current.y;
             if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.5) {swiped.current = true; move(dx < 0 ? 1 : -1);}
           }

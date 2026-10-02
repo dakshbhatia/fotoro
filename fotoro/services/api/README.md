@@ -1,6 +1,5 @@
 # Private Fotoro service
 
-Local only; this repository does not provision D1, R2, DNS or passkey domains.
 Run `pnpm seed:local` once, then `pnpm dev:api` at the Fotoro workspace root for
 127.0.0.1:8787. Browser origin is http://localhost:4310 or
 http://127.0.0.1:4310, RP localhost. The Worker always rejects fixture-account
@@ -8,12 +7,11 @@ headers, including in local mode. Local test actors are inserted only by tests;
 HTTP integration tests use actual hashed bearer sessions.
 
 Production configuration selects RP fotoro.cloud and only origin
-https://fotoro.cloud. Provision private D1/R2 bindings separately, migrate all
-SQL files and configure HTTPS/domain before enabling production. The existing
-production Wrangler environment deliberately has no provisioned bindings.
-Native associated domains must include webcredentials:fotoro.cloud and
-applinks:fotoro.cloud with an Apple association file tied to the signed app.
-No deployment has been performed.
+https://fotoro.cloud. The web app and API are live on that origin with private
+D1/R2 bindings configured in `wrangler.toml`. See
+[deployment and release status](../../docs/deployment.md).
+Native passkeys require webcredentials:fotoro.cloud with an Apple association
+file tied to the signed app.
 
 Hono authenticates requests before querying immutable object references. Grant
 options reserve server IDs and expiry before the client signs. Temporary grants
@@ -23,6 +21,9 @@ check aborts the entire transaction. Photo-insert triggers retain all objects.
 Signed bodies are parsed only after Ed25519 verification and validated with the
 shared precompiled schema. Account signing/box cards cannot be replaced through
 this API: replacing an identity requires a future explicit trust-renewal flow.
+JSON request bodies are capped at 2 MiB while annotation PUTs retain their 512 KiB
+cap. Both declared and streamed sizes are checked before parsing. Encrypted media
+uploads use the separately reserved ciphertext byte limit.
 
 Upload staging PUT is a session-and-capability-authorized Worker route. Its
 FixedLengthStream bounds bytes. Commit incrementally hashes the observed staging

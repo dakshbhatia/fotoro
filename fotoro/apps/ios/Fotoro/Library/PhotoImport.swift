@@ -165,8 +165,11 @@ actor PhotoImport {
     try await read(SelectedResource(id: id, origin: .photos, resourceIdentifier: id, fileURL: nil)).0.digest
   }
   func stageBackup(
-    _ source: BackupSource, accountId: String, bundle: AccountBundle, capturedAt: Date? = nil
+    _ source: BackupSource, accountId: String, bundle: AccountBundle, capturedAt: Date? = nil,
+    valid: @escaping @Sendable () async -> Bool = { true }
   ) async throws -> LocalPhoto {
+    try Task.checkCancellation()
+    guard await valid() else { throw CancellationError() }
     if let existing = try store.backupPhoto(source.photoId) { return existing }
     func checkRevision() throws {
       guard let expected = source.sourceRevision else { return }
@@ -178,6 +181,7 @@ actor PhotoImport {
     let selection = SelectedResource(
       id: source.id, origin: .photos, resourceIdentifier: source.id, fileURL: nil)
     let (bytes, filename, _) = try await read(selection)
+    guard await valid() else { throw CancellationError() }
     try checkRevision()
     try Task.checkCancellation()
     if let reused = try store.ownedOriginal(digest: bytes.digest, accountId: accountId) {
@@ -197,6 +201,7 @@ actor PhotoImport {
       photoId: source.photoId, backup: true, capturedAt: capturedAt)
     do {
       try Task.checkCancellation()
+      guard await valid() else { throw CancellationError() }
       try store.stageBackup(photo, source: source)
     } catch {
       for url in Array(photo.staged.values)
