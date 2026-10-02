@@ -15,7 +15,9 @@ on-device previews. Clarity, exposure, favorites and capture-date variety guide
 the picks; similar shots within a short verified capture window share a
 representative. All Photos and search still include the originals. Account shows
 the signed-in account reference. Save picks adds the current suggestions from the
-last 10 days once, after account unlock. Automatic sync is off.
+last 10 days once, after account unlock. Select → Save preserves the exact reviewed
+photos, and a photo's viewer also offers Save. Sign-in keeps that choice ready;
+Save N photos starts the batch. Automatic sync is off.
 
 Account uses one generated Fotoro password. New Fotoro creates that password;
 Continue opens the account. Enter the same password on iPhone or the web to sign
@@ -51,8 +53,8 @@ the suggestions. Every original stays unchanged and every imported photo remains
 searchable. The reviewed subset reaches account setup only when you open Sync;
 upload still requires Sync selected photos. Picks are session-only, and retained
 previews require reselecting the original before upload. This selector is currently
-implemented in both the browser and native app. Browser selection is editable;
-native sync uses the current suggestions.
+implemented in both the browser and native app. Both support a reviewed subset;
+native selection can also save older permitted search results from their viewer.
 
 Search shows one photo with its source evidence and alternative meanings. Add
 labels in Photo details. Choosing a meaning, confirming a photo and pinning its
@@ -62,12 +64,15 @@ not teach a preference. Text mentions never establish named face identity.
 On iOS, Account → Save picks starts one manual batch. Preparation processes one
 original at a time. Continue saving resumes only queued encrypted files; Save picks
 starts another current selection. Reopening Fotoro and editing labels do not
-start uploads. Refresh saved photos downloads the account catalog only when tapped.
+start uploads. Opening Saved photos or tapping Refresh downloads the account
+catalog without sending queued uploads or edits.
 Encrypted file uploads scheduled by a manual batch can finish through iOS
 background transfer; force quitting interrupts system transfers. In the browser,
 Settings → Sync photos connects the local canvas to the encrypted account catalog.
 Opening setup preserves selected files and
-uploads nothing; Sync selected photos starts their upload.
+uploads nothing; Save selected photos starts their upload. Sign-in, returning to
+the tab and reconnecting may refresh the saved catalog but never send pending
+originals or edits. Continue saving and Sync changes are explicit actions.
 
 Account annotations are bound to the unchanged original digest, encrypted with
 the account vault key, signed and revisioned separately from media. Label edits

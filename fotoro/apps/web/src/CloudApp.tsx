@@ -34,12 +34,12 @@ import {
 } from "./exchange/journal";
 import {
   refreshSync,
-  lastSync,
+  cachedSync,
+  saveSync,
   syncStatus,
   sameVault,
   readableSyncError,
   pauseSync,
-  skippedImports,
   recordSkipped,
   clearSkipped,
 } from "./exchange/sync";
@@ -109,8 +109,7 @@ export default function CloudApp({
     [annotationPending, setAnnotationPending] = useState<PendingAnnotation[]>([]),
     [committedMeaning, setCommittedMeaning] = useState<string>(),
     [selecting, setSelecting] = useState(false),
-    [online, setOnline] = useState(() => navigator.onLine !== false),
-    [pauseReady, setPauseReady] = useState(false);
+    [online, setOnline] = useState(() => navigator.onLine !== false);
   const running = useRef(false),
     authIntent = useRef(0),
     pausedRef = useRef(true),
@@ -167,7 +166,6 @@ export default function CloudApp({
     setSkipped(0);
     pausedRef.current = true;
     setPaused(true);
-    setPauseReady(false);
     intentVersion.current++;
     uploadAbort.current?.abort();
   };
@@ -175,13 +173,13 @@ export default function CloudApp({
     const version = intentVersion.current;
     const value = await loadUploadPause(session);
     if (!sameVault(session) || intentVersion.current !== version) return;
-    pausedRef.current = value; setPaused(value); setPauseReady(true);
+    pausedRef.current = value; setPaused(value);
   };
   const continueSync = async (session = requireVault()) => {
     const version = ++intentVersion.current;
     await saveUploadPause(false, session);
     if (!sameVault(session) || intentVersion.current !== version) throw new DOMException("Sync paused", "AbortError");
-    pausedRef.current = false; setPaused(false); setPauseReady(true);
+    pausedRef.current = false; setPaused(false);
   };
   useEffect(() => {
     let observed: ReturnType<typeof requireVault> | undefined;
@@ -195,34 +193,26 @@ export default function CloudApp({
     window.addEventListener("fotoro-lock", onLock);
     return () => window.removeEventListener("fotoro-lock", onLock);
   }, [photos, received]);
-  const refresh = async () => {
+  const refresh = async (send = false) => {
     const session = requireVault();
-    const cached = await cachedCatalog();
+    const cached = await cachedSync(session);
     if (!sameVault(session)) return;
-    setPhotos((previous) => (sameVault(session) ? cached : previous));
-    const imports = await pendingImports();
-    if (!sameVault(session)) return;
-    setPending((previous) => (sameVault(session) ? imports : previous));
-    const edits = await pendingAnnotations(session);
-    if (!sameVault(session)) return;
-    setAnnotationPending(edits);
-    const previous = await lastSync(session);
-    if (!sameVault(session)) return;
-    setLastSuccessfulSync((value) => (sameVault(session) ? previous : value));
-    const skip = await skippedImports(session);
-    if (!sameVault(session)) return;
-    setSkipped((value) => (sameVault(session) ? skip : value));
-    if (pausedRef.current) {
+    setPhotos(cached.photos);
+    setPending(cached.pending);
+    setAnnotationPending(cached.annotations);
+    setLastSuccessfulSync(cached.lastSuccessfulSync);
+    setSkipped(cached.skipped);
+    if (send && pausedRef.current) {
       setStatus("Sync is paused. Continue when you’re ready.");
       return;
     }
     if (!navigator.onLine) {
       setStatus(
-        "Offline · your cached photos are available. Sync will resume when online.",
+        "Offline · your cached photos are available. Save when you’re online.",
       );
       return;
     }
-    const result = await refreshSync(session);
+    const result = await (send ? saveSync(session) : refreshSync(session));
     if (!sameVault(session)) return;
     setPhotos((previous) => (sameVault(session) ? result.photos : previous));
     setPending((previous) => (sameVault(session) ? result.pending : previous));
@@ -335,7 +325,7 @@ export default function CloudApp({
             setStaging((value) => (sameVault(session) ? 0 : value));
           },
           drain: async () => {
-            await refresh();
+            await refresh(true);
           },
           unresolved: async () => {
             const queue = await pendingImports();
@@ -382,7 +372,7 @@ export default function CloudApp({
   const retry = () =>
     run(async () => {
       await continueSync();
-      await refresh();
+      await refresh(true);
     });
   const localCount = unsavedLocalFiles.length;
   const consumerSummary = useMemo(() => deriveConsumerSyncSummary({
@@ -444,13 +434,6 @@ export default function CloudApp({
     })().catch(error => {if (alive && sameVault(session)) {setStatus(readableSyncError(error)); setNeedsAttention(true);}});
     return () => {alive = false;};
   }, [account, localPhotos, photos, publicDemo]);
-  useEffect(() => {
-    if (!account || !pauseReady || busy || paused || needsAttention || !annotationPending.some(edit => !edit.conflict)) return;
-    const timeout = setTimeout(() => {
-      if (navigator.onLine && !running.current && !pausedRef.current) void run(refresh);
-    }, 1000);
-    return () => clearTimeout(timeout);
-  }, [account, pauseReady, busy, paused, needsAttention, annotationPending]);
   const chosen = photos.filter((p) => selected.has(p.manifest.photoId));
   return (
     <>
@@ -662,7 +645,7 @@ export default function CloudApp({
                       throw new Error("PUBLIC_TEST_ACCOUNT_UPLOAD_DISABLED");
                     await stageImport(files[0], pendingReselection);
                     await continueSync();
-                    await refresh();
+                    await refresh(true);
                   });
                   return;
                 }
@@ -674,7 +657,7 @@ export default function CloudApp({
             />
           </>
         )}
-        {status && (
+        {status && !menu && (
           <p className="status" role="status">
             {status}
           </p>
@@ -699,7 +682,7 @@ export default function CloudApp({
               Originals, labels and photo text are encrypted. Keep this browser open while syncing.
             </p>
             <p role="status">
-              {syncStateLabel[consumerSummary.state]}
+              {status || syncStateLabel[consumerSummary.state]}
             </p>
             <p className="hint">
               {consumerSummary.detail}
@@ -725,8 +708,8 @@ export default function CloudApp({
                 : "Encrypted library"}
             </p>
             <div className="actions">
-              <button className="primary-action" disabled={busy || (localCount > 0 && publicDemo)} onClick={localCount > 0 ? syncLocal : retry}>
-                {paused ? "Continue sync" : localCount > 0 ? `Sync ${localCount} selected ${localCount === 1 ? "photo" : "photos"}` : needsAttention || summary.pending || summary.failed ? "Retry sync" : "Check for photos"}
+              <button className="primary-action" disabled={busy || (localCount > 0 && publicDemo)} onClick={localCount > 0 ? syncLocal : summary.pending || summary.failed || annotationPending.length ? retry : () => {void run(refresh);}}>
+                {localCount > 0 ? `Save ${localCount} selected ${localCount === 1 ? "photo" : "photos"}` : summary.pending || summary.failed ? paused ? "Continue saving" : "Retry saving" : annotationPending.length ? "Sync changes" : "Check for photos"}
               </button>
               {!paused && (busy || summary.pending > 0 || annotationPending.length > 0) && <button onClick={pause}>Pause sync</button>}
               <button
@@ -807,7 +790,7 @@ export default function CloudApp({
                 <p>{photos.find(photo => photo.manifest.photoId === edit.photoId)?.metadata.filename ?? "Photo"} · {edit.conflict ? "Changed on another device" : "Waiting to sync"}</p>
                 {edit.conflict && <>
                   <p className="hint">Your pending edits are kept here. Choose which changes to keep.</p>
-                  <div className="actions"><button disabled={busy} onClick={() => run(async () => {await resolveAnnotationConflict(edit.photoId, "local"); await refresh();})}>Use my edits</button><button disabled={busy} onClick={() => run(async () => {await resolveAnnotationConflict(edit.photoId, "remote"); await refresh();})}>Keep synced edits</button></div>
+                  <div className="actions"><button disabled={busy} onClick={() => run(async () => {await resolveAnnotationConflict(edit.photoId, "local"); await continueSync(); await refresh(true);})}>Use my edits</button><button disabled={busy} onClick={() => run(async () => {await resolveAnnotationConflict(edit.photoId, "remote"); await refresh();})}>Keep synced edits</button></div>
                 </>}
               </div>)}
             </details>}

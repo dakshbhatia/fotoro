@@ -13,6 +13,7 @@ enum SyncPhotosAccessPolicy {
 
 struct PhotosBackupView: View {
   @Bindable var services: AppServices
+  var selection: [RecentPhotoSource]? = nil
   @State private var savedPhotos = false
   @State private var exchange = false
   @State private var signingOut = false
@@ -25,12 +26,31 @@ struct PhotosBackupView: View {
     NavigationStack {
       Group {
         if services.auth.startPassword != nil || !services.vault.isUnlocked || (!services.session.isSignedIn && !services.session.fixture) {
-          AccountView(services: services, onSignOut: { signingOut = true })
+          VStack(alignment: .leading, spacing: 0) {
+            if let selection {
+              Text("Sign in to save \(selection.count) \(selection.count == 1 ? "photo" : "photos")")
+                .font(.headline).padding(.horizontal).padding(.top)
+            }
+            AccountView(services: services, onSignOut: { signingOut = true })
+          }
         } else {
           List {
             Section {
               AccountIdentityView(session: services.session, unlocked: services.vault.isUnlocked)
                 .padding(.vertical, 4)
+            }
+            if let selection {
+              Section {
+                Text("\(selection.count) \(selection.count == 1 ? "photo selected" : "photos selected")")
+                  .font(.headline).accessibilityIdentifier("account.selection")
+                Button("Save \(selection.count) \(selection.count == 1 ? "photo" : "photos")") {
+                  services.error = nil
+                  do { try services.startPhotosBackup(selection: selection) }
+                  catch { services.error = error.localizedDescription }
+                }.buttonStyle(.borderedProminent).accessibilityIdentifier("account.saveSelection")
+                  .disabled(services.busy || services.backup.isRunning || services.journal.running
+                    || !NativeBackupPolicy.allowsPrivatePhotos(accountId: services.session.accountId, fixture: services.session.fixture))
+              }
             }
             overview
             if summary.state == .needsAttention || summary.skippedPhotos > 0 {
@@ -152,11 +172,14 @@ struct PhotosBackupView: View {
   @ViewBuilder private var syncAction: some View {
     switch summary.action {
     case .start:
+      if selection == nil {
       Button("Save picks") {
+        services.error = nil
         do { try services.startPhotosBackup() } catch { services.error = error.localizedDescription }
       }.buttonStyle(.borderedProminent)
         .accessibilityIdentifier("account.savePicks")
         .disabled(!NativeBackupPolicy.allowsPrivatePhotos(accountId: services.session.accountId, fixture: services.session.fixture))
+      }
     case .continue:
       Button("Continue saving") {
         services.run { try await services.continueSync() }

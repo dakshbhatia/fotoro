@@ -4,6 +4,74 @@ import XCTest
 @testable import Fotoro
 
 final class PhotosBackupTests: XCTestCase {
+  func testReviewedPhotoSelectionRequiresEveryOriginalRevisionAndKeepsReviewOrder() throws {
+    let candidates = [BackupCandidate(id: "other", sourceRevision: "1"),
+      BackupCandidate(id: "chosen", capturedAt: Date(timeIntervalSince1970: 0), sourceRevision: "2")]
+    let chosen = RecentPhotoSource(id: "chosen", revision: "2")
+    XCTAssertEqual(try ReviewedPhotosBackupPolicy.select(candidates, selection: [chosen]).map(\.id), ["chosen"])
+    XCTAssertEqual(try ReviewedPhotosBackupPolicy.select(candidates, selection: [chosen, RecentPhotoSource(id: "other", revision: "1")]).map(\.id), ["chosen", "other"])
+    XCTAssertThrowsError(try ReviewedPhotosBackupPolicy.select(candidates, selection: []))
+    XCTAssertThrowsError(try ReviewedPhotosBackupPolicy.select(candidates, selection: [chosen, chosen]))
+    XCTAssertThrowsError(try ReviewedPhotosBackupPolicy.select(candidates, selection: [RecentPhotoSource(id: "chosen", revision: "1")]))
+    XCTAssertThrowsError(try ReviewedPhotosBackupPolicy.select(candidates, selection: [RecentPhotoSource(id: "missing-or-hidden", revision: "1")]))
+    XCTAssertThrowsError(try ReviewedPhotosBackupPolicy.select([BackupCandidate(id: "chosen")], selection: [chosen]))
+  }
+  @MainActor func testReviewedSubsetSavesOnlyChosenPhotoWithoutCompletedAIPicksOrRecentCutoff() async throws {
+    let candidate = BackupCandidate(id: "chosen", sourceRevision: "reviewed")
+    let context = try PausedUploadContext()
+    defer { context.restore() }
+    let services = try await context.enroll()
+    let bytes = try Data(contentsOf: context.sample)
+    services.importer = PhotoImport(store: services.store, sourceReader: { source in
+      XCTAssertEqual(source.resourceIdentifier, candidate.id)
+      return (bytes, "source.jpg", false)
+    }, sourceRevision: { id in id == candidate.id ? candidate.sourceRevision : nil })
+    var oldCandidate = candidate
+    oldCandidate.capturedAt = Date(timeIntervalSince1970: 0)
+    services.photosBackupSnapshot = { _ in
+      [BackupCandidate(id: "not-reviewed", sourceRevision: "1"), oldCandidate]
+    }
+    try services.startPhotosBackup(selection: [RecentPhotoSource(id: candidate.id, revision: candidate.sourceRevision!)])
+    await services.backup.waitUntilSettled()
+    XCTAssertEqual(try services.store.backupSources().map(\.id), [candidate.id])
+    XCTAssertEqual(try services.store.consumerCommittedCount(accountId: services.session.accountId!), 1)
+    XCTAssertEqual(services.backup.status.phase, .complete)
+    XCTAssertFalse(try services.store.syncEnabled())
+    services.vault.lock()
+  }
+  @MainActor func testReviewedSelectionCannotStageAfterRevisionPauseOrAccountChangesDuringOriginalRead() async throws {
+    let candidate = BackupCandidate(id: "chosen", sourceRevision: "reviewed")
+    for interruption in ["revision", "pause", "account"] {
+      let context = try PausedUploadContext()
+      defer { context.restore() }
+      let services = try await context.enroll()
+      let gate = BackupGate()
+      let bytes = try Data(contentsOf: context.sample)
+      services.importer = PhotoImport(store: services.store, sourceReader: { _ in
+        await gate.wait()
+        return (bytes, "source.jpg", false)
+      }, sourceRevision: { id in id == candidate.id ? candidate.sourceRevision : nil })
+      var current = candidate
+      services.photosBackupSnapshot = { _ in [current] }
+      try services.startPhotosBackup(selection: [RecentPhotoSource(id: candidate.id, revision: candidate.sourceRevision!)])
+      while !gate.entered { await Task.yield() }
+      if interruption == "revision" { current.sourceRevision = "changed" }
+      else if interruption == "pause" { services.pauseSync() }
+      else { services.session.accountId = Wire.id() }
+      gate.open()
+      await services.backup.waitUntilSettled()
+      let expectedPhase: BackupStatus.Phase = interruption == "revision" ? .failed : .paused
+      XCTAssertEqual(services.backup.status.phase, expectedPhase, interruption)
+      if interruption == "revision" {
+        XCTAssertEqual(try services.store.backupSource(candidate.id).phase, .failed)
+        XCTAssertEqual(services.backup.status.failed, 1)
+      }
+      XCTAssertTrue(try services.store.photos().isEmpty, interruption)
+      XCTAssertTrue(try services.journal.entries().isEmpty, interruption)
+      XCTAssertTrue(PausedUploadProtocol.server.requests.allSatisfy { $0.method == "GET" }, "Invalid reviewed sources cannot reserve, upload, commit, or publish photos")
+      services.vault.lock()
+    }
+  }
   @MainActor func testUnpausedLegacyEnrollmentAndLocalEditsNeverSendOnForegroundOrRelaunch() async throws {
     let context = try PausedUploadContext()
     defer { context.restore() }

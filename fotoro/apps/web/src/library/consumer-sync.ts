@@ -34,7 +34,7 @@ export function deriveConsumerSyncSummary(facts: ConsumerSyncFacts): ConsumerSyn
   if (!facts.online) return {...base, state: "offline", action: "retry"};
   if (facts.needsAttention || facts.failedPhotos || facts.conflictingEdits) return {...base, state: "needsAttention", action: facts.conflictingEdits ? "review" : "retry"};
   if (facts.preparing) return {...base, state: "preparing", action: "none"};
-  if (facts.queuedPhotos) return {...base, state: "uploading", action: facts.busy ? "none" : "retry"};
+  if (facts.queuedPhotos) return {...base, state: facts.busy ? "uploading" : "paused", action: facts.busy ? "none" : "continue"};
   if (facts.busy) return {...base, state: "checking", action: "none"};
   if (facts.pendingEdits || facts.skippedPhotos) return {...base, state: "needsAttention", action: facts.skippedPhotos ? "review" : "retry"};
   if (facts.localPhotos) return {...base, state: "notStarted", action: "start"};

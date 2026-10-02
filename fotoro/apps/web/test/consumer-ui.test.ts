@@ -26,7 +26,9 @@ test("consumer counts come from verified catalog photos and omit an unknown tota
   const result = deriveConsumerSyncSummary(facts);
   assert.equal(result.completedPhotos, 3);
   assert.equal(result.totalPhotos, undefined);
-  assert.equal(result.state, "uploading");
+  assert.equal(result.state, "paused");
+  assert.equal(result.action, "continue");
+  assert.equal(deriveConsumerSyncSummary({...facts, busy: true}).state, "uploading");
   assert.match(result.detail!, /2.*waiting/);
 });
 test("explicit pause wins over offline and pending uploads; locked snapshots discard account counts", async () => {
