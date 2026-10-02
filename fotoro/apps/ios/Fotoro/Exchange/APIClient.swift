@@ -4,6 +4,9 @@ import AuthenticationServices
 
 enum NativeDiagnosticPhase: String, Codable, Sendable { case app, api, auth, sync, share, consent, picks }
 enum NativeDiagnosticOutcome: String, Codable, Sendable { case started, completed, failed, cancelled, changed }
+enum NativeDiagnosticAccountState: String, Codable, Sendable {
+  case signedOut, locked, recoveryRequired, unlocked, demo
+}
 enum NativeDiagnosticEndpoint: String, Codable, Sendable {
   case auth, account, catalog, upload, annotations, exchange, device, other
   init(path: String) {
@@ -38,6 +41,7 @@ struct NativeDiagnosticEvent: Codable, Sendable {
   let authorizationCode: Int?
   let requestId: UUID?
   let state: ConsumerSyncState?
+  let accountState: NativeDiagnosticAccountState?
   let completed: Int?
   let pending: Int?
   let build: String
@@ -45,7 +49,8 @@ struct NativeDiagnosticEvent: Codable, Sendable {
     endpoint: NativeDiagnosticEndpoint? = nil, method: String? = nil,
     elapsed: Double? = nil, status: Int? = nil, networkError: URLError? = nil,
     authorizationCode: ASAuthorizationError.Code? = nil, requestId: String? = nil,
-    state: ConsumerSyncState? = nil, completed: Int? = nil, pending: Int? = nil) {
+    state: ConsumerSyncState? = nil, accountState: NativeDiagnosticAccountState? = nil,
+    completed: Int? = nil, pending: Int? = nil) {
     timestamp = Date().timeIntervalSince1970
     self.phase = phase; self.outcome = outcome; self.endpoint = endpoint
     self.method = method.map(NativeDiagnosticMethod.init)
@@ -55,6 +60,7 @@ struct NativeDiagnosticEvent: Codable, Sendable {
     self.authorizationCode = authorizationCode?.rawValue
     self.requestId = requestId.flatMap(UUID.init(uuidString:))
     self.state = state
+    self.accountState = accountState
     self.completed = completed.map { max(0, min($0, 1_000_000)) }
     self.pending = pending.map { max(0, min($0, 1_000_000)) }
     let value = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"

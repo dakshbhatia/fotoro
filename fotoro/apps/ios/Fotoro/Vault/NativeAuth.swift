@@ -9,15 +9,65 @@ struct RecoveryCode {
   let accountId: String
   let secret: Data
   init(_ code: String) throws {
-    let parts = code.trimmingCharacters(in: .whitespacesAndNewlines).split(
-      separator: ".", omittingEmptySubsequences: false)
-    guard parts.count == 3, parts[0] == "fotoro1", UUID(uuidString: String(parts[1])) != nil else {
-      throw FotoroError("Invalid recovery code")
+    let value = code.trimmingCharacters(in: .whitespacesAndNewlines)
+    if value.hasPrefix("foto_") {
+      let bytes = try Data(b64: String(value.dropFirst(5)))
+      guard bytes.count == 48 else { throw FotoroError("Check your Fotoro password and try again.") }
+      let id = Array(bytes.prefix(16))
+      accountId = UUID(uuid: (id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7],
+        id[8], id[9], id[10], id[11], id[12], id[13], id[14], id[15])).uuidString.lowercased()
+      secret = Data(bytes.suffix(32))
+      return
     }
-    accountId = String(parts[1])
+    let parts = value.split(
+      separator: ".", omittingEmptySubsequences: false)
+    guard parts.count == 3, parts[0] == "fotoro1", let id = UUID(uuidString: String(parts[1])) else {
+      throw FotoroError("Check your Fotoro password and try again.")
+    }
+    accountId = id.uuidString.lowercased()
     secret = try Data(b64: String(parts[2]))
-    guard secret.count == 32 else { throw FotoroError("Invalid recovery secret") }
+    guard secret.count == 32 else { throw FotoroError("Check your Fotoro password and try again.") }
   }
+  static func format(accountId: String, secret: Data) throws -> String {
+    guard let id = UUID(uuidString: accountId), secret.count == 32 else {
+      throw FotoroError("Check your Fotoro password and try again.")
+    }
+    var bytes = id.uuid
+    var payload = withUnsafeBytes(of: &bytes) { Data($0) }
+    payload.append(secret)
+    return "foto_" + payload.b64
+  }
+}
+struct StartOptionsRequest: Codable {
+  var version = 1
+  var client = "native"
+}
+struct StartOptionsResponse: Codable {
+  var version: Int
+  var accountId: String
+  var challengeId: String
+  var challenge: String
+  var expiresAt: String
+}
+struct StartVerify: Codable {
+  var version = 1
+  var challengeId: String
+  var client = "native"
+  var enrollment: Enrollment
+  var signedPayload: SignedPayloadV1
+}
+private struct PendingStartAccount {
+  var options: StartOptionsResponse
+  var card: AccountCardV1
+  var bundle: AccountBundle
+  var secret: Data
+  var wrapper: VaultWrapperV1
+  var password: String
+  var previousAccount: String?
+  var generation: UUID
+  var origin: String
+  var attempted = false
+  var verified = false
 }
 struct AuthOptionsRequest: Codable {
   var version = 1
@@ -79,11 +129,11 @@ struct NativePasskeyError: LocalizedError {
   var errorDescription: String? {
     switch code {
     case .canceled:
-      return "Sign-in was cancelled. Tap Sign in to try again."
+      return "Passkey sign-in was cancelled."
     case .failed, .notHandled:
-      return "Passkey sign-in could not finish. If this is your first time, create an account. Otherwise try again or use your recovery code or a trusted device."
+      return "Passkey sign-in could not finish. Enter your Fotoro password, or tap New Fotoro to start."
     default:
-      return "Passkey sign-in could not finish. Try again or use your recovery code."
+      return "Passkey sign-in could not finish. Try again or enter your Fotoro password."
     }
   }
 }
@@ -174,11 +224,21 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
   let vault: VaultStore
   private let crypto = CryptoAdapter()
   private let credentialCeremony: NativeCredentialCeremony
+  private let rememberPassword: @MainActor (Data, String) throws -> Void
+  private var pendingStart: PendingStartAccount?
+  @ObservationIgnored private var startOperation: UUID?
   var pending: PendingEnrollment?
   var recoveryCode: String? { pending.map { "fotoro1.\($0.card.accountId).\($0.recovery.b64)" } }
+  var startPassword: String? { pendingStart?.password }
+  var hasSavedPassword: Bool {
+    guard session.isSignedIn, let account = session.accountId else { return false }
+    return Keychain.contains("password-" + account)
+  }
   var fallbackMessage: String?
+  var needsRecovery: Bool { session.isSignedIn && !vault.isUnlocked && !vault.canUnlockLocally }
   init(session: AccountSession, api: APIClient, vault: VaultStore,
-    credentialCeremony: NativeCredentialCeremony? = nil) {
+    credentialCeremony: NativeCredentialCeremony? = nil,
+    rememberPassword: (@MainActor (Data, String) throws -> Void)? = nil) {
     self.session = session
     self.api = api
     self.vault = vault
@@ -186,10 +246,15 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
     self.credentialCeremony = credentialCeremony ?? { request in
       try await ceremony.perform(request)
     }
+    self.rememberPassword = rememberPassword ?? { bytes, id in try Keychain.write(bytes, id: id) }
   }
   private func performCredential(_ request: ASAuthorizationRequest) async throws -> CredentialResult {
     do { return try await credentialCeremony(request) }
     catch let error as ASAuthorizationError { throw NativePasskeyError(code: error.code) }
+  }
+  private func checkAuthentication(account: String?, generation: UUID) throws {
+    try Task.checkCancellation()
+    guard session.accountId == account, vault.generation == generation else { throw CancellationError() }
   }
   private func options(_ path: String, accountId: String? = nil) async throws -> [String: Any] {
     let bytes = try await api.request(
@@ -199,22 +264,174 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
     else { throw FotoroError("Invalid authentication options") }
     return json
   }
-  private func accept(_ result: SessionV1) throws {
-    guard result.version == 1, let token = result.token, !token.isEmpty else {
-      throw FotoroError("Native bearer session missing")
+  private func accept(_ result: SessionV1, preservingStart: Bool = false) throws {
+    let previousAccount = session.accountId
+    try session.accept(result)
+    if previousAccount != result.accountId {
+      let operation = preservingStart ? startOperation : nil
+      vault.lock()
+      if preservingStart { startOperation = operation }
     }
-    session.accountId = result.accountId
-    session.bearerToken = token
-    session.deviceId = result.deviceId
-    session.fixture = false
-    try Keychain.write(try Wire.encode(result), id: "session")
-    UserDefaults.standard.set(result.accountId, forKey: "fotoro.account")
+  }
+  private func applyAllowedCredentials(_ options: [String: Any], to request: ASAuthorizationPlatformPublicKeyCredentialAssertionRequest) throws {
+    guard let value = options["allowCredentials"] else { return }
+    guard let credentials = value as? [[String: Any]] else { throw FotoroError("Invalid sign-in credentials") }
+    guard !credentials.isEmpty || session.accountId == nil else {
+      throw FotoroError("This account has no passkey. Enter your Fotoro password.")
+    }
+    request.allowedCredentials = try credentials.map { credential in
+      guard credential["type"] as? String == "public-key", let id = credential["id"] as? String else {
+        throw FotoroError("Invalid sign-in credential")
+      }
+      let bytes = try Data(b64: id)
+      guard !bytes.isEmpty else { throw FotoroError("Invalid sign-in credential") }
+      return ASAuthorizationPlatformPublicKeyCredentialDescriptor(credentialID: bytes)
+    }
+  }
+  func cancelStart() {
+    pendingStart = nil
+    startOperation = nil
+  }
+  func savedPassword() throws -> String {
+    guard session.isSignedIn, let account = session.accountId else { throw FotoroError("Sign in to see your Fotoro password.") }
+    guard let bytes = try? Keychain.read("password-" + account),
+      let value = String(data: bytes, encoding: .utf8), let code = try? RecoveryCode(value),
+      code.accountId == account
+    else { throw FotoroError("This iPhone hasn't saved a Fotoro password yet.") }
+    return try RecoveryCode.format(accountId: account, secret: code.secret)
+  }
+  private func savePassword(_ password: RecoveryCode) throws {
+    let value = try RecoveryCode.format(accountId: password.accountId, secret: password.secret)
+    do { try rememberPassword(Data(value.utf8), "password-" + password.accountId) }
+    catch { throw FotoroError("Your account is open. Keep a copy of your Fotoro password; it couldn't be saved on this iPhone.") }
+  }
+  private func checkStart(_ operation: UUID, account: String?, generation: UUID, origin: String) throws {
+    try checkAuthentication(account: account, generation: generation)
+    guard startOperation == operation, api.origin == origin else { throw CancellationError() }
+  }
+  func prepareStart() async throws {
+    guard !session.fixture else { throw FotoroError("Choose a real API to create an account") }
+    guard startOperation == nil else { throw FotoroError("Account setup is already in progress") }
+    let operation = UUID(), account = session.accountId, generation = vault.generation, origin = api.origin
+    startOperation = operation
+    pendingStart = nil
+    defer { if startOperation == operation { startOperation = nil } }
+    let options: StartOptionsResponse = try await api.post("/v1/auth/start/options", StartOptionsRequest())
+    try checkStart(operation, account: account, generation: generation, origin: origin)
+    guard options.version == 1, UUID(uuidString: options.accountId) != nil,
+      UUID(uuidString: options.challengeId) != nil,
+      let expiry = Wire.parseDate(options.expiresAt), expiry > Date(),
+      !(try Data(b64: options.challenge)).isEmpty,
+      let box = Sodium().box.keyPair(), let sign = Sodium().sign.keyPair()
+    else { throw FotoroError("Account setup could not finish. Try again.") }
+    let bundle = AccountBundle(vaultKey: crypto.randomKey().b64,
+      boxSecretKey: Data(box.secretKey).b64, signingSecretKey: Data(sign.secretKey).b64)
+    let card = AccountCardV1(accountId: options.accountId,
+      boxPublicKey: Data(box.publicKey).b64, signingPublicKey: Data(sign.publicKey).b64)
+    let secret = crypto.randomKey()
+    let wrapper = VaultWrapperV1(version: 1, wrapperId: Wire.id(), kind: "recovery",
+      credentialId: nil, prfSalt: nil,
+      wrappedBundle: try crypto.wrap(Wire.encode(bundle), key: secret), verified: true)
+    pendingStart = PendingStartAccount(options: options, card: card, bundle: bundle,
+      secret: secret, wrapper: wrapper,
+      password: try RecoveryCode.format(accountId: card.accountId, secret: secret),
+      previousAccount: account, generation: generation, origin: origin)
+    fallbackMessage = nil
+  }
+  func completeStart(code: String) async throws {
+    guard startOperation == nil else { throw FotoroError("Account setup is already in progress") }
+    guard var pendingStart else { throw FotoroError("Create a Fotoro password first.") }
+    let password: RecoveryCode
+    do { password = try RecoveryCode(code) }
+    catch { throw FotoroError("Check your Fotoro password and try again.") }
+    guard password.accountId == pendingStart.card.accountId, password.secret == pendingStart.secret else {
+      throw FotoroError("Check your Fotoro password and try again.")
+    }
+    let operation = UUID()
+    startOperation = operation
+    defer { if startOperation == operation { startOperation = nil } }
+    try checkStart(operation, account: pendingStart.previousAccount,
+      generation: pendingStart.generation, origin: pendingStart.origin)
+    if pendingStart.attempted && !pendingStart.verified {
+      // A prior response or local session write may have failed after the account was created.
+      // Recover that same account before attempting its one-use enrollment challenge again.
+      do {
+        let account = pendingStart.previousAccount, generation = pendingStart.generation, origin = pendingStart.origin
+        try await recover(pendingStart.password, missingAccountIsPasswordError: false,
+          validation: { try self.checkStart(operation, account: account, generation: generation, origin: origin) },
+          accepted: {
+            pendingStart.verified = true
+            pendingStart.previousAccount = pendingStart.card.accountId
+            pendingStart.generation = self.vault.generation
+            self.pendingStart = pendingStart
+          })
+        try Task.checkCancellation()
+        guard startOperation == operation, session.accountId == pendingStart.card.accountId,
+          vault.isUnlocked, api.origin == pendingStart.origin else { throw CancellationError() }
+        pendingStart.verified = true
+        pendingStart.previousAccount = pendingStart.card.accountId
+        pendingStart.generation = vault.generation
+        self.pendingStart = pendingStart
+      } catch let error as FotoroError where error.message == "NOT_FOUND" {
+        try checkStart(operation, account: pendingStart.previousAccount,
+          generation: pendingStart.generation, origin: pendingStart.origin)
+      }
+    }
+    if !pendingStart.verified {
+      guard let expiry = Wire.parseDate(pendingStart.options.expiresAt), expiry > Date() else {
+        throw FotoroError("This account setup expired. Create a new Fotoro password.")
+      }
+      let proof = try crypto.sign(
+        EnrollmentProof(accountCard: pendingStart.card, recoveryWrapper: pendingStart.wrapper),
+        kind: "account-enrollment", accountId: pendingStart.card.accountId,
+        secret: Data(b64: pendingStart.bundle.signingSecretKey))
+      let challengeProof = RecoveryProof(challengeId: pendingStart.options.challengeId,
+        challenge: pendingStart.options.challenge, accountId: pendingStart.card.accountId,
+        origin: pendingStart.origin)
+      let signed = try crypto.sign(challengeProof, kind: "start-enrollment",
+        accountId: pendingStart.card.accountId, secret: Data(b64: pendingStart.bundle.signingSecretKey))
+      pendingStart.attempted = true
+      self.pendingStart = pendingStart
+      let result: SessionV1 = try await api.post("/v1/auth/start/verify",
+        StartVerify(challengeId: pendingStart.options.challengeId,
+          enrollment: Enrollment(accountCard: pendingStart.card, recoveryWrapper: pendingStart.wrapper, proof: proof),
+          signedPayload: signed))
+      try checkStart(operation, account: pendingStart.previousAccount,
+        generation: pendingStart.generation, origin: pendingStart.origin)
+      guard result.accountId == pendingStart.card.accountId else { throw FotoroError("Account setup could not finish. Try again.") }
+      try accept(result, preservingStart: true)
+      try session.pin(pendingStart.card)
+      pendingStart.verified = true
+      pendingStart.previousAccount = pendingStart.card.accountId
+      pendingStart.generation = vault.generation
+      self.pendingStart = pendingStart
+    }
+    if !vault.isUnlocked {
+      try await vault.unlock(.recoveryEnvelope(secret: pendingStart.secret, wrapper: pendingStart.wrapper.wrappedBundle))
+    }
+    try Task.checkCancellation()
+    guard startOperation == operation, session.accountId == pendingStart.card.accountId,
+      vault.isUnlocked, api.origin == pendingStart.origin else { throw CancellationError() }
+    pendingStart.generation = vault.generation
+    self.pendingStart = pendingStart
+    try savePassword(password)
+    self.pendingStart = nil
+    fallbackMessage = nil
+  }
+  func loginWithCode(_ code: String) async throws {
+    guard !session.fixture else { throw FotoroError("Choose a real API to sign in") }
+    try await recover(code)
+    try savePassword(RecoveryCode(code))
+    cancelStart()
+    fallbackMessage = nil
   }
   func prepareEnrollment() async throws {
     guard !session.fixture else {
       throw FotoroError("Fixture authentication is unavailable; choose a real API")
     }
+    let account = session.accountId, generation = vault.generation
     let response = try await options("/v1/auth/register/options")
+    try checkAuthentication(account: account, generation: generation)
     guard let id = response["accountId"] as? String,
       let challengeId = response["challengeId"] as? String,
       let options = response["options"] as? [String: Any],
@@ -241,6 +458,7 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
     guard recoverySaved, let pending else {
       throw FotoroError("Save the recovery code before enrolling")
     }
+    let account = session.accountId, generation = vault.generation
     let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(
       relyingPartyIdentifier: api.rpId)
     let request = provider.createCredentialRegistrationRequest(
@@ -248,6 +466,7 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
     request.prf = .inputValues(.saltInput1(pending.salt))
     request.userVerificationPreference = .required
     let credential = try await performCredential(request)
+    try checkAuthentication(account: account, generation: generation)
     let proof = try crypto.sign(
       EnrollmentProof(accountCard: pending.card, recoveryWrapper: pending.wrapper),
       kind: "account-enrollment", accountId: pending.card.accountId,
@@ -268,31 +487,44 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
     guard result.accountId == pending.card.accountId else {
       throw FotoroError("Enrollment account mismatch")
     }
+    try checkAuthentication(account: account, generation: generation)
     try accept(result)
     try session.pin(pending.card)
     try await vault.unlock(
       .recoveryEnvelope(secret: pending.recovery, wrapper: pending.wrapper.wrappedBundle))
+    // Registration and local enrollment are complete; the optional PRF wrapper can fail independently.
+    self.pending = nil
+    fallbackMessage = nil
     if let output = credential.prf, output.count == 32 {
-      let wrapper = VaultWrapperV1(
-        version: 1, wrapperId: Wire.id(), kind: "prf", credentialId: credential.credentialId,
-        prfSalt: pending.salt.b64,
-        wrappedBundle: try crypto.wrap(Wire.encode(pending.bundle), key: output), verified: false)
-      let _: VaultWrapperV1 = try Wire.decode(
-        VaultWrapperV1.self,
-        await api.request(
-          "/v1/vault/wrappers/\(wrapper.wrapperId)", method: "PUT", body: Wire.encode(wrapper)))
+      let enrolledGeneration = vault.generation
+      do {
+        let wrapper = VaultWrapperV1(
+          version: 1, wrapperId: Wire.id(), kind: "prf", credentialId: credential.credentialId,
+          prfSalt: pending.salt.b64,
+          wrappedBundle: try crypto.wrap(Wire.encode(pending.bundle), key: output), verified: false)
+        let _: VaultWrapperV1 = try Wire.decode(
+          VaultWrapperV1.self,
+          await api.request(
+            "/v1/vault/wrappers/\(wrapper.wrapperId)", method: "PUT", body: Wire.encode(wrapper)))
+        try checkAuthentication(account: pending.card.accountId, generation: enrolledGeneration)
+      } catch {
+        try checkAuthentication(account: pending.card.accountId, generation: enrolledGeneration)
+        if (error as? URLError)?.code == .cancelled { throw error }
+        fallbackMessage = "This iPhone is enrolled. Use your saved recovery code or a trusted device to unlock your account on another device."
+      }
     } else {
       fallbackMessage =
         "This passkey has no PRF output. This enrolled iPhone uses Keychain; another device needs the saved recovery code or trusted-device approval."
     }
-    self.pending = nil
   }
   @discardableResult func login() async throws -> NativeSignInOutcome {
     fallbackMessage = nil
     guard !session.fixture else {
       throw FotoroError("Fixture authentication cannot create passkeys")
     }
-    let response = try await options("/v1/auth/login/options", accountId: session.accountId)
+    let account = session.accountId, generation = vault.generation
+    let response = try await options("/v1/auth/login/options", accountId: account)
+    try checkAuthentication(account: account, generation: generation)
     guard let challengeId = response["challengeId"] as? String,
       let options = response["options"] as? [String: Any],
       let challenge = options["challenge"] as? String
@@ -300,9 +532,11 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
     let request = ASAuthorizationPlatformPublicKeyCredentialProvider(
       relyingPartyIdentifier: api.rpId
     ).createCredentialAssertionRequest(challenge: try Data(b64: challenge))
+    try applyAllowedCredentials(options, to: request)
     request.userVerificationPreference = .required
     var wrappers: [VaultWrapperV1] = []
-    if session.accountId != nil, let v: VaultV1 = try? await api.get("/v1/vault") {
+    if let account = session.accountId, let v: VaultV1 = try? await api.get("/v1/vault"),
+      v.version == 1, v.accountCard.accountId == account {
       wrappers = v.wrappers
       let values = try wrappers.filter { $0.kind == "prf" }.reduce(
         into: [Data: ASAuthorizationPublicKeyCredentialPRFAssertionInput.InputValues]()
@@ -313,7 +547,9 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
       }
       if !values.isEmpty { request.prf = .perCredentialInputValues(values) }
     }
+    try checkAuthentication(account: account, generation: generation)
     let credential = try await performCredential(request)
+    try checkAuthentication(account: account, generation: generation)
     let body: [String: Any] = [
       "version": 1, "challengeId": challengeId,
       "response": try JSONSerialization.jsonObject(with: credential.response), "client": "native",
@@ -323,7 +559,18 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
       await api.request(
         "/v1/auth/login/verify", method: "POST", body: JSONSerialization.data(withJSONObject: body))
     )
+    try checkAuthentication(account: account, generation: generation)
     try accept(result)
+    if vault.isUnlocked { return .unlocked }
+    if session.pinnedCards[result.accountId] == nil {
+      let acceptedGeneration = vault.generation
+      let current: VaultV1 = try await api.get("/v1/vault")
+      try checkAuthentication(account: result.accountId, generation: acceptedGeneration)
+      guard current.version == 1, current.accountCard.accountId == result.accountId else {
+        throw FotoroError("Vault account mismatch")
+      }
+      try session.pin(current.accountCard)
+    }
     if let output = credential.prf,
       let wrapper = wrappers.first(where: { $0.credentialId == credential.credentialId })
     {
@@ -338,7 +585,9 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
     return .unlocked
   }
   func unlockWithPRF() async throws {
+    let account = session.accountId, generation = vault.generation
     let v: VaultV1 = try await api.get("/v1/vault")
+    try checkAuthentication(account: account, generation: generation)
     guard v.accountCard.accountId == session.accountId else {
       throw FotoroError("Vault account mismatch")
     }
@@ -360,9 +609,11 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
     let request = ASAuthorizationPlatformPublicKeyCredentialProvider(
       relyingPartyIdentifier: api.rpId
     ).createCredentialAssertionRequest(challenge: try Data(b64: challenge))
+    try applyAllowedCredentials(options, to: request)
     request.prf = .perCredentialInputValues(values)
     request.userVerificationPreference = .required
     let credential = try await performCredential(request)
+    try checkAuthentication(account: account, generation: generation)
     guard let output = credential.prf, output.count == 32,
       let wrapper = v.wrappers.first(where: {
         $0.credentialId == credential.credentialId && $0.kind == "prf"
@@ -393,40 +644,70 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
     guard result.accountId == v.accountCard.accountId else {
       throw FotoroError("PRF authenticated account mismatch")
     }
+    try checkAuthentication(account: account, generation: generation)
     try accept(result)
     try session.pin(v.accountCard)
     try await vault.unlock(.prf(output: output, wrapper: wrapper.wrappedBundle))
   }
-  func recover(_ code: String) async throws {
-    let recovery = try RecoveryCode(code)
-    let bytes = try await api.request(
-      "/v1/auth/recovery/options", method: "POST",
-      body: Wire.encode(AuthOptionsRequest(accountId: recovery.accountId)))
-    let options = try Wire.decode(RecoveryOptionsResponse.self, bytes)
-    guard options.version == 1, options.vault.accountCard.accountId == recovery.accountId,
-      let wrapper = options.vault.wrappers.first(where: { $0.kind == "recovery" && $0.verified })
-    else { throw FotoroError("Recovery account mismatch") }
-    let bundle = try Wire.decode(
-      AccountBundle.self, crypto.unwrap(wrapper.wrappedBundle, key: recovery.secret))
-    let proof = RecoveryProof(
-      challengeId: options.challengeId, challenge: options.challenge, accountId: recovery.accountId,
-      origin: api.origin)
-    let signed = try crypto.sign(
-      proof, kind: "recovery-session", accountId: recovery.accountId,
-      secret: Data(b64: bundle.signingSecretKey))
-    _ = try crypto.verify(signed, card: options.vault.accountCard, kind: "recovery-session")
-    guard
-      try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: Data(b64: bundle.boxSecretKey))
-        .publicKey.rawRepresentation.b64 == options.vault.accountCard.boxPublicKey
-    else { throw FotoroError("Recovery identity mismatch") }
-    let result: SessionV1 = try await api.post(
-      "/v1/auth/recovery/verify",
-      RecoveryVerify(challengeId: options.challengeId, signedPayload: signed))
-    guard result.accountId == recovery.accountId else {
-      throw FotoroError("Recovery session account mismatch")
+  func recover(_ code: String, missingAccountIsPasswordError: Bool = true,
+    validation: (() throws -> Void)? = nil, accepted: (() -> Void)? = nil) async throws {
+    let account = session.accountId, generation = vault.generation, origin = api.origin
+    let recovery: RecoveryCode
+    do { recovery = try RecoveryCode(code) }
+    catch { throw FotoroError("Check your Fotoro password and try again.") }
+    let bytes: Data
+    do {
+      bytes = try await api.request(
+        "/v1/auth/recovery/options", method: "POST",
+        body: Wire.encode(AuthOptionsRequest(accountId: recovery.accountId)))
+    } catch let error as FotoroError where error.message == "NOT_FOUND" && missingAccountIsPasswordError {
+      throw FotoroError("Check your Fotoro password and try again.")
     }
-    try accept(result)
+    let options = try Wire.decode(RecoveryOptionsResponse.self, bytes)
+    try checkAuthentication(account: account, generation: generation)
+    guard api.origin == origin else { throw CancellationError() }
+    try validation?()
+    let wrapper: VaultWrapperV1
+    let signed: SignedPayloadV1
+    do {
+      guard options.version == 1, options.vault.version == 1,
+        options.vault.accountCard.version == 1, options.vault.accountCard.accountId == recovery.accountId,
+        let expiry = Wire.parseDate(options.expiresAt), expiry > Date(),
+        UUID(uuidString: options.challengeId) != nil, !(try Data(b64: options.challenge)).isEmpty,
+        let current = options.vault.wrappers.first(where: { $0.kind == "recovery" && $0.verified })
+      else { throw FotoroError("Invalid password response") }
+      wrapper = current
+      let bundle = try Wire.decode(
+        AccountBundle.self, crypto.unwrap(wrapper.wrappedBundle, key: recovery.secret))
+      let proof = RecoveryProof(
+        challengeId: options.challengeId, challenge: options.challenge, accountId: recovery.accountId,
+        origin: origin)
+      signed = try crypto.sign(
+        proof, kind: "recovery-session", accountId: recovery.accountId,
+        secret: Data(b64: bundle.signingSecretKey))
+      _ = try crypto.verify(signed, card: options.vault.accountCard, kind: "recovery-session")
+      guard
+        try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: Data(b64: bundle.boxSecretKey))
+          .publicKey.rawRepresentation.b64 == options.vault.accountCard.boxPublicKey
+      else { throw FotoroError("Invalid password identity") }
+    } catch { throw FotoroError("Check your Fotoro password and try again.") }
+    let result: SessionV1
+    do {
+      result = try await api.post(
+        "/v1/auth/recovery/verify",
+        RecoveryVerify(challengeId: options.challengeId, signedPayload: signed))
+    } catch let error as FotoroError where ["BAD_SIGNATURE", "FORBIDDEN", "BODY_MISMATCH"].contains(error.message) {
+      throw FotoroError("Check your Fotoro password and try again.")
+    }
+    guard result.accountId == recovery.accountId else {
+      throw FotoroError("Check your Fotoro password and try again.")
+    }
+    try checkAuthentication(account: account, generation: generation)
+    guard api.origin == origin else { throw CancellationError() }
+    try validation?()
+    try accept(result, preservingStart: validation != nil)
     try session.pin(options.vault.accountCard)
+    accepted?()
     try await vault.unlock(
       .recoveryEnvelope(secret: recovery.secret, wrapper: wrapper.wrappedBundle))
   }

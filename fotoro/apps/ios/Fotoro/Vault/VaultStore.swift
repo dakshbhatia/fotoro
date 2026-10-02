@@ -17,13 +17,20 @@ enum UnlockMethod {
   private(set) var generation = UUID()
   private(set) var bundle: AccountBundle?
   var isUnlocked: Bool { bundle != nil }
+  var canUnlockLocally: Bool {
+    guard let id = session.accountId else { return false }
+    return Keychain.contains(id)
+  }
   private let session: AccountSession
   private let api: APIClient
   private let crypto = CryptoAdapter()
+  private let storeBundle: @MainActor (Data, String) throws -> Void
   var onLock: (() -> Void)?
-  init(session: AccountSession, api: APIClient) {
+  init(session: AccountSession, api: APIClient,
+    storeBundle: (@MainActor (Data, String) throws -> Void)? = nil) {
     self.session = session
     self.api = api
+    self.storeBundle = storeBundle ?? { bytes, id in try Keychain.write(bytes, id: id) }
   }
   func unlock(_ method: UnlockMethod) async throws {
     guard let id = session.accountId else { throw FotoroError("Authenticate before unlocking") }
@@ -77,10 +84,11 @@ enum UnlockMethod {
       try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: Data(b64: candidate.boxSecretKey))
         .publicKey.rawRepresentation.b64 == card.boxPublicKey
     else { throw FotoroError("Recovered box identity mismatch") }
+    try Task.checkCancellation()
     guard session.accountId == id, generation == unlockingGeneration else {
       throw CancellationError()
     }
-    try Keychain.write(bytes, id: id)
+    try storeBundle(bytes, id)
     generation = UUID()
     bundle = candidate
   }
@@ -91,7 +99,10 @@ enum UnlockMethod {
     onLock?()
   }
   func signOut() throws {
-    if let id = session.accountId { Keychain.remove(id) }
+    if let id = session.accountId {
+      Keychain.remove(id)
+      Keychain.remove("password-" + id)
+    }
     lock()
     session.accountId = nil
     session.bearerToken = nil
@@ -109,13 +120,24 @@ enum Keychain {
     ]
   }
   static func write(_ bytes: Data, id: String) throws {
-    remove(id)
+    let attributes: [String: Any] = [
+      kSecValueData as String: bytes,
+      kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+    ]
+    let updated = SecItemUpdate(query(id) as CFDictionary, attributes as CFDictionary)
+    if updated == errSecSuccess { return }
+    guard updated == errSecItemNotFound else {
+      throw FotoroError("Cannot enroll protected local access")
+    }
     var q = query(id)
     q[kSecValueData as String] = bytes
     q[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
     guard SecItemAdd(q as CFDictionary, nil) == errSecSuccess else {
       throw FotoroError("Cannot enroll protected local access")
     }
+  }
+  static func contains(_ id: String) -> Bool {
+    SecItemCopyMatching(query(id) as CFDictionary, nil) == errSecSuccess
   }
   static func read(_ id: String) throws -> Data {
     var q = query(id)

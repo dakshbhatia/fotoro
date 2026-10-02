@@ -53,6 +53,7 @@ import {deriveConsumerSyncSummary, syncStateLabel, type ConsumerSyncSummary} fro
 import {loadUploadPause, saveUploadPause} from "./library/consumer-preferences";
 import type {OwnedPhotoSnapshot} from "./library/consumer-search";
 import {useDialogFocus} from "./library/dialog-focus";
+import {AccountAccess} from "./vault/AccountAccess";
 const noLocalPhotos: LocalPhoto[] = [];
 const SearchIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -97,13 +98,9 @@ export default function CloudApp({
     [recovery, setRecovery] = useState(""),
     [pending, setPending] = useState<PendingImport[]>([]);
   const [recoveryNew, setRecoveryNew] = useState(""),
-    [recoverySaved, setRecoverySaved] = useState(false),
     [approvalText, setApprovalText] = useState(""),
     [reselect, setReselect] = useState<PendingImport | undefined>(undefined);
-  const [authStep, setAuthStep] = useState<
-      "welcome" | "recovery" | "newRecovery"
-    >("welcome"),
-    [lastSuccessfulSync, setLastSuccessfulSync] = useState<string | null>(null),
+  const [lastSuccessfulSync, setLastSuccessfulSync] = useState<string | null>(null),
     [staging, setStaging] = useState(0),
     [skipped, setSkipped] = useState(0),
     [paused, setPaused] = useState(false),
@@ -115,6 +112,7 @@ export default function CloudApp({
     [online, setOnline] = useState(() => navigator.onLine !== false),
     [pauseReady, setPauseReady] = useState(false);
   const running = useRef(false),
+    authIntent = useRef(0),
     pausedRef = useRef(true),
     intentVersion = useRef(0),
     uploadAbort = useRef<AbortController | null>(null),
@@ -236,7 +234,7 @@ export default function CloudApp({
     setStatus((previous) => (sameVault(session) ? "" : previous));
     setNeedsAttention((previous) => (sameVault(session) ? false : previous));
   };
-  const run = async (fn: () => Promise<void>) => {
+  const run = async (fn: () => Promise<void>, accountAction = false) => {
     if (running.current) return;
     running.current = true;
     setBusy(true);
@@ -250,7 +248,8 @@ export default function CloudApp({
       await fn();
     } catch (e) {
       if (!session || sameVault(session)) {
-        setStatus(readableSyncError(e));
+        const message = readableSyncError(e);
+        setStatus(accountAction && message.startsWith("Sync could not finish.") ? "Sign-in could not finish. Check your connection and try again." : message);
         setNeedsAttention(true);
       }
       if (session && sameVault(session)) {
@@ -274,17 +273,15 @@ export default function CloudApp({
       await fn();
       try {
         setAccount(requireVault().accountId);
-        setAuthStep("welcome");
       } catch {
-        setAuthStep("recovery");
         setStatus(
-          "Use your saved recovery code to unlock photos on this device.",
+          "Enter your Fotoro password to unlock photos on this device.",
         );
         return;
       }
       await restorePause();
       await refresh();
-    });
+    }, true);
   useEffect(() => {
     if (!account) return;
     void run(async () => {await restorePause(); await refresh();});
@@ -465,9 +462,10 @@ export default function CloudApp({
             ref={backButton}
             onClick={() => {
               if (!account) {
+                authIntent.current++;
                 cancelEnrollment();
                 setRecoveryNew("");
-                setAuthStep("welcome");
+                setRecovery("");
               }
               onBack();
             }}
@@ -499,116 +497,31 @@ export default function CloudApp({
               Use one account on your iPhone and browser. Your local photos stay
               private until you choose to sync them.
             </p>
-            {authStep === "welcome" && (
-              <>
-                <button
-                  className="primary-action"
-                  disabled={busy}
-                  onClick={() =>
-                    run(async () => {
-                      setRecoveryNew(await prepareEnrollment());
-                      setRecoverySaved(false);
-                      setAuthStep("newRecovery");
-                    })
-                  }
-                >
-                  Create account
-                </button>
-                <button disabled={busy} onClick={() => login(passkeyLogin)}>
-                  Sign in
-                </button>
-                <button
-                  className="text-button"
-                  disabled={busy}
-                  onClick={() => setAuthStep("recovery")}
-                >
-                  Use a recovery code
-                </button>
-              </>
-            )}
-            {authStep === "newRecovery" && (
-              <>
-                <h3>Save your recovery code</h3>
-                <p className="hint">
-                  Keep this code somewhere safe. It unlocks your photos on
-                  another device if your passkey cannot. Fotoro never receives
-                  the code.
-                </p>
-                <textarea
-                  readOnly
-                  aria-label="Your recovery code"
-                  value={recoveryNew}
-                />
-                <label className="local-check">
-                  <input
-                    type="checkbox"
-                    checked={recoverySaved}
-                    onChange={(event) => setRecoverySaved(event.target.checked)}
-                  />
-                  I saved my recovery code
-                </label>
-                <button
-                  disabled={busy || !recoverySaved}
-                  onClick={() =>
-                    login(async () => {
-                      try {
-                        await completeEnrollment(recoverySaved);
-                        setRecoveryNew("");
-                        setRecoverySaved(false);
-                      } catch (error) {
-                        setAuthStep("welcome");
-                        setRecoveryNew("");
-                        throw error;
-                      }
-                    })
-                  }
-                >
-                  Continue
-                </button>
-                <button
-                  disabled={busy}
-                  onClick={() => {
-                    cancelEnrollment();
-                    setRecoveryNew("");
-                    setAuthStep("welcome");
-                  }}
-                >
-                  Cancel
-                </button>
-              </>
-            )}
-            {authStep === "recovery" && (
-              <form onSubmit={event => {
-                event.preventDefault();
-                if (busy || !recovery.trim()) return;
-                void login(async () => {await recover(recovery); setRecovery("");});
-              }}>
-                <h3>Unlock photos on this device</h3>
-                <p className="hint">
-                  Enter the recovery code you saved when creating your account.
-                  This opens the same encrypted library as your iPhone.
-                </p>
-                <label>
-                  Recovery code
-                  <input
-                    value={recovery}
-                    onChange={(event) => setRecovery(event.target.value)}
-                    type="password"
-                    autoComplete="off"
-                    placeholder="Paste your saved code"
-                  />
-                </label>
-                <button
-                  type="submit"
-                  disabled={busy || !recovery.trim()}
-                >
-                  Continue
-                </button>
-                <button type="button" disabled={busy} onClick={() => setAuthStep("welcome")}>
-                  Back
-                </button>
-              </form>
-            )}
+            <AccountAccess
+              password={recovery}
+              onPassword={setRecovery}
+              generatedPassword={recoveryNew}
+              busy={busy}
+              onSignIn={() => {
+                const version = authIntent.current;
+                void login(async () => {await recover(recovery, () => authIntent.current === version); setRecovery("");});
+              }}
+              onCreate={() => {void run(async () => {setRecoveryNew(await prepareEnrollment());}, true);}}
+              onContinue={() => {void login(async () => {await completeEnrollment(); setRecoveryNew("");});}}
+              onBack={() => {cancelEnrollment(); setRecovery(recoveryNew); setRecoveryNew(""); setStatus("");}}
+              onPasskey={() => {void login(passkeyLogin);}}
+              onCopy={() => {void run(async () => {
+                if (!navigator.clipboard) throw new Error("PASSWORD_COPY_UNAVAILABLE");
+                await navigator.clipboard.writeText(recoveryNew).catch(() => {throw new Error("PASSWORD_COPY_UNAVAILABLE");});
+                setStatus("Password copied.");
+              });}}
+              onSave={() => {
+                const url = URL.createObjectURL(new Blob([recoveryNew + "\n"], {type: "text/plain"}));
+                const link = document.createElement("a");
+                link.href = url; link.download = "Fotoro password.txt"; link.click();
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+              }}
+            />
             {fixtureMode && (
               <details>
                 <summary>Advanced DEBUG</summary>

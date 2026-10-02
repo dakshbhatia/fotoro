@@ -66,6 +66,7 @@ enum PhotoPicksBackupPolicy {
   #endif
   private(set) var consumerSyncSummary = ConsumerSyncSummary()
   private(set) var consumerCatalogGeneration: UInt64 = 0
+  @ObservationIgnored private var diagnosticAccountState: NativeDiagnosticAccountState?
   @ObservationIgnored private var consumerObservation = UUID()
   @ObservationIgnored private var syncIntent = UUID()
   private var consumerChecking = false
@@ -168,6 +169,16 @@ enum PhotoPicksBackupPolicy {
     return try export(bytes)
   }
   func refreshConsumerSyncSummary() {
+    let accountState: NativeDiagnosticAccountState
+    if !session.isSignedIn { accountState = .signedOut }
+    else if session.fixture { accountState = .demo }
+    else if vault.isUnlocked { accountState = .unlocked }
+    else if auth.needsRecovery { accountState = .recoveryRequired }
+    else { accountState = .locked }
+    if diagnosticAccountState != accountState {
+      diagnosticAccountState = accountState
+      diagnostics.record(NativeDiagnosticEvent(phase: .app, outcome: .changed, accountState: accountState))
+    }
     let previous = consumerSyncSummary.state
     defer {
       if consumerSyncSummary.state != previous {
@@ -178,7 +189,7 @@ enum PhotoPicksBackupPolicy {
           }))
       }
     }
-    guard vault.isUnlocked, let account = session.accountId, store.root.lastPathComponent == account else {
+    guard session.isSignedIn, vault.isUnlocked, let account = session.accountId, store.root.lastPathComponent == account else {
       consumerSyncSummary = ConsumerSyncSummary()
       return
     }
@@ -186,31 +197,33 @@ enum PhotoPicksBackupPolicy {
       let sources = try store.backupSources()
       let entries = try journal.entries().filter { $0.photo.manifest.ownerAccountId == account }
       var pendingIDs = Set<String>()
-      for id in sources.filter({ $0.phase != .skipped }).map(\.photoId) + entries.map({ $0.photo.id }) {
+      for id in entries.map({ $0.photo.id }) {
         if let photo = try store.backupPhoto(id), photo.manifest.ownerAccountId == account,
           ["committed", "saved"].contains(photo.transferState) { continue }
         pendingIDs.insert(id)
       }
+      let unpreparedIDs = Set(try backup.unpreparedSources().map(\.photoId)).subtracting(pendingIDs)
       let completed = try store.consumerCommittedCount(accountId: account)
       let skipped = sources.filter { $0.phase == .skipped }.count
       var facts = ConsumerSyncFacts()
       facts.unlocked = true
-      facts.enabled = try store.syncEnabled()
       facts.paused = try store.uploadsPaused()
       facts.uploading = journal.running && !entries.isEmpty
       facts.checking = consumerChecking || annotations.busy
       facts.preparing = backup.isRunning && !facts.uploading && !facts.checking
       facts.offline = consumerOffline
       facts.completed = completed
-      facts.total = backup.status.sourceTotal == nil ? nil : completed + pendingIDs.count + skipped
+      facts.total = backup.status.sourceTotal == nil ? nil : completed + pendingIDs.count + unpreparedIDs.count + skipped
       facts.pending = pendingIDs.count
+      facts.unprepared = unpreparedIDs.count
       facts.failed = backup.status.failed + journal.errors.count + annotations.errors.count + (consumerFailure == nil ? 0 : 1)
       if sources.contains(where: { $0.phase == .committed && $0.message != nil }) { facts.failed += 1 }
       facts.skipped = skipped
       facts.annotationsPending = try store.consumerPendingAnnotations(accountId: account)
       facts.lastChecked = try store.consumerLastChecked() ?? backup.status.lastChecked
       facts.detail = consumerFailure ?? sources.first(where: { $0.message != nil })?.message
-      if facts.paused { facts.detail = "Your queued photos are kept. Continue when you’re ready." }
+      if facts.paused && !pendingIDs.isEmpty { facts.detail = "Your queued photos are kept. Continue when you’re ready." }
+      else if !unpreparedIDs.isEmpty { facts.detail = "Some picks weren't saved. Save picks to try again." }
       else if !NativeBackupPolicy.allowsPrivatePhotos(accountId: account, fixture: session.fixture) {
         facts.detail = "Public demo accounts cannot back up your private photos."
       }
@@ -222,6 +235,10 @@ enum PhotoPicksBackupPolicy {
   private func observeConsumerSync() {
     let token = consumerObservation
     withObservationTracking {
+      _ = session.isSignedIn
+      _ = session.fixture
+      _ = vault.isUnlocked
+      _ = auth.needsRecovery
       _ = backup.status
       _ = backup.isRunning
       _ = journal.running
@@ -270,6 +287,7 @@ enum PhotoPicksBackupPolicy {
     storageRoot = path
     let initialStore = try LibraryStore(
       root: path.appendingPathComponent(session.accountId ?? "locked"))
+    try initialStore.setSyncEnabled(false)
     backup = try PhotosBackup(store: initialStore)
     store = initialStore
     importer = PhotoImport(store: initialStore)
@@ -291,6 +309,7 @@ enum PhotoPicksBackupPolicy {
       self?.grants = []
       self?.selectedGrant = nil
       self?.auth.pending = nil
+      self?.auth.cancelStart()
       self?.deviceTrust.pending = nil
       ImageCache.shared.removeAll()
     }
@@ -303,6 +322,7 @@ enum PhotoPicksBackupPolicy {
     if store.root.lastPathComponent != id { localSearch?.clearSyncedAnnotations() }
     journal.pause(cancelBackground: store.root.lastPathComponent != id)
     store = try LibraryStore(root: storageRoot.appendingPathComponent(id))
+    try store.setSyncEnabled(false)
     backup = try PhotosBackup(store: store)
     importer = PhotoImport(store: store)
     journal = TransferJournal(store: store, api: api, vault: vault)
@@ -315,6 +335,8 @@ enum PhotoPicksBackupPolicy {
     resetConsumerSyncObservation()
   }
   func startPhotosBackup() throws {
+    guard session.isSignedIn else { throw FotoroError("Sign in to save your picks.") }
+    guard !backup.isRunning, !journal.running else { throw FotoroError("Saving is already in progress.") }
     guard
       NativeBackupPolicy.allowsPrivatePhotos(accountId: session.accountId, fixture: session.fixture)
     else {
@@ -322,7 +344,7 @@ enum PhotoPicksBackupPolicy {
     }
     guard let account = session.accountId else { throw FotoroError("Sign in first") }
     let bundle = try vault.requireBundle()
-    try store.setSyncIntent(enabled: true, uploadsPaused: false)
+    try store.setSyncIntent(enabled: false, uploadsPaused: false)
     consumerOffline = false
     consumerFailure = nil
     refreshConsumerSyncSummary()
@@ -335,7 +357,8 @@ enum PhotoPicksBackupPolicy {
       snapshot: {
         await uploadJournal.resumePending()
         try Task.checkCancellation()
-        guard self.vault.generation == generation, self.session.accountId == account else {
+        guard self.session.isSignedIn, self.vault.generation == generation, self.session.accountId == account,
+          self.store === catalog else {
           throw CancellationError()
         }
         if try !uploadJournal.entries().isEmpty {
@@ -399,14 +422,14 @@ enum PhotoPicksBackupPolicy {
       },
       valid: { [weak self] in
         guard let self else { return false }
-        return self.vault.isUnlocked && self.vault.generation == generation
+        return self.session.isSignedIn && self.vault.isUnlocked && self.vault.generation == generation
           && self.session.accountId == account && self.store === catalog
       },
       stage: { [weak self] source, date in
         _ = try await importWorker.stageBackup(
           source, accountId: account, bundle: bundle, capturedAt: date,
           valid: { @MainActor [weak self] in
-            guard let self, self.vault.isUnlocked, self.vault.generation == generation,
+            guard let self, self.session.isSignedIn, self.vault.isUnlocked, self.vault.generation == generation,
               self.session.accountId == account, self.store === catalog,
               (try? catalog.uploadsPaused()) == false else { return false }
             #if DEBUG
@@ -439,48 +462,49 @@ enum PhotoPicksBackupPolicy {
       })
   }
   func resumeSavedAccount(initialRestoration: Bool = false) async {
-    guard session.accountId != nil, !session.fixture else { return }
+    guard session.isSignedIn, !session.fixture else { return }
     do {
       if !vault.isUnlocked {
         guard initialRestoration, let account = session.accountId, !UserDefaults.standard.bool(forKey: "fotoro.manualLock." + account) else { return }
         try await vault.unlock(.localKeychain)
         try activateAccount()
       }
-      if try !store.uploadsPaused() { await journal.resumePending() }
-      try await sync()
-      if try store.syncEnabled(), try !store.uploadsPaused(), !backup.isRunning { try startPhotosBackup() }
+      try store.setSyncEnabled(false)
+      try reload()
     } catch {
-      recordConsumerSyncFailure(error)
-      if vault.isUnlocked { notices = ["Sync will continue when you reconnect."] }
-      else { self.error = "Sign in to continue syncing your photos." }
+      self.error = "Sign in to open your saved photos."
     }
   }
   func lockAccount() {
     if let account = session.accountId { UserDefaults.standard.set(true, forKey: "fotoro.manualLock." + account) }
     vault.lock()
+    resetConsumerSyncObservation()
   }
   func pauseSync() {
     syncIntent = UUID()
-    do { try store.setSyncIntent(enabled: store.syncEnabled(), uploadsPaused: true) }
+    do { try store.setSyncIntent(enabled: false, uploadsPaused: true) }
     catch { self.error = error.localizedDescription }
     backup.pause()
     journal.pause(cancelBackground: true)
     refreshConsumerSyncSummary()
   }
   func continueSync() async throws {
+    guard session.isSignedIn || session.fixture else { throw FotoroError("Sign in to continue saving.") }
     guard vault.isUnlocked, let account = session.accountId else { throw FotoroError("Sign in first") }
     let generation = vault.generation
     let catalog = store
     let coordinator = backup
     let uploads = journal
-    let optedIn = try catalog.syncEnabled()
     let intent = UUID()
     syncIntent = intent
-    try catalog.setSyncIntent(enabled: optedIn, uploadsPaused: false)
+    try catalog.setSyncIntent(enabled: false, uploadsPaused: false)
+    consumerOffline = false
+    consumerFailure = nil
     refreshConsumerSyncSummary()
     func check() throws {
       try Task.checkCancellation()
-      guard vault.isUnlocked, vault.generation == generation, store === catalog,
+      guard session.isSignedIn || session.fixture,
+        vault.isUnlocked, vault.generation == generation, store === catalog,
         backup === coordinator, journal === uploads, session.accountId == account,
         syncIntent == intent, try !catalog.uploadsPaused() else { throw CancellationError() }
     }
@@ -488,12 +512,17 @@ enum PhotoPicksBackupPolicy {
     try check()
     try await uploads.waitUntilSettled()
     try check()
-    if optedIn {
-      try startPhotosBackup()
-      return
-    }
     try await resumeTransfers()
     try check()
+    for var source in try catalog.backupSources() where source.phase == .queued {
+      guard let photo = try catalog.backupPhoto(source.photoId), photo.manifest.ownerAccountId == account,
+        ["committed", "saved"].contains(photo.transferState) else { continue }
+      source.phase = .committed
+      source.message = nil
+      source.originalSha256 = photo.metadata.originalSha256
+      try catalog.putBackupSource(source)
+    }
+    try coordinator.refreshCounts()
     await syncAnnotations()
     try check()
     try await sync()
@@ -719,7 +748,6 @@ enum PhotoPicksBackupPolicy {
     try fence()
     try reload()
     try hydrateLocalAnnotations()
-    await syncAnnotations()
     try fence()
     let inbox: GrantInboxV1 = try await api.get("/v1/grants")
     try fence()
@@ -771,7 +799,6 @@ enum PhotoPicksBackupPolicy {
     try annotations.ledger.edit(value, photo: photo, bundle: bundle, card: session.requireCard(account))
     try reloadAnnotations()
     try hydrateLocalAnnotations()
-    Task { await self.syncAnnotations() }
   }
   func searchCatalog(_ query: String) async throws -> [LocalPhoto] {
     let generation = vault.generation
@@ -838,7 +865,6 @@ enum PhotoPicksBackupPolicy {
     try annotations.ledger.edit(value, photo: photo, bundle: bundle, card: card)
     photoAnnotations[photo.id] = value
     if refreshSummary { refreshConsumerSyncSummary() }
-    if labelsChanged { Task { await self.syncAnnotations() } }
   }
   private func captureLocalAnnotations() throws {
     guard let localSearch, vault.isUnlocked else { return }
@@ -861,7 +887,8 @@ enum PhotoPicksBackupPolicy {
     }
   }
   func syncAnnotations() async {
-    guard (try? store.uploadsPaused()) == false, vault.isUnlocked,
+    guard session.isSignedIn || session.fixture,
+      (try? store.uploadsPaused()) == false, vault.isUnlocked,
       let account = session.accountId, let bundle = try? vault.requireBundle(),
       let card = try? session.requireCard(account) else { return }
     let generation = vault.generation
@@ -869,7 +896,7 @@ enum PhotoPicksBackupPolicy {
     let worker = annotations
     await worker.resume(bundle: bundle, card: card, valid: { [weak self] in
       guard let self else { return false }
-      return self.vault.isUnlocked && self.vault.generation == generation && self.session.accountId == account && self.store === catalog && (try? catalog.uploadsPaused()) == false
+      return (self.session.isSignedIn || self.session.fixture) && self.vault.isUnlocked && self.vault.generation == generation && self.session.accountId == account && self.store === catalog && (try? catalog.uploadsPaused()) == false
     }, send: { signed in
       _ = try await self.api.request("/v1/photos/\(try Wire.decode(PhotoAnnotationsUpdateV1.self, Data(b64: signed.body)).photoId)/annotations", method: "PUT", body: Wire.encode(signed))
     })
@@ -958,6 +985,7 @@ enum PhotoPicksBackupPolicy {
     try reload()
   }
   func resumeTransfers() async throws {
+    guard session.isSignedIn || session.fixture else { throw FotoroError("Sign in to continue saving.") }
     guard try !store.uploadsPaused() else {
       throw FotoroError("Sync is paused. Continue sync to upload photos.")
     }

@@ -423,8 +423,8 @@ struct RecentPhotosView: View {
       Text("Local-only beta").font(.caption).foregroundStyle(.secondary)
         .fixedSize(horizontal: true, vertical: false)
 #else
-      Button(action: openBackup) { ConsumerBackupLabel(summary: services?.consumerSyncSummary ?? ConsumerSyncSummary()) }
-        .accessibilityLabel("Sync status")
+      Button("Account", systemImage: services?.session.isSignedIn == true ? "person.crop.circle.fill" : "person.crop.circle", action: openBackup)
+        .labelStyle(.titleAndIcon).accessibilityIdentifier("account.open")
 #endif
     }
     ToolbarItem(placement: .topBarTrailing) {
@@ -478,8 +478,11 @@ struct RecentPhotosView: View {
           Text("Local-only beta").font(.headline)
           Text("Browse and search your Photos library on this device. Labels stay on this device. Nothing is backed up to Fotoro.")
 #else
-          Text("Photos stay in your library. Browsing does not upload them.")
-          Button("Sync status") { pendingBackup = true; settings = false }
+          if let services {
+            AccountIdentityView(session: services.session, unlocked: services.vault.isUnlocked)
+          }
+          Text("Automatic sync is off. Save photos when you choose.")
+          Button("Account") { pendingBackup = true; settings = false }
 #endif
         }
         Section("Photos access") {
@@ -498,7 +501,7 @@ struct RecentPhotosView: View {
 #if FOTORO_LOCAL_PREVIEW
     return "Local-only beta · \(version) (\(build))"
 #else
-    return "Encrypted sync · \(version) (\(build))"
+    return "Fotoro · \(version) (\(build))"
 #endif
   }
   private func validatePhotosPresentation() {

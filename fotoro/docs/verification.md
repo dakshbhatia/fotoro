@@ -3,11 +3,12 @@
 The web app and API are live at [fotoro.cloud](https://fotoro.cloud). The separate
 local Photos preview 0.1.0 (3) is uploaded and in internal TestFlight. Its matching
 development build was installed and launched on the physical iPhone;
-personal Photos access remains uninspected. Full encrypted build 8 is installed,
+personal Photos access remains uninspected. Full encrypted build 11 is installed,
 its exact version is read back, and its running process and protected diagnostic
 file are verified on the unlocked physical iPhone. The owner's screenshots show
-local Photos and a signed-out Sync screen; real-account authentication remains
-unverified. Apple has processed full build 4; its
+local Photos and a signed-out Sync screen. Build 11's protected account-state event
+independently reports signed out; real-account authentication remains unverified.
+Apple has processed full build 4; its
 TestFlight access awaits an export-compliance declaration. Independent reviews reproduced
 retrieval, permission, cancellation, persistence and navigation defects; fixes
 include permanent regressions and were re-reviewed.
@@ -40,10 +41,10 @@ Real-account phone-to-Safari acceptance remains open.
 | Check | Evidence |
 | --- | --- |
 | Contracts, crypto and loopback fixtures | 15 tests pass: schema boundaries, bounded annotations, signatures, media binding, preservation, closed diagnostic-method vocabulary and bounded public-fixture readiness retries |
-| Worker/D1/R2 API | 43 tests pass, including truncated/overlong/interrupted upload bodies, storage-write failure, retry after promotion failure, bounded JSON bodies and concurrent idempotent commits; existing authentication/exchange/annotation and diagnostic privacy checks pass |
-| Web | 164 tests pass, including immediate single-attempt sharing, cancellation/retry and original fallback; existing consumer status, search, compact selection, viewer, retention and annotation checks pass |
+| Worker/D1/R2 API | 51 tests pass, including nonce-bound password signup, challenge replay/conflicts and unchanged legacy login; upload/storage, authentication/exchange/annotation and diagnostic privacy checks pass |
+| Web | 176 tests pass, including one-password entry, same-account setup retry, cancellation/account/storage fences, sharing and existing search/viewer/retention/annotation checks |
 | Web production build | TypeScript/Vite pass. Account/crypto loads after Sync photos; the large encrypted-media chunk warning remains |
-| Native | Full app 139 tests and local preview 49 tests pass locally with Xcode 27, zero failures or skips; final preview analyzer changes also pass all six lifecycle cases. Consent, recovery-code acknowledgement, bounded diagnostic rotation/privacy/cancellation and existing crypto/journal/background/search checks are included |
+| Native | Latest full app 184 tests and local preview 50 tests pass locally with Xcode 27, zero failures or skips. One-password entry and signup, compact/legacy credential parity, protected storage failures, late auth cancellation, manual saving and existing crypto/journal/background/search checks are included |
 | TestFlight metadata | 28 tests pass for team/individual authentication, exact app/build ownership, sparse Apple responses, notes readback and credential-safe errors. A live build 2 update preserved every existing test-note character and verified its build relationship; its processing state is VALID and beta states remain MISSING_EXPORT_COMPLIANCE. Build 3 is VALID / IN_BETA_TESTING with encryption metadata false and verified local-preview test notes |
 | Distribution IPA | Actual build 3 archive and distribution IPA pass the strict preview audit. Xcode Organizer used its existing cloud-managed certificate; the copied IPA matches the unchanged archive/dSYM/link map. Apple validation and exact-IPA upload both exit 0 with success markers |
 | Internal tester access | App Store Connect shows the existing internal group with one tester and one build; iOS 0.1.0 (3) is Testing and the requested sole owner tester is Invited. Association was automatic; no new tester/role/invitation mutation was needed. Inbox delivery and installation remain unverified |
@@ -52,6 +53,95 @@ Real-account phone-to-Safari acceptance remains open.
 | Real local HTTP exchange | Three isolated tests cover fresh migrations, recovery sessions, bidirectional contribution/save, revocation, restore, byte-preserved HEIC, background ciphertext staging, encrypted labels/OCR in a fresh account session, cross-account denial and idempotent revision conflicts |
 | Native local lifecycle | All-age permitted enumeration, limited/denied startup, permission purge, ten-day browse, changed revisions, cancellation rollback and refresh stability are exercised |
 | Browser local lifecycle | Session-only default; retained labels/text/previews; lazy preview hydration; unavailable preview preservation; digest reselection; pending/cross-instance clear fences |
+
+## October 2 account screen cleanup
+
+Build 11 keeps Save picks and Saved photos as the everyday actions. Password
+retrieval, catalog refresh, lock, sharing and sign out live under More options.
+A locally enrolled locked account offers Unlock photos without redundant sign-in
+choices. Sign-out confirmation describes unfinished uploads and unsent edits;
+passkey errors point to the existing Fotoro password rather than a separate
+recovery step. Automatic saving stays off.
+
+All 29 account regressions pass after updating the two existing error-copy
+assertions. The app builds for Simulator and signed iPhoneOS. Public Simulator
+checks verify collapsed/expanded controls and the locked-account view. Full
+encrypted 0.1.0 (11) is installed over the existing phone app; CoreDevice verifies
+its version and running executable. The protected build-11 diagnostic state is
+signedOut. The web/API release and previous full/preview acceptance evidence
+below are unchanged; owner sign-in remains unverified.
+
+## October 2 one-password account entry
+
+The primary iPhone and web flow uses one generated Fotoro password. It identifies
+the account and unlocks its encrypted bundle locally; no username, passkey ceremony
+or recovery-code acknowledgement is required. New Fotoro shows Copy/Save/Continue.
+The iPhone saves the credential in protected Keychain after authenticated unlock;
+Account can explicitly reveal it later. Sign out removes that local credential.
+Existing recovery codes work in the same password field, and existing passkeys
+remain a secondary choice.
+
+Signup uses signed account enrollment and a separate signed, nonce-bound challenge
+proof. The server receives neither the password nor unwrapped account keys. Account,
+wrapper and one-use challenge commit atomically. A lost signup response or local
+storage failure keeps the same displayed credential; Continue restores that account
+or finishes local storage, rather than creating another account. Cancellation and
+account changes fence late responses and cache writes. Native and web tests share
+the compact credential byte-order vector and verify legacy compatibility.
+
+The final local suites pass 184 native, 50 preview, 176 web and 51 API tests, with
+typechecks, production web build and three isolated real D1/R2 exchange tests.
+An initial cancellation test failed because its fixture sent the wrong request;
+exact-path routing corrected it and the complete native suite passed afterward.
+Public Simulator UI verifies the single password field, New Fotoro, signed-out
+identity and an actual invalid-password tap's inline error. The live web screen
+shows the same single password entry and collapsed secondary choices.
+
+Worker `4fe935ab-892b-43e3-b8ee-8b586196c3cc` is active at 100%. The production
+setup-options endpoint, authenticated API boundary and exact Apple association
+checks pass. The setup probe creates no account. Signed full Release 0.1.0 (10)
+passes signature and exact production-entitlement checks, is installed without
+uninstalling the owner's app, and its version and running process are read back.
+The bounded protected diagnostic file reports build 10 as signedOut; it contains
+no credential, account reference or token. Owner authentication, photo save/restore
+and browser password-manager autofill remain unverified.
+
+## Earlier October 2 manual account and sign-in simplification
+
+Account replaces the misleading Sync status entry. It explicitly shows signed-in
+state and a stable account reference; the locked state still shows its identity
+and Unlock photos. Sign-in completion activates the local account immediately,
+without waiting for a catalog refresh or starting photo uploads. Recovery state
+survives process restoration without depending on an in-memory message.
+
+Native passkey assertions now honor the server's allowed credentials. Session
+restoration validates identity and expiry; session acceptance persists before
+changing active identity. Protected Keychain updates preserve prior values on
+failure. Account switches discard the previous unlocked bundle while preserving
+its enrolled keys, and late auth/card responses respect account and vault fences.
+Optional PRF wrapper failure does not repeat completed account enrollment.
+
+Automatic sync is off. Legacy automatic intent is neutralized; foreground and
+process restoration read only local data. Save picks starts one current batch;
+Continue saving resumes only staged encrypted files. New photos wait for another
+Save picks tap. Editing labels or recognized text keeps drafts local. Explicit
+Refresh saved photos performs GET-only catalog work; explicit Save or Sync changes
+can send queued encrypted annotations. Already scheduled encrypted OS uploads
+can finish. Pausing an incomplete selection reports unprepared picks truthfully.
+
+Final local verification passes all 175 full-app and 50 preview tests. Public
+Simulator UI verifies Account routing, visible signed-in identity, locked account
+identity/Unlock photos, and the signed-out Sign in/Create account controls. Tapping
+Sign in reaches the real credential ceremony and renders its expected Simulator
+passkey failure inline. This does not establish an owner-phone passkey success.
+
+Signed Release 0.1.0 (9) builds and passes signature, exact application identity
+and both production associated-domain checks. It is installed over the existing
+phone app without uninstalling, its version is independently read back, and its
+new executable is running. The bounded protected diagnostic file reports only
+account-state enums, with no account reference, token, credential or key. Its first
+build-9 state is signedOut, and no owner-phone authentication attempt is recorded.
+Direct and Apple CDN association probes agree on the signed application identifier.
 
 ## October 2 iPhone sign-in and refresh correction
 
@@ -315,11 +405,13 @@ records; it cannot enumerate an iPhone photo library automatically.
   `MISSING_EXPORT_COMPLIANCE`. Its actual encryption declaration and France
   distribution answer are open. Local Photos preview build 3 is separately
   `VALID / IN_BETA_TESTING`; personal TestFlight installation remains unverified.
-  Signed full build 5 is installed and launched directly on the physical iPhone.
+  Signed full build 10 is installed and launched directly on the physical iPhone.
   Production HTTPS, API routing and the signed passkey association now pass.
   Universal-link handling remains unimplemented.
-- Physical passkey/PRF and non-PRF flows, original PhotoKit/iCloud resources and a
-  complete iPhone-to-Safari restore. See [release setup](deployment.md).
+- Owner password signup/sign-in, protected credential restoration, original
+  PhotoKit/iCloud resources and a complete iPhone-to-Safari restore. Existing
+  secondary passkey/PRF flows still need physical acceptance. See
+  [release setup](deployment.md).
 - Physical background continuation, file protection, daemon reconnection and
   termination/relaunch checks. Background URLSession can continue an already
   scheduled encrypted file; reservation, additional PhotoKit preparation, signing

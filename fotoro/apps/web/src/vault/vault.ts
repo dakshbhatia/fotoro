@@ -28,6 +28,8 @@ export interface UnlockedVault {
   dispose(): void;
 }
 let active: UnlockedVault | undefined;
+let generation = 0;
+export const vaultGeneration = () => generation;
 let envelope: VaultV1 | undefined;
 let prfKey: Uint8Array | undefined;
 let credentialId: string | undefined;
@@ -156,6 +158,7 @@ export async function unlockVault(
   return active;
 }
 export function lockVault() {
+  generation++;
   active?.dispose();
   active = undefined;
   prfKey?.fill(0);

@@ -153,6 +153,9 @@ struct BackupStatus: Codable {
         || $0.phase == .queued || $0.phase == .committed
     }
   }
+  func unpreparedSources() throws -> [BackupSource] {
+    try countedSources().filter { $0.phase == .pending || $0.phase == .failed }
+  }
   func pause() { task?.cancel() }
   func waitUntilSettled() async { await task?.value }
   func start(

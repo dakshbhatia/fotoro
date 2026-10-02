@@ -63,7 +63,7 @@ test("foreground/retry coalesce per vault and cannot start a second worker befor
   );
   assert.equal(calls, 2);
 });
-test("cancelled account preparation cannot publish recovery keys after delayed service response", async () => {
+test("cancelled account preparation cannot publish a password after delayed service response", async () => {
   const old = globalThis.fetch;
   let release: (response: Response) => void = () => {},
     started = false;
@@ -83,7 +83,8 @@ test("cancelled account preparation cannot publish recovery keys after delayed s
           version: 1,
           accountId: crypto.randomUUID(),
           challengeId: crypto.randomUUID(),
-          options: {},
+          challenge: "A".repeat(43),
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
         }),
         { status: 200 },
       ),
@@ -92,7 +93,7 @@ test("cancelled account preparation cannot publish recovery keys after delayed s
       preparing,
       (error) => error instanceof Error && error.name === "AbortError",
     );
-    await assert.rejects(completeEnrollment(true), /SAVE_RECOVERY_CODE_FIRST/);
+    await assert.rejects(completeEnrollment(), /ACCOUNT_SETUP_NOT_STARTED/);
   } finally {
     globalThis.fetch = old;
     cancelEnrollment();

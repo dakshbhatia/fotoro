@@ -37,3 +37,6 @@ export function RecoverySessionProofV1(value:unknown):boolean;
 export function PhotoAnnotationsV1(value:unknown):boolean;
 export function PhotoAnnotationsUpdateV1(value:unknown):boolean;
 export function PhotoAnnotationsReplyV1(value:unknown):boolean;
+export function StartOptionsRequestV1(value:unknown):boolean;
+export function StartOptionsV1(value:unknown):boolean;
+export function StartVerifyRequestV1(value:unknown):boolean;

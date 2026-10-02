@@ -17,6 +17,7 @@ final class ConsumerCoreTests: XCTestCase {
     facts.paused = true
     facts.offline = true
     facts.completed = 12
+    facts.pending = 1
     facts.total = 13
     facts.skipped = 1
     XCTAssertEqual(ConsumerSyncSummary.derive(facts).state, .paused)
@@ -27,18 +28,35 @@ final class ConsumerCoreTests: XCTestCase {
     XCTAssertEqual(locked.skippedPhotos, 0)
     XCTAssertEqual(locked.action, .signIn)
   }
-  func testSkippedOrPendingAnnotationsNeverClaimUpToDate() {
+  func testSkippedPhotosNeedAttentionWhileLocalDraftsKeepSavedPhotosReady() {
     var facts = ConsumerSyncFacts()
     facts.unlocked = true
-    facts.enabled = true
+    facts.completed = 1
     facts.lastChecked = Date()
     facts.skipped = 1
     XCTAssertEqual(ConsumerSyncSummary.derive(facts).state, .needsAttention)
     facts.skipped = 0
     facts.annotationsPending = 1
-    XCTAssertEqual(ConsumerSyncSummary.derive(facts).state, .needsAttention)
+    XCTAssertEqual(ConsumerSyncSummary.derive(facts).state, .upToDate)
+    XCTAssertEqual(ConsumerSyncSummary.derive(facts).detail, "Photo changes are saved on this device.")
     facts.annotationsPending = 0
     XCTAssertEqual(ConsumerSyncSummary.derive(facts).state, .upToDate)
+    XCTAssertEqual(ConsumerSyncSummary.derive(facts).action, .start, "A finished batch must still allow another explicit Save")
+  }
+  func testManualSaveIsAvailableWhenIdleAndContinueRequiresActualQueue() {
+    var facts = ConsumerSyncFacts()
+    facts.unlocked = true
+    facts.paused = true
+    XCTAssertEqual(ConsumerSyncSummary.derive(facts).action, .start)
+    facts.completed = 5
+    XCTAssertEqual(ConsumerSyncSummary.derive(facts).state, .upToDate)
+    XCTAssertEqual(ConsumerSyncSummary.derive(facts).action, .start)
+    facts.pending = 1
+    XCTAssertEqual(ConsumerSyncSummary.derive(facts).action, .continue)
+    facts.paused = false
+    XCTAssertEqual(ConsumerSyncSummary.derive(facts).action, .retry)
+    facts.preparing = true
+    XCTAssertEqual(ConsumerSyncSummary.derive(facts).action, .none)
   }
   func testVerifiedMappingDeduplicatesOnlyCurrentRevisionAndOriginalDigest() throws {
     let photo = try samplePhoto()
@@ -304,6 +322,48 @@ extension ConsumerCoreTests {
   private func diagnosticEvents(_ diagnostics: NativeDiagnostics, file: URL) throws -> [NativeDiagnosticEvent] {
     diagnostics.flush()
     return try Data(contentsOf: file).split(separator: 10).map { try JSONDecoder().decode(NativeDiagnosticEvent.self, from: Data($0)) }
+  }
+  @MainActor func testAccountDiagnosticsEmitOnlyStateChangesWithoutIdentityOrCredentials() throws {
+    let savedSession = try? Keychain.read("session")
+    Keychain.remove("session")
+    defer {
+      if let savedSession { try? Keychain.write(savedSession, id: "session") }
+      else { Keychain.remove("session") }
+    }
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("runtime.jsonl")
+    let diagnostics = NativeDiagnostics(fileURL: file, emitSystemLog: false)
+    let services = try AppServices(root: root.appendingPathComponent("app"), diagnostics: diagnostics)
+    services.session.accountId = nil
+    services.session.bearerToken = nil
+    services.session.fixture = false
+    services.refreshConsumerSyncSummary()
+    let initial = try diagnosticEvents(diagnostics, file: file).filter { $0.accountState != nil }
+    XCTAssertFalse(initial.isEmpty)
+    XCTAssertEqual(initial.last?.accountState, .signedOut)
+    services.refreshConsumerSyncSummary()
+    services.refreshConsumerSyncSummary()
+    XCTAssertEqual(try diagnosticEvents(diagnostics, file: file).filter { $0.accountState != nil }.count, initial.count)
+    let account = Wire.id()
+    let token = "private-account-status-token"
+    services.session.accountId = account
+    services.session.bearerToken = token
+    services.refreshConsumerSyncSummary()
+    services.session.fixture = true
+    services.refreshConsumerSyncSummary()
+    let events = try diagnosticEvents(diagnostics, file: file).filter { $0.accountState != nil }
+    XCTAssertEqual(events.suffix(2).compactMap(\.accountState), [.recoveryRequired, .demo])
+    XCTAssertTrue(events.allSatisfy { $0.phase == .app && $0.outcome == .changed && $0.requestId == nil && $0.completed == nil && $0.pending == nil })
+    let bytes = try String(contentsOf: file, encoding: .utf8)
+    XCTAssertFalse(bytes.contains(account))
+    XCTAssertFalse(bytes.contains(token))
+    for state in [NativeDiagnosticAccountState.signedOut, .locked, .recoveryRequired, .unlocked, .demo] {
+      let event = NativeDiagnosticEvent(phase: .app, outcome: .changed, accountState: state)
+      let decoded = try JSONDecoder().decode(NativeDiagnosticEvent.self, from: JSONEncoder().encode(event))
+      XCTAssertEqual(decoded.accountState, state)
+      XCTAssertNil(decoded.requestId)
+    }
   }
   func testRuntimeDiagnosticsCannotIncludeRequestPathsOrUntrustedIdentifiers() throws {
     XCTAssertEqual(NativeDiagnosticEndpoint(path: "/v1/background/uploads/private-id/staging"), .upload)

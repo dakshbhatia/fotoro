@@ -13,8 +13,16 @@ exports the still original through the system share sheet.
 The native home suggests roughly 10% of viable recent photo groups from small
 on-device previews. Clarity, exposure, favorites and capture-date variety guide
 the picks; similar shots within a short verified capture window share a
-representative. All Photos and search still include the originals. Sync your
-picks explicitly adds the suggestions from the last 10 days after account unlock.
+representative. All Photos and search still include the originals. Account shows
+the signed-in account reference. Save picks adds the current suggestions from the
+last 10 days once, after account unlock. Automatic sync is off.
+
+Account uses one generated Fotoro password. New Fotoro creates that password;
+Continue opens the account. Enter the same password on iPhone or the web to sign
+in and unlock saved photos. The iPhone keeps its password in protected Keychain;
+Account → More options → Your Fotoro password lets you copy or save it later. Existing passkeys
+remain available under Other ways to sign in, and existing recovery codes work in
+the password field.
 
 Native search covers all permitted non-hidden still photos, including older photos
 outside the 10-day canvas. It indexes supplied labels, available metadata and
@@ -51,18 +59,20 @@ labels in Photo details. Choosing a meaning, confirming a photo and pinning its
 representative are separate explicit actions; merely inspecting a preview does
 not teach a preference. Text mentions never establish named face identity.
 
+On iOS, Account → Save picks starts one manual batch. Preparation processes one
+original at a time. Continue saving resumes only queued encrypted files; Save picks
+starts another current selection. Reopening Fotoro and editing labels do not
+start uploads. Refresh saved photos downloads the account catalog only when tapped.
+Encrypted file uploads scheduled by a manual batch can finish through iOS
+background transfer; force quitting interrupts system transfers. In the browser,
 Settings → Sync photos connects the local canvas to the encrypted account catalog.
-On iOS, explicitly start Sync your picks after unlocking your account. Backup
-processes one original at a time, resumes durable pending work, and shows synced,
-pending, failed and skipped counts. Scheduled encrypted file uploads can continue
-through iOS background transfer. Open and unlock Fotoro to scan/encrypt more photos
-and finish catalog commits; force quitting interrupts system transfers. In the
-browser, opening setup preserves selected files and
+Opening setup preserves selected files and
 uploads nothing; Sync selected photos starts their upload.
 
 Account annotations are bound to the unchanged original digest, encrypted with
 the account vault key, signed and revisioned separately from media. Label edits
-and text resume from an encrypted outbox. Concurrent edits preserve changes to
+and text wait in an encrypted outbox until an explicit save or Sync changes action.
+Concurrent edits preserve changes to
 different fields; a conflicting field waits for an explicit choice. Private
 annotations are absent from shared grants.
 
@@ -73,7 +83,7 @@ and downloads the untouched HEIC. Browser imports accept JPEG/PNG. Live Photo
 motion pairs and videos are visibly skipped by backup.
 
 The encrypted exchange also provides encrypted metadata,
-metadata search, passkey/recovery/device-approval protocols, explicit sharing,
+metadata search, password/passkey/device-approval protocols, explicit sharing,
 15-minute or ongoing grants, view/save/contribute, revocation, and recipient-owned
 saved copies. Exchanges accept up to 100 photos. Originals are verified by digest.
 
@@ -104,7 +114,7 @@ The seed command uses local storage only. Recover with a public code printed by
 the command. Do not store personal photographs in either public test account.
 
 Open `apps/ios/Fotoro.xcodeproj`, scheme `Fotoro`, on an iOS 26+ Simulator.
-Open Photos starts local browsing. Settings → Sync photos opens account
+Open Photos starts local browsing. Account opens password entry and account
 setup; developer controls are inside Advanced in DEBUG builds. Physical-device
 passkeys require HTTPS, signing, and associated domains.
 
