@@ -7,6 +7,15 @@ import { emptyFeedback } from "../src/local/search";
 const fixture = () => ({ id: "sha-photo", digest: "sha-photo", filename: "private-name.jpg", labels: ["Ronald"], date: "2026-09-01T00:00:00Z", dateSource: "exif" as const, width: 640, height: 480, originalSize: 1234, preview: new Blob(["bounded jpeg"], { type: "image/jpeg" }) });
 const store = (budget?: number) => new LocalRetention({ name: "test-search-" + crypto.randomUUID(), budget });
 
+test("capture verification survives retention without inventing it for legacy dates", async () => {
+  const saved=store();
+  await saved.save([{...fixture(),captureVerified:true as const},{...fixture(),id:"legacy"}],emptyFeedback());
+  const loaded=await saved.load();
+  assert.equal(loaded.photos.find(photo=>photo.id==="sha-photo")?.captureVerified,true);
+  assert.equal(loaded.photos.find(photo=>photo.id==="legacy")?.captureVerified,undefined);
+  await saved.clear();
+});
+
 test("reopening restores labels and preview but never the original File", async () => {
   const saved = store();
   const photo = { ...fixture(), file: new File(["original secret"], "private-name.jpg") };

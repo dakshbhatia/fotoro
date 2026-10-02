@@ -1,6 +1,6 @@
 import type { PhotoAnnotationsV1, PhotoAnnotationsUpdateV1, PhotoAnnotationsReplyV1, SignedPayloadV1, WrappedKeyV1 } from "@fotoro/contracts";
 import { validateWire } from "@fotoro/contracts/validate";
-import { signPayload, verifyPayload, unb64, b64, utf8 } from "@fotoro/crypto";
+import { signPayload, verifyPayload, unb64, utf8 } from "@fotoro/crypto";
 import { requireVault, encryptPrivate, decryptPrivate, type UnlockedVault } from "../vault/vault";
 import { assertVault } from "../vault/scope";
 import { all, atomic, get, put, type Store } from "./cache";
@@ -208,7 +208,10 @@ export async function resolveAnnotationConflict(photoId: string, choice: "local"
 export function localOriginalDigest(local: Pick<LocalPhoto, "digest">) {
   const value = local.digest;
   if (!value) return undefined;
-  return /^[a-f0-9]{64}$/i.test(value) ? b64(Uint8Array.from(value.match(/../g)!, byte => Number.parseInt(byte, 16))) : value;
+  if (!/^[a-f0-9]{64}$/i.test(value)) return value;
+  // Identity encoding is synchronous during the first render, before sodium.ready.
+  const bytes = value.match(/../g)!.map(byte => String.fromCharCode(Number.parseInt(byte, 16))).join("");
+  return btoa(bytes).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 }
 function localFields(local: LocalPhoto): AnnotationPatch {
   const value: AnnotationPatch = {labels: local.labels ?? []};
