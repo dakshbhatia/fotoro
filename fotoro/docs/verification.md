@@ -1,9 +1,18 @@
-# Verification — October 1, 2026
+# Verification — October 2, 2026
 
 The native, browser and service development build runs locally. It has not been
 publicly deployed or released through TestFlight. Independent reviews reproduced
 retrieval, permission, cancellation, persistence and navigation defects; fixes
 include permanent regressions and were re-reviewed.
+
+The completed release tree is merged in
+[PR 1](https://github.com/dakshbhatia/fotoro/pull/1). Both the
+[main CI run](https://github.com/dakshbhatia/fotoro/actions/runs/36953464488)
+and [PR CI run](https://github.com/dakshbhatia/fotoro/actions/runs/36953408124)
+passed. A reused individual Apple API key verifies Fotoro's app/build records,
+but cannot provision signing certificates. The existing active Cloudflare
+account token cannot access the required D1, R2 or domain resources. These
+credential checks do not establish deployment or TestFlight availability.
 
 | Check | Evidence |
 | --- | --- |
@@ -11,7 +20,7 @@ include permanent regressions and were re-reviewed.
 | Worker/D1/R2 API | 27 tests pass: real cryptographic WebAuthn ceremonies, recovery, uploads, renewal, grants, encrypted annotation revisions, capability-bound ciphertext PUTs and Apple association metadata |
 | Web | 128 tests pass: consumer choices/status, account-isolated Pause, combined local/saved search, preview fences, original Share/fallback, rank-key read budget and existing retrieval/retention/annotation checks |
 | Web production build | TypeScript/Vite pass; local entry 306.15 kB (95.75 kB gzip). Account/crypto loads after Sync photos; the large encrypted-media chunk warning remains |
-| Native | 103 tests pass locally with Xcode 27, zero failures or skips. Consumer source/consent/cancellation tests, held-worker Continue, share-copy eviction/lock/cleanup, real PhotoKit all-age labels and existing crypto/journal/background checks are included. Both iOS and web/API CI jobs pass on release code `4eb1240439` in run `36939449167`, including the build 2 orientation/toolchain fixes. Remote native runs 103 tests with zero failures and one expected Photos-permission interaction skip; that test passed in the permitted local Simulator |
+| Native | Full app 104 tests and local preview 31 tests pass locally with Xcode 27, zero failures or skips. The merged release passes native CI; remote full/preview suites each have one expected Photos-permission interaction skip, which passes in the permitted local Simulator. Consumer cancellation/Continue, original-share cleanup, all-age PhotoKit labels, isolated preview storage and existing crypto/journal/background checks are included |
 | Shared retrieval fixtures | Both platforms find all 20 predeclared supported tasks; five unsupported visual tasks and five absent terms remain empty. These are development fixtures, not held-out user accuracy |
 | Cross-language media | Swift decrypts frozen TypeScript vectors; TypeScript decrypts checked-in Swift ciphertext and rejects altered binding |
 | Real local HTTP exchange | Three isolated tests cover fresh migrations, recovery sessions, bidirectional contribution/save, revocation, restore, byte-preserved HEIC, background ciphertext staging, encrypted labels/OCR in a fresh account session, cross-account denial and idempotent revision conflicts |
