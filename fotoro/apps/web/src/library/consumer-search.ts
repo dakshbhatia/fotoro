@@ -3,6 +3,10 @@ import {cloudSearchRecords} from "./search";
 import type {LocalPhoto} from "../local/resources";
 import {LocalResources, imageDimensions} from "../local/resources";
 import type {SearchResult, SearchMeaning} from "../local/search";
+export function mergeConsumerSearchPhotos<T extends {id: string}>(local: T[], saved: T[]): T[] {
+  const localIDs = new Set(local.map(photo => photo.id));
+  return [...local, ...saved.filter(photo => !localIDs.has(photo.id))];
+}
 export interface OwnedPhotoSnapshot {
   accountId: string;
   token: object;

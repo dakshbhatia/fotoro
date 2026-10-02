@@ -164,6 +164,7 @@ svg {
   background: transparent;
   border: 0;
   width: 44px;
+  flex: 0 0 44px;
   padding: 10px;
 }
 .share-button {
@@ -609,7 +610,7 @@ summary {
 .cloud-search-meanings button[aria-pressed="true"] { outline: 1px solid currentColor; }
 
 /* Consumer surfaces: photos lead; controls sit in the surrounding space. */
-:root { color: #20211f; background: #fcfcfa; }
+:root { color-scheme: light; color: #20211f; background: #fcfcfa; }
 main.local-trial, main.cloud-library { height: 100dvh; display: flex; flex-direction: column; min-height: 0; }
 header { flex: 0 0 auto; height: 110px; padding: calc(22px + env(safe-area-inset-top)) 32px 18px; align-items: center; gap: 18px; }
 h1 { font-size: 32px; letter-spacing: -1.3px; font-weight: 650; }
@@ -717,4 +718,29 @@ h1 { font-size: 32px; letter-spacing: -1.3px; font-weight: 650; }
   .cloud-library .busy { margin: 0 18px 8px; }
   .details.local-details { top: calc(92px + env(safe-area-inset-top)); }
   .viewer-top { left: 12px; right: 12px; }
+}
+@media (prefers-color-scheme: dark) {
+  :root { color-scheme: dark; color: #f4f4f2; background: #111211; }
+  button, input, textarea, select { color: #f4f4f2; background: #252625; border-color: #464846; }
+  button:hover:not(:disabled) { background: #343634; }
+  .glass { background: #222422e8; border-color: #ffffff1f; box-shadow: 0 7px 28px #0003; }
+  .sheet, .status { background: #1c1e1c; border-color: #464846; }
+  .photo, .local-leading, .local-leading:hover:not(:disabled), .loading-photo { background: #252725; }
+  .local-details input { color: #f4f4f2; background: #252625; }
+  .consumer-choices { background: #202420; border-color: #454c45; }
+  .search-info, .account-sheet details, .grant { border-color: #464846; }
+  .hint, .date, .eyebrow, .local-browse-coverage, .choice-row small,
+  .local-progress, .browse-sync-detail, .search-caption .local-coverage,
+  .local-search-controls > span, .local-alternatives, .cloud-sync-status,
+  .cloud-sync-status small, .busy, .empty, .unavailable-photo { color: #b7beb5; }
+  .toolbar svg { color: #c4cbc1; }
+  .toolbar input::placeholder { color: #aeb5ac; }
+  .toolbar input, .toolbar button, .text-button, .local-search-controls button,
+  .local-alternatives button, .cloud-sync-status, .cloud-search-meanings,
+  .browse-sync-detail, .close { background: transparent; }
+  .local-progress { background: #1c1e1ce6; }
+  .open-photos, .primary-action, .sync-onboarding .primary-action { color: #171917; background: #edf1eb; border-color: #edf1eb; }
+  .open-photos:hover:not(:disabled), .primary-action:hover:not(:disabled), .sync-onboarding .primary-action:hover:not(:disabled) { background: #d4dbd1; }
+  .sync-onboarding .text-button, .sync-onboarding .text-button:hover:not(:disabled) { color: #b7beb5; background: transparent; }
+  button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline-color: #89bcff; }
 }

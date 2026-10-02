@@ -10,7 +10,7 @@ import { useLocalOcr, type LocalOcrPhoto } from "./useLocalOcr";
 import { collectLocalFiles, type LocalPhoto, LocalResources } from "./resources";
 import {ConsumerChoices, loadLocalChoices, saveLocalChoices, shouldOfferLocalChoices, type LocalChoices} from "./ConsumerChoices";
 import {syncStateLabel, type ConsumerSyncSummary} from "../library/consumer-sync";
-import {savedSearchPhotos, combineConsumerSearch, ConsumerPreviewResources, type OwnedPhotoSnapshot} from "../library/consumer-search";
+import {savedSearchPhotos, combineConsumerSearch, mergeConsumerSearchPhotos, ConsumerPreviewResources, type OwnedPhotoSnapshot} from "../library/consumer-search";
 import {inRecentSelectedRange} from "./consumer-range";
 export function selectedOriginals(photos: LocalPhoto[]): File[] {
   return photos.flatMap(photo => photo.file instanceof File ? [photo.file] : []);
@@ -50,7 +50,7 @@ export function LocalTrial({onBackup, onPhotosChange, syncSummary, ownedPhotos =
   const scope = "local:all";
   const scoped = useMemo(() => photos.filter(photo => !last30 || inRecentSelectedRange(photo)), [photos, last30]);
   const savedPhotos = useMemo(() => savedSearchPhotos(ownedPhotos, photos), [ownedPhotos, photos]);
-  const searchPhotos = useMemo(() => [...photos, ...savedPhotos.filter(photo => !photos.some(local => local.id === photo.id))], [photos, savedPhotos]);
+  const searchPhotos = useMemo(() => mergeConsumerSearchPhotos(photos, savedPhotos), [photos, savedPhotos]);
   const index = useMemo(() => new PhotoSearchIndex(photos.map(photo => photo.ocr && photo.ocr.processor !== OCR_PROCESSOR ? {...photo, ocr: undefined} : photo), feedback), [photos, feedback]);
   const localPredicted = useMemo(() => index.search(query, {scope, committedMeaning: committed, previous: previous.current}), [index, query, committed]);
   const savedIndex = useMemo(() => new PhotoSearchIndex(savedPhotos), [savedPhotos]);
