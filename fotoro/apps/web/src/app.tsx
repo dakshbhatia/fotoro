@@ -46,7 +46,7 @@ export default function App() {
       </div>
       {opened && (
         <div hidden={!cloud}>
-          <Suspense fallback={<p className="hint">Opening Sync photos…</p>}>
+          <Suspense fallback={<p className="hint">Opening Fotoro…</p>}>
             <CloudApp
               active={cloud}
               localPhotos={localPhotos}

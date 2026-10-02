@@ -13,18 +13,16 @@ exports the still original through the system share sheet.
 The native home suggests roughly 10% of viable recent photo groups from small
 on-device previews. Clarity, exposure, favorites and capture-date variety guide
 the picks; similar shots within a short verified capture window share a
-representative. All Photos and search still include the originals. Account shows
-the signed-in account reference. Save picks adds the current suggestions from the
-last 10 days once, after account unlock. Select → Save preserves the exact reviewed
-photos, and a photo's viewer also offers Save. Sign-in keeps that choice ready;
-Save N photos starts the batch. Automatic sync is off.
+representative. All Photos and search still include the originals. Saved photos
+opens the account library directly. Select → Save and the viewer's Save preserve
+the exact reviewed sources; an unlocked account starts that manual batch, and
+password entry completes the same Save if needed. Automatic sync is off.
 
-Account uses one generated Fotoro password. New Fotoro creates that password;
-Continue opens the account. Enter the same password on iPhone or the web to sign
-in and unlock saved photos. The iPhone keeps its password in protected Keychain;
-Account → More options → Your Fotoro password lets you copy or save it later. Existing passkeys
-remain available under Other ways to sign in, and existing recovery codes work in
-the password field.
+One Fotoro password opens the same saved photos on iPhone and the web. New Fotoro
+creates that password; Open Fotoro opens the account. The iPhone keeps it in
+protected Keychain. Settings shows the current account reference, Fotoro password
+and Sign out. Existing passkeys remain under Settings, and existing recovery codes
+work in the password field.
 
 Native search covers all permitted non-hidden still photos, including older photos
 outside the 10-day canvas. It indexes supplied labels, available metadata and
@@ -61,11 +59,10 @@ labels in Photo details. Choosing a meaning, confirming a photo and pinning its
 representative are separate explicit actions; merely inspecting a preview does
 not teach a preference. Text mentions never establish named face identity.
 
-On iOS, Account → Save picks starts one manual batch. Preparation processes one
-original at a time. Continue saving resumes only queued encrypted files; Save picks
-starts another current selection. Reopening Fotoro and editing labels do not
-start uploads. Opening Saved photos or tapping Refresh downloads the account
-catalog without sending queued uploads or edits.
+On iOS, select photos and tap Save, or tap Save in a photo viewer. Preparation
+processes one original at a time. Continue saving resumes queued encrypted files.
+Reopening Fotoro and editing labels do not start uploads. Opening Saved photos or
+tapping Refresh downloads the catalog without sending queued uploads or edits.
 Encrypted file uploads scheduled by a manual batch can finish through iOS
 background transfer; force quitting interrupts system transfers. In the browser,
 Settings → Sync photos connects the local canvas to the encrypted account catalog.
@@ -119,8 +116,8 @@ The seed command uses local storage only. Recover with a public code printed by
 the command. Do not store personal photographs in either public test account.
 
 Open `apps/ios/Fotoro.xcodeproj`, scheme `Fotoro`, on an iOS 26+ Simulator.
-Open Photos starts local browsing. Account opens password entry and account
-setup; developer controls are inside Advanced in DEBUG builds. Physical-device
+Open Photos starts local browsing. Saved photos opens the saved library or one
+password entry; developer controls are inside Advanced in DEBUG builds. Physical-device
 passkeys require HTTPS, signing, and associated domains.
 
 ## Check

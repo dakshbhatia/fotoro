@@ -204,6 +204,9 @@ struct RecentPhotosView: View {
   @State private var savedViewer: SavedPhotoViewerPresentation?
   @State private var pendingBackup = false
   @State private var pendingSavePhoto: RecentPhoto?
+  @State private var savedPassword: FotoroPassword?
+  @State private var signingOut = false
+  @State private var settingsAuthTask: Task<Void, Never>?
 #endif
   @State private var selectedPhotos: [String: SelectedRecentPhoto] = [:]
   @State private var selecting = false
@@ -263,7 +266,7 @@ struct RecentPhotosView: View {
         if let services { PhotoViewer(services: services, initialID: presentation.initial.id, displayedPhotos: presentation.photos) }
       }
       .sheet(item: $backupAccount) {
-        PhotosBackupView(services: $0.services, selection: $0.selection)
+        LibraryView(services: $0.services, saveSelection: $0.selection)
       }
       .task(id: searchTaskID) { await updateSearch() }
       .onChange(of: services?.consumerCatalogGeneration) { validateSavedPresentation() }
@@ -328,6 +331,11 @@ struct RecentPhotosView: View {
           } else {
 #if !FOTORO_LOCAL_PREVIEW
             services?.backup.pause()
+            if scenePhase == .background {
+              savedPassword = nil
+              settingsAuthTask?.cancel()
+              settingsAuthTask = nil
+            }
 #endif
             store.pauseAnalysis()
             search.pause()
@@ -451,7 +459,7 @@ struct RecentPhotosView: View {
       Text("Local-only beta").font(.caption).foregroundStyle(.secondary)
         .fixedSize(horizontal: true, vertical: false)
 #else
-      Button("Account", systemImage: services?.session.isSignedIn == true ? "person.crop.circle.fill" : "person.crop.circle", action: openBackup)
+      Button("Saved photos", systemImage: "photo.stack", action: openBackup)
         .labelStyle(.titleAndIcon).accessibilityIdentifier("account.open")
 #endif
     }
@@ -529,7 +537,30 @@ struct RecentPhotosView: View {
             AccountIdentityView(session: services.session, unlocked: services.vault.isUnlocked)
           }
           Text("Automatic sync is off. Save photos when you choose.")
-          Button("Account") { pendingBackup = true; settings = false }
+          Button("Saved photos") { pendingBackup = true; settings = false }
+          if let services {
+            if services.auth.hasSavedPassword {
+              Button("Fotoro password", systemImage: "key") {
+                do { savedPassword = FotoroPassword(value: try services.auth.savedPassword()) }
+                catch { services.error = error.localizedDescription }
+              }
+            }
+            if !services.session.isSignedIn || !services.vault.isUnlocked {
+              Button("Use existing passkey") {
+                if let task = services.run(phase: .auth, {
+                  _ = try await services.auth.login()
+                  try Task.checkCancellation()
+                  try services.activateAccount()
+                  pendingBackup = true
+                  settings = false
+                }) { settingsAuthTask = task }
+              }.disabled(services.busy)
+            }
+            if services.session.accountId != nil {
+              Button("Sign out", role: .destructive) { signingOut = true }.disabled(services.busy)
+            }
+            if let error = services.error { Text(error).foregroundStyle(.red) }
+          }
 #endif
         }
         Section("Photos access") {
@@ -540,6 +571,21 @@ struct RecentPhotosView: View {
         Section { Text(buildDescription).font(.caption).foregroundStyle(.secondary) }
       }.navigationTitle("Settings").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { settings = false } } }
+#if !FOTORO_LOCAL_PREVIEW
+        .sheet(item: $savedPassword) { FotoroPasswordView(password: $0) }
+        .onChange(of: services?.vault.isUnlocked) { _, unlocked in
+          if unlocked != true { savedPassword = nil }
+        }
+        .onDisappear { savedPassword = nil; settingsAuthTask?.cancel(); settingsAuthTask = nil }
+        .alert("Sign out?", isPresented: $signingOut) {
+          Button("Sign out", role: .destructive) {
+            services?.run { try services?.signOut(discardPending: true) }
+          }
+          Button("Cancel", role: .cancel) {}
+        } message: {
+          Text("Unfinished uploads and unsent edits will be removed from this iPhone. Your Photos library and photos saved to Fotoro stay.")
+        }
+#endif
     }
   }
   private var buildDescription: String {

@@ -1,12 +1,6 @@
 import SwiftUI
 import UIKit
 
-struct RecoveryCodeAcknowledgement {
-  private var savedCode: String?
-  func isSaved(_ code: String?) -> Bool { code != nil && savedCode == code }
-  mutating func setSaved(_ saved: Bool, code: String?) { savedCode = saved ? code : nil }
-}
-
 struct AccountIdentityView: View {
   let session: AccountSession
   let unlocked: Bool
@@ -29,13 +23,12 @@ struct AccountIdentityView: View {
 struct AccountView: View {
   @Bindable var services: AppServices
   var onSignedIn: () -> Void = {}
-  var onSignOut: (() -> Void)?
+  var onAuthenticationTask: (Task<Void, Never>?) -> Void = { _ in }
   @State private var password = ""
   @State private var apiURL = ""
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
-        AccountIdentityView(session: services.session, unlocked: services.vault.isUnlocked)
         if let code = services.auth.startPassword {
           Text("Your Fotoro password").font(.title2.bold())
           Text("Save this password. Use it to open your Fotoro on any device.").foregroundStyle(.secondary)
@@ -45,16 +38,16 @@ struct AccountView: View {
             Button("Copy password", systemImage: "doc.on.doc") { UIPasteboard.general.string = code }
             ShareLink("Save password", item: code)
           }
-          Button("Continue") {
-            services.run(phase: .auth) {
+          Button("Open Fotoro") {
+            authenticate {
               try await services.auth.completeStart(code: code)
               try await finishSignIn()
             }
           }.buttonStyle(.borderedProminent).disabled(services.busy)
           Button("Cancel") { services.auth.cancelStart(); services.error = nil }.disabled(services.busy)
         } else if services.session.isSignedIn && services.vault.canUnlockLocally {
-          Button("Unlock photos") {
-            services.run(phase: .auth) {
+          Button("Open Fotoro") {
+            authenticate {
               try await services.vault.unlock(.localKeychain)
               try await finishSignIn()
             }
@@ -67,11 +60,11 @@ struct AccountView: View {
             .textContentType(.password).textInputAutocapitalization(.never)
             .autocorrectionDisabled().submitLabel(.go).onSubmit(signIn)
             .disabled(services.busy).accessibilityIdentifier("account.password")
-          Button("Sign in", action: signIn).buttonStyle(.borderedProminent)
+          Button("Open Fotoro", action: signIn).buttonStyle(.borderedProminent)
             .disabled(services.busy || password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             .accessibilityIdentifier("account.signIn")
           Button("New Fotoro") {
-            services.run(phase: .auth) { try await services.auth.prepareStart() }
+            authenticate { try await services.auth.prepareStart() }
           }.disabled(services.busy)
             .accessibilityIdentifier("account.create")
         }
@@ -80,29 +73,6 @@ struct AccountView: View {
         }
         if services.busy {
           ProgressView("Opening your Fotoro…").accessibilityIdentifier("account.connecting")
-        }
-        if services.auth.startPassword == nil && (!services.session.isSignedIn || !services.vault.canUnlockLocally) {
-          DisclosureGroup("Other ways to sign in") {
-            Button("Use a passkey") {
-              services.run(phase: .auth) {
-                _ = try await services.auth.login()
-                try await finishSignIn()
-              }
-            }
-            DisclosureGroup("Use a trusted device") {
-              Button("Request approval") { services.run(phase: .auth) { try await services.deviceTrust.begin() } }
-              if let request = services.deviceTrust.challengeJSON { ShareLink("Send request", item: request) }
-              Button("Complete approved request") {
-                services.run(phase: .auth) {
-                  try await services.deviceTrust.complete()
-                  try await finishSignIn()
-                }
-              }
-            }
-          }.disabled(services.busy)
-        }
-        if services.session.accountId != nil, let onSignOut {
-          Button("Sign out", role: .destructive, action: onSignOut).disabled(services.busy)
         }
         #if DEBUG
           DisclosureGroup("Advanced · development") {
@@ -117,18 +87,45 @@ struct AccountView: View {
       }.padding()
     }
   }
+  private func authenticate(_ action: @escaping @MainActor () async throws -> Void) {
+    if let task = services.run(phase: .auth, action) { onAuthenticationTask(task) }
+  }
   private func signIn() {
     guard !password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-    services.run(phase: .auth) {
+    authenticate {
       try await services.auth.loginWithCode(password)
       password = ""
       try await finishSignIn()
     }
   }
   func finishSignIn() async throws {
+    try Task.checkCancellation()
     guard services.vault.isUnlocked else { return }
     services.auth.fallbackMessage = nil
     try services.activateAccount()
     onSignedIn()
+  }
+}
+
+struct FotoroPassword: Identifiable {
+  let id = UUID()
+  let value: String
+}
+
+struct FotoroPasswordView: View {
+  let password: FotoroPassword
+  @Environment(\.dismiss) private var dismiss
+  var body: some View {
+    NavigationStack {
+      VStack(alignment: .leading, spacing: 20) {
+        Text("Use this password to open your Fotoro on any device.").foregroundStyle(.secondary)
+        Text(password.value).font(.system(.callout, design: .monospaced))
+          .textSelection(.enabled).privacySensitive()
+        Button("Copy password", systemImage: "doc.on.doc") { UIPasteboard.general.string = password.value }
+        ShareLink("Save password", item: password.value)
+        Spacer()
+      }.padding().navigationTitle("Fotoro password").navigationBarTitleDisplayMode(.inline)
+        .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+    }
   }
 }

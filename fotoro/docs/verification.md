@@ -54,6 +54,30 @@ Real-account phone-to-Safari acceptance remains open.
 | Native local lifecycle | All-age permitted enumeration, limited/denied startup, permission purge, ten-day browse, changed revisions, cancellation rollback and refresh stability are exercised |
 | Browser local lifecycle | Session-only default; retained labels/text/previews; lazy preview hydration; unavailable preview preservation; digest reselection; pending/cross-instance clear fences |
 
+## October 2 direct-photo cleanup
+
+Build 13 removes the Account dashboard and its nested Saved photos/Sharing menus.
+Saved photos opens the library or a single password entry directly. A tapped Save
+carries immutable sources through authentication and starts once after account
+activation. Opening the library without that intent reads only. Busy rejection
+keeps an explicit retry even when an earlier batch completes. Owner dismissal,
+backgrounding and account lock cancel pending authentication/save; transient iOS
+inactivity preserves password setup. Password retrieval, identity, sign out and
+legacy passkeys live in Settings. Extra native import/exchange/account menus and
+web account-card/device forms are removed from everyday browsing.
+
+All 190 full native, 50 local-preview and 180 web tests pass, with TypeScript and
+production web build checks. Simulator UI verifies direct library entry, one
+password gate and viewer Save carrying one photo into that gate. The live web
+shows Fotoro password, Open Fotoro, New Fotoro and collapsed Settings.
+
+Worker `71177dd1-b155-436e-b87a-85b48723c43e` is read back at 100%; canonical API
+and exact signed association checks pass. Full Release 0.1.0 (13) is signed and
+installed over the physical app. The phone connection dropped before launch and
+version readback; owner authentication and private-photo save/restore remain
+unverified. The preceding saving/sharing PR 15 merged after all exact-head CI
+checks completed successfully.
+
 ## October 2 chosen-photo saving and saved-library handoffs
 
 Build 12 adds Save to the native photo viewer and selection bar. The account sheet

@@ -225,17 +225,20 @@ final class RecentPhotosTests: XCTestCase {
       XCTAssertFalse(SyncPhotosAccessPolicy.needsAccess(permission, action: .start, enabled: false, hasQueuedUploads: false))
     }
   }
-  func testReplacementRecoveryCodeNeedsItsOwnAcknowledgement() {
-    var acknowledgement = RecoveryCodeAcknowledgement()
-    XCTAssertFalse(acknowledgement.isSaved(nil))
-    XCTAssertFalse(acknowledgement.isSaved("first code"))
-    acknowledgement.setSaved(true, code: "first code")
-    XCTAssertTrue(acknowledgement.isSaved("first code"))
-    XCTAssertFalse(acknowledgement.isSaved("replacement code"))
-    acknowledgement.setSaved(true, code: "replacement code")
-    XCTAssertTrue(acknowledgement.isSaved("replacement code"))
-    acknowledgement.setSaved(false, code: "replacement code")
-    XCTAssertFalse(acknowledgement.isSaved("replacement code"))
+  func testManualSaveConsumesOnlyOneActiveUnlockedIntent() {
+    let source = RecentPhotoSource(id: "chosen", revision: "original")
+    var intent = ManualPhotoSaveIntent([source])
+    XCTAssertNil(intent.consume(active: false, unlocked: true))
+    XCTAssertNil(intent.consume(active: true, unlocked: false))
+    XCTAssertEqual(intent.consume(active: true, unlocked: true), [source])
+    XCTAssertTrue(intent.wasConsumed)
+    XCTAssertNil(intent.consume(active: true, unlocked: true))
+    var cancelled = ManualPhotoSaveIntent([source])
+    cancelled.cancel()
+    XCTAssertFalse(cancelled.wasConsumed)
+    XCTAssertNil(cancelled.consume(active: true, unlocked: true))
+    var empty = ManualPhotoSaveIntent([])
+    XCTAssertNil(empty.consume(active: true, unlocked: true))
   }
   @MainActor func testSyncPermissionActionRequestsOnceAndDoesNotEnableUploads() async throws {
     let services = try AppServices(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))

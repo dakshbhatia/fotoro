@@ -1,29 +1,30 @@
 import NukeUI
 import Observation
-import PhotosUI
 import SwiftUI
 
 struct LibraryView: View {
   @Bindable var services: AppServices
+  let saveSelection: [RecentPhotoSource]?
+  @State private var saveIntent: ManualPhotoSaveIntent?
+  @State private var authenticationTask: Task<Void, Never>?
   @State private var query = ""
   @State private var searchResults: [LocalPhoto]?
   @State private var selection = SavedPhotoSelection()
   @State private var catalogRefresh = SavedLibraryRefresh()
-  @State private var showingFiles = false
   @State private var viewer: SavedPhotoViewerPresentation?
-  @State private var showExchange = false
-  @State private var showingBackup = false
   @Environment(\.scenePhase) private var scenePhase
   @Environment(\.dismiss) private var dismiss
-  @State private var selectedPhotos: [PhotosPickerItem] = []
   @State private var scrollID: String?
-  @State private var signingOut = false
   @State private var originalURLs: [URL] = []
   @State private var sharingOriginals = false
   @State private var preparingShare = false
   @State private var shareTask: Task<Void, Never>?
   @State private var shareSources: [LocalPhoto] = []
-  private let photoManager = PHCachingImageManager()
+  init(services: AppServices, saveSelection: [RecentPhotoSource]? = nil) {
+    self.services = services
+    self.saveSelection = saveSelection
+    _saveIntent = State(initialValue: saveSelection.map(ManualPhotoSaveIntent.init))
+  }
   var filtered: [LocalPhoto] {
     if !query.isEmpty, let searchResults { return searchResults }
     return services.photos.filter {
@@ -41,10 +42,19 @@ struct LibraryView: View {
   var body: some View {
     NavigationStack {
       Group {
-        if !services.vault.isUnlocked {
-          AccountView(services: services)
+        if services.auth.startPassword != nil || !services.vault.isUnlocked
+          || (!services.session.isSignedIn && !services.session.fixture) {
+          VStack(alignment: .leading, spacing: 0) {
+            if let saveSelection {
+              Text("Open Fotoro to save \(saveSelection.count) \(saveSelection.count == 1 ? "photo" : "photos")")
+                .font(.headline).padding(.horizontal).padding(.top)
+            }
+            AccountView(services: services, onSignedIn: startSelectedSave,
+              onAuthenticationTask: { authenticationTask = $0 })
+          }
         } else {
           ScrollView {
+            savingFeedback
             catalogFeedback
             LazyVGrid(
               columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3
@@ -68,8 +78,7 @@ struct LibraryView: View {
             if filtered.isEmpty && !catalogRefresh.isRefreshing {
               ContentUnavailableView(
                 "No photos", systemImage: "photo",
-                description: Text(query.isEmpty ? "Save picks from your account, or refresh photos you've already saved." : "Try a label, filename or words in a photo."))
-              if query.isEmpty { Button("Account") { showingBackup = true }.buttonStyle(.borderedProminent) }
+                description: Text(query.isEmpty ? "Save photos in Fotoro, or refresh photos you've already saved." : "Try a label, filename or words in a photo."))
             }
             ForEach(services.notices, id: \.self) { Text($0).font(.caption).padding() }
           }.scrollPosition(id: $scrollID, anchor: .top)
@@ -94,31 +103,6 @@ struct LibraryView: View {
               }
             }
             .toolbar {
-              ToolbarItem(placement: .topBarLeading) {
-                Button("Account", systemImage: "person.crop.circle") { showingBackup = true }
-              }
-              ToolbarItem(placement: .topBarTrailing) {
-                Menu("More", systemImage: "ellipsis") {
-                  Button("Encrypted sharing") { showExchange = true }
-                  Button("Lock", systemImage: "lock") { services.lockAccount() }
-                  Button("Sign out", systemImage: "person.crop.circle.badge.xmark") {
-                    signingOut = true
-                  }
-                  Button("Files") { showingFiles = true }
-                  PhotosPicker(
-                    "Photos", selection: $selectedPhotos, maxSelectionCount: 100, matching: .images)
-                  #if DEBUG
-                    Button("Public sample") {
-                      services.run {
-                        guard
-                          let url = Bundle.main.url(forResource: "singapore", withExtension: "jpg")
-                        else { throw FotoroError("Sample missing") }
-                        try await services.importFiles([url], publicSample: true)
-                      }
-                    }
-                  #endif
-                }
-              }
               if selection.count > 0 {
                 ToolbarItem(placement: .bottomBar) {
                   Button("Share \(selection.count)", systemImage: "square.and.arrow.up") {
@@ -128,7 +112,8 @@ struct LibraryView: View {
               }
             }
         }
-      }.navigationTitle("Saved photos")
+      }.navigationTitle("Saved photos").navigationBarTitleDisplayMode(.inline)
+        .task { startSelectedSave() }
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         .overlay { if services.busy { ProgressView().padding().glassEffect() } }
         .sheet(item: $viewer, onDismiss: { viewer = nil }) { presentation in
@@ -136,47 +121,22 @@ struct LibraryView: View {
             services: services, initialID: presentation.initial.id, displayedPhotos: presentation.photos)
         }
         .onChange(of: scenePhase) {
-          if scenePhase != .active { services.backup.pause() }
+          if scenePhase == .background {
+            cancelAuthentication()
+            services.pauseSync()
+          } else if scenePhase == .active {
+            startSelectedSave()
+          } else {
+            services.backup.pause()
+          }
         }
-        .sheet(isPresented: $showingBackup) { PhotosBackupView(services: services) }
         .sheet(isPresented: $sharingOriginals, onDismiss: cleanupShare) {
           OriginalShareSheet(urls: originalURLs) { _ in cleanupShare() }
         }
-        .sheet(isPresented: $showExchange) {
-          ExchangeView(
-            services: services, selected: (try? selection.resolve(using: services.consumerSavedPhoto)) ?? [])
-        }
-        .fileImporter(
-          isPresented: $showingFiles, allowedContentTypes: [.jpeg, .png, .heic],
-          allowsMultipleSelection: true
-        ) { result in services.run { try await services.importFiles(result.get()) } }
-        .onChange(of: selectedPhotos) { _, items in
-          services.run {
-            guard
-              NativeBackupPolicy.allowsPrivatePhotos(
-                accountId: services.session.accountId, fixture: services.session.fixture)
-            else {
-              throw FotoroError(
-                "Public test accounts cannot import your Photos library. Use a real account.")
-            }
-            let selected = items.compactMap { item in
-              item.itemIdentifier.map {
-                SelectedResource(
-                  id: Wire.id(), origin: .photos, resourceIdentifier: $0, fileURL: nil)
-              }
-            }
-            guard selected.count == items.count else {
-              throw FotoroError(
-                "Original Photos identifiers unavailable; select an original from Files")
-            }
-            try await services.importPhotos(selected)
-          }
-        }
         .onChange(of: services.vault.isUnlocked) { _, unlocked in
           if !unlocked {
+            saveIntent?.cancel()
             viewer = nil
-            showExchange = false
-            showingBackup = false
             shareTask?.cancel()
             cleanupShare()
             selection.removeAll()
@@ -188,22 +148,12 @@ struct LibraryView: View {
           shareTask?.cancel(); cleanupShare(); selection.removeAll(); catalogRefresh.cancel()
         }
         .onChange(of: services.consumerCatalogGeneration) { validateSelection() }
-        .onDisappear { shareTask?.cancel(); cleanupShare(); catalogRefresh.cancel() }
-        .alert("Sign out?", isPresented: $signingOut) {
-          Button("Sign out and remove local data", role: .destructive) {
-            services.run { try services.signOut(discardPending: true) }
-          }
-          Button("Cancel", role: .cancel) {}
-        } message: {
-          Text(
-            "Pending unsent imports, account wrappers, and local photo caches will be removed from this iPhone."
-          )
-        }
+        .onDisappear { cancelAuthentication(); shareTask?.cancel(); cleanupShare(); catalogRefresh.cancel() }
         .alert(
           "Fotoro",
           isPresented: Binding(
-            get: { services.error != nil && !showExchange && !showingBackup && viewer == nil && !sharingOriginals },
-            set: { if !$0 && !showExchange && !showingBackup && viewer == nil && !sharingOriginals { services.error = nil } })
+            get: { services.error != nil && services.vault.isUnlocked && viewer == nil && !sharingOriginals },
+            set: { if !$0 && viewer == nil && !sharingOriginals { services.error = nil } })
         ) {
           Button("OK") { services.error = nil }
         } message: {
@@ -212,6 +162,43 @@ struct LibraryView: View {
     }
   }
 
+  private func startSelectedSave() {
+    guard services.session.isSignedIn, services.vault.isUnlocked, services.auth.startPassword == nil,
+      let sources = saveIntent?.consume(active: scenePhase == .active, unlocked: true) else { return }
+    services.error = nil
+    do { try services.startPhotosBackup(selection: sources) }
+    catch {
+      saveIntent = ManualPhotoSaveIntent(sources)
+      saveIntent?.cancel()
+      services.error = error.localizedDescription
+    }
+  }
+  private func cancelAuthentication() {
+    saveIntent?.cancel()
+    authenticationTask?.cancel()
+    authenticationTask = nil
+    services.auth.cancelStart()
+  }
+  @ViewBuilder private var savingFeedback: some View {
+    let summary = services.consumerSyncSummary
+    if services.backup.isRunning || services.journal.running {
+      HStack {
+        ProgressView("Saving photos…")
+        Spacer()
+        Button("Pause") { services.pauseSync() }
+      }.padding()
+    } else if summary.action == .continue || summary.action == .retry {
+      Button("Continue saving", systemImage: "icloud.and.arrow.up") {
+        services.run { try await services.continueSync() }
+      }.disabled(services.busy).padding()
+    } else if let saveSelection, saveIntent?.pending == false,
+      saveIntent?.wasConsumed == false || summary.state == .needsAttention {
+      Button("Save selected photos", systemImage: "icloud.and.arrow.up") {
+        saveIntent = ManualPhotoSaveIntent(saveSelection)
+        startSelectedSave()
+      }.disabled(services.busy).padding()
+    }
+  }
   private func loadMoreIfNeeded(photoID: String) {
     if photoID == services.photos.last?.id { try? services.loadMore() }
   }

@@ -15,8 +15,8 @@ export interface ConsumerSyncFacts {
   pendingEdits: number; conflictingEdits: number; localPhotos: number; lastCheckedAt: string | null;
 }
 export const syncStateLabel: Record<ConsumerSyncState, string> = {
-  notStarted: "Sync your photos", preparing: "Preparing photos…", uploading: "Saving photos…", checking: "Checking photos…",
-  upToDate: "Photos saved", paused: "Sync paused", offline: "Offline", needsAttention: "Sync needs attention",
+  notStarted: "Save photos", preparing: "Preparing photos…", uploading: "Saving photos…", checking: "Checking photos…",
+  upToDate: "Photos saved", paused: "Saving paused", offline: "Offline", needsAttention: "Needs attention",
 };
 export function deriveConsumerSyncSummary(facts: ConsumerSyncFacts): ConsumerSyncSummary {
   if (!facts.unlocked) return {state: "notStarted", skippedPhotos: 0, action: "signIn"};
