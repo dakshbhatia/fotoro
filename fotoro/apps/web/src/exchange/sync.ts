@@ -138,6 +138,7 @@ async function performRefresh(session: UnlockedVault, signal?: AbortSignal) {
 }
 async function performSave(session: UnlockedVault, signal: AbortSignal) {
   assertVault(session);
+  signal.throwIfAborted();
   await resumePendingImports(signal);
   assertVault(session);
   signal.throwIfAborted();
@@ -156,11 +157,16 @@ async function performSave(session: UnlockedVault, signal: AbortSignal) {
 export function refreshSync(session = requireVault()) {
   return readFlight.run(session, () => serializeSync(session, () => performRefresh(session)));
 }
-export function saveSync(session = requireVault()) {
+export function saveSync(session = requireVault(), signal?: AbortSignal) {
+  signal?.throwIfAborted();
   return saveFlight.run(session, () => {
     const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal?.addEventListener("abort", abort, {once: true});
+    if (signal?.aborted) controller.abort();
     controllers.set(session, controller);
     return serializeSync(session, () => performSave(session, controller.signal)).finally(() => {
+      signal?.removeEventListener("abort", abort);
       if (controllers.get(session) === controller) controllers.delete(session);
     });
   });

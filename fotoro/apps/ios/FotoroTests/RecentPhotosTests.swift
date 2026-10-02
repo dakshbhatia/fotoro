@@ -225,20 +225,29 @@ final class RecentPhotosTests: XCTestCase {
       XCTAssertFalse(SyncPhotosAccessPolicy.needsAccess(permission, action: .start, enabled: false, hasQueuedUploads: false))
     }
   }
-  func testManualSaveConsumesOnlyOneActiveUnlockedIntent() {
+  func testManualSaveRequiresActivatedAccountAndConsumesOnlyOnce() {
     let source = RecentPhotoSource(id: "chosen", revision: "original")
+    let catalog = NSObject(), replacement = NSObject()
+    let access = PhotoAccountAccess(account: "opened", vault: UUID(), catalog: ObjectIdentifier(catalog))
     var intent = ManualPhotoSaveIntent([source])
-    XCTAssertNil(intent.consume(active: false, unlocked: true))
-    XCTAssertNil(intent.consume(active: true, unlocked: false))
-    XCTAssertEqual(intent.consume(active: true, unlocked: true), [source])
+    XCTAssertNil(intent.consume(active: true, access: access), "Unlock alone cannot authorize Save before activation")
+    intent.authorize(access)
+    XCTAssertNil(intent.consume(active: false, access: access))
+    XCTAssertNil(intent.consume(active: true, access: nil))
+    XCTAssertNil(intent.consume(active: true, access: PhotoAccountAccess(account: "another", vault: access.vault, catalog: access.catalog)))
+    XCTAssertNil(intent.consume(active: true, access: PhotoAccountAccess(account: access.account, vault: UUID(), catalog: access.catalog)))
+    XCTAssertNil(intent.consume(active: true, access: PhotoAccountAccess(account: access.account, vault: access.vault, catalog: ObjectIdentifier(replacement))))
+    XCTAssertEqual(intent.consume(active: true, access: access), [source])
     XCTAssertTrue(intent.wasConsumed)
-    XCTAssertNil(intent.consume(active: true, unlocked: true))
+    XCTAssertNil(intent.consume(active: true, access: access))
     var cancelled = ManualPhotoSaveIntent([source])
     cancelled.cancel()
+    cancelled.authorize(access)
     XCTAssertFalse(cancelled.wasConsumed)
-    XCTAssertNil(cancelled.consume(active: true, unlocked: true))
+    XCTAssertNil(cancelled.consume(active: true, access: access), "Late authentication cannot revive a dismissed Save")
     var empty = ManualPhotoSaveIntent([])
-    XCTAssertNil(empty.consume(active: true, unlocked: true))
+    empty.authorize(access)
+    XCTAssertNil(empty.consume(active: true, access: access))
   }
   @MainActor func testSyncPermissionActionRequestsOnceAndDoesNotEnableUploads() async throws {
     let services = try AppServices(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))

@@ -9,16 +9,27 @@ enum SyncPhotosAccessPolicy {
   }
 }
 
+struct PhotoAccountAccess: Equatable {
+  let account: String
+  let vault: UUID
+  let catalog: ObjectIdentifier
+}
+
 struct ManualPhotoSaveIntent {
   let sources: [RecentPhotoSource]
   private(set) var pending = true
   private(set) var wasConsumed = false
+  private var authorization: PhotoAccountAccess?
   init(_ sources: [RecentPhotoSource]) { self.sources = sources }
-  mutating func consume(active: Bool, unlocked: Bool) -> [RecentPhotoSource]? {
-    guard pending, active, unlocked, !sources.isEmpty else { return nil }
+  mutating func authorize(_ access: PhotoAccountAccess?) {
+    guard pending else { return }
+    authorization = access
+  }
+  mutating func consume(active: Bool, access: PhotoAccountAccess?) -> [RecentPhotoSource]? {
+    guard pending, active, let authorization, authorization == access, !sources.isEmpty else { return nil }
     pending = false
     wasConsumed = true
     return sources
   }
-  mutating func cancel() { pending = false }
+  mutating func cancel() { pending = false; authorization = nil }
 }

@@ -8,6 +8,8 @@ its exact version is read back, and its running process and protected diagnostic
 file are verified on the unlocked physical iPhone. The owner's screenshots show
 local Photos and a signed-out Sync screen. Build 12's protected account-state event
 independently reports signed out; real-account authentication remains unverified.
+Build 13 subsequently installed successfully, but the phone disconnected before
+launch/version readback. Signed build 14 is ready; it is not installed yet.
 Apple has processed full build 4; its
 TestFlight access awaits an export-compliance declaration. Independent reviews reproduced
 retrieval, permission, cancellation, persistence and navigation defects; fixes
@@ -42,9 +44,9 @@ Real-account phone-to-Safari acceptance remains open.
 | --- | --- |
 | Contracts, crypto and loopback fixtures | 15 tests pass: schema boundaries, bounded annotations, signatures, media binding, preservation, closed diagnostic-method vocabulary and bounded public-fixture readiness retries |
 | Worker/D1/R2 API | 51 tests pass, including nonce-bound password signup, challenge replay/conflicts and unchanged legacy login; upload/storage, authentication/exchange/annotation and diagnostic privacy checks pass |
-| Web | 180 tests pass, including read-only account/lifecycle refresh, explicit queue/annotation saving, one-password entry, setup retry, cancellation/account/storage fences and existing search/viewer checks |
+| Web | 189 tests pass, including chosen-photo Save through password entry, immutable selection and current-account binding, read-only account/lifecycle refresh, cancellation and queued-save fences |
 | Web production build | TypeScript/Vite pass. Account/crypto loads after Sync photos; the large encrypted-media chunk warning remains |
-| Native | Latest full app 190 tests and local preview 50 tests pass locally with Xcode 27, zero failures or skips. Reviewed-photo saving, read-only saved-library loading and complete sharing selections join the account, crypto/journal/background/search regressions |
+| Native | Latest full app 193 tests and local preview 50 tests pass locally with Xcode 27, zero failures or skips. Complete account activation, read-only catalog opening and Save authorization join the account, crypto/journal/background/search regressions |
 | TestFlight metadata | 28 tests pass for team/individual authentication, exact app/build ownership, sparse Apple responses, notes readback and credential-safe errors. A live build 2 update preserved every existing test-note character and verified its build relationship; its processing state is VALID and beta states remain MISSING_EXPORT_COMPLIANCE. Build 3 is VALID / IN_BETA_TESTING with encryption metadata false and verified local-preview test notes |
 | Distribution IPA | Actual build 3 archive and distribution IPA pass the strict preview audit. Xcode Organizer used its existing cloud-managed certificate; the copied IPA matches the unchanged archive/dSYM/link map. Apple validation and exact-IPA upload both exit 0 with success markers |
 | Internal tester access | App Store Connect shows the existing internal group with one tester and one build; iOS 0.1.0 (3) is Testing and the requested sole owner tester is Invited. Association was automatic; no new tester/role/invitation mutation was needed. Inbox delivery and installation remain unverified |
@@ -53,6 +55,42 @@ Real-account phone-to-Safari acceptance remains open.
 | Real local HTTP exchange | Three isolated tests cover fresh migrations, recovery sessions, bidirectional contribution/save, revocation, restore, byte-preserved HEIC, background ciphertext staging, encrypted labels/OCR in a fresh account session, cross-account denial and idempotent revision conflicts |
 | Native local lifecycle | All-age permitted enumeration, limited/denied startup, permission purge, ten-day browse, changed revisions, cancellation rollback and refresh stability are exercised |
 | Browser local lifecycle | Session-only default; retained labels/text/previews; lazy preview hydration; unavailable preview preservation; digest reselection; pending/cross-instance clear fences |
+
+## October 2 Save through password entry
+
+The browser now distinguishes the explicit selection's Save from opening Saved
+photos. Save retains an immutable File/annotation snapshot through Open Fotoro or
+New Fotoro and starts once against the authenticated current vault. An already
+open account starts directly. Wrong-password and busy rejections retain the
+selection; Back, sheet close, backgrounding, local clearing, account lock and
+account switch cancel it. Cancellation also fences a save waiting behind a
+read-only catalog request. Ordinary sign-in, browsing and lifecycle refresh do
+not send originals or annotations.
+
+Build 14 waits for complete account/library activation before consuming Save or
+opening the catalog. Store replacement is part of the catalog-open binding.
+Fallible construction prepares the store, backup and journal together before
+publishing them; a failed activation exposes an explicit Open Fotoro retry.
+Corrupted persisted selection coverage verifies no premature catalog read, no
+mixed services and successful explicit retry. Authentication task handles clear
+after completion while dismissal and background cancellation stay fenced.
+
+All 193 full-app, 50 preview and 189 web tests pass. Core checks, web typecheck
+and production build pass; the startup bundle remains 315.25 KB with crypto
+loaded lazily. Signed Release 0.1.0 (14) passes strict signature, app identity and
+production associated-domain checks without a preview encryption exemption.
+The paired phone remains disconnected, so installation, owner password entry
+and private-photo save/restore are unverified.
+
+Worker `3c2a139f-59d4-4c66-804b-e9c2946a00a8` contains the web handoff. Its predecessor
+is retained for rollback. Deployment readback confirms this version at
+100%; canonical API and exact production association checks pass. Live 390×844
+browser QA verifies Save for one public local image opens the single password
+gate, Back preserves the selection, and separate Saved photos opens that gate.
+The Save target is 44 px tall and the page has no horizontal overflow.
+The direct-photo cleanup PR 16 merged after every exact-head CI check completed
+successfully. No production schema, storage binding or Apple compliance changes
+are included in this handoff.
 
 ## October 2 direct-photo cleanup
 

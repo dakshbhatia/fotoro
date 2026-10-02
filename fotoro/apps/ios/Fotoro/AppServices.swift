@@ -82,6 +82,7 @@ enum ReviewedPhotosBackupPolicy {
   #endif
   private(set) var consumerSyncSummary = ConsumerSyncSummary()
   private(set) var consumerCatalogGeneration: UInt64 = 0
+  private var activatedPhotoAccount: PhotoAccountAccess?
   @ObservationIgnored private var diagnosticAccountState: NativeDiagnosticAccountState?
   @ObservationIgnored private var consumerObservation = UUID()
   @ObservationIgnored private var syncIntent = UUID()
@@ -314,6 +315,7 @@ enum ReviewedPhotosBackupPolicy {
     }
     ImageCache.shared.costLimit = 48 * 1024 * 1024
     vault.onLock = { [weak self] in
+      self?.activatedPhotoAccount = nil
       self?.consumerObservation = UUID()
       self?.consumerSyncSummary = ConsumerSyncSummary()
       self?.backup.pause()
@@ -332,23 +334,36 @@ enum ReviewedPhotosBackupPolicy {
     resetConsumerSyncObservation()
     diagnostics.record(NativeDiagnosticEvent(phase: .app, outcome: .started))
   }
+  var photoAccountAccess: PhotoAccountAccess? {
+    guard session.isSignedIn || session.fixture, vault.isUnlocked,
+      let account = session.accountId, store.root.lastPathComponent == account else { return nil }
+    let access = PhotoAccountAccess(account: account, vault: vault.generation, catalog: ObjectIdentifier(store))
+    return access == activatedPhotoAccount ? access : nil
+  }
   func activateAccount() throws {
+    activatedPhotoAccount = nil
     backup.pause()
     guard let id = session.accountId else { throw FotoroError("Authenticate first") }
     if store.root.lastPathComponent != id { localSearch?.clearSyncedAnnotations() }
     journal.pause(cancelBackground: store.root.lastPathComponent != id)
-    store = try LibraryStore(root: storageRoot.appendingPathComponent(id))
-    try store.setSyncEnabled(false)
-    backup = try PhotosBackup(store: store)
-    importer = PhotoImport(store: store)
-    journal = TransferJournal(store: store, api: api, vault: vault)
-    annotations = AnnotationSync(ledger: AnnotationLedger(store: store, accountId: id))
+    let catalog = try LibraryStore(root: storageRoot.appendingPathComponent(id))
+    try catalog.setSyncEnabled(false)
+    let nextBackup = try PhotosBackup(store: catalog)
+    let nextImporter = PhotoImport(store: catalog)
+    let nextJournal = TransferJournal(store: catalog, api: api, vault: vault)
+    let nextAnnotations = AnnotationSync(ledger: AnnotationLedger(store: catalog, accountId: id))
     try BackgroundUploadTransport.shared.configure(accountId: id, fixture: session.fixture, baseURL: api.baseURL)
+    store = catalog
+    backup = nextBackup
+    importer = nextImporter
+    journal = nextJournal
+    annotations = nextAnnotations
     UserDefaults.standard.removeObject(forKey: "fotoro.manualLock." + id)
     photoAnnotations = [:]
     try reload()
     try hydrateLocalAnnotations()
     resetConsumerSyncObservation()
+    activatedPhotoAccount = PhotoAccountAccess(account: id, vault: vault.generation, catalog: ObjectIdentifier(store))
   }
   func startPhotosBackup(selection: [RecentPhotoSource]? = nil) throws {
     guard session.isSignedIn else { throw FotoroError("Sign in to save your picks.") }
@@ -613,13 +628,8 @@ enum ReviewedPhotosBackupPolicy {
       session.fixture = true
       session.accountId = accounts.accounts[index].accountId
       UserDefaults.standard.set(session.accountId, forKey: "fotoro.fixtureAccount")
-      store = try LibraryStore(root: storageRoot.appendingPathComponent(session.accountId!))
-      backup = try PhotosBackup(store: store)
-      importer = PhotoImport(store: store)
-      journal = TransferJournal(store: store, api: api, vault: vault)
-      annotations = AnnotationSync(ledger: AnnotationLedger(store: store, accountId: session.accountId!))
       try await vault.recover(secret: Data(b64: accounts.testSecrets[index].recoverySecret))
-      try reload()
+      try activateAccount()
       try await sync()
     }
   #endif
@@ -729,6 +739,7 @@ enum ReviewedPhotosBackupPolicy {
     try reloadAnnotations()
   }
   func sync() async throws {
+    guard photoAccountAccess != nil else { throw FotoroError("Open Fotoro before loading saved photos.") }
     let bundle = try vault.requireBundle()
     let started = ProcessInfo.processInfo.systemUptime
     var outcome = NativeDiagnosticOutcome.failed

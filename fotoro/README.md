@@ -34,6 +34,8 @@ on each device.
 
 In the browser, Open photos selects JPEG/PNG files for a local session. Search,
 day grouping, zoom and original sharing/download work without an account. The
+selection's Save action carries the chosen originals through password entry and
+starts the same manual save once the account opens. Saved photos opens read-only.
 browser cannot scan the iPhone Photos library. Settings optionally enables local
 English text recognition and retained search. Retention saves encrypted labels,
 text, preferences and up to 100 MiB of previews using a browser-held key; originals

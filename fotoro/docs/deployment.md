@@ -24,20 +24,24 @@ A Worker preview with a different RP creates different passkey credentials. Do n
 
 ## Current state
 
-Worker `71177dd1-b155-436e-b87a-85b48723c43e`, tagged
-`direct-photos-20261002`, is read back at 100%. Saved photos opens directly;
-one password field opens the account. Legacy passkeys stay in collapsed Settings.
+Worker `3c2a139f-59d4-4c66-804b-e9c2946a00a8`, tagged
+`save-handoff-20261002`, is read back at 100%. The selection's explicit Save
+continues through password entry once the current account opens. Saved photos
+opens read-only; legacy passkeys stay in collapsed Settings.
 Uploads and annotation writes still require an explicit Save or Continue.
 Bounded failure fields and stored Worker logs remain enabled. Production D1/R2
 bindings and five migrations are unchanged. Canonical API and exact signed
 association checks pass.
 
-The direct-photo cleanup passed 190 full-app, 50 local-preview and 180 web tests,
-typechecks and the production web build. Development-signed Release 0.1.0 (13)
-passes signature and exact production association checks without a local-preview
-encryption exemption. CoreDevice reports successful installation over the existing
-phone app. The connection dropped before launch/version readback; those checks
-remain open. Owner authentication and private-photo saving remain unverified.
+The handoff passed 193 full-app, 50 local-preview and 189 web tests, core checks,
+typechecks and the production web build. Live 390×844 browser QA verifies a
+public local image's Save opens one password field, Back preserves the selection,
+and the Save target is 44 px tall without horizontal overflow.
+Development-signed Release 0.1.0 (14) passes strict signature and exact production
+association checks without a local-preview encryption exemption. It is ready but
+not installed because the paired phone is disconnected. CoreDevice previously
+reported successful build 13 installation; its launch/version readback remains
+open. Owner authentication and private-photo saving remain unverified.
 Build 4's TestFlight compliance gate is unchanged. See
 [verification](verification.md) for the consumer acceptance evidence.
 
