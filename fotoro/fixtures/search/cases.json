@@ -1,0 +1,564 @@
+{
+  "version": 1,
+  "fixedAt": "2026-10-01",
+  "clock": "2026-10-01T12:00:00Z",
+  "description": "Predeclared local retrieval checks. Synthetic source facts and supplied labels are test data, not assertions about actual people or automatic identity. Visual-only tasks intentionally have no model/label evidence. No account/photo network data. Covered completed-word denominator=20. Development fixtures are not a held-out user corpus.",
+  "records": [
+    {
+      "version": 1,
+      "scope": "local",
+      "favorite": false,
+      "captureVerified": true,
+      "capturedAt": "2020-05-01T12:00:00Z",
+      "previewAvailable": true,
+      "originalAvailable": true,
+      "labels": [
+        "Ronald"
+      ],
+      "keywords": [],
+      "facts": [],
+      "id": "ronald-label",
+      "filename": "IMG_001.jpg"
+    },
+    {
+      "version": 1,
+      "scope": "local",
+      "favorite": true,
+      "captureVerified": true,
+      "capturedAt": "2026-10-01T12:00:00Z",
+      "previewAvailable": true,
+      "originalAvailable": true,
+      "labels": [],
+      "keywords": [],
+      "facts": [],
+      "id": "ronald-mention",
+      "filename": "Ronald.jpg"
+    },
+    {
+      "version": 1,
+      "scope": "local",
+      "favorite": false,
+      "captureVerified": true,
+      "capturedAt": "2026-09-10T12:00:00Z",
+      "previewAvailable": true,
+      "originalAvailable": true,
+      "labels": [
+        "Rosa"
+      ],
+      "keywords": [],
+      "facts": [],
+      "id": "rosa-label",
+      "filename": "IMG_002.jpg"
+    },
+    {
+      "version": 1,
+      "scope": "local",
+      "favorite": false,
+      "captureVerified": true,
+      "capturedAt": "2026-09-10T12:00:00Z",
+      "previewAvailable": true,
+      "originalAvailable": true,
+      "labels": [
+        "Éléna"
+      ],
+      "keywords": [],
+      "facts": [],
+      "id": "elena-label",
+      "filename": "IMG_003.jpg"
+    },
+    {
+      "version": 1,
+      "scope": "local",
+      "favorite": false,
+      "captureVerified": true,
+      "capturedAt": "2026-09-10T12:00:00Z",
+      "previewAvailable": true,
+      "originalAvailable": true,
+      "labels": [],
+      "keywords": [
+        "Rome"
+      ],
+      "facts": [
+        "41.9028, 12.4964"
+      ],
+      "id": "rome",
+      "filename": "IMG_004.jpg"
+    },
+    {
+      "version": 1,
+      "scope": "local",
+      "favorite": false,
+      "captureVerified": true,
+      "capturedAt": "2026-09-10T12:00:00Z",
+      "previewAvailable": true,
+      "originalAvailable": true,
+      "labels": [],
+      "keywords": [
+        "Singapore"
+      ],
+      "facts": [
+        "1.3521, 103.8198"
+      ],
+      "id": "singapore",
+      "filename": "IMG_005.jpg"
+    },
+    {
+      "version": 1,
+      "scope": "local",
+      "favorite": false,
+      "captureVerified": true,
+      "capturedAt": "2026-09-10T12:00:00Z",
+      "previewAvailable": true,
+      "originalAvailable": true,
+      "labels": [],
+      "keywords": [
+        "Brooklyn"
+      ],
+      "facts": [],
+      "id": "brooklyn",
+      "filename": "IMG_006.jpg"
+    },
+    {
+      "version": 1,
+      "scope": "local",
+      "favorite": false,
+      "captureVerified": true,
+      "capturedAt": "2026-09-10T12:00:00Z",
+      "previewAvailable": true,
+      "originalAvailable": true,
+      "labels": [],
+      "keywords": [],
+      "facts": [],
+      "id": "receipt",
+      "filename": "neutral-a.png",
+      "ocr": {
+        "text": "SEATTLE RECEIPT INVOICE 4826 TOTAL 28.50",
+        "confidence": 0.94,
+        "status": "complete",
+        "processor": "fixture-v1"
+      }
+    },
+    {
+      "version": 1,
+      "scope": "local",
+      "favorite": false,
+      "captureVerified": true,
+      "capturedAt": "2026-09-10T12:00:00Z",
+      "previewAvailable": true,
+      "originalAvailable": true,
+      "labels": [],
+      "keywords": [],
+      "facts": [],
+      "id": "boarding",
+      "filename": "neutral-b.png",
+      "ocr": {
+        "text": "BOARDING PASS FLIGHT BOSTON GATE TWELVE",
+        "confidence": 0.98,
+        "status": "complete",
+        "processor": "fixture-v1"
+      }
+    },
+    {
+      "version": 1,
+      "scope": "local",
+      "favorite": false,
+      "captureVerified": true,
+      "capturedAt": "2026-09-10T12:00:00Z",
+      "previewAvailable": true,
+      "originalAvailable": true,
+      "labels": [],
+      "keywords": [],
+      "facts": [],
+      "id": "wifi",
+      "filename": "neutral-c.png",
+      "ocr": {
+        "text": "WIFI PASSWORD ORCHID",
+        "confidence": 0.97,
+        "status": "complete",
+        "processor": "fixture-v1"
+      }
+    },
+    {
+      "version": 1,
+      "scope": "local",
+      "favorite": false,
+      "captureVerified": true,
+      "capturedAt": "2026-09-10T12:00:00Z",
+      "previewAvailable": true,
+      "originalAvailable": true,
+      "labels": [],
+      "keywords": [],
+      "facts": [],
+      "id": "appointment",
+      "filename": "neutral-d.png",
+      "ocr": {
+        "text": "APPOINTMENT DENTIST FRIDAY",
+        "confidence": 0.92,
+        "status": "complete",
+        "processor": "fixture-v1"
+      }
+    },
+    {
+      "version": 1,
+      "scope": "local",
+      "favorite": false,
+      "captureVerified": true,
+      "capturedAt": "2026-09-10T12:00:00Z",
+      "previewAvailable": true,
+      "originalAvailable": true,
+      "labels": [
+        "Birthday"
+      ],
+      "keywords": [],
+      "facts": [],
+      "id": "birthday",
+      "filename": "IMG_007.jpg"
+    },
+    {
+      "version": 1,
+      "scope": "local",
+      "favorite": false,
+      "captureVerified": true,
+      "capturedAt": "2026-09-10T12:00:00Z",
+      "previewAvailable": true,
+      "originalAvailable": true,
+      "labels": [
+        "Graduation"
+      ],
+      "keywords": [],
+      "facts": [],
+      "id": "graduation",
+      "filename": "IMG_008.jpg"
+    },
+    {
+      "version": 1,
+      "scope": "local",
+      "favorite": false,
+      "captureVerified": true,
+      "capturedAt": "2026-09-10T12:00:00Z",
+      "previewAvailable": true,
+      "originalAvailable": true,
+      "labels": [
+        "Holiday"
+      ],
+      "keywords": [],
+      "facts": [],
+      "id": "holiday",
+      "filename": "IMG_009.jpg"
+    },
+    {
+      "version": 1,
+      "scope": "local",
+      "favorite": false,
+      "captureVerified": true,
+      "capturedAt": "2026-09-10T12:00:00Z",
+      "previewAvailable": true,
+      "originalAvailable": true,
+      "labels": [
+        "Bicycle"
+      ],
+      "keywords": [],
+      "facts": [],
+      "id": "bike",
+      "filename": "IMG_010.jpg"
+    },
+    {
+      "version": 1,
+      "scope": "local",
+      "favorite": false,
+      "captureVerified": true,
+      "capturedAt": "2026-09-10T12:00:00Z",
+      "previewAvailable": true,
+      "originalAvailable": true,
+      "labels": [
+        "Red jacket"
+      ],
+      "keywords": [],
+      "facts": [],
+      "id": "jacket",
+      "filename": "IMG_011.jpg"
+    },
+    {
+      "version": 1,
+      "scope": "local",
+      "favorite": false,
+      "captureVerified": true,
+      "capturedAt": "2026-09-10T12:00:00Z",
+      "previewAvailable": true,
+      "originalAvailable": true,
+      "labels": [
+        "Books"
+      ],
+      "keywords": [],
+      "facts": [],
+      "id": "books",
+      "filename": "IMG_012.jpg"
+    },
+    {
+      "version": 1,
+      "scope": "local",
+      "favorite": true,
+      "captureVerified": true,
+      "capturedAt": "2026-09-10T12:00:00Z",
+      "previewAvailable": true,
+      "originalAvailable": true,
+      "labels": [
+        "Coffee"
+      ],
+      "keywords": [],
+      "facts": [],
+      "id": "coffee",
+      "filename": "IMG_013.jpg"
+    },
+    {
+      "version": 1,
+      "scope": "local",
+      "favorite": false,
+      "captureVerified": true,
+      "capturedAt": "2026-09-10T12:00:00Z",
+      "previewAvailable": true,
+      "originalAvailable": true,
+      "labels": [],
+      "keywords": [],
+      "facts": [],
+      "id": "visual-only",
+      "filename": "IMG_014.jpg"
+    }
+  ],
+  "retrievalTasks": [
+    {
+      "id": "covered-01",
+      "query": "Ronald",
+      "classification": "covered",
+      "acceptablePhotoIDs": [
+        "ronald-label"
+      ]
+    },
+    {
+      "id": "covered-02",
+      "query": "Rosa",
+      "classification": "covered",
+      "acceptablePhotoIDs": [
+        "rosa-label"
+      ]
+    },
+    {
+      "id": "covered-03",
+      "query": "Elena",
+      "classification": "covered",
+      "acceptablePhotoIDs": [
+        "elena-label"
+      ]
+    },
+    {
+      "id": "covered-04",
+      "query": "Rome",
+      "classification": "covered",
+      "acceptablePhotoIDs": [
+        "rome"
+      ]
+    },
+    {
+      "id": "covered-05",
+      "query": "Singapore",
+      "classification": "covered",
+      "acceptablePhotoIDs": [
+        "singapore"
+      ]
+    },
+    {
+      "id": "covered-06",
+      "query": "Brooklyn",
+      "classification": "covered",
+      "acceptablePhotoIDs": [
+        "brooklyn"
+      ]
+    },
+    {
+      "id": "covered-07",
+      "query": "Seattle",
+      "classification": "covered",
+      "acceptablePhotoIDs": [
+        "receipt"
+      ]
+    },
+    {
+      "id": "covered-08",
+      "query": "Invoice",
+      "classification": "covered",
+      "acceptablePhotoIDs": [
+        "receipt"
+      ]
+    },
+    {
+      "id": "covered-09",
+      "query": "Receipt",
+      "classification": "covered",
+      "acceptablePhotoIDs": [
+        "receipt"
+      ]
+    },
+    {
+      "id": "covered-10",
+      "query": "Boarding",
+      "classification": "covered",
+      "acceptablePhotoIDs": [
+        "boarding"
+      ]
+    },
+    {
+      "id": "covered-11",
+      "query": "Boston",
+      "classification": "covered",
+      "acceptablePhotoIDs": [
+        "boarding"
+      ]
+    },
+    {
+      "id": "covered-12",
+      "query": "Orchid",
+      "classification": "covered",
+      "acceptablePhotoIDs": [
+        "wifi"
+      ]
+    },
+    {
+      "id": "covered-13",
+      "query": "Dentist",
+      "classification": "covered",
+      "acceptablePhotoIDs": [
+        "appointment"
+      ]
+    },
+    {
+      "id": "covered-14",
+      "query": "Birthday",
+      "classification": "covered",
+      "acceptablePhotoIDs": [
+        "birthday"
+      ]
+    },
+    {
+      "id": "covered-15",
+      "query": "Graduation",
+      "classification": "covered",
+      "acceptablePhotoIDs": [
+        "graduation"
+      ]
+    },
+    {
+      "id": "covered-16",
+      "query": "Holiday",
+      "classification": "covered",
+      "acceptablePhotoIDs": [
+        "holiday"
+      ]
+    },
+    {
+      "id": "covered-17",
+      "query": "Bicycle",
+      "classification": "covered",
+      "acceptablePhotoIDs": [
+        "bike"
+      ]
+    },
+    {
+      "id": "covered-18",
+      "query": "Red jacket",
+      "classification": "covered",
+      "acceptablePhotoIDs": [
+        "jacket"
+      ]
+    },
+    {
+      "id": "covered-19",
+      "query": "Books",
+      "classification": "covered",
+      "acceptablePhotoIDs": [
+        "books"
+      ]
+    },
+    {
+      "id": "covered-20",
+      "query": "Coffee",
+      "classification": "covered",
+      "acceptablePhotoIDs": [
+        "coffee"
+      ]
+    },
+    {
+      "id": "visual-01",
+      "query": "sunset silhouette",
+      "classification": "uncovered-visual",
+      "acceptablePhotoIDs": []
+    },
+    {
+      "id": "visual-02",
+      "query": "blue umbrella",
+      "classification": "uncovered-visual",
+      "acceptablePhotoIDs": []
+    },
+    {
+      "id": "visual-03",
+      "query": "snowy mountain",
+      "classification": "uncovered-visual",
+      "acceptablePhotoIDs": []
+    },
+    {
+      "id": "visual-04",
+      "query": "sleeping cat",
+      "classification": "uncovered-visual",
+      "acceptablePhotoIDs": []
+    },
+    {
+      "id": "visual-05",
+      "query": "beach landscape",
+      "classification": "uncovered-visual",
+      "acceptablePhotoIDs": []
+    },
+    {
+      "id": "absent-01",
+      "query": "Nairobi",
+      "classification": "absent",
+      "acceptablePhotoIDs": []
+    },
+    {
+      "id": "absent-02",
+      "query": "Zachary",
+      "classification": "absent",
+      "acceptablePhotoIDs": []
+    },
+    {
+      "id": "absent-03",
+      "query": "Refund",
+      "classification": "absent",
+      "acceptablePhotoIDs": []
+    },
+    {
+      "id": "absent-04",
+      "query": "2029",
+      "classification": "absent",
+      "acceptablePhotoIDs": []
+    },
+    {
+      "id": "absent-05",
+      "query": "Dragonfruit",
+      "classification": "absent",
+      "acceptablePhotoIDs": []
+    }
+  ],
+  "adversarialRules": [
+    "R and Ro expose alternatives; Ron narrows; accepted Ronald excludes Rome/Rosa.",
+    "Direct supplied Ronald label outranks recent/favorite/repeatedly inspected filename mention.",
+    "Inspecting preview records neither completion acceptance nor confirmed use.",
+    "Meaning acceptance and confirmed use are distinct idempotent events per session and decay half in 30 days.",
+    "A 100-frame Rome burst creates no popularity advantage over the same supported Rome meaning without the burst.",
+    "Equal-display Ronald label and text meanings remain relation distinct.",
+    "Source filtering precedes six-meaning/200-photo caps; older in-scope records remain eligible.",
+    "Prefix extension explores the full range, including meanings beyond previous six.",
+    "An explicit compatible pin changes representative; permission withdrawal invalidates pin.",
+    "Prefix extension keeps same-meaning best-evidence photo stable; incompatible continuation replaces it.",
+    "Missing or future capture date is not a verified recency signal.",
+    "Stale OCR/preview/retention writes cannot resurrect cleared or unauthorized records."
+  ]
+}

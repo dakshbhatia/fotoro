@@ -5,6 +5,10 @@ import type { RemotePullOpts } from "@/components/gallery";
 import { TakeoutOptions } from "@/components/TakeoutOptions";
 import { UploadConfirmationDialog } from "@/components/UploadConfirmationDialog";
 import { downloadAppDialogAttributes } from "@/components/utils/download";
+import {
+    uploadOutcome,
+    type UploadActivityPhase,
+} from "@/services/fotoro-library";
 import type {
     ImportSource,
     InProgressUpload,
@@ -98,6 +102,8 @@ import { t } from "i18next";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 
 interface UploadProps {
+    reviewRequest?: number;
+    onUploadStateChange?: (phase: UploadActivityPhase) => void;
     user?: LocalUser;
     isFirstUpload?: boolean;
     uploadTypeSelectorView: boolean;
@@ -196,6 +202,9 @@ export const Upload: React.FC<UploadProps> = ({
     const { isInternalUser } = useSettingsSnapshot();
 
     const [uploadProgressView, setUploadProgressView] = useState(false);
+    useEffect(() => {
+        if (props.reviewRequest) setUploadProgressView(true);
+    }, [props.reviewRequest]);
     const [
         showCanvasReadbackBlockedDialog,
         setShowCanvasReadbackBlockedDialog,
@@ -996,6 +1005,7 @@ export const Upload: React.FC<UploadProps> = ({
     const preUploadAction = async (
         parsedMetadataJSONMap?: Map<string, ParsedMetadataJSON>,
     ) => {
+        props.onUploadStateChange?.("uploading");
         uploadManager.prepareForNewUpload(parsedMetadataJSONMap);
         uploadManager.showUploadProgressDialog();
         await onRemotePull({ silent: true, source: "pre-upload" });
@@ -1063,7 +1073,13 @@ export const Upload: React.FC<UploadProps> = ({
                     watcher.resumePausedSync();
                 }
             }
+            props.onUploadStateChange?.(
+                uploadOutcome(
+                    batchResult.itemResults.map(({ result }) => result),
+                ),
+            );
         } catch (e) {
+            props.onUploadStateChange?.("error");
             log.error("Failed to upload files", e);
             closeUploadProgress();
             notifyUser(e);
@@ -1098,7 +1114,13 @@ export const Upload: React.FC<UploadProps> = ({
                 retrySharedAlbumUploadTarget.current,
                 retryImportTakeoutFavorites.current,
             );
+            props.onUploadStateChange?.(
+                uploadOutcome(
+                    batchResult.itemResults.map(({ result }) => result),
+                ),
+            );
         } catch (e) {
+            props.onUploadStateChange?.("error");
             log.error("Retrying failed uploads failed", e);
             closeUploadProgress();
             notifyUser(e);
@@ -1221,6 +1243,7 @@ export const Upload: React.FC<UploadProps> = ({
                 onSelect={handleUploadTypeSelect}
             />
             <UploadProgress
+                reviewRequest={props.reviewRequest}
                 open={uploadProgressView}
                 onClose={closeUploadProgress}
                 percentComplete={percentComplete}

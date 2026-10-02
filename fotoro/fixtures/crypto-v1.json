@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "constants": {
+    "secretstreamKeyBytes": 32,
+    "secretstreamHeaderBytes": 24,
+    "secretstreamOverheadBytes": 17,
+    "secretboxNonceBytes": 24,
+    "secretboxMacBytes": 16,
+    "boxPublicKeyBytes": 32,
+    "boxSecretKeyBytes": 32,
+    "sealedBoxOverheadBytes": 48,
+    "signingPublicKeyBytes": 32,
+    "signingSecretKeyBytes": 64,
+    "signatureBytes": 64,
+    "recordBytes": 4194304
+  },
+  "media": {
+    "binding": {
+      "version": 1,
+      "photoId": "00000000-0000-4000-8000-000000000010",
+      "representationId": "00000000-0000-4000-8000-000000000011",
+      "kind": "original"
+    },
+    "key": "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk",
+    "plaintext": "Rm90b3JvIHB1YmxpYyB2ZWN0b3IKT3JpZ2luYWwgYnl0ZXMgcHJlc2VydmVkLg",
+    "plaintextSha256": "s68bSjsyPVR7H89Zb1zYI5My0H4Syc8HNVtwnhKuDzo",
+    "container": "ZIw2NFjC7KaSy_ZRumdBzyvNRV_z3XTJAAAAJUX9zRUoOFJc--lzNHWQTMWHtiNkrJiPNoWDtk7jXuFD2A0YClMAAAArkheBjm_Mdf7AdsVxBACf4cBGStzAEbFyfPgpM6iedy_xPLmeYBEZQmhWoQ",
+    "chunks": [
+      "ZIw2NFjC7KaSy_ZRumdBzyvNRV_z3XTJ",
+      "AAAAJUX9zRUoOFJc--lzNHWQTMWHtiNkrJiPNoWDtk7jXuFD2A0YClM",
+      "AAAAK5IXgY5vzHX-wHbFcQQAn-HARkrcwBGxcnz4KTOonncv8Ty5nmARGUJoVqE"
+    ]
+  },
+  "wrappedKey": {
+    "version": 1,
+    "nonce": "L4BJADukPKSK-cuBH0Qato-RX0lVuAVL",
+    "ciphertext": "uSQkAKeEo4ZlLx8uL8fcled-345qf_NYVAwwySmZTP7cYPr8pYXwAHgI5taBfTMy"
+  },
+  "share": {
+    "binding": {
+      "version": 1,
+      "grantId": "00000000-0000-4000-8000-000000000020",
+      "photoId": "00000000-0000-4000-8000-000000000010",
+      "senderAccountId": "00000000-0000-4000-8000-000000000001",
+      "recipientAccountId": "00000000-0000-4000-8000-000000000002"
+    },
+    "envelope": {
+      "version": 1,
+      "grantId": "00000000-0000-4000-8000-000000000020",
+      "photoId": "00000000-0000-4000-8000-000000000010",
+      "senderAccountId": "00000000-0000-4000-8000-000000000001",
+      "recipientAccountId": "00000000-0000-4000-8000-000000000002",
+      "sealedMetadataKey": "xhDyUg17i6edOo-yV7fwmpMS7TlGvRhcJciPNpA9vS-fTUZRwqNffJ6inRq9JezXW3gASbR1B9Yx93A8UeoZODP1_HNNT08VZSAPSInpv84",
+      "senderSignature": "irsEewXxC6PlLTJ55RaFt8peFthfSo3eR-n8GgRmc9Z28iGcK-aY5DTyDt7L7kFEflvd7HiV9tFc1cMCS5rDBQ"
+    }
+  },
+  "signed": {
+    "version": 1,
+    "kind": "vector",
+    "accountId": "00000000-0000-4000-8000-000000000001",
+    "body": "Rm90b3JvIHB1YmxpYyB2ZWN0b3IKT3JpZ2luYWwgYnl0ZXMgcHJlc2VydmVkLg",
+    "signature": "oj--TLSCL6mNbow93AD_0WMioBe8t5nJ3lCeiCRV5pYPBVA6qNdJroqEB9TgWoVyfQQ7yDogMEQ4UfA1pGauDg"
+  },
+  "negative": {
+    "wrongKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "wrongBinding": {
+      "version": 1,
+      "photoId": "00000000-0000-4000-8000-000000000010",
+      "representationId": "00000000-0000-4000-8000-000000000011",
+      "kind": "preview"
+    },
+    "truncated": "ZIw2NFjC7KaSy_ZRumdBzyvNRV_z3XTJAAAAJUX9zRUoOFJc--lzNHWQTMWHtiNkrJiPNoWDtk7jXuFD2A0YClMAAAArkheBjm_Mdf7AdsVxBACf4cBGStzAEbFyfPgpM6iedy_xPLmeYBEZQmhW",
+    "reordered": "ZIw2NFjC7KaSy_ZRumdBzyvNRV_z3XTJAAAAK5IXgY5vzHX-wHbFcQQAn-HARkrcwBGxcnz4KTOonncv8Ty5nmARGUJoVqEAAAAlRf3NFSg4Ulz76XM0dZBMxYe2I2SsmI82hYO2TuNe4UPYDRgKUw",
+    "trailing": "ZIw2NFjC7KaSy_ZRumdBzyvNRV_z3XTJAAAAJUX9zRUoOFJc--lzNHWQTMWHtiNkrJiPNoWDtk7jXuFD2A0YClMAAAArkheBjm_Mdf7AdsVxBACf4cBGStzAEbFyfPgpM6iedy_xPLmeYBEZQmhWoQA"
+  }
+}

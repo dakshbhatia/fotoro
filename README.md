@@ -1,3 +1,26 @@
+# Fotoro
+
+Private photo library and exchange app. The active native SwiftUI, React web and
+Cloudflare API build lives in [fotoro/](fotoro/README.md). Intended domain:
+`fotoro.cloud` (not deployed). This repository retains [Ente](https://github.com/ente/ente)
+as an attributed reference.
+
+- [Product direction and next work](docs/ai-photos/product.md)
+- [Run the local preview and native build](fotoro/README.md)
+- [Deployment plan](fotoro/docs/deployment.md)
+- [Verification and current limits](fotoro/docs/verification.md)
+
+The current development build supports encrypted original preservation,
+recovery, explicit two-person sharing, save/contribute and revocation. Local
+checks pass; physical-device, performance and public-release gates remain.
+Earlier Ente-based `/library` and `/intelligence` experiments remain reference work.
+
+## Upstream Ente documentation
+
+The original project documentation follows. Its service offerings and audits
+refer to Ente; they do not establish validation of Fotoro's additions. Original
+licensing and attribution are retained.
+
 <div align="center">
 
 <img src=".github/assets/ente-rocketship.png" width="400"/>

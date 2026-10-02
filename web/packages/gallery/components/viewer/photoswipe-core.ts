@@ -79,6 +79,7 @@ export interface FileViewerPhotoSwipeCoreOptions<
     T extends FileViewerPhotoSwipeAnnotatedFile =
         FileViewerPhotoSwipeAnnotatedFile,
 > {
+    appearance?: "fotoro";
     initialIndex: number;
     showFullscreenButton?: boolean;
     disableEscapeClose?: boolean;
@@ -106,6 +107,10 @@ export const moreMenuID = "ente-pswp-more-menu";
 
 const fullscreenControlsAutoHideDelayMS = 3000;
 
+const fotoroArrowSVG = `<svg aria-hidden="true" class="pswp__icn" viewBox="0 0 24 24"
+fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+<path d="m15 4-8 8 8 8" /></svg>`;
+
 export class FileViewerPhotoSwipe<
     T extends FileViewerPhotoSwipeAnnotatedFile =
         FileViewerPhotoSwipeAnnotatedFile,
@@ -117,6 +122,7 @@ export class FileViewerPhotoSwipe<
         haveUser,
         isPublicAlbum,
         publicAlbumLogoHTML,
+        appearance,
         showSocialButtons,
         enableComment,
         showFullscreenButton,
@@ -134,8 +140,13 @@ export class FileViewerPhotoSwipe<
         onMore,
     }: FileViewerPhotoSwipeCoreOptions<T>) {
         const pswp = new PhotoSwipe({
+            ...(appearance === "fotoro"
+                ? { arrowPrevSVG: fotoroArrowSVG, arrowNextSVG: fotoroArrowSVG }
+                : {}),
             bgOpacity: 1,
             showHideAnimationType: "fade",
+            showAnimationDuration: appearance === "fotoro" ? 180 : 333,
+            hideAnimationDuration: appearance === "fotoro" ? 180 : 333,
             // PhotoSwipe otherwise closes a loaded thumbnail that cannot zoom.
             clickToCloseNonZoomable: false,
             // The background boundary is ambiguous, so taps only toggle controls.
@@ -164,9 +175,11 @@ export class FileViewerPhotoSwipe<
             // PhotoSwipe's focus trap conflicts with MUI drawers and fast swipes.
             trapFocus: false,
             index: initialIndex,
-            mainClass: isPublicAlbum
-                ? "pswp-ente pswp-ente-public-album"
-                : "pswp-ente",
+            mainClass:
+                (isPublicAlbum
+                    ? "pswp-ente pswp-ente-public-album"
+                    : "pswp-ente") +
+                (appearance === "fotoro" ? " pswp-fotoro" : ""),
             closeTitle: t("close"),
             zoomTitle: t("zoom"),
             arrowPrevTitle: t("previous"),

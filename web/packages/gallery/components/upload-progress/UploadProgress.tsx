@@ -14,6 +14,7 @@ import { StopUploadConfirmationDialog } from "./StopUploadConfirmationDialog";
 import { UploadProgressDialog } from "./UploadProgressDialog";
 
 interface UploadProgressProps {
+    reviewRequest?: number;
     open: boolean;
     onClose: () => void;
     uploadCounter: UploadCounter;
@@ -37,6 +38,7 @@ export function UploadProgress(props: UploadProgressProps) {
 }
 
 function UploadProgressBody({
+    reviewRequest,
     onClose,
     uploadCounter,
     uploadPhase,
@@ -57,6 +59,13 @@ function UploadProgressBody({
     useEffect(() => {
         if (uploadPhase == "preparing") setSummaryMode(undefined);
     }, [uploadPhase]);
+
+    useEffect(() => {
+        if (reviewRequest) {
+            setExpanded(true);
+            setSummaryMode("review");
+        }
+    }, [reviewRequest]);
 
     const handleClose = () =>
         uploadPhase == "done" ? onClose() : setShowStopConfirmation(true);

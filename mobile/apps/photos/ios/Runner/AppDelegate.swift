@@ -4,13 +4,13 @@ import UIKit
 import UserNotifications
 import app_links
 import ente_background_manager
+import receive_sharing_intent
 import workmanager_apple
 
 @main
-@objc class AppDelegate: FlutterAppDelegate {
+@objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private static let workmanagerDebugThreadIdentifier =
     "io.ente.frame.workmanager.debug"
-  private let foregroundHeartbeat = ForegroundHeartbeat()
 
   override func application(
     _ application: UIApplication,
@@ -33,7 +33,6 @@ import workmanager_apple
       UNUserNotificationCenter.current().delegate = self as UNUserNotificationCenterDelegate
     }
 
-    GeneratedPluginRegistrant.register(with: self)
     BackgroundManagerPlugin.install(
       isEnabled: { Self.shouldUseNativeBackgroundManager() },
       registrant: { registry in GeneratedPluginRegistrant.register(with: registry) }
@@ -45,21 +44,18 @@ import workmanager_apple
     WorkmanagerPlugin.setPluginRegistrantCallback { registry in
       GeneratedPluginRegistrant.register(with: registry)
     }
-    var freqInMinutes = 30 * 60
+    let freqInMinutes = 30 * 60
     WorkmanagerPlugin.registerPeriodicTask(
       withIdentifier: "io.ente.frame.iOSBackgroundAppRefresh",
       frequency: NSNumber(value: freqInMinutes))
     WorkmanagerPlugin.registerBGProcessingTask(
       withIdentifier: "io.ente.frame.iOSBackgroundProcessing")
 
-    if let url = AppLinks.shared.getLink(launchOptions: launchOptions) {
-      // only accept non-homewidget urls for AppLinks
-      if !url.absoluteString.contains("homeWidget") {
-        AppLinks.shared.handleLink(url: url)
-      }
-    }
-
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
+    GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
   }
 
   private func configureWorkmanagerDebugHandler() {
@@ -106,21 +102,6 @@ import workmanager_apple
     return json["internalUser"] as? Bool ?? false
   }
 
-  override func applicationDidBecomeActive(_ application: UIApplication) {
-    foregroundHeartbeat.start()
-    signal(SIGPIPE, SIG_IGN)
-  }
-
-  override func applicationWillEnterForeground(_ application: UIApplication) {
-    foregroundHeartbeat.start()
-    signal(SIGPIPE, SIG_IGN)
-  }
-
-  override func applicationDidEnterBackground(_ application: UIApplication) {
-    foregroundHeartbeat.stop()
-    super.applicationDidEnterBackground(application)
-  }
-
   override func userNotificationCenter(
     _ center: UNUserNotificationCenter,
     willPresent notification: UNNotification,
@@ -144,5 +125,82 @@ import workmanager_apple
     } else {
       completionHandler([.alert, .sound, .badge])
     }
+  }
+}
+
+// Keep this in the existing Runner source so every build configuration includes it.
+class SceneDelegate: FlutterSceneDelegate {
+  private let foregroundHeartbeat = ForegroundHeartbeat()
+
+  override func scene(
+    _ scene: UIScene,
+    willConnectTo session: UISceneSession,
+    options connectionOptions: UIScene.ConnectionOptions
+  ) {
+    super.scene(scene, willConnectTo: session, options: connectionOptions)
+    // app_links currently registers application callbacks, not scene callbacks.
+    // Capture the initial link before Dart subscribes, preserving the widget filter.
+    for context in connectionOptions.urlContexts {
+      _ = SwiftReceiveSharingIntentPlugin.instance.application(
+        UIApplication.shared,
+        didFinishLaunchingWithOptions: [UIApplication.LaunchOptionsKey.url: context.url])
+      if !context.url.absoluteString.contains("homeWidget") {
+        AppLinks.shared.handleLink(url: context.url)
+      }
+    }
+    for activity in connectionOptions.userActivities {
+      _ = SwiftReceiveSharingIntentPlugin.instance.application(
+        UIApplication.shared, continue: activity, restorationHandler: { _ in })
+      if let url = activity.webpageURL {
+        AppLinks.shared.handleLink(url: url)
+      }
+    }
+  }
+
+  override func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
+    super.scene(scene, openURLContexts: URLContexts)
+    // Bridge only the URL plugins that still lack scene callbacks.
+    // home_widget 0.10 handles its own scene events through super.
+    for context in URLContexts {
+      var options: [UIApplication.OpenURLOptionsKey: Any] = [
+        .openInPlace: context.options.openInPlace
+      ]
+      if let source = context.options.sourceApplication { options[.sourceApplication] = source }
+      if let annotation = context.options.annotation { options[.annotation] = annotation }
+      _ = SwiftReceiveSharingIntentPlugin.instance.application(
+        UIApplication.shared, open: context.url, options: options)
+      if !context.url.absoluteString.contains("homeWidget") {
+        AppLinks.shared.handleLink(url: context.url)
+      }
+    }
+  }
+
+  override func scene(_ scene: UIScene, continue userActivity: NSUserActivity) {
+    super.scene(scene, continue: userActivity)
+    _ = SwiftReceiveSharingIntentPlugin.instance.application(
+      UIApplication.shared, continue: userActivity, restorationHandler: { _ in })
+    if let url = userActivity.webpageURL { AppLinks.shared.handleLink(url: url) }
+  }
+
+  override func sceneDidBecomeActive(_ scene: UIScene) {
+    super.sceneDidBecomeActive(scene)
+    foregroundHeartbeat.start()
+    signal(SIGPIPE, SIG_IGN)
+  }
+
+  override func sceneWillEnterForeground(_ scene: UIScene) {
+    super.sceneWillEnterForeground(scene)
+    foregroundHeartbeat.start()
+    signal(SIGPIPE, SIG_IGN)
+  }
+
+  override func sceneDidEnterBackground(_ scene: UIScene) {
+    foregroundHeartbeat.stop()
+    super.sceneDidEnterBackground(scene)
+  }
+
+  override func sceneDidDisconnect(_ scene: UIScene) {
+    foregroundHeartbeat.stop()
+    super.sceneDidDisconnect(scene)
   }
 }

@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "accounts": [
+    {
+      "version": 1,
+      "accountId": "00000000-0000-4000-8000-000000000001",
+      "boxPublicKey": "GxtY3VDqFLYNoXt5DNAnVNlwybq4ZOuzwPMBb-UdP1c",
+      "signingPublicKey": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E"
+    },
+    {
+      "version": 1,
+      "accountId": "00000000-0000-4000-8000-000000000002",
+      "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+      "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+    }
+  ],
+  "testSecrets": [
+    {
+      "accountId": "00000000-0000-4000-8000-000000000001",
+      "boxSecretKey": "XOhu-3X6TixBD0bhben2rK4aFwNShlG2m8F2wIi-8-4",
+      "signingSecretKey": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwPtSSjGKNHCxurpAziQWZVhKVknOlxj-TY2wUYUrIc30Q",
+      "vaultKey": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+      "recoverySecret": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "encryptedBundle": {
+        "version": 1,
+        "nonce": "hzQyBBpktrOreBCBpLNFNW7-UemSKpXD",
+        "ciphertext": "2lKmhWPlOGYk3iVOtNVs0iHIzahYhiABwUh25CRoweM0DTWzU3l0bU7Z2VSNCOiSsCwfnLROMRFDiukJVQTwCO-HCrRtWRuddQkeagFI_Q-n5akDmAsl3TN2XwMj3icrELb73MPkZ5oZo6Y_kZYos5LyvGf1VPymIhMtMzJ4JVKWgT0Ny9O64TPE22iG5N7dqPxM0plP-HWbyjljXlBxaG0959WTMCqAVEzbqpJY9gYHtrQaW81bFNhwiFeFeO28c65_2vk7Og4Xbi9LATTwuOatkdD-XIzwoOPuam9nXKgVNcEBDomiTFaeB6FWTq7fmlV5"
+      }
+    },
+    {
+      "accountId": "00000000-0000-4000-8000-000000000002",
+      "boxSecretKey": "qjxia8nDjIwgGHjrsdWwtQrEDomGx4eT2x1O82n8oc4",
+      "signingSecretKey": "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBATKk6wXBRhwcdZ7g8f_Dv6BCOjsRTBXXXcmh5Mz29q-fA",
+      "vaultKey": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY",
+      "recoverySecret": "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg",
+      "encryptedBundle": {
+        "version": 1,
+        "nonce": "VoX6yJu2U3M1NiN9pn9WPRSj0O5PYS29",
+        "ciphertext": "truCnv5CzpA7DAKfX7GgNjV9PJYRRtVVtmcm4LrVE6sx4bliH3L6JqLCfVU5GoBthx6FhSy-aiATcsHS2KDcubgI12hVjrEgipSOSImzMKrC6kS9n6-jDEmBqUoiKL1rLoI76bn-mG0ZqxEwq0aNKGUVUh99LsJ_thvgPaLG6NybK0syu8oLmOFDU9KvT5wiOEfStjocUXfSTb7uaPweLgEVgZj5IUNvYtTNaopNriO6ZTB0oaGDZq_-oPatHSOludV-zQSwapo0XM4JJvdt3tZVtVZdYfbcLAAEE-zkRTz9JMuqDhJv1w5ZjIJuXLHXLlrg"
+      }
+    }
+  ]
+}
