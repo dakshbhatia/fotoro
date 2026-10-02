@@ -41,8 +41,17 @@ Photos, searches permitted photos/text and shares originals; hosted backup is
 excluded. Actual owner TestFlight installation remains a device check.
 App Store Connect also verifies the existing internal group has one tester and
 one build: 0.1.0 (3) is `Testing`, and the requested owner tester is `Invited`.
-The owner can accept that TestFlight invitation and install the preview. Inbox
-delivery and device installation have not been inspected.
+The matching development-signed preview was subsequently installed and launched
+on the connected physical iPhone. CoreDevice verifies version 0.1.0, build 3 and
+its running process. Personal Photos access remains the owner's choice; this
+direct installation does not establish TestFlight invitation acceptance or
+installation through TestFlight.
+
+[PR 4](https://github.com/dakshbhatia/fotoro/pull/4) is now merged at
+`59d66f8506`. Every exact-head native, web/API and repository check completed
+successfully before the merge. It adds linear local/saved search merging, bounded
+error diagnostics, adaptive dark styling and 44 px controls at the smallest
+verified browser width.
 
 An existing local individual App Store Connect key was verified against this
 exact Fotoro app record and copied into private storage outside the repositories.
@@ -58,9 +67,19 @@ An existing Cloudflare account token is active and can list Workers. D1, R2 and
 Workers Domains requests are denied, and it cannot confirm the `fotoro.cloud`
 zone. It is insufficient for this production deployment. Another configured
 Cloudflare token is invalid. No resources in another application were changed.
-The owner still needs to authenticate the intended Cloudflare account with
-access to Fotoro's domain, D1, R2 and Worker. A fresh Wrangler account check remains
-unauthenticated; the open Cloudflare sign-in has not completed.
+The owner is signed in to the intended Cloudflare dashboard. That account now
+has an isolated empty D1 database `fotoro-production` and R2 bucket
+`fotoro-private-production`; bucket public access is disabled. Their production
+bindings and the signed application's association identifier are configured in
+`services/api/wrangler.toml`. A production packaging dry-run lists all five
+bindings without warnings. Remote migrations, Worker deployment and domain
+routing remain unapplied. The action-time Wrangler access grant remains
+unanswered; no new CLI credential has been created.
+
+`fotoro.cloud` is absent from this account's Cloudflare zones and currently uses
+Vercel DNS. Its HTTPS response reports a missing Vercel deployment. The domain
+route must be resolved before claiming a shared iPhone/Safari service; a
+`workers.dev` hostname does not match the configured production passkey RP.
 
 October 1, 2026: the active checkout is `/Users/dakshbhatia/Documents/GitHub/Fotoro`.
 The native/web/API development build runs locally, with the web preview at 4310,
@@ -175,8 +194,9 @@ Organizer can use its existing account and cloud-managed distribution certificat
 The signed IPA was copied from Xcode staging into private release storage and
 audited against the unchanged archive and link map before validation/upload.
 No preview audit was bypassed. A preceding physical preview installation failed
-with CoreDevice4016 while its phone transport was unavailable; no personal phone
-installation is inferred from the TestFlight API state.
+with CoreDevice4016 while its phone transport was unavailable. The later
+connected-device install and launch succeeded independently of the TestFlight
+API state; personal Photos access has not been inspected.
 
 For an individual key, keep metadata authentication (`ASC_KEY_SUBJECT=user`,
 no `ASC_ISSUER_ID`) separate from `altool`'s arguments. Its parser requires an
@@ -210,10 +230,11 @@ localhost on this Mac is not an installable iPhone service.
 Read-only checks of `https://fotoro.cloud/v1/vault` and the HTTPS association route
 currently return 404. This origin is not serving the prepared API/association build.
 
-Production web assets and Worker bundling pass a Wrangler `--dry-run`. Wrangler
-reports missing production D1/R2 bindings: those bindings are not inherited from
-the local environment. Add the real resource identifiers before deployment;
-the dry-run is not a provisioned or usable service.
+Production web assets and Worker bundling pass a Wrangler `--dry-run` with the
+created production D1/R2 bindings, static assets, production authentication and
+Apple association identifier. These bindings are explicit because environments
+do not inherit the local database or bucket. The resources are empty and remote
+migrations remain unapplied; the dry-run is not a deployed or usable service.
 
 After deploying to the intended HTTPS origin, run `pnpm check:service
 https://fotoro.cloud APPLICATION_PREFIX.cloud.fotoro.Fotoro`. It checks the

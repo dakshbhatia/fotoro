@@ -15,6 +15,17 @@ binding = "BUCKET"
 bucket_name = "fotoro-private-local"
 [env.production.vars]
 AUTH_MODE = "production"
+APPLE_APP_IDS = "A7TGPQ27JF.cloud.fotoro.Fotoro"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "fotoro-production"
+database_id = "a2c6f91e-5021-4b2f-8c9a-dfd18a9ea26e"
+migrations_dir = "migrations"
+
+[[env.production.r2_buckets]]
+binding = "BUCKET"
+bucket_name = "fotoro-private-production"
 
 # Build the web application locally first. No provider is provisioned here.
 [env.production.assets]
