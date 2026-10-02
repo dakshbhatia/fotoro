@@ -74,7 +74,10 @@ Each slice needs a short design and reviewable implementation plan before its
 code work starts. Keep separate acceptance evidence for each capability; a
 working preview or inherited Ente feature does not prove the whole beta.
 
-## Deploy and iterate
+## Earlier deployment plan — September 30, 2026
+
+Current deployment and native release status is recorded in
+[the active release setup](../../fotoro/docs/deployment.md).
 
 Code is on GitHub. The custom account library and separate session-only
 intelligence preview run locally; the native build uses upstream onboarding.

@@ -24,6 +24,20 @@ A Worker preview with a different RP creates different passkey credentials. Do n
 
 ## Current state
 
+Worker `82df2ca2-b808-42f8-a38c-ac26779ac157`, tagged
+`consumer-finish-20261002`, now serves the compact gallery and retry-safe API.
+All production bindings remain the existing isolated D1/R2 resources. No new
+migration is required. Canonical API and exact signed association checks pass.
+
+Native automatic picks and picks-only new sync work pass 131 full-app and 49
+local-preview tests. Development-signed Release 0.1.0 (5) is built for iPhoneOS,
+with the exact production association intact and no local-preview encryption
+exemption. Build 5 was subsequently installed on the physical iPhone; CoreDevice read back
+0.1.0 (5) and launched the exact bundle successfully. Build 4's TestFlight compliance gate remains unchanged. See
+[verification](verification.md) for the consumer acceptance evidence.
+
+## Earlier release checkpoints
+
 October 2 release checkpoint: [PR 2](https://github.com/dakshbhatia/fotoro/pull/2)
 is merged into `main` at `adb35ae652`. Both the
 [main CI run](https://github.com/dakshbhatia/fotoro/actions/runs/36960016617)
@@ -118,21 +132,7 @@ Wrangler OAuth is authorized and the production service is live at
 `https://fotoro.cloud`. The separate local Photos preview is in internal TestFlight.
 See [verification](verification.md).
 
-## October 2 consumer finish
-
-Worker `82df2ca2-b808-42f8-a38c-ac26779ac157`, tagged
-`consumer-finish-20261002`, now serves the compact gallery and retry-safe API.
-All production bindings remain the existing isolated D1/R2 resources. No new
-migration is required. Canonical API and exact signed association checks pass.
-
-Native automatic picks and picks-only new sync work pass 131 full-app and 49
-local-preview tests. Development-signed Release 0.1.0 (5) is built for iPhoneOS,
-with the exact production association intact and no local-preview encryption
-exemption. Build 5 was subsequently installed on the physical iPhone; CoreDevice read back
-0.1.0 (5) and launched the exact bundle successfully. Build 4's TestFlight compliance gate remains unchanged. See
-[verification](verification.md) for the consumer acceptance evidence.
-
-## Full build 4 checkpoint
+## Earlier full build 4 checkpoint
 
 The full encrypted 0.1.0 (4) development app is installed on the connected
 iPhone and its exact version is read back. Launch was blocked by the locked
@@ -145,7 +145,7 @@ with `usesNonExemptEncryption` unset. The owner’s France distribution answer
 and the actual encryption declaration remain open; no beta availability is
 claimed.
 
-## Encrypted build 2 checkpoint
+## Earlier encrypted build 2 checkpoint
 
 Version 0.1.0, build 2 is uploaded and processed. `Fotoro Internal` has automatic
 distribution enabled and the requested existing owner tester; no account roles
@@ -219,8 +219,8 @@ The helper verifies the exact Fotoro app/bundle and selected build before the
 notes write, then reads back the saved notes. `--notes-file` preserves explicitly
 supplied wording. Processing, encryption and beta states are reported separately;
 group assignment and actual tester access still require their own verification.
-The current read-only check finds build 3 as `VALID` and `IN_BETA_TESTING`; its
-local-preview notes are verified. Build 2 remains `MISSING_EXPORT_COMPLIANCE`.
+The build 3 checkpoint's read-only check found `VALID` and `IN_BETA_TESTING`; its
+local-preview notes were verified. Build 2 reported `MISSING_EXPORT_COMPLIANCE`.
 
 The final version 0.1.0 (build 3) signed preview archive and distribution IPA
 passed their artifact audits. Terminal `xcodebuild` export still returns exit 70
@@ -253,9 +253,9 @@ markers. Keep credentials and receipts outside Git. Verify the exact app, iOS
 marketing version/build, beta state and internal group through App Store Connect;
 an upload receipt alone does not establish tester availability.
 
-Foreground Photos sync is implemented locally. On a deployed/signed build:
+Foreground Photos sync is implemented. On the installed full build:
 create or unlock one account on iPhone, save its recovery code, then start
-Sync last 10 days. Open the same HTTPS service in Safari and sign in or recover
+Sync your picks. Open the same HTTPS service in Safari and sign in or recover
 that account to load committed photos. Open and unlock the iPhone app to scan and
 prepare more photos and finish catalog commits. An encrypted upload already
 scheduled with iOS can continue in the background. Whole-library background

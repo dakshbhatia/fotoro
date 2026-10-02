@@ -3,13 +3,13 @@
 The web app and API are live at [fotoro.cloud](https://fotoro.cloud). The separate
 local Photos preview 0.1.0 (3) is uploaded and in internal TestFlight. Its matching
 development build was installed and launched on the physical iPhone;
-personal Photos access remains uninspected. Full encrypted build 4 is installed
-on the physical iPhone and processed by Apple; TestFlight access awaits its
-export-compliance declaration. Independent reviews reproduced
+personal Photos access remains uninspected. Full encrypted build 5 is installed
+and launched on the physical iPhone. Apple has processed full build 4; its
+TestFlight access awaits an export-compliance declaration. Independent reviews reproduced
 retrieval, permission, cancellation, persistence and navigation defects; fixes
 include permanent regressions and were re-reviewed.
 
-The completed release tree is merged in
+The preceding release tree is merged in
 [PR 2](https://github.com/dakshbhatia/fotoro/pull/2). Both the
 [main CI run](https://github.com/dakshbhatia/fotoro/actions/runs/36960016617)
 and [PR CI run](https://github.com/dakshbhatia/fotoro/actions/runs/36958905612)
@@ -19,8 +19,8 @@ preceded the authorized Wrangler login and production deployment documented in
 [release setup](deployment.md).
 
 [PR 4](https://github.com/dakshbhatia/fotoro/pull/4) is merged at `59d66f8506`
-after every exact-head native, web/API and repository check passed. The local
-check passes 12 core, 28 API, 133 web and 28 release-metadata tests, typechecks
+after every exact-head native, web/API and repository check passed. That local
+check passed 12 core, 28 API, 133 web and 28 release-metadata tests, typechecks
 and the production web build. Actual 390×844 and 320×568 browser checks cover
 search, Sync/Back query preservation, dark-mode input contrast and 44 px controls.
 The temporary forced dark-mode activation was restored to the automatic media
@@ -40,7 +40,7 @@ Real-account phone-to-Safari acceptance remains open.
 | Worker/D1/R2 API | 36 tests pass, including bounded JSON bodies, malformed completion input and concurrent idempotent photo commits: real cryptographic WebAuthn ceremonies, recovery, uploads, renewal, grants, encrypted annotation revisions, capability-bound ciphertext PUTs, Apple association metadata and diagnostic privacy |
 | Web | 160 tests pass, including visible dialog controls, viewer identity and compact selection controls: consumer choices/status, account-isolated Pause, combined local/saved search, linear merge read budget, preview fences, original Share/fallback, rank-key read budget, bounded HTTP errors and existing retrieval/retention/annotation checks |
 | Web production build | TypeScript/Vite pass. Account/crypto loads after Sync photos; the large encrypted-media chunk warning remains |
-| Native | Full app 131 tests and local preview 49 tests pass locally with Xcode 27, zero failures or skips. The merged release passes native CI; remote full/preview suites each have one expected Photos-permission interaction skip, which passes in the permitted local Simulator. Consumer cancellation/Continue, original-share cleanup, all-age PhotoKit labels, isolated preview storage and existing crypto/journal/background checks are included |
+| Native | Full app 131 tests and local preview 49 tests pass locally with Xcode 27, zero failures or skips. Earlier merged releases passed native CI with expected Photos-permission interaction skips; those cases pass in the permitted local Simulator. Consumer cancellation/Continue, original-share cleanup, all-age PhotoKit labels, isolated preview storage and existing crypto/journal/background checks are included |
 | TestFlight metadata | 28 tests pass for team/individual authentication, exact app/build ownership, sparse Apple responses, notes readback and credential-safe errors. A live build 2 update preserved every existing test-note character and verified its build relationship; its processing state is VALID and beta states remain MISSING_EXPORT_COMPLIANCE. Build 3 is VALID / IN_BETA_TESTING with encryption metadata false and verified local-preview test notes |
 | Distribution IPA | Actual build 3 archive and distribution IPA pass the strict preview audit. Xcode Organizer used its existing cloud-managed certificate; the copied IPA matches the unchanged archive/dSYM/link map. Apple validation and exact-IPA upload both exit 0 with success markers |
 | Internal tester access | App Store Connect shows the existing internal group with one tester and one build; iOS 0.1.0 (3) is Testing and the requested sole owner tester is Invited. Association was automatic; no new tester/role/invitation mutation was needed. Inbox delivery and installation remain unverified |
@@ -65,6 +65,8 @@ annotations and unchanged HEIC restore. Final native full/preview suites pass
 131/49 with zero failures or skips. Independent review's incomplete-preview
 finding is fixed and covered by a store regression. Public Simulator QA verifies
 Picked for you, All Photos, the visible original and its system Share sheet.
+The implementation at `2ca5aecc78` also passes native, preview, web/API and
+repository CI in [run 37034528513](https://github.com/dakshbhatia/fotoro/actions/runs/37034528513).
 
 Browser QA on `127.0.0.1:4310` at 1280×720, 390×844 and 320×568 verifies compact
 controls, Settings selection editing, digest reselection enabling Share, keyboard
@@ -80,7 +82,7 @@ exact Associated Domains checks. CoreDevice verifies physical installation as 0.
 Personal sync and original restore remain separate from automated checks and
 the unchanged TestFlight compliance gate.
 
-## Actual app checks
+## Earlier app checks — October 1–2, 2026
 
 The consumer update was rendered at an actual 689×797 browser viewport. A neutral
 receipt is found by recognized text; opening Sync and returning preserves its
@@ -223,25 +225,13 @@ records; it cannot enumerate an iPhone photo library automatically.
 
 ## Remaining release gates
 
-- Wrangler authorization, remote D1 migrations, Worker deployment, HTTPS and
-  canonical-domain routing. Production D1/R2 resources and bindings are prepared;
-  the current domain is absent from the signed-in Cloudflare account and uses
-  Vercel DNS with a missing deployment.
-- Xcode's existing account can sign through Organizer; terminal export still
-  reports No Accounts. The local Photos preview build 3 has uploaded and is
-  VALID / IN_BETA_TESTING. Personal TestFlight installation remains unverified.
-  The preceding app-specific development profile preserved Associated Domains,
-  and its Debug checkpoint installed. Build 1's signed Release archive passed, but Apple upload validation
-  rejected its missing orientation metadata after the export's mixed rsync
-  toolchain was corrected. Build 2's signed Release archive includes standard
-  iPhone/iPad orientation arrays and uploaded successfully at 19:10 Eastern
-  (`EXPORT SUCCEEDED`, exit 0). Apple has finished processing and displays
-  Missing Compliance. The encryption declaration remains open; the internal
-  tester group is prepared. Build 2 remains unavailable due to its compliance
-  gate; build 3 is the separate local-only preview.
-  The HTTPS association file still needs deployment. Universal-link handling is
-  not implemented. The read-only `check:service https://fotoro.cloud` currently
-  fails: vault and association endpoints both return 404.
+- Full encrypted TestFlight access: build 4 is `VALID` but remains
+  `MISSING_EXPORT_COMPLIANCE`. Its actual encryption declaration and France
+  distribution answer are open. Local Photos preview build 3 is separately
+  `VALID / IN_BETA_TESTING`; personal TestFlight installation remains unverified.
+  Signed full build 5 is installed and launched directly on the physical iPhone.
+  Production HTTPS, API routing and the signed passkey association now pass.
+  Universal-link handling remains unimplemented.
 - Physical passkey/PRF and non-PRF flows, original PhotoKit/iCloud resources and a
   complete iPhone-to-Safari restore. See [release setup](deployment.md).
 - Physical background continuation, file protection, daemon reconnection and
