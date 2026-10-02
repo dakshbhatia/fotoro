@@ -17,7 +17,7 @@ The new Fotoro web and API build is developed in `fotoro/`. The upstream Ente ru
 3. Create separate preview D1/R2 resources and apply migrations. Deploy a preview with explicit allowed origin/RP settings, never localhost fixture settings.
 4. Exercise real passkey sessions, recovery, two-account exchange, upload reconciliation, revocation and independent save against that preview.
 5. Build production with distinct bindings, production RP `fotoro.cloud`, allowed origin `https://fotoro.cloud`, secure cookies and authenticated media delivery.
-6. Verify the deployment URL before changing domain routing. Attach `fotoro.cloud` only after checks pass; retain a rollback target.
+6. Verify the production bindings and active Worker version before cutover. Back up authoritative DNS, prepare equivalent records in the pending Cloudflare zone, change nameservers, and attach `fotoro.cloud`. Require HTTPS API, association and browser checks before declaring the service live; retain the DNS rollback target.
 7. Configure Apple associated domains and signing; test passkeys, background transfer and original restore on physical devices before TestFlight release.
 
 A Worker preview with a different RP creates different passkey credentials. Do not assume those credentials migrate to the production RP.
@@ -63,33 +63,34 @@ the Xcode signing account or a distribution certificate. Xcode 27's installed
 and uploaded the already distribution-signed build 3 IPA. The existing build 2 is `VALID` in the API, with its
 encryption declaration unset; this is not an installable beta claim.
 
-An existing Cloudflare account token is active and can list Workers. D1, R2 and
-Workers Domains requests are denied, and it cannot confirm the `fotoro.cloud`
-zone. It is insufficient for this production deployment. Another configured
-Cloudflare token is invalid. No resources in another application were changed.
-The owner is signed in to the intended Cloudflare dashboard. That account now
-has an isolated empty D1 database `fotoro-production` and R2 bucket
-`fotoro-private-production`; bucket public access is disabled. Their production
-bindings and the signed application's association identifier are configured in
-`services/api/wrangler.toml`. A production packaging dry-run lists all five
-bindings without warnings. Remote migrations, Worker deployment and domain
-routing remain unapplied. The owner approved the account-scoped Wrangler grant,
-and its normal OAuth flow saved the credential in the macOS keychain. The first
-remote migration stopped before application tables were created: D1's remote
-parser rejected the unparenthesized `CASE ... END` inside `retention_live`.
-Parenthesizing that expression preserves the live-object guard. All five
-migrations then applied successfully to a separate temporary remote database;
-production migrations and deployment still await the reviewed fix.
+The owner approved the account-scoped Wrangler grant, and its normal OAuth flow
+saved the credential in the macOS keychain. Production uses the isolated D1
+`fotoro-production` and R2 `fotoro-private-production`; bucket public access is
+disabled. All five production migrations applied and were read back after the
+`retention_live` CASE expression parser fix. The production bindings, signed
+application association identifier and `fotoro.cloud` custom-domain route are
+explicit in `services/api/wrangler.toml`.
 
-`fotoro.cloud` is absent from this account's Cloudflare zones and currently uses
-Vercel DNS. Its HTTPS response reports a missing Vercel deployment. The domain
-route must be resolved before claiming a shared iPhone/Safari service; a
-`workers.dev` hostname does not match the configured production passkey RP.
+Worker version `d04b80fc-b484-4d57-b1df-846c12182ed1` is active at 100%, tagged
+`48780562ca`. The `fotoro.cloud` custom domain is attached to that existing Worker
+and read back; no code re-upload was needed. `workers_dev` remains false. The
+production dry-run packages all five bindings without warnings; it is not proof
+of a reachable service.
 
-October 1, 2026: the active checkout is `/Users/dakshbhatia/Documents/GitHub/Fotoro`.
+The owner's existing Vercel credential was reused privately to verify the exact
+team domain, and its DNS backup is complete. The registrar accepted the approved
+Cloudflare nameservers and its custom-nameserver readback matches. Authoritative
+`.cloud` servers and public resolvers now return the assigned Cloudflare pair.
+The apex is a managed Worker record; the wildcard fallback, domain connection
+and all three CAA records are preserved. The Free zone still awaits activation
+and canonical HTTPS is not verified. Do not claim a live shared iPhone/Safari service
+until HTTPS API and association checks pass; a `workers.dev` hostname would not
+match the configured production passkey RP.
+
+Historical October 1, 2026 checkpoint: the active checkout was `/Users/dakshbhatia/Documents/GitHub/Fotoro`.
 The native/web/API development build runs locally, with the web preview at 4310,
 real local API at 8787 and public fixtures at 8790. Production D1/R2 bindings and
-Cloudflare access are still required. The owner is signed in to Xcode, an
+Cloudflare access were still required at that checkpoint. The owner is signed in to Xcode, an
 app-specific development provisioning profile includes Associated Domains, and
 the final signed consumer checkpoint is installed on the connected iPhone. Its
 latest launch attempt was refused while the phone was locked; the earlier
@@ -111,8 +112,8 @@ Missing or invalid configuration returns an uncached 503; the route does not
 fall through to the web app. It lists `webcredentials.apps` for passkeys.
 Universal-link handling remains unimplemented. See
 [Apple's associated domains documentation](https://developer.apple.com/documentation/xcode/supporting-associated-domains).
-Wrangler's normal account check is unauthenticated. No public Fotoro service
-is claimed yet. The separate local Photos preview is in internal TestFlight.
+Wrangler OAuth is authorized. No public Fotoro service is verified yet. The
+separate local Photos preview is in internal TestFlight.
 See [verification](verification.md).
 
 ## Encrypted build 2 checkpoint
@@ -232,14 +233,18 @@ scheduled with iOS can continue in the background. Whole-library background
 processing and a personal physical-device acceptance run remain release gates;
 localhost on this Mac is not an installable iPhone service.
 
-Read-only checks of `https://fotoro.cloud/v1/vault` and the HTTPS association route
-currently return 404. This origin is not serving the prepared API/association build.
+Before cutover, read-only API and association checks returned the old Vercel
+404. After the approved registrar change and Worker attachment, HTTPS checks
+still await zone activation and working DNS/TLS. Domain attachment alone does
+not establish a reachable service.
 
 Production web assets and Worker bundling pass a Wrangler `--dry-run` with the
 created production D1/R2 bindings, static assets, production authentication and
 Apple association identifier. These bindings are explicit because environments
-do not inherit the local database or bucket. The resources are empty and remote
-migrations remain unapplied; the dry-run is not a deployed or usable service.
+do not inherit the local database or bucket. All five production migrations
+are applied. The custom domain is attached to the active Worker and the
+registrar delegation is changed. Canonical HTTPS still needs verification; the
+dry-run is not a usable-service check.
 
 After deploying to the intended HTTPS origin, run `pnpm check:service
 https://fotoro.cloud APPLICATION_PREFIX.cloud.fotoro.Fotoro`. It checks the

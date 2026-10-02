@@ -13,6 +13,9 @@ migrations_dir = "migrations"
 [[r2_buckets]]
 binding = "BUCKET"
 bucket_name = "fotoro-private-local"
+[env.production]
+routes = [{ pattern = "fotoro.cloud", custom_domain = true }]
+
 [env.production.vars]
 AUTH_MODE = "production"
 APPLE_APP_IDS = "A7TGPQ27JF.cloud.fotoro.Fotoro"
