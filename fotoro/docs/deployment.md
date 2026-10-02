@@ -82,10 +82,12 @@ team domain, and its DNS backup is complete. The registrar accepted the approved
 Cloudflare nameservers and its custom-nameserver readback matches. Authoritative
 `.cloud` servers and public resolvers now return the assigned Cloudflare pair.
 The apex is a managed Worker record; the wildcard fallback, domain connection
-and all three CAA records are preserved. The Free zone still awaits activation
-and canonical HTTPS is not verified. Do not claim a live shared iPhone/Safari service
-until HTTPS API and association checks pass; a `workers.dev` hostname would not
-match the configured production passkey RP.
+and all three CAA records are preserved. The Free zone is active. Canonical
+HTTPS serves the web app; `pnpm check:service` passes the unauthenticated API
+and exact signed iPhone passkey association checks. Desktop and 390 × 844
+browser checks pass Photos → Sync → Back without console warnings or errors.
+Real-account passkeys, recovery, personal photo sync and original restore still
+require physical-device acceptance.
 
 Historical October 1, 2026 checkpoint: the active checkout was `/Users/dakshbhatia/Documents/GitHub/Fotoro`.
 The native/web/API development build runs locally, with the web preview at 4310,
@@ -112,9 +114,19 @@ Missing or invalid configuration returns an uncached 503; the route does not
 fall through to the web app. It lists `webcredentials.apps` for passkeys.
 Universal-link handling remains unimplemented. See
 [Apple's associated domains documentation](https://developer.apple.com/documentation/xcode/supporting-associated-domains).
-Wrangler OAuth is authorized. No public Fotoro service is verified yet. The
-separate local Photos preview is in internal TestFlight.
+Wrangler OAuth is authorized and the production service is live at
+`https://fotoro.cloud`. The separate local Photos preview is in internal TestFlight.
 See [verification](verification.md).
+
+## Full build 4 checkpoint
+
+The full encrypted 0.1.0 (4) development app is installed on the connected
+iPhone and its exact version is read back. Launch was blocked by the locked
+phone. The full archive passes strict signature, metadata, entitlement and
+matching-dSYM checks; it retains the production service URL and includes sync.
+It does not carry the local-preview encryption exemption. The distribution
+IPA is exported and audited; Apple validation and upload are in progress.
+No build 4 beta availability is claimed.
 
 ## Encrypted build 2 checkpoint
 
@@ -234,17 +246,18 @@ processing and a personal physical-device acceptance run remain release gates;
 localhost on this Mac is not an installable iPhone service.
 
 Before cutover, read-only API and association checks returned the old Vercel
-404. After the approved registrar change and Worker attachment, HTTPS checks
-still await zone activation and working DNS/TLS. Domain attachment alone does
-not establish a reachable service.
+404. The approved registrar change, active Cloudflare zone and Worker custom
+domain now serve canonical HTTPS. `pnpm check:service` confirms the protected
+API returns its expected unauthenticated response and the passkey association
+contains the signed application identifier.
 
 Production web assets and Worker bundling pass a Wrangler `--dry-run` with the
 created production D1/R2 bindings, static assets, production authentication and
 Apple association identifier. These bindings are explicit because environments
 do not inherit the local database or bucket. All five production migrations
 are applied. The custom domain is attached to the active Worker and the
-registrar delegation is changed. Canonical HTTPS still needs verification; the
-dry-run is not a usable-service check.
+registrar delegation is changed. Canonical HTTPS API, association and browser
+onboarding checks pass; the dry-run remains a separate packaging check.
 
 After deploying to the intended HTTPS origin, run `pnpm check:service
 https://fotoro.cloud APPLICATION_PREFIX.cloud.fotoro.Fotoro`. It checks the
