@@ -24,24 +24,21 @@ A Worker preview with a different RP creates different passkey credentials. Do n
 
 ## Current state
 
-Worker `5ce1ce81-2445-4e20-91f0-967778520fb4`, tagged
-`manual-saving-20261002`, serves one-password account entry and keeps web uploads
-and annotation writes explicit. Account/lifecycle refresh reads the catalog only;
-save failures appear inside the account sheet.
-Bounded failure fields and stored Worker logs remain enabled.
-All production bindings remain the existing isolated D1/R2 resources. No new
-migration is required. Canonical API and exact signed association checks pass.
+Worker `71177dd1-b155-436e-b87a-85b48723c43e`, tagged
+`direct-photos-20261002`, is read back at 100%. Saved photos opens directly;
+one password field opens the account. Legacy passkeys stay in collapsed Settings.
+Uploads and annotation writes still require an explicit Save or Continue.
+Bounded failure fields and stored Worker logs remain enabled. Production D1/R2
+bindings and five migrations are unchanged. Canonical API and exact signed
+association checks pass.
 
-The chosen-photo release passed 190 full-app, 50 local-preview and 180 web tests,
-core checks, typechecks and the production web build. Development-signed
-Release 0.1.0 (12) is built for iPhoneOS,
-with the exact production association intact and no local-preview encryption
-exemption. Build 12 is installed and launched on the physical iPhone; CoreDevice
-read back 0.1.0 (12) and its running executable. The initial protected account-state
-event reports signed out. The owner can create or open an account with one Fotoro
-password, save a reviewed selection and load Saved photos explicitly. Owner
-authentication and private-photo saving remain acceptance checks.
-Build 4's TestFlight compliance gate remains unchanged. See
+The direct-photo cleanup passed 190 full-app, 50 local-preview and 180 web tests,
+typechecks and the production web build. Development-signed Release 0.1.0 (13)
+passes signature and exact production association checks without a local-preview
+encryption exemption. CoreDevice reports successful installation over the existing
+phone app. The connection dropped before launch/version readback; those checks
+remain open. Owner authentication and private-photo saving remain unverified.
+Build 4's TestFlight compliance gate is unchanged. See
 [verification](verification.md) for the consumer acceptance evidence.
 
 ## Earlier release checkpoints
@@ -262,10 +259,10 @@ marketing version/build, beta state and internal group through App Store Connect
 an upload receipt alone does not establish tester availability.
 
 Manual Photos saving is implemented. On the installed full build:
-open Account, create or sign in to one account on iPhone, save its recovery code,
-then tap Save picks. Open the same HTTPS service in Safari and sign in or recover
-that account to load committed photos. Another Save picks tap prepares another
-current selection; Continue saving resumes only queued encrypted files. Automatic
+open Saved photos and enter a Fotoro password, or choose New Fotoro and save the
+generated password. Select photos and tap Save; the viewer also offers Save.
+Enter the same password in Safari to open committed photos. Continue saving
+resumes queued encrypted files. Automatic
 sync is off. An encrypted upload scheduled by a manual save can finish in the
 background. A personal physical-device acceptance run remains a release gate;
 localhost on this Mac is not an installable iPhone service.

@@ -245,17 +245,18 @@ for (const interruption of ["lock", "cancel"] as const) test(interruption + " du
 }));
 
 test("primary account UI has one password entry and no second recovery/save checkbox flow", () => {
-  const props = { password: "", onPassword: () => {}, generatedPassword: "", busy: false, onSignIn: () => {}, onCreate: () => {}, onContinue: () => {}, onBack: () => {}, onPasskey: () => {}, onCopy: () => {}, onSave: () => {} };
+  const props = { password: "", onPassword: () => {}, generatedPassword: "", busy: false, onSignIn: () => {}, onCreate: () => {}, onContinue: () => {}, onBack: () => {}, onCopy: () => {}, onSave: () => {} };
   const markup = renderToStaticMarkup(createElement(AccountAccess, props));
   assert.equal((markup.match(/<input/g) ?? []).length, 1);
   assert.match(markup, /autoComplete="current-password"/i);
   assert.match(markup, /Fotoro password/);
-  assert.match(markup, /<details><summary>Other ways to sign in/);
-  assert.doesNotMatch(markup, /recovery|checkbox/);
+  assert.match(markup, /New Fotoro/);
+  assert.match(markup, /Open Fotoro/);
+  assert.doesNotMatch(markup, /recovery|checkbox|passkey|Other ways|<details/);
   const newAccount = renderToStaticMarkup(createElement(AccountAccess, { ...props, generatedPassword: vector }));
-  assert.match(newAccount, /Copy password/);
+  assert.match(newAccount, />Copy<\/button>/);
   assert.match(newAccount, /Save password/);
   assert.match(newAccount, /autoComplete="new-password"/i);
   assert.doesNotMatch(newAccount, /checkbox|passkey|recovery/);
-  assert.match(newAccount, /<button class="primary-action" type="submit">Continue<\/button>/);
+  assert.match(newAccount, /<button class="primary-action" type="submit">Open Fotoro<\/button>/);
 });

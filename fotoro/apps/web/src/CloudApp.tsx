@@ -7,15 +7,11 @@ import { cachedCatalog, photoBytes, type Photo } from "./library/catalog";
 import {
   lockVault,
   requireVault,
-  requestDeviceApproval,
-  approveDeviceChallenge,
-  unlockVault,
 } from "./vault/vault";
 import {
   publicTestSession,
   passkeyLogin,
   recover,
-  fixtureAccounts,
   prepareEnrollment,
   completeEnrollment,
   cancelEnrollment,
@@ -98,7 +94,6 @@ export default function CloudApp({
     [recovery, setRecovery] = useState(""),
     [pending, setPending] = useState<PendingImport[]>([]);
   const [recoveryNew, setRecoveryNew] = useState(""),
-    [approvalText, setApprovalText] = useState(""),
     [reselect, setReselect] = useState<PendingImport | undefined>(undefined);
   const [lastSuccessfulSync, setLastSuccessfulSync] = useState<string | null>(null),
     [staging, setStaging] = useState(0),
@@ -140,6 +135,7 @@ export default function CloudApp({
     return localSynced.current.get(file) !== account && (!digest || !catalogDigests.has(digest));
   });
   const unlocked = !!account;
+  const accountReference = account ? account.slice(0, 8) + "…" + account.slice(-4) : "";
   const publicDemo = fixtureMode || isPublicDemoAccount(account);
   const clear = () => {
     for (const photo of [...photos, ...(received ?? [])])
@@ -439,7 +435,7 @@ export default function CloudApp({
     <>
       <main className={"cloud-library" + (selecting ? " exchange-selection" : "")} inert={viewing || exchange || menu ? true : undefined}>
         <header>
-          <div className="brand"><p className="eyebrow">Saved photos</p><h1>Fotoro</h1></div>
+          <div className="brand"><p className="eyebrow">Saved photos{accountReference && " · " + accountReference}</p><h1>Fotoro</h1></div>
           <div className="header-actions">
           <button
             ref={backButton}
@@ -458,7 +454,7 @@ export default function CloudApp({
           {unlocked && (
             <button
               className="menu-button glass"
-              aria-label="Sync and account"
+              aria-label="Save and settings"
               onClick={() => setMenu(!menu)}
             >
               <svg
@@ -475,11 +471,6 @@ export default function CloudApp({
         </header>
         {!unlocked ? (
           <section className="unlock sync-onboarding">
-            <h2>Sync photos</h2>
-            <p className="hint">
-              Use one account on your iPhone and browser. Your local photos stay
-              private until you choose to sync them.
-            </p>
             <AccountAccess
               password={recovery}
               onPassword={setRecovery}
@@ -492,7 +483,6 @@ export default function CloudApp({
               onCreate={() => {void run(async () => {setRecoveryNew(await prepareEnrollment());}, true);}}
               onContinue={() => {void login(async () => {await completeEnrollment(); setRecoveryNew("");});}}
               onBack={() => {cancelEnrollment(); setRecovery(recoveryNew); setRecoveryNew(""); setStatus("");}}
-              onPasskey={() => {void login(passkeyLogin);}}
               onCopy={() => {void run(async () => {
                 if (!navigator.clipboard) throw new Error("PASSWORD_COPY_UNAVAILABLE");
                 await navigator.clipboard.writeText(recoveryNew).catch(() => {throw new Error("PASSWORD_COPY_UNAVAILABLE");});
@@ -505,12 +495,15 @@ export default function CloudApp({
                 setTimeout(() => URL.revokeObjectURL(url), 1000);
               }}
             />
+            <details>
+              <summary>Settings</summary>
+              <button disabled={busy} onClick={() => {void login(passkeyLogin);}}>Use existing passkey</button>
+            </details>
             {fixtureMode && (
               <details>
                 <summary>Advanced DEBUG</summary>
                 <p className="hint">
-                  Public test accounts only. These accounts are not private and
-                  do not simulate passkey success.
+                  Public test accounts only.
                 </p>
                 <button
                   disabled={busy}
@@ -539,8 +532,7 @@ export default function CloudApp({
           <>
             {publicDemo && (
               <p className="demo-notice hint">
-                Public demo account — create a private account to sync your
-                photos. Pending uploads are kept here but will not be sent.
+                Public test account · private uploads disabled.
               </p>
             )}
             {unlocked && !received && (
@@ -669,7 +661,7 @@ export default function CloudApp({
         )}
       </main>
         {active && menu && unlocked && (
-          <aside className="account-sheet sheet" ref={accountPanel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Sync and account">
+          <aside className="account-sheet sheet" ref={accountPanel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Saved photos">
             <button
               className="close"
               aria-label="Close account"
@@ -677,41 +669,24 @@ export default function CloudApp({
             >
               ×
             </button>
-            <h2>Sync photos</h2>
-            <p className="hint">
-              Originals, labels and photo text are encrypted. Keep this browser open while syncing.
-            </p>
+            <h2>Saved photos</h2>
+            <p className="hint">Fotoro · {accountReference}</p>
             <p role="status">
               {status || syncStateLabel[consumerSummary.state]}
             </p>
             <p className="hint">
               {consumerSummary.detail}
             </p>
-            <p className="hint">
-              {lastSuccessfulSync
-                ? "Last checked " +
-                  new Date(lastSuccessfulSync).toLocaleString()
-                : "Not checked yet"}
-            </p>
-            {localCount > 0 && (
-              <>
-                <p className="hint">
-                  Only these selected files will be encrypted and uploaded.
-                  Originals stay unchanged. Browser imports support JPEG and
-                  PNG; HEIC photos synced from iPhone use JPEG previews here.
-                </p>
-              </>
-            )}
-            <p className="hint">
-              {publicDemo
-                ? "Public demo account — private uploads disabled"
-                : "Encrypted library"}
-            </p>
             <div className="actions">
-              <button className="primary-action" disabled={busy || (localCount > 0 && publicDemo)} onClick={localCount > 0 ? syncLocal : summary.pending || summary.failed || annotationPending.length ? retry : () => {void run(refresh);}}>
-                {localCount > 0 ? `Save ${localCount} selected ${localCount === 1 ? "photo" : "photos"}` : summary.pending || summary.failed ? paused ? "Continue saving" : "Retry saving" : annotationPending.length ? "Sync changes" : "Check for photos"}
-              </button>
-              {!paused && (busy || summary.pending > 0 || annotationPending.length > 0) && <button onClick={pause}>Pause sync</button>}
+              {(localCount > 0 || summary.pending || summary.failed || annotationPending.length > 0) && <button className="primary-action" disabled={busy || publicDemo} onClick={localCount > 0 ? syncLocal : retry}>
+                {localCount > 0 ? `Save ${localCount} selected ${localCount === 1 ? "photo" : "photos"}` : summary.pending || summary.failed ? "Continue" : "Save changes"}
+              </button>}
+              {!paused && busy && <button onClick={pause}>Pause</button>}
+              <button onClick={() => setMenu(false)}>Saved photos</button>
+            </div>
+            <details>
+              <summary>Settings</summary>
+              <button disabled={busy} onClick={() => {void run(refresh);}}>Refresh saved photos</button>
               <button
                 onClick={() => {
                   lockVault();
@@ -720,70 +695,7 @@ export default function CloudApp({
               >
                 Lock
               </button>
-            </div>
-            <details>
-              <summary>Advanced · encrypted exchanges and devices</summary>
-              <p className="hint">For ordinary sharing, open a photo and choose Share. Encrypted exchanges require a trusted account card.</p>
               <div className="actions"><button onClick={() => {setExchange(true); setMenu(false);}}>Open encrypted exchanges</button><button onClick={() => {setSelecting(true); setMenu(false);}}>Choose photos for an exchange</button>{selecting && <button onClick={() => {setSelecting(false); setSelected(new Set());}}>Finish choosing photos</button>}</div>
-              <label>
-                Your account card
-                <textarea
-                  readOnly
-                  value={JSON.stringify(requireVault().card)}
-                />
-              </label>
-              <p className="hint">
-                Send this card through a trusted channel. Compare the complete
-                keys before pinning a received card.
-              </p>
-              {fixtureMode && (
-                <button
-                  onClick={() =>
-                    run(async () => {
-                      const data = await fixtureAccounts();
-                      const card = data.accounts.find(
-                        (c) => c.accountId !== account,
-                      )!;
-                      await navigator.clipboard.writeText(JSON.stringify(card));
-                      setStatus(
-                        "Other public test card copied · pin explicitly in Exchanges",
-                      );
-                    })
-                  }
-                >
-                  Copy other public test account card
-                </button>
-              )}
-              <button
-                onClick={() =>
-                  run(async () => {
-                    const challenge = await requestDeviceApproval();
-                    setStatus("Approval requested · " + challenge.enrollmentId);
-                  })
-                }
-              >
-                Request trusted-device approval
-              </button>
-              <label>
-                Device challenge from your other device
-                <textarea
-                  value={approvalText}
-                  onChange={(e) => setApprovalText(e.target.value)}
-                />
-              </label>
-              <button
-                disabled={busy || !approvalText}
-                onClick={() =>
-                  run(async () => {
-                    await approveDeviceChallenge(approvalText);
-                    setApprovalText("");
-                    setStatus("Device approved");
-                  })
-                }
-              >
-                Approve device challenge
-              </button>
-            </details>
             {annotationPending.length > 0 && <details open={annotationPending.some(edit => edit.conflict)}>
               <summary>Labels and photo text · {annotationPending.length} pending</summary>
               {annotationPending.map(edit => <div key={edit.photoId}>
@@ -794,20 +706,12 @@ export default function CloudApp({
                 </>}
               </div>)}
             </details>}
-            <details open={summary.pending > 0 || summary.failed > 0}>
-              <summary>Photo status</summary>
-              <p className="hint">
-                Keep your original files until they are synced.
-              </p>
-              {pending.length === 0 ? (
-                <p>No pending imports</p>
-              ) : (
-                pending.map((p) => (
+            {pending.some(p => p.state !== "committed") && <details open={summary.failed > 0}>
+              <summary>Waiting photos</summary>
+              {pending.filter(p => p.state !== "committed").map((p) => (
                   <p key={p.operationId}>
                     {p.sourceFilename} ·{" "}
-                    {p.state === "committed"
-                      ? "Synced"
-                      : p.state === "failed"
+                    {p.state === "failed"
                         ? "Failed"
                         : "Pending"}
                     {p.error
@@ -824,9 +728,8 @@ export default function CloudApp({
                       </button>
                     )}
                   </p>
-                ))
-              )}
-            </details>
+                ))}
+            </details>}
             <button
               onClick={() =>
                 run(async () => {
@@ -847,6 +750,7 @@ export default function CloudApp({
             >
               Sign out and clear this browser
             </button>
+            </details>
           </aside>
         )}
       {active && exchange && unlocked && (
