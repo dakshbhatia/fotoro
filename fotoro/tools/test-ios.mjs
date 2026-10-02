@@ -2,6 +2,10 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const cwd = fileURLToPath(new URL("..", import.meta.url));
+const flags = process.argv.slice(2);
+if (flags.some(flag => flag !== "--local-preview")) throw new Error("Usage: node tools/test-ios.mjs [--local-preview]");
+const localPreview = flags.includes("--local-preview");
+const scheme = localPreview ? "FotoroLocalPreview" : "Fotoro";
 const listed = spawnSync(
   "xcrun",
   ["simctl", "list", "devices", "available", "--json"],
@@ -24,7 +28,7 @@ const device =
   ) ?? candidates[0];
 if (!device)
   throw new Error("Fotoro needs an installed iOS 26+ iPhone Simulator");
-console.log(`Testing Fotoro on ${device.name} (${device.udid})`);
+console.log(`Testing ${scheme} on ${device.name} (${device.udid})`);
 const child = spawn(
   "xcodebuild",
   [
@@ -32,11 +36,11 @@ const child = spawn(
     "-project",
     "apps/ios/Fotoro.xcodeproj",
     "-scheme",
-    "Fotoro",
+    scheme,
     "-destination",
     `platform=iOS Simulator,id=${device.udid}`,
     "-derivedDataPath",
-    "apps/ios/build",
+    localPreview ? "apps/ios/build-local-preview" : "apps/ios/build",
     "CODE_SIGN_IDENTITY=-",
   ],
   { cwd, stdio: "inherit", shell: false },

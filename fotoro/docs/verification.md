@@ -194,3 +194,28 @@ JPEG/PNG and skips unknown dimensions, including current HEIC metadata, before d
 Semantic search, inferred face groups, cleanup, video intelligence and nearby
 transfer remain planned. Production auth rejects fixture headers; production web
 builds disable fixture mode. Public fixture accounts block private uploads.
+
+## Local Photos preview validation — October 1, 2026
+
+The approved `FotoroLocalPreview` target compiles nine allowlisted shared sources
+and links GRDB only. It excludes Fotoro account, encrypted backup, transfer,
+Sodium and saved-account views. The full target retains its packages and signed
+Associated Domains capability. The shared Info.plist uses an explicit build-mode
+macro; only the preview target declares no non-exempt encryption. Artifact
+validation, rather than source flags alone, is required before uploading it.
+
+The actual default-root isolation regression failed five assertions before the
+namespace change and passed after it: preview records/pins/use history neither
+read nor alter the full app's index, including the same permitted asset. The
+complete preview suite passed31/31; the full app protection suite passed104/104,
+with zero failures or skips. The older public PhotoKit asset and local Vision
+recognition cases passed. The isolated artifact-verifier harness covers unexpected
+binaries, dSYM mismatch, excluded cryptography code, tool failure, forbidden
+resources/entitlements and unsafe ZIP entries; its actual archive/IPA checks are
+retained separately in private release output.
+
+Public Simulator UI acceptance verified the ten-day gallery, explicit local-beta
+scope, receipt OCR including an older photo, local label persistence after reopen,
+and the original PNG in the system share sheet. Dismissing the sheet removed its
+share-owned temporary copy. These checks do not establish personal Photos, iCloud
+network, physical share destinations or hosted backup acceptance.

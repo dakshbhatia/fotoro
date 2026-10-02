@@ -104,6 +104,7 @@ final class SearchIndex: @unchecked Sendable {
       return true
     }
   }
+  #if !FOTORO_LOCAL_PREVIEW
   @discardableResult func applyAnnotations(_ value: PhotoAnnotationsV1, photoID: String, revision: String, accountId: String) throws -> Bool {
     try database.write { db in
       guard var record = try Row.fetchOne(db, sql: "SELECT value FROM searchRecords WHERE id=?", arguments: [photoID]).map(decode), record.revision == revision else { return false }
@@ -125,6 +126,7 @@ final class SearchIndex: @unchecked Sendable {
       return true
     }
   }
+  #endif
   func clearSyncedAnnotations() throws {
     try database.write { db in
       let records = try Row.fetchAll(db, sql: "SELECT value FROM searchRecords").map(decode)

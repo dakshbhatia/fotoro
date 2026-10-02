@@ -128,7 +128,7 @@ final class SearchLifecycleTests: XCTestCase {
         assetID = request.placeholderForCreatedAsset?.localIdentifier ?? ""
       }
       // The app host restores its own durable search on launch; this interaction test owns its index.
-      let search = LocalSearchStore(root: FileManager.default.temporaryDirectory.appendingPathComponent("PhotoKitSearch-" + Wire.id()))
+      let search = LocalSearchStore(root: FileManager.default.temporaryDirectory.appendingPathComponent("PhotoKitSearch-" + UUID().uuidString))
       search.open(status: status)
       // Label editing needs this asset's verified metadata, while OCR may continue for other photos.
       for _ in 0..<200 where !search.canEditLabels(assetID) { try await Task.sleep(for: .milliseconds(50)) }

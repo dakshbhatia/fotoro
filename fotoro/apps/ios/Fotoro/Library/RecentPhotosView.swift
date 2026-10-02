@@ -1,4 +1,5 @@
 import Photos
+import PhotosUI
 import SwiftUI
 import UIKit
 
@@ -144,14 +145,17 @@ struct RecentPhotosView: View {
   @State private var search = LocalSearchStore()
   @State private var query = ""
   @FocusState private var queryFocused: Bool
+#if !FOTORO_LOCAL_PREVIEW
   @State private var services: AppServices?
   @State private var backupAccount: AppServices?
   @State private var searchHits: [ConsumerSearchHit] = []
   @State private var savedResults: [String: LocalPhoto] = [:]
+  @State private var savedViewer: LocalPhoto?
+  @State private var pendingBackup = false
+#endif
   @State private var selected: Set<String> = []
   @State private var selecting = false
   @State private var viewer: RecentPhoto?
-  @State private var savedViewer: LocalPhoto?
   @State private var pendingShare: RecentPhoto?
   @State private var shareTask: Task<Void, Never>?
   @State private var sharing: [URL] = []
@@ -160,15 +164,19 @@ struct RecentPhotosView: View {
   @State private var shareMeaning: String?
   @State private var sharedPhotoIDs: [String] = []
   @State private var settings = false
-  @State private var pendingBackup = false
   @Environment(\.scenePhase) private var scenePhase
 
   private var visible: [RecentPhoto] {
+#if FOTORO_LOCAL_PREVIEW
+    query.isEmpty ? store.photos : search.matchingPhotos
+#else
     query.isEmpty ? store.photos : searchHits.compactMap {
       if case .device(let id) = $0.photo { return search.assets[id] }
       return nil
     }
+#endif
   }
+#if !FOTORO_LOCAL_PREVIEW
   private var savedPhotos: [LocalPhoto] {
     searchHits.compactMap {
       if case .saved(let id) = $0.photo { return savedResults[id] }
@@ -180,9 +188,33 @@ struct RecentPhotosView: View {
       results: search.response.results.map(\.id), indexed: search.response.indexed,
       account: services?.session.accountId, vault: services?.vault.generation)
   }
+#endif
   var body: some View {
     NavigationStack {
-      content.navigationTitle("Photos")
+#if FOTORO_LOCAL_PREVIEW
+      sharedHome
+#else
+      accountHome
+#endif
+    }
+  }
+#if !FOTORO_LOCAL_PREVIEW
+  private var accountHome: some View {
+    sharedHome
+      .sheet(item: $savedViewer) { photo in
+        if let services { PhotoViewer(services: services, initialID: photo.id, displayedPhotos: savedPhotos) }
+      }
+      .sheet(item: $backupAccount) { PhotosBackupView(services: $0) }
+      .task(id: searchTaskID) { await updateSearch() }
+      .onChange(of: services?.vault.generation) {
+        savedViewer = nil
+        searchHits.removeAll { if case .saved = $0.photo { return true }; return false }
+        savedResults = [:]
+      }
+  }
+#endif
+  private var sharedHome: some View {
+    content.navigationTitle("Photos")
         .toolbar { homeToolbar }
         .safeAreaInset(edge: .bottom) { searchBar }
         .overlay {
@@ -196,9 +228,6 @@ struct RecentPhotosView: View {
             viewer = nil
           }
         }
-        .sheet(item: $savedViewer) { photo in
-          if let services { PhotoViewer(services: services, initialID: photo.id, displayedPhotos: savedPhotos) }
-        }
         .sheet(isPresented: $showShare, onDismiss: cleanupShare) {
           OriginalShareSheet(urls: sharing) { success in
             if success, let meaning = shareMeaning {
@@ -207,44 +236,49 @@ struct RecentPhotosView: View {
             cleanupShare()
           }
         }
-        .sheet(item: $backupAccount) { PhotosBackupView(services: $0) }
         .sheet(isPresented: $settings, onDismiss: {
+#if !FOTORO_LOCAL_PREVIEW
           if pendingBackup { pendingBackup = false; openBackup() }
+#endif
         }) { settingsView }
         .onChange(of: query) { search.updateQuery(query) }
-        .task(id: searchTaskID) { await updateSearch() }
         .onChange(of: search.libraryGeneration) {
           viewer = nil
           selected = []
           shareTask?.cancel()
           cleanupShare()
+#if !FOTORO_LOCAL_PREVIEW
           searchHits = []
           savedResults = [:]
+#endif
           store.refresh()
-        }
-        .onChange(of: services?.vault.generation) {
-          savedViewer = nil
-          searchHits.removeAll { if case .saved = $0.photo { return true }; return false }
-          savedResults = [:]
         }
         .onChange(of: scenePhase) {
           if scenePhase == .active {
             restorePhotos()
+#if !FOTORO_LOCAL_PREVIEW
             if let services { Task { await services.resumeSavedAccount() } }
-          } else { services?.backup.pause(); search.pause() }
+#endif
+          } else {
+#if !FOTORO_LOCAL_PREVIEW
+            services?.backup.pause()
+#endif
+            search.pause()
+          }
         }
         .task {
           restorePhotos()
+#if !FOTORO_LOCAL_PREVIEW
           do {
             if services == nil { services = try AppServices() }
             services?.bindLocalSearch(search)
             await services?.resumeSavedAccount(initialRestoration: true)
           } catch { store.error = error.localizedDescription }
+#endif
         }
         .alert("Fotoro", isPresented: Binding(get: { store.error != nil }, set: { if !$0 { store.error = nil } })) {
           Button("OK") { store.error = nil }
         } message: { Text(store.error ?? "") }
-    }
   }
   @ViewBuilder private var content: some View {
     let mode = RecentPhotosContentMode.select(query: query, opened: store.opened, status: store.status)
@@ -252,6 +286,9 @@ struct RecentPhotosView: View {
       VStack(spacing: 18) {
         Image(systemName: "photo.on.rectangle").font(.system(size: 44))
         Text("Your last 10 days").font(.title2.bold())
+#if FOTORO_LOCAL_PREVIEW
+        Text("Local-only beta").font(.subheadline).foregroundStyle(.secondary)
+#endif
         Text("Find a photo. Keep a moment.").foregroundStyle(.secondary)
         Button("Open Photos") {
           Task { await store.open(); search.open(status: store.status) }
@@ -261,15 +298,26 @@ struct RecentPhotosView: View {
       ContentUnavailableView {
         Label("Photos access is off", systemImage: "photo")
       } description: {
+#if FOTORO_LOCAL_PREVIEW
+        Text("Allow selected photos or full access in Settings.")
+#else
         Text("Allow selected photos or full access in Settings. Your saved account photos are still searchable after signing in.")
+#endif
       } actions: { Button("Open Settings", action: openSettings) }
     } else {
       ScrollView {
         if mode == .search {
+#if FOTORO_LOCAL_PREVIEW
+          LocalSearchView(search: search, photos: store, choseMeaning: { queryFocused = false }) {
+            queryFocused = false
+            viewer = $0
+          }
+#else
           ConsumerSearchResultsView(hits: searchHits, saved: savedResults, search: search, photos: store,
             inspectDevice: { queryFocused = false; viewer = $0 },
             inspectSaved: { queryFocused = false; savedViewer = $0 },
             choseAlternative: { queryFocused = false })
+#endif
         } else {
           HStack {
             Text("Last 10 days").font(.subheadline.weight(.medium))
@@ -300,8 +348,13 @@ struct RecentPhotosView: View {
   }
   @ToolbarContentBuilder private var homeToolbar: some ToolbarContent {
     ToolbarItem(placement: .topBarLeading) {
+#if FOTORO_LOCAL_PREVIEW
+      Text("Local-only beta").font(.caption).foregroundStyle(.secondary)
+        .fixedSize(horizontal: true, vertical: false)
+#else
       Button(action: openBackup) { ConsumerBackupLabel(summary: services?.consumerSyncSummary ?? ConsumerSyncSummary()) }
         .accessibilityLabel("Backup status")
+#endif
     }
     ToolbarItem(placement: .topBarTrailing) {
       if store.opened, !store.photos.isEmpty {
@@ -316,7 +369,7 @@ struct RecentPhotosView: View {
     }
   }
   @ViewBuilder private var searchBar: some View {
-    if store.opened || services?.vault.isUnlocked == true {
+    if canSearch {
       HStack(spacing: 12) {
         Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
         TextField("Search photos", text: $query).focused($queryFocused)
@@ -334,12 +387,24 @@ struct RecentPhotosView: View {
         .glassEffect(.regular.interactive()).padding(.horizontal).padding(.bottom, 6)
     }
   }
+  private var canSearch: Bool {
+#if FOTORO_LOCAL_PREVIEW
+    store.opened
+#else
+    store.opened || services?.vault.isUnlocked == true
+#endif
+  }
   private var settingsView: some View {
     NavigationStack {
       List {
         Section {
+#if FOTORO_LOCAL_PREVIEW
+          Text("Local-only beta").font(.headline)
+          Text("Browse and search your Photos library on this device. Labels stay on this device. Nothing is backed up to Fotoro.")
+#else
           Text("Photos stay in your library. Browsing does not upload them.")
           Button("Backup status") { pendingBackup = true; settings = false }
+#endif
         }
         Section("Photos access") {
           Button("Refresh last 10 days") { restorePhotos(); settings = false }
@@ -355,6 +420,7 @@ struct RecentPhotosView: View {
     if RecentPhotosPolicy.canRead(store.status) { search.open(status: store.status) }
     else { search.auditAuthorization() }
   }
+#if !FOTORO_LOCAL_PREVIEW
   private func openBackup() {
     queryFocused = false
     do {
@@ -384,6 +450,7 @@ struct RecentPhotosView: View {
       store.error = error.localizedDescription
     }
   }
+#endif
   private func toggleSelection(_ photo: RecentPhoto) {
     if selected.contains(photo.id) { selected.remove(photo.id) } else { selected.insert(photo.id) }
   }
@@ -433,6 +500,7 @@ struct RecentPhotosView: View {
   }
 }
 
+#if !FOTORO_LOCAL_PREVIEW
 private struct ConsumerSearchPresentationID: Equatable {
   var query: String
   var library: UInt64
@@ -441,6 +509,7 @@ private struct ConsumerSearchPresentationID: Equatable {
   var account: String?
   var vault: UUID?
 }
+#endif
 
 private struct RecentPhotoCell: View {
   let photo: RecentPhoto

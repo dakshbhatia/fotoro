@@ -63,6 +63,9 @@ jobs:
             sleep 0.2
           done
           pnpm test:ios
+      - name: Local Photos preview tests
+        working-directory: fotoro
+        run: node tools/test-ios.mjs --local-preview
       - name: Local service diagnostics on failure
         if: failure()
         run: |

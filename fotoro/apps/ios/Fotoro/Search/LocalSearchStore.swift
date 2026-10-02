@@ -28,13 +28,23 @@ import UIKit
   @ObservationIgnored private let processor = VisionTextProcessor()
   @ObservationIgnored private var imageRequest: PHImageRequestID?
 
-  @ObservationIgnored private var root = FileManager.default.urls(
-    for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent(
-      "FotoroLocalSearch", isDirectory: true)
+  static func defaultIndexRoot(in directory: URL) -> URL {
+    #if FOTORO_LOCAL_PREVIEW
+      directory.appendingPathComponent("FotoroLocalPreviewSearch", isDirectory: true)
+    #else
+      directory.appendingPathComponent("FotoroLocalSearch", isDirectory: true)
+    #endif
+  }
+  @ObservationIgnored private(set) var root = LocalSearchStore.defaultIndexRoot(in: FileManager.default.urls(
+    for: .applicationSupportDirectory, in: .userDomainMask)[0])
   override init() { super.init() }
   init(index: SearchIndex) {
     self.index = index
     ready = true
+    super.init()
+  }
+  init(applicationSupportDirectory: URL) {
+    self.root = Self.defaultIndexRoot(in: applicationSupportDirectory)
     super.init()
   }
   init(root: URL) {
@@ -390,11 +400,13 @@ import UIKit
     catch { self.error = error.localizedDescription }
   }
   func record(_ photoID: String) throws -> SearchRecord? { try index?.record(photoID) }
+  #if !FOTORO_LOCAL_PREVIEW
   func applyAnnotations(_ value: PhotoAnnotationsV1, source: BackupSource, accountId: String) throws {
     guard ready, let revision = source.sourceRevision,
       try index?.applyAnnotations(value, photoID: source.id, revision: revision, accountId: accountId) == true else { return }
     updateQuery(query)
   }
+  #endif
   func labels(_ photoID: String) -> [String] { (try? index?.record(photoID)?.labels) ?? [] }
   @discardableResult func setLabels(_ labels: [String], photoID: String) -> Bool {
     guard labels.count <= 64, labels.allSatisfy({ !$0.isEmpty && $0.unicodeScalars.count <= 120 }) else {

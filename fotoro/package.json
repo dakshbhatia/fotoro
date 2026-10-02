@@ -21,8 +21,9 @@
     "test:exchange": "tsx --test tests/integration/exchange.test.ts",
     "test:exchange:isolated": "node tools/test-exchange.mjs",
     "test:ios": "node tools/test-ios.mjs",
+    "test:ios-preview-audit": "node --experimental-vm-modules tools/check-ios-preview.test.mjs",
     "test": "tsx --test tests/*.test.ts",
-    "check:core": "tsc --noEmit && pnpm test && pnpm test:search:fixtures",
+    "check:core": "tsc --noEmit && pnpm test && pnpm test:search:fixtures && pnpm test:ios-preview-audit",
     "check:api": "pnpm --filter @fotoro/api check && pnpm test:api",
     "build:web": "pnpm --filter @fotoro/web build",
     "check": "pnpm check:core && pnpm check:api && pnpm test:web && pnpm build:web"

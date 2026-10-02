@@ -1,4 +1,6 @@
+#if !FOTORO_LOCAL_PREVIEW
 import NukeUI
+#endif
 import SwiftUI
 
 struct LocalSearchView: View {
@@ -51,6 +53,7 @@ struct SearchAlternatives: View {
   }
 }
 
+#if !FOTORO_LOCAL_PREVIEW
 struct ConsumerSearchResultsView: View {
   let hits: [ConsumerSearchHit]
   let saved: [String: LocalPhoto]
@@ -112,6 +115,8 @@ private struct ConsumerSearchCell: View {
     }
   }
 }
+
+#endif
 
 struct LocalPhotoDetails: View {
   let photo: RecentPhoto

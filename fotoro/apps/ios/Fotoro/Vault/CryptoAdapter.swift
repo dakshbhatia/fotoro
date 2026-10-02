@@ -2,11 +2,6 @@ import CryptoKit
 import Foundation
 import Sodium
 
-struct FotoroError: LocalizedError, Equatable {
-  var message: String
-  var errorDescription: String? { message }
-  init(_ message: String) { self.message = message }
-}
 enum Wire {
   static func encode<T: Encodable>(_ value: T) throws -> Data {
     let e = JSONEncoder()

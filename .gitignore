@@ -15,5 +15,6 @@ node_modules/
 fotoro/apps/web/dist/
 fotoro/services/api/.wrangler/
 fotoro/apps/ios/build/
+fotoro/apps/ios/build-local-preview/
 fotoro/apps/ios/**/xcuserdata/
 *.xcresult

@@ -84,12 +84,22 @@ photos and recognized text. Share an original photo. Hosted backup is unavailabl
 in this build." Local Photos access does not opt the library into uploads. This
 pilot does not establish personal iCloud or background-transfer acceptance.
 
-A separate local-only preview scheme is feasible using shared PhotoKit/Vision
-views and search, an isolated local index, explicit source/resource allowlists
-and GRDB-only linkage. Account, network/backup/exchange sources and Sodium would
-be excluded from the binary. This variant is a proposal pending the owner's
-scope choice; no preview code has been implemented or uploaded. The default
-encrypted scheme and its formats remain intact.
+The owner approved and implemented the separate `FotoroLocalPreview` scheme.
+It shares PhotoKit/Vision views and search, uses an isolated
+`FotoroLocalPreviewSearch` index, explicit source/resource allowlists and GRDB-only
+linkage. Account, Fotoro network/backup/exchange sources and Sodium are excluded
+from this binary. Local-only scope is visible on first open, the gallery and
+Settings. The default encrypted scheme and its formats remain intact. Installing
+this beta replaces the app under the same bundle identifier; it does not import
+or change the full app's index or account files.
+
+`node tools/build-testflight.mjs <build-number> --local-preview --upload` checks
+the signed archive and a distribution-signed IPA before upload. It scans the
+single executable, matching dSYM and link map for excluded code, verifies icons/
+privacy-only resources and checks the preview-specific Apple-OS-only encryption
+metadata. Unexpected bundled binaries, account resources or background/domain
+entitlements fail the audit. Actual processing and tester access still need
+App Store Connect verification after upload.
 
 Foreground Photos sync is implemented locally. On a deployed/signed build:
 create or unlock one account on iPhone, save its recovery code, then start
