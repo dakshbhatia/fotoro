@@ -1,16 +1,24 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { type LocalPhoto, LocalResources } from "./resources";
+interface PickSelection {
+  ids: ReadonlySet<string>;
+  reasons?: ReadonlyMap<string, string[]>;
+  disabled: boolean;
+  onChange: (id: string, checked: boolean) => void;
+}
 function Tile({
   photo,
   resources,
   onOpen,
   onFailure,
+  selection,
 }: {
   photo: LocalPhoto;
   resources: LocalResources;
   onOpen: () => void;
   onFailure: (id: string, message: string) => void;
+  selection?: PickSelection;
 }) {
   const [url, setUrl] = useState(""), [error, setError] = useState("");
   useEffect(() => {
@@ -44,6 +52,13 @@ function Tile({
           <span className="loading-photo" aria-label="Preparing photo" />
         )}
       </button>
+      {selection && <>
+        <label className="photo-pick-toggle">
+          <input type="checkbox" aria-label={"Select " + photo.filename + " for sync"} checked={selection.ids.has(photo.id)} disabled={selection.disabled}
+            onChange={event => selection.onChange(photo.id, event.target.checked)} />
+        </label>
+        {selection.ids.has(photo.id) && <span className="photo-pick-reason">{selection.reasons?.get(photo.id)?.join(" · ") ?? "Your choice"}</span>}
+      </>}
     </div>
   );
 }
@@ -52,11 +67,13 @@ export function LocalLibrary({
   resources,
   onOpen,
   onFailure,
+  selection,
 }: {
   photos: LocalPhoto[];
   resources: LocalResources;
   onOpen: (id: string) => void;
   onFailure: (id: string, message: string) => void;
+  selection?: PickSelection;
 }) {
   const parent = useRef<HTMLDivElement>(null),
     [width, setWidth] = useState(800),
@@ -167,6 +184,7 @@ export function LocalLibrary({
                   resources={resources}
                   onOpen={() => onOpen(photo.id)}
                   onFailure={onFailure}
+                  selection={selection}
                 />
               ))}
             </div>

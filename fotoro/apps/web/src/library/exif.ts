@@ -1,4 +1,4 @@
-/* Minimal bounded JPEG EXIF reader. Missing/invalid dates retain import provenance. */
+/* Minimal bounded JPEG EXIF reader. Only DateTimeOriginal establishes capture provenance. */
 export function captureDate(bytes: Uint8Array): string | undefined {
   try {
     if (bytes[0] !== 255 || bytes[1] !== 216) return;
@@ -36,20 +36,24 @@ export function captureDate(bytes: Uint8Array): string | undefined {
           for (let i = 0; i < count; i++) {
             const p = start + 2 + i * 12,
               tag = u16(p);
-            if (tag === 0x8769) {
+            if (tag === 0x8769 && u16(p + 2) === 4 && u32(p + 4) === 1) {
               const found = parse(u32(p + 8), depth + 1);
               if (found) return found;
             }
-            if (tag === 0x9003 || tag === 0x132) {
+            if (tag === 0x9003 && u16(p + 2) === 2) {
               const size = u32(p + 4),
                 at = size <= 4 ? p + 8 : base + u32(p + 8);
               if (size < 19 || size > 64 || at + size > end) continue;
               const raw = new TextDecoder().decode(bytes.subarray(at, at + 19));
               if (!/^\d{4}:\d{2}:\d{2} \d{2}:\d{2}:\d{2}$/.test(raw)) continue;
-              const date = new Date(
-                raw.slice(0, 10).replaceAll(":", "-") + "T" + raw.slice(11),
-              );
-              if (Number.isFinite(date.getTime())) return date.toISOString();
+              const clock = raw.slice(0, 10).replaceAll(":", "-") + "T" + raw.slice(11);
+              // Validate the calendar without the browser's DST rules, retaining the
+              // existing local interpretation when no EXIF timezone offset is available.
+              const calendar = new Date(clock + "Z"), date = new Date(clock);
+              const parts = raw.split(/[: ]/).map(Number);
+              if (Number.isFinite(date.getTime()) &&
+                [calendar.getUTCFullYear(), calendar.getUTCMonth() + 1, calendar.getUTCDate(), calendar.getUTCHours(), calendar.getUTCMinutes(), calendar.getUTCSeconds()].every((value, i) => value === parts[i]))
+                return date.toISOString();
             }
           }
         };

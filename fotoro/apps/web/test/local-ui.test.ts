@@ -20,6 +20,13 @@ test('account selection callback includes only actual selected originals, never 
  const original=new File(['unchanged original'],'same.png');
  assert.deepEqual(selectedOriginals([photo('retained'),{...photo('live'),file:original}]),[original]);
 });
+test('sync uses the reviewed subset while unchosen originals remain in the library',()=>{
+ const a={...photo('a'),file:new File(['a'],'a.png')},b={...photo('b'),file:new File(['b'],'b.png')};
+ const library=[a,b,photo('retained')];
+ assert.deepEqual(selectedOriginals(library,new Set(['b','retained'])),[b.file]);
+ assert.equal(library.length,3);assert.equal(library[0].file,a.file);
+ assert.deepEqual(selectedOriginals(library,new Set()),[]);
+});
 
 test('explicit navigation reaches all three hits and keeps a pinned default browsable',async()=>{
  const {PhotoSearchIndex,emptyFeedback}=await import('../src/local/search');

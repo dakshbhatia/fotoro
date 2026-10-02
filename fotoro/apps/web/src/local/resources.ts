@@ -18,6 +18,7 @@ export interface LocalPhoto {
   filename: string;
   date: string;
   dateSource: "exif" | "selected";
+  captureVerified?: true;
   width?: number;
   height?: number;
 }
@@ -144,6 +145,7 @@ export async function localPhoto(file: File): Promise<LocalPhoto & { file: File 
     filename: file.name,
     date: captured ?? new Date().toISOString(),
     dateSource: captured ? "exif" : "selected",
+    captureVerified: captured ? true : undefined,
     ...dimensions,
   };
 }

@@ -744,3 +744,21 @@ h1 { font-size: 32px; letter-spacing: -1.3px; font-weight: 650; }
   .sync-onboarding .text-button, .sync-onboarding .text-button:hover:not(:disabled) { color: #b7beb5; background: transparent; }
   button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline-color: #89bcff; }
 }
+
+.photo-picks { flex: 0 0 auto; margin: 0 32px 10px; padding: 10px 12px; border: 1px solid #e1e5dd; border-radius: 16px; background: #f3f5ef; }
+.photo-pick-count { margin: 0 0 3px; font-size: 13px; font-weight: 600; }
+.photo-picks .hint { margin: 3px 0 7px; font-size: 12px; }
+.photo-pick-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.photo-pick-actions button { min-height: 44px; padding: 8px; font-size: 12px; white-space: nowrap; }
+.photo-pick-toggle { position: absolute; top: 3px; right: 3px; width: 44px; height: 44px; display: grid; place-items: center; background: #ffffffd9; border-radius: 50%; }
+.photo-pick-toggle input { width: 24px; height: 24px; margin: 0; accent-color: #386341; cursor: pointer; }
+.photo-pick-reason { position: absolute; bottom: 4px; left: 4px; right: 4px; padding: 4px 6px; border-radius: 6px; background: #111c; color: #fff; font-size: 11px; line-height: 1.25; pointer-events: none; }
+@media (max-width: 700px) {
+  .photo-picks { margin: 0 14px 8px; padding: 10px; }
+  .photo-pick-reason { font-size: 9px; padding: 3px; }
+}
+@media (prefers-color-scheme: dark) {
+  .photo-picks { background: #202420; border-color: #454c45; }
+  .photo-pick-toggle { background: #202420e8; }
+  .photo-pick-toggle input { accent-color: #a4cfad; }
+}
