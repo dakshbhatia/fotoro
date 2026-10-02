@@ -141,3 +141,103 @@ final class BackgroundUploadTests: XCTestCase {
     XCTAssertEqual(try ledger.records(accountId: account).filter { $0.state == .transferring }.count, 2)
   }
 }
+
+// These exercise APIClient's real URLSession error boundary, without contacting
+// any account, fixture server or media store.
+final class APIClientErrorTests: XCTestCase {
+  private let reference = "12345678-1234-4234-8234-123456789abc"
+
+  @MainActor private func client() -> APIClient {
+    let account = AccountSession()
+    account.fixture = false
+    account.bearerToken = nil
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [FailureResponseProtocol.self]
+    return APIClient(session: account, baseURL: URL(string: "https://api-errors.invalid")!, networkConfiguration: configuration)
+  }
+
+  @MainActor func testJSONFailureKeepsConflictCodeAndPresentsOnlyOpaqueReference() async throws {
+    do {
+      _ = try await client().request("/conflict?cap=PRIVATE_CAP", method: "POST", body: Data("PRIVATE_PHOTO_BODY".utf8))
+      XCTFail("Expected conflict")
+    } catch let error as FotoroError {
+      XCTAssertEqual(error.message, "VERSION_CONFLICT")
+      XCTAssertEqual(error.localizedDescription, "VERSION_CONFLICT (reference: \(reference))")
+      XCTAssertEqual(error.requestId, reference)
+      XCTAssertEqual(error.retryable, true)
+      XCTAssertFalse(error.localizedDescription.contains("PRIVATE_"))
+    }
+  }
+
+  @MainActor func testMediaUploadRetainsTheSameFailureMetadata() async throws {
+    do {
+      try await client().upload(Data("PRIVATE_CIPHERTEXT".utf8), to: "/unavailable?cap=PRIVATE_CAP")
+      XCTFail("Expected media failure")
+    } catch let error as FotoroError {
+      XCTAssertEqual(error.message, "INTERNAL_ERROR")
+      XCTAssertEqual(error.requestId, reference)
+      XCTAssertEqual(error.retryable, true)
+      XCTAssertTrue(error.localizedDescription.contains(reference))
+    }
+  }
+
+  @MainActor func testMalformedRequestIDAndNumericRetryableCannotBecomeSupportMetadata() async throws {
+    for path in ["/malformed-id", "/numeric-retryable", "/false-retryable"] {
+      do {
+        _ = try await client().request(path)
+        XCTFail("Expected rejection")
+      } catch let error as FotoroError {
+        XCTAssertEqual(error.message, "FORBIDDEN")
+        XCTAssertNil(error.requestId)
+        XCTAssertEqual(error.retryable, false)
+        XCTAssertEqual(error.localizedDescription, "FORBIDDEN")
+      }
+    }
+  }
+
+  @MainActor func testMalformedHTTPBodiesUseStatusFallbackWithoutDecoderErrors() async throws {
+    for path in ["/html", "/null", "/broken-json", "/wrong-code"] {
+      do {
+        _ = try await client().request(path)
+        XCTFail("Expected HTTP error")
+      } catch let error as FotoroError {
+        XCTAssertEqual(error.message, "Network request failed (503)")
+        XCTAssertEqual(error.localizedDescription, "Network request failed (503)")
+        XCTAssertNil(error.requestId)
+        XCTAssertEqual(error.retryable, false)
+      }
+    }
+  }
+
+
+}
+
+private final class FailureResponseProtocol: URLProtocol, @unchecked Sendable {
+  override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "api-errors.invalid" }
+  override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+  override func startLoading() {
+    let reference = "12345678-1234-4234-8234-123456789abc"
+    let status: Int
+    let body: String
+    switch request.url!.path {
+    case "/conflict":
+      status = 409; body = "{\"version\":1,\"code\":\"VERSION_CONFLICT\",\"retryable\":true,\"requestId\":\"\(reference)\",\"private\":\"PRIVATE_SERVER_BODY\"}"
+    case "/unavailable":
+      status = 500; body = "{\"version\":1,\"code\":\"INTERNAL_ERROR\",\"retryable\":true,\"requestId\":\"\(reference)\"}"
+    case "/malformed-id":
+      status = 403; body = "{\"code\":\"FORBIDDEN\",\"retryable\":false,\"requestId\":\"private-token\\nnot-an-id\"}"
+    case "/numeric-retryable":
+      status = 403; body = "{\"code\":\"FORBIDDEN\",\"retryable\":1,\"requestId\":\"12345678123442348234123456789abc\"}"
+    case "/false-retryable":
+      status = 403; body = "{\"code\":\"FORBIDDEN\",\"retryable\":false}"
+    case "/null": status = 503; body = "null"
+    case "/broken-json": status = 503; body = "{bad json"
+    case "/wrong-code": status = 503; body = "{\"code\":42}"
+    default: status = 503; body = "<html>PRIVATE_SERVER_BODY</html>"
+    }
+    client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!, cacheStoragePolicy: .notAllowed)
+    client?.urlProtocol(self, didLoad: Data(body.utf8))
+    client?.urlProtocolDidFinishLoading(self)
+  }
+  override func stopLoading() {}
+}

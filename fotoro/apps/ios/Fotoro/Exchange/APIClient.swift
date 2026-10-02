@@ -9,6 +9,20 @@ private final class APIRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchec
   }
 }
 
+private struct APIFailure: Decodable {
+  let code: String?
+  let requestId: String?
+  let retryable: Bool
+  private enum CodingKeys: String, CodingKey { case code, requestId, retryable }
+  init(from decoder: Decoder) throws {
+    let fields = try decoder.container(keyedBy: CodingKeys.self)
+    code = try? fields.decode(String.self, forKey: .code)
+    requestId = try? fields.decode(String.self, forKey: .requestId)
+    // JSONDecoder's Bool decoding rejects JSON numbers rather than bridging 1.
+    retryable = (try? fields.decode(Bool.self, forKey: .retryable)) ?? false
+  }
+}
+
 @MainActor final class APIClient {
   let session: AccountSession
   var baseURL: URL
@@ -52,10 +66,10 @@ private final class APIRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchec
     }
     let (data, response) = try await network.data(for: r)
     guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-      let code =
-        (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["code"] as? String
+      let failure = try? JSONDecoder().decode(APIFailure.self, from: data)
       throw FotoroError(
-        code ?? "Network request failed (\((response as? HTTPURLResponse)?.statusCode ?? 0))")
+        failure?.code ?? "Network request failed (\((response as? HTTPURLResponse)?.statusCode ?? 0))",
+        requestId: failure?.requestId, retryable: failure?.retryable ?? false)
     }
     return data
   }
