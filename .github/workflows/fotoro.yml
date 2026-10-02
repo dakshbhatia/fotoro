@@ -4,7 +4,7 @@ on:
   pull_request:
     paths: ["fotoro/**", ".github/workflows/fotoro.yml"]
   push:
-    branches: ["codex/ai-photos"]
+    branches: ["main", "codex/ai-photos"]
     paths: ["fotoro/**", ".github/workflows/fotoro.yml"]
   workflow_dispatch:
 
