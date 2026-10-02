@@ -88,7 +88,10 @@ struct AccountView: View {
     }
   }
   private func authenticate(_ action: @escaping @MainActor () async throws -> Void) {
-    if let task = services.run(phase: .auth, action) { onAuthenticationTask(task) }
+    if let task = services.run(phase: .auth, {
+      defer { onAuthenticationTask(nil) }
+      try await action()
+    }) { onAuthenticationTask(task) }
   }
   private func signIn() {
     guard !password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }

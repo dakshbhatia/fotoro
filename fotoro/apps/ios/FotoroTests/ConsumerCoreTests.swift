@@ -471,8 +471,68 @@ extension ConsumerCoreTests {
       services.vault.lock()
       refresh.cancel()
       try await services.vault.unlock(.localKeychain)
+      try services.activateAccount()
       await refresh.open(services)
       XCTAssertGreaterThan(server.requests.count, completed, "Explicit unlock opens a fresh vault binding")
+      XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" })
+    }
+  }
+  @MainActor func testUnlockedUnactivatedAccountCannotReadWrongCatalogAndRemainsOpenable() async throws {
+    try await withSavedLibrary { services, server in
+      let refresh = SavedLibraryRefresh()
+      services.store = try LibraryStore(root: services.storageRoot.appendingPathComponent(Wire.id()))
+      XCTAssertTrue(services.vault.isUnlocked)
+      XCTAssertNil(services.photoAccountAccess)
+      await refresh.open(services)
+      await refresh.refresh(services)
+      do { try await services.sync(); XCTFail("An unactivated store was read") }
+      catch let error as FotoroError { XCTAssertEqual(error.message, "Open Fotoro before loading saved photos.") }
+      XCTAssertTrue(server.requests.isEmpty)
+      try services.activateAccount()
+      XCTAssertNotNil(services.photoAccountAccess)
+      await refresh.open(services)
+      XCTAssertNotNil(try services.consumerSavedPhoto(server.photoID))
+      XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" })
+    }
+  }
+  @MainActor func testSavedLibraryOpenTracksStoreReplacementWithinSameAccountAndVault() async throws {
+    try await withSavedLibrary { services, server in
+      let refresh = SavedLibraryRefresh()
+      await refresh.open(services)
+      let completed = server.requests.count
+      let generation = services.vault.generation
+      let old = services.store
+      try services.activateAccount()
+      XCTAssertFalse(services.store === old)
+      XCTAssertEqual(services.vault.generation, generation)
+      await refresh.open(services)
+      XCTAssertGreaterThan(server.requests.count, completed)
+      XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" })
+    }
+  }
+  @MainActor func testFailedAccountActivationKeepsServicesTogetherAndAllowsExplicitRetry() async throws {
+    try await withSavedLibrary { services, server in
+      let originalStore = services.store, originalBackup = services.backup
+      let originalJournal = services.journal
+      try await originalStore.database.write { db in
+        try db.execute(sql: "INSERT INTO state(key,value) VALUES('backupSelection',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+          arguments: [Data("invalid-json".utf8).b64])
+      }
+      XCTAssertThrowsError(try services.activateAccount())
+      XCTAssertTrue(services.store === originalStore)
+      XCTAssertTrue(services.backup === originalBackup)
+      XCTAssertTrue(services.journal === originalJournal)
+      XCTAssertNil(services.photoAccountAccess)
+      let refresh = SavedLibraryRefresh()
+      await refresh.open(services)
+      XCTAssertTrue(server.requests.isEmpty)
+      try await originalStore.database.write { db in
+        try db.execute(sql: "DELETE FROM state WHERE key='backupSelection'")
+      }
+      try services.activateAccount()
+      XCTAssertNotNil(services.photoAccountAccess)
+      await refresh.open(services)
+      XCTAssertNotNil(try services.consumerSavedPhoto(server.photoID))
       XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" })
     }
   }

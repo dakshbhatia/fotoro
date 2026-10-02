@@ -732,7 +732,7 @@ h1 { font-size: 32px; letter-spacing: -1.3px; font-weight: 650; }
 .photo-pick-count { margin: 0; font-size: 13px; font-weight: 550; }
 .photo-pick-count span { font-size: 12px; font-weight: 400; color: #71776a; }
 .photo-pick-context { margin: 2px 0; font-size: 12px; line-height: 1.4; color: #71776a; overflow-wrap: anywhere; }
-.photo-picks > button { min-height: 44px; min-width: 44px; padding: 8px 12px; border: 0; border-radius: 22px; background: transparent; color: #3d634c; font-size: 13px; }
+.photo-picks .header-actions > button { min-height: 44px; min-width: 44px; padding: 8px 12px; border: 0; border-radius: 22px; background: transparent; color: #3d634c; font-size: 13px; }
 .local-settings h3 { margin: 18px 0 8px; font-size: 14px; font-weight: 600; }
 .photo-pick-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .photo-pick-actions button { min-height: 44px; padding: 8px; font-size: 12px; white-space: nowrap; }
@@ -745,7 +745,7 @@ h1 { font-size: 32px; letter-spacing: -1.3px; font-weight: 650; }
 }
 @media (prefers-color-scheme: dark) {
   .photo-pick-count span, .photo-pick-context { color: #b7beb5; }
-  .photo-picks > button { color: #a4cfad; }
+  .photo-picks .header-actions > button { color: #a4cfad; }
   .photo-pick-toggle { background: #202420e8; }
   .photo-pick-toggle input { accent-color: #a4cfad; }
 }

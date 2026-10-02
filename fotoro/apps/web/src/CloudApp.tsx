@@ -7,6 +7,7 @@ import { cachedCatalog, photoBytes, type Photo } from "./library/catalog";
 import {
   lockVault,
   requireVault,
+  vaultGeneration,
 } from "./vault/vault";
 import {
   publicTestSession,
@@ -50,6 +51,8 @@ import {loadUploadPause, saveUploadPause} from "./library/consumer-preferences";
 import type {OwnedPhotoSnapshot} from "./library/consumer-search";
 import {useDialogFocus} from "./library/dialog-focus";
 import {AccountAccess} from "./vault/AccountAccess";
+import {ChosenSaveIntent, type ChosenSaveSnapshot} from "./exchange/chosen-save";
+import type {UnlockedVault} from "./vault/vault";
 const noLocalPhotos: LocalPhoto[] = [];
 const SearchIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -68,12 +71,14 @@ export default function CloudApp({
   active = true,
   onSyncSummary,
   onOwnedPhotos,
+  saveIntent = null,
 }: {
   onBack: () => void;
   localPhotos?: LocalPhoto[];
   active?: boolean;
   onSyncSummary?: (summary: ConsumerSyncSummary) => void;
   onOwnedPhotos?: (snapshot: OwnedPhotoSnapshot | null) => void;
+  saveIntent?: ChosenSaveIntent | null;
 }) {
   const [account, setAccount] = useState(() => {
       try {
@@ -105,6 +110,7 @@ export default function CloudApp({
     [committedMeaning, setCommittedMeaning] = useState<string>(),
     [selecting, setSelecting] = useState(false),
     [online, setOnline] = useState(() => navigator.onLine !== false);
+  const [saveReady, setSaveReady] = useState<UnlockedVault | null>(null);
   const running = useRef(false),
     authIntent = useRef(0),
     pausedRef = useRef(true),
@@ -112,10 +118,13 @@ export default function CloudApp({
     uploadAbort = useRef<AbortController | null>(null),
     localSynced = useRef(new WeakMap<File, string>());
   const input = useRef<HTMLInputElement>(null);
+  const activeRef = useRef(active), saveIntentRef = useRef(saveIntent);
+  activeRef.current = active; saveIntentRef.current = saveIntent;
   const backButton = useRef<HTMLButtonElement>(null);
   useEffect(() => {if (active) backButton.current?.focus({preventScroll: true});}, [active]);
   const accountPanel = useRef<HTMLElement>(null);
-  useDialogFocus(accountPanel, () => setMenu(false), menu && active && !!account);
+  const closeAccountPanel = () => {saveIntentRef.current?.cancel(); setMenu(false);};
+  useDialogFocus(accountPanel, closeAccountPanel, menu && active && !!account);
   useEffect(() => {
     const picker = input.current;
     if (!picker) return;
@@ -159,6 +168,7 @@ export default function CloudApp({
     setStaging(0);
     setStatus("");
     setNeedsAttention(false);
+    setSaveReady(null);
     setSkipped(0);
     pausedRef.current = true;
     setPaused(true);
@@ -189,15 +199,19 @@ export default function CloudApp({
     window.addEventListener("fotoro-lock", onLock);
     return () => window.removeEventListener("fotoro-lock", onLock);
   }, [photos, received]);
-  const refresh = async (send = false) => {
+  const refresh = async (send = false, current = () => true, signal?: AbortSignal) => {
+    const check = () => {signal?.throwIfAborted(); if (!current()) throw new DOMException("Save cancelled", "AbortError");};
+    check();
     const session = requireVault();
     const cached = await cachedSync(session);
+    check();
     if (!sameVault(session)) return;
     setPhotos(cached.photos);
     setPending(cached.pending);
     setAnnotationPending(cached.annotations);
     setLastSuccessfulSync(cached.lastSuccessfulSync);
     setSkipped(cached.skipped);
+    setSaveReady(session);
     if (send && pausedRef.current) {
       setStatus("Sync is paused. Continue when you’re ready.");
       return;
@@ -208,7 +222,9 @@ export default function CloudApp({
       );
       return;
     }
-    const result = await (send ? saveSync(session) : refreshSync(session));
+    check();
+    const result = await (send ? saveSync(session, signal) : refreshSync(session));
+    check();
     if (!sameVault(session)) return;
     setPhotos((previous) => (sameVault(session) ? result.photos : previous));
     setPending((previous) => (sameVault(session) ? result.pending : previous));
@@ -221,7 +237,7 @@ export default function CloudApp({
     setNeedsAttention((previous) => (sameVault(session) ? false : previous));
   };
   const run = async (fn: () => Promise<void>, accountAction = false) => {
-    if (running.current) return;
+    if (running.current) return false;
     running.current = true;
     setBusy(true);
     setStatus("");
@@ -253,13 +269,22 @@ export default function CloudApp({
       running.current = false;
       setBusy(false);
     }
+    return true;
   };
-  const login = async (fn: () => Promise<unknown>) =>
-    run(async () => {
-      await fn();
+  const login = async (fn: () => Promise<unknown>) => {
+    const request = saveIntentRef.current, version = authIntent.current;
+    return run(async () => {
+      const ticket = request?.beginAuthentication(vaultGeneration());
+      try {await fn();}
+      catch (error) {request?.finishAuthentication(ticket, undefined, error); throw error;}
+      if (!activeRef.current || authIntent.current !== version) {request?.cancel(); return;}
       try {
-        setAccount(requireVault().accountId);
+        const session = requireVault();
+        request?.finishAuthentication(ticket, {session, generation: vaultGeneration(), current: () => sameVault(session)});
+        setAccount(session.accountId);
+        if (request?.pending && request.boundVault === session) setMenu(true);
       } catch {
+        request?.finishAuthentication(ticket);
         setStatus(
           "Enter your Fotoro password to unlock photos on this device.",
         );
@@ -268,6 +293,7 @@ export default function CloudApp({
       await restorePause();
       await refresh();
     }, true);
+  };
   useEffect(() => {
     if (!account) return;
     void run(async () => {await restorePause(); await refresh();});
@@ -290,30 +316,38 @@ export default function CloudApp({
     window.addEventListener("online", update); window.addEventListener("offline", update);
     return () => {window.removeEventListener("online", update); window.removeEventListener("offline", update);};
   }, []);
-  const syncLocal = () =>
+  const syncLocal = (snapshot?: ChosenSaveSnapshot, signal?: AbortSignal, current = () => true) =>
     run(async () => {
       const session = requireVault();
+      const check = () => {signal?.throwIfAborted(); if (!current() || !sameVault(session)) throw new DOMException("Save cancelled", "AbortError");};
+      check();
       if (publicDemo) throw new Error("PUBLIC_TEST_ACCOUNT_UPLOAD_DISABLED");
       await continueSync(session);
+      check();
       const controller = new AbortController();
+      const abort = () => controller.abort();
+      signal?.addEventListener("abort", abort, {once: true});
       uploadAbort.current = controller;
       let failures = 0;
-      const candidates = allLocalFiles.filter(
+      const candidates = (snapshot?.files ?? allLocalFiles).filter(
         (file) => localSynced.current.get(file) !== session.accountId,
       );
       try {
         const result = await syncSelectedSequential(candidates, {
-          current: () => sameVault(session),
+          current: () => sameVault(session) && current(),
           signal: controller.signal,
           stage: async (file) => {
             setStaging((value) => (sameVault(session) ? 1 : value));
-            const source = localPhotosRef.current.find(photo => photo.file === file);
-            const existing = source?.digest ? photos.find(photo => photo.metadata.originalSha256 === localOriginalDigest(source)) : undefined;
+            check();
+            const source = (snapshot?.photos ?? localPhotosRef.current).find(photo => photo.file === file);
+            const existing = source?.digest ? currentCatalog.current.find(photo => photo.metadata.originalSha256 === localOriginalDigest(source)) : undefined;
             const staged = existing ? undefined : await stageImport(file, undefined, controller.signal);
+            check();
             if (source && (staged || existing)) {
               const photoId = existing?.manifest.photoId ?? staged!.photoId;
               const originalSha256 = existing?.metadata.originalSha256 ?? staged!.sourceDigest;
               await queueLocalAnnotations({ownerAccountId: session.accountId, photoId, originalSha256}, source, session);
+              check();
             }
             if (!sameVault(session)) throw new Error("VAULT_LOCKED");
             localSynced.current.set(file, session.accountId);
@@ -321,7 +355,8 @@ export default function CloudApp({
             setStaging((value) => (sameVault(session) ? 0 : value));
           },
           drain: async () => {
-            await refresh(true);
+            check();
+            await refresh(true, current, controller.signal);
           },
           unresolved: async () => {
             const queue = await pendingImports();
@@ -343,10 +378,34 @@ export default function CloudApp({
             `${failures} photos could not be prepared. Your local originals are unchanged.`,
           );
       } finally {
+        signal?.removeEventListener("abort", abort);
         if (uploadAbort.current === controller) uploadAbort.current = null;
         if (sameVault(session)) setStaging(0);
       }
     });
+  const startChosenSave = (request = saveIntentRef.current) => {
+    if (!request?.pending) return Promise.resolve(false);
+    // A failed cache activation can be retried explicitly without replacing the selection.
+    if (!saveReady || !sameVault(saveReady)) return run(async () => {await restorePause(); await refresh();});
+    return request.start({
+      active: activeRef.current && document.visibilityState !== "hidden",
+      busy: running.current,
+      session: saveReady,
+      current: () => activeRef.current && saveIntentRef.current === request && sameVault(saveReady) && document.visibilityState !== "hidden",
+      save: (snapshot, signal, current) => {
+        setMenu(true);
+        return syncLocal(snapshot, signal, current);
+      },
+    });
+  };
+  useEffect(() => {
+    // A request arriving at an already-open account needs no authentication transition.
+    if (!active || !account || !saveIntent?.pending) return;
+    try {const session = requireVault(); if (session.accountId === account) saveIntent.bindInitialVault(session);} catch {}
+  }, [active, saveIntent]);
+  useEffect(() => {
+    if (active && !busy && saveIntent?.pending && saveReady) void startChosenSave(saveIntent);
+  }, [active, busy, saveIntent, saveReady]);
   const summary = syncStatus(
     pending,
     lastSuccessfulSync,
@@ -665,7 +724,7 @@ export default function CloudApp({
             <button
               className="close"
               aria-label="Close account"
-              onClick={() => setMenu(false)}
+              onClick={closeAccountPanel}
             >
               ×
             </button>
@@ -678,11 +737,11 @@ export default function CloudApp({
               {consumerSummary.detail}
             </p>
             <div className="actions">
-              {(localCount > 0 || summary.pending || summary.failed || annotationPending.length > 0) && <button className="primary-action" disabled={busy || publicDemo} onClick={localCount > 0 ? syncLocal : retry}>
+              {(localCount > 0 || summary.pending || summary.failed || annotationPending.length > 0) && <button className="primary-action" disabled={busy || publicDemo} onClick={() => {if (saveIntent?.pending) void startChosenSave(); else if (localCount > 0) void syncLocal(); else void retry();}}>
                 {localCount > 0 ? `Save ${localCount} selected ${localCount === 1 ? "photo" : "photos"}` : summary.pending || summary.failed ? "Continue" : "Save changes"}
               </button>}
               {!paused && busy && <button onClick={pause}>Pause</button>}
-              <button onClick={() => setMenu(false)}>Saved photos</button>
+              <button onClick={closeAccountPanel}>Saved photos</button>
             </div>
             <details>
               <summary>Settings</summary>

@@ -23,3 +23,10 @@ test("analysis and editing keep accurate accessible state in the compact status"
   const editing=renderToStaticMarkup(createElement(PhotoPicks,{...props,reviewing:true}));
   assert.match(editing,/aria-label="Done editing selection"/);assert.match(editing,/aria-pressed="true"/);
 });
+test("selected Save is explicit and unavailable until every selected original is present",()=>{
+  const markup=renderToStaticMarkup(createElement(PhotoPicks,{...props,onSave:()=>{}}));
+  assert.match(markup,/aria-label="Save 2 selected photos"/);
+  assert.match(markup,/>Save 2<\/button>/);
+  const missing=renderToStaticMarkup(createElement(PhotoPicks,{...props,ready:1,onSave:()=>{}}));
+  assert.match(missing,/<button disabled="" aria-label="Save 2 selected photos"/);
+});

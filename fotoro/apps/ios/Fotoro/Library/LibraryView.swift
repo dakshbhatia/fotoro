@@ -42,16 +42,17 @@ struct LibraryView: View {
   var body: some View {
     NavigationStack {
       Group {
-        if services.auth.startPassword != nil || !services.vault.isUnlocked
-          || (!services.session.isSignedIn && !services.session.fixture) {
+        if services.auth.startPassword != nil || services.photoAccountAccess == nil {
           VStack(alignment: .leading, spacing: 0) {
             if let saveSelection {
               Text("Open Fotoro to save \(saveSelection.count) \(saveSelection.count == 1 ? "photo" : "photos")")
                 .font(.headline).padding(.horizontal).padding(.top)
             }
-            AccountView(services: services, onSignedIn: startSelectedSave,
+            AccountView(services: services, onSignedIn: openedAccount,
               onAuthenticationTask: { authenticationTask = $0 })
           }
+        } else if authenticationTask != nil {
+          ProgressView("Opening Fotoro…")
         } else {
           ScrollView {
             savingFeedback
@@ -82,7 +83,7 @@ struct LibraryView: View {
             }
             ForEach(services.notices, id: \.self) { Text($0).font(.caption).padding() }
           }.scrollPosition(id: $scrollID, anchor: .top)
-            .task(id: SavedLibraryOpenBinding(account: services.session.accountId, vault: services.vault.generation)) {
+            .task(id: SavedLibraryOpenBinding(services)) {
               await catalogRefresh.open(services)
             }
             .searchable(text: $query, prompt: "Search")
@@ -113,7 +114,12 @@ struct LibraryView: View {
             }
         }
       }.navigationTitle("Saved photos").navigationBarTitleDisplayMode(.inline)
-        .task { startSelectedSave() }
+        .task {
+          if authenticationTask == nil, services.auth.startPassword == nil {
+            saveIntent?.authorize(services.photoAccountAccess)
+          }
+          startSelectedSave()
+        }
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         .overlay { if services.busy { ProgressView().padding().glassEffect() } }
         .sheet(item: $viewer, onDismiss: { viewer = nil }) { presentation in
@@ -135,7 +141,7 @@ struct LibraryView: View {
         }
         .onChange(of: services.vault.isUnlocked) { _, unlocked in
           if !unlocked {
-            saveIntent?.cancel()
+            if authenticationTask == nil { saveIntent?.cancel() }
             viewer = nil
             shareTask?.cancel()
             cleanupShare()
@@ -162,9 +168,13 @@ struct LibraryView: View {
     }
   }
 
+  private func openedAccount() {
+    saveIntent?.authorize(services.photoAccountAccess)
+    startSelectedSave()
+  }
   private func startSelectedSave() {
-    guard services.session.isSignedIn, services.vault.isUnlocked, services.auth.startPassword == nil,
-      let sources = saveIntent?.consume(active: scenePhase == .active, unlocked: true) else { return }
+    guard services.session.isSignedIn, services.auth.startPassword == nil,
+      let sources = saveIntent?.consume(active: scenePhase == .active, access: services.photoAccountAccess) else { return }
     services.error = nil
     do { try services.startPhotosBackup(selection: sources) }
     catch {
@@ -195,7 +205,7 @@ struct LibraryView: View {
       saveIntent?.wasConsumed == false || summary.state == .needsAttention {
       Button("Save selected photos", systemImage: "icloud.and.arrow.up") {
         saveIntent = ManualPhotoSaveIntent(saveSelection)
-        startSelectedSave()
+        openedAccount()
       }.disabled(services.busy).padding()
     }
   }
@@ -307,14 +317,14 @@ struct SavedPhotoSelection {
   @ObservationIgnored private var operation: UUID?
   @ObservationIgnored private var task: Task<Void, Never>?
   func open(_ services: AppServices) async {
-    let binding = SavedLibraryOpenBinding(account: services.session.accountId, vault: services.vault.generation)
-    guard openedBinding != binding, services.vault.isUnlocked else { return }
+    let binding = SavedLibraryOpenBinding(services)
+    guard openedBinding != binding, services.photoAccountAccess != nil else { return }
     if isRefreshing { cancel() }
     openedBinding = binding
     await refresh(services)
   }
   func refresh(_ services: AppServices) async {
-    guard !isRefreshing, services.vault.isUnlocked else { return }
+    guard !isRefreshing, services.photoAccountAccess != nil else { return }
     let token = UUID(), account = services.session.accountId, generation = services.vault.generation
     let catalog = services.store
     operation = token
@@ -345,6 +355,12 @@ struct SavedPhotoSelection {
 private struct SavedLibraryOpenBinding: Equatable {
   var account: String?
   var vault: UUID
+  var catalog: ObjectIdentifier
+  @MainActor init(_ services: AppServices) {
+    account = services.session.accountId
+    vault = services.vault.generation
+    catalog = ObjectIdentifier(services.store)
+  }
 }
 
 private struct SavedCatalogSearchPresentationID: Equatable {
