@@ -228,7 +228,7 @@ export function createAscMetadataClient({
       if (existing && written.id !== existing.id) fail("LOCALIZATION_SCOPE_MISMATCH");
       const verified = resource((await request(`/v1/betaBuildLocalizations/${written.id}?fields[betaBuildLocalizations]=locale,whatsNew,build`)).data, "betaBuildLocalizations");
       if (verified.id !== written.id || verified.attributes?.locale !== locale || verified.attributes?.whatsNew !== notes) fail("NOTES_NOT_VERIFIED");
-      const linked = verified.relationships?.build?.data;
+      const linked = (await request(`/v1/betaBuildLocalizations/${written.id}/relationships/build`)).data;
       if (linked?.type !== "builds" || linked.id !== build.id) fail("LOCALIZATION_SCOPE_MISMATCH");
       return Object.freeze({ ...status(selection, selector), locale, action: existing ? "updated" : "created", notesVerified: true });
     } catch (error) { safeError(error); }

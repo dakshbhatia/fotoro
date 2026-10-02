@@ -165,6 +165,36 @@ test("notes must be read back exactly, with no mutation retry", async () => {
   const { client, calls } = fixture({ fetchOverride(url, request) { if (request.method === "GET" && url.pathname === `/v1/betaBuildLocalizations/${LOCALIZATION}`) return new Response(JSON.stringify({ data: localization("different") })); } });
   await assert.rejects(client.setWhatToTest({ ...selector, localPreview: true }), safeError("NOTES_NOT_VERIFIED")); assert.equal(writes(calls).length, 1);
 });
+test("notes readback verifies build through linkage when inline data is omitted", async () => {
+  const notes = "Keep these exact words.";
+  for (const existing of [true, false]) {
+    const { client, calls } = fixture({ existing, fetchOverride(url, request) {
+      if (request.method === "GET" && url.pathname === `/v1/betaBuildLocalizations/${LOCALIZATION}`) {
+        const data = localization(notes);
+        data.relationships.build = { links: { related: `https://api.appstoreconnect.apple.com/v1/betaBuildLocalizations/${LOCALIZATION}/build` } };
+        return new Response(JSON.stringify({ data }));
+      }
+    } });
+    const result = await client.setWhatToTest({ ...selector, notes });
+    assert.equal(result.notesVerified, true);
+    assert.equal(result.action, existing ? "updated" : "created");
+    assert.equal(writes(calls).length, 1);
+    const readbackIndex = calls.findIndex(call => call.request.method === "GET" && call.url.pathname === `/v1/betaBuildLocalizations/${LOCALIZATION}`);
+    assert.equal(calls[readbackIndex + 1].url.pathname, `/v1/betaBuildLocalizations/${LOCALIZATION}/relationships/build`);
+    if (existing) assert.ok(calls.slice(0, calls.indexOf(writes(calls)[0])).some(call => call.url.pathname === `/v1/betaBuildLocalizations/${LOCALIZATION}/relationships/build`));
+  }
+});
+test("foreign postwrite linkage cannot pass exact notes and inline build readback", async () => {
+  for (const linked of [{ type: "builds", id: "foreign-build" }, { type: "apps", id: BUILD }]) {
+    const { client, calls } = fixture({ existing: true, fetchOverride(url, request, recorded) {
+      if (url.pathname === `/v1/betaBuildLocalizations/${LOCALIZATION}/relationships/build` && writes(recorded).length) {
+        return new Response(JSON.stringify({ data: linked }));
+      }
+    } });
+    await assert.rejects(client.setWhatToTest({ ...selector, notes: "Keep these exact words." }), safeError("LOCALIZATION_SCOPE_MISMATCH"));
+    assert.equal(writes(calls).length, 1);
+  }
+});
 test("no upload, compliance, group or tester endpoints are reachable", async () => {
   const { client, calls } = fixture(); await client.readBuildStatus(selector); await client.setWhatToTest({ ...selector, localPreview: true });
   assert.deepEqual(Object.keys(client).sort(), ["readBuildStatus", "setWhatToTest"]);
