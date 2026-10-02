@@ -24,6 +24,27 @@ A Worker preview with a different RP creates different passkey credentials. Do n
 
 ## Current state
 
+October 2 release checkpoint: [PR 1](https://github.com/dakshbhatia/fotoro/pull/1)
+is merged into `main` at `deb751e0c9`. Both the
+[main CI run](https://github.com/dakshbhatia/fotoro/actions/runs/36953464488)
+and [PR CI run](https://github.com/dakshbhatia/fotoro/actions/runs/36953408124)
+passed, including the native, web/API and repository checks.
+
+An existing local individual App Store Connect key was verified against this
+exact Fotoro app record and copied into private storage outside the repositories.
+It can read Fotoro build and group metadata. As described in
+[Apple's API key documentation](https://developer.apple.com/documentation/appstoreconnectapi/creating-api-keys-for-app-store-connect-api),
+individual keys cannot use Apple's provisioning endpoints; they do not replace
+the Xcode signing account or a distribution certificate. The existing build 2 is `VALID` in the API, with its
+encryption declaration unset; this is not an installable beta claim.
+
+An existing Cloudflare account token is active and can list Workers. D1, R2 and
+Workers Domains requests are denied, and it cannot confirm the `fotoro.cloud`
+zone. It is insufficient for this production deployment. Another configured
+Cloudflare token is invalid. No resources in another application were changed.
+The owner still needs to unlock this Mac for Xcode signing and authenticate the
+intended Cloudflare account with access to Fotoro's domain, D1, R2 and Worker.
+
 October 1, 2026: the active checkout is `/Users/dakshbhatia/Documents/GitHub/Fotoro`.
 The native/web/API development build runs locally, with the web preview at 4310,
 real local API at 8787 and public fixtures at 8790. Production D1/R2 bindings and
@@ -100,6 +121,33 @@ privacy-only resources and checks the preview-specific Apple-OS-only encryption
 metadata. Unexpected bundled binaries, account resources or background/domain
 entitlements fail the audit. Actual processing and tester access still need
 App Store Connect verification after upload.
+
+### API release metadata
+
+`tools/asc-metadata.mjs` supports both team and individual keys. Set
+`ASC_KEY_PATH` and `ASC_KEY_ID` from private local configuration. Team keys also
+require `ASC_ISSUER_ID`; individual keys use `ASC_KEY_SUBJECT=user` and omit the
+issuer. Credentials stay outside the repository, and JWTs remain in memory.
+This authentication is separate from Xcode archive/export signing.
+
+From `fotoro/`, check an exact iOS marketing version and build:
+
+```sh
+node tools/asc-metadata.mjs status --version 0.1.0 --build 3
+```
+
+After that local preview's archive and distribution IPA pass the artifact audit,
+set its build-specific test notes:
+
+```sh
+node tools/asc-metadata.mjs set-what-to-test --version 0.1.0 --build 3 --local-preview
+```
+
+The helper verifies the exact Fotoro app/bundle and selected build before the
+notes write, then reads back the saved notes. `--notes-file` preserves explicitly
+supplied wording. Processing, encryption and beta states are reported separately;
+group assignment and actual tester access still require their own verification.
+The current read-only check finds build 2 and returns `BUILD_NOT_FOUND` for build 3.
 
 The final version0.1.0(build3) signed preview archive passed its artifact audit.
 It has not uploaded: the pre-upload app-store IPA export returns exit70,
