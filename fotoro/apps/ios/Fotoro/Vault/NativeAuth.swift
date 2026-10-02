@@ -129,11 +129,11 @@ struct NativePasskeyError: LocalizedError {
   var errorDescription: String? {
     switch code {
     case .canceled:
-      return "Sign-in was cancelled. Tap Sign in to try again."
+      return "Passkey sign-in was cancelled."
     case .failed, .notHandled:
-      return "Passkey sign-in could not finish. If this is your first time, create an account. Otherwise try again or use your recovery code or a trusted device."
+      return "Passkey sign-in could not finish. Enter your Fotoro password, or tap New Fotoro to start."
     default:
-      return "Passkey sign-in could not finish. Try again or use your recovery code."
+      return "Passkey sign-in could not finish. Try again or enter your Fotoro password."
     }
   }
 }
@@ -277,7 +277,7 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
     guard let value = options["allowCredentials"] else { return }
     guard let credentials = value as? [[String: Any]] else { throw FotoroError("Invalid sign-in credentials") }
     guard !credentials.isEmpty || session.accountId == nil else {
-      throw FotoroError("No passkey is registered for this account. Use your recovery code or a trusted device.")
+      throw FotoroError("This account has no passkey. Enter your Fotoro password.")
     }
     request.allowedCredentials = try credentials.map { credential in
       guard credential["type"] as? String == "public-key", let id = credential["id"] as? String else {

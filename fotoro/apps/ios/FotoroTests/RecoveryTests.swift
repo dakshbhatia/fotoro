@@ -461,7 +461,7 @@ final class RecoveryTests: XCTestCase {
       do { _ = try await auth.login(); XCTFail("Cancelled passkey accepted") }
       catch let error as NativePasskeyError {
         XCTAssertTrue(error.isCancelled)
-        XCTAssertEqual(error.localizedDescription, "Sign-in was cancelled. Tap Sign in to try again.")
+        XCTAssertEqual(error.localizedDescription, "Passkey sign-in was cancelled.")
       }
       XCTAssertNil(session.accountId)
       XCTAssertNil(session.bearerToken)
@@ -478,7 +478,7 @@ final class RecoveryTests: XCTestCase {
         do { _ = try await auth.login(); XCTFail("Unavailable passkey accepted") }
         catch let error as NativePasskeyError {
           XCTAssertFalse(error.isCancelled)
-          XCTAssertEqual(error.localizedDescription, "Passkey sign-in could not finish. If this is your first time, create an account. Otherwise try again or use your recovery code or a trusted device.")
+          XCTAssertEqual(error.localizedDescription, "Passkey sign-in could not finish. Enter your Fotoro password, or tap New Fotoro to start.")
         }
         XCTAssertNil(session.accountId)
         XCTAssertNil(session.bearerToken)

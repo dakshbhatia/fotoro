@@ -81,7 +81,7 @@ struct AccountView: View {
         if services.busy {
           ProgressView("Opening your Fotoro…").accessibilityIdentifier("account.connecting")
         }
-        if services.auth.startPassword == nil {
+        if services.auth.startPassword == nil && (!services.session.isSignedIn || !services.vault.canUnlockLocally) {
           DisclosureGroup("Other ways to sign in") {
             Button("Use a passkey") {
               services.run(phase: .auth) {

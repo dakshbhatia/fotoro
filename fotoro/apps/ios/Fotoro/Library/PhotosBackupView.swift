@@ -31,12 +31,6 @@ struct PhotosBackupView: View {
             Section {
               AccountIdentityView(session: services.session, unlocked: services.vault.isUnlocked)
                 .padding(.vertical, 4)
-              if services.auth.hasSavedPassword {
-                Button("Your Fotoro password", systemImage: "key") {
-                  do { savedPassword = SavedAccountPassword(value: try services.auth.savedPassword()) }
-                  catch { services.error = error.localizedDescription }
-                }.accessibilityIdentifier("account.showPassword")
-              }
             }
             overview
             if summary.state == .needsAttention || summary.skippedPhotos > 0 {
@@ -54,12 +48,18 @@ struct PhotosBackupView: View {
             Section {
               Button("Saved photos", systemImage: "photo.stack") { savedPhotos = true }
                 .accessibilityIdentifier("account.savedPhotos")
-              Button("Refresh saved photos", systemImage: "arrow.clockwise") {
-                services.run { try await services.sync() }
-              }.disabled(services.busy)
               DisclosureGroup("More options") {
+                if services.auth.hasSavedPassword {
+                  Button("Your Fotoro password", systemImage: "key") {
+                    do { savedPassword = SavedAccountPassword(value: try services.auth.savedPassword()) }
+                    catch { services.error = error.localizedDescription }
+                  }.accessibilityIdentifier("account.showPassword")
+                }
+                Button("Refresh saved photos", systemImage: "arrow.clockwise") {
+                  services.run { try await services.sync() }
+                }.disabled(services.busy)
                 Button("Lock saved photos", systemImage: "lock") { services.lockAccount() }
-                Button("Encrypted sharing", systemImage: "person.2") { exchange = true }
+                Button("Sharing", systemImage: "person.2") { exchange = true }
                 Button("Sign out", role: .destructive) { signingOut = true }
               }
             }
@@ -86,20 +86,18 @@ struct PhotosBackupView: View {
         .onDisappear { services.auth.cancelStart(); savedPassword = nil }
         .onChange(of: scenePhase) { _, phase in
           if phase == .active { refreshPhotosPermission() }
+          else { savedPassword = nil }
         }
         .onChange(of: services.vault.isUnlocked) { _, unlocked in
           if !unlocked { savedPhotos = false; exchange = false; savedPassword = nil }
         }
-        .onChange(of: scenePhase) { _, phase in
-          if phase != .active { savedPassword = nil }
-        }
         .alert("Sign out?", isPresented: $signingOut) {
-          Button("Sign out and remove local data", role: .destructive) {
+          Button("Sign out", role: .destructive) {
             services.run { try services.signOut(discardPending: true) }
           }
           Button("Cancel", role: .cancel) {}
         } message: {
-          Text("Pending unsent imports, account wrappers and local account caches will be removed from this iPhone. Your Photos library stays here.")
+          Text("Unfinished uploads and unsent edits will be removed from this iPhone. Your Photos library and photos saved to Fotoro stay.")
         }
     }
   }
@@ -107,7 +105,7 @@ struct PhotosBackupView: View {
     Section {
       VStack(alignment: .leading, spacing: 14) {
         Text(title).font(.title2.bold())
-        Text("Automatic sync is off. Save your current picks when you choose.").foregroundStyle(.secondary)
+        Text("Automatic sync is off.").font(.footnote).foregroundStyle(.secondary)
         if let completed = summary.completedPhotos {
           if let total = summary.totalPhotos {
             Text("\(completed) of \(total) photos saved").font(.headline).monospacedDigit()
@@ -189,7 +187,7 @@ struct PhotosBackupView: View {
   }
   private var title: String {
     switch summary.state {
-    case .notStarted: return "Save your picks"
+    case .notStarted: return "Your saved photos"
     case .preparing: return "Preparing photos"
     case .uploading: return "Saving photos"
     case .checking: return "Refreshing saved photos"

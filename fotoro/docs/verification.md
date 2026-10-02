@@ -54,6 +54,23 @@ Real-account phone-to-Safari acceptance remains open.
 | Native local lifecycle | All-age permitted enumeration, limited/denied startup, permission purge, ten-day browse, changed revisions, cancellation rollback and refresh stability are exercised |
 | Browser local lifecycle | Session-only default; retained labels/text/previews; lazy preview hydration; unavailable preview preservation; digest reselection; pending/cross-instance clear fences |
 
+## October 2 account screen cleanup
+
+Build 11 keeps Save picks and Saved photos as the everyday actions. Password
+retrieval, catalog refresh, lock, sharing and sign out live under More options.
+A locally enrolled locked account offers Unlock photos without redundant sign-in
+choices. Sign-out confirmation describes unfinished uploads and unsent edits;
+passkey errors point to the existing Fotoro password rather than a separate
+recovery step. Automatic saving stays off.
+
+All 29 account regressions pass after updating the two existing error-copy
+assertions. The app builds for Simulator and signed iPhoneOS. Public Simulator
+checks verify collapsed/expanded controls and the locked-account view. Full
+encrypted 0.1.0 (11) is installed over the existing phone app; CoreDevice verifies
+its version and running executable. The protected build-11 diagnostic state is
+signedOut. The web/API release and previous full/preview acceptance evidence
+below are unchanged; owner sign-in remains unverified.
+
 ## October 2 one-password account entry
 
 The primary iPhone and web flow uses one generated Fotoro password. It identifies

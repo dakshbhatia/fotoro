@@ -20,7 +20,7 @@ last 10 days once, after account unlock. Automatic sync is off.
 Account uses one generated Fotoro password. New Fotoro creates that password;
 Continue opens the account. Enter the same password on iPhone or the web to sign
 in and unlock saved photos. The iPhone keeps its password in protected Keychain;
-Account → Your Fotoro password lets you copy or save it later. Existing passkeys
+Account → More options → Your Fotoro password lets you copy or save it later. Existing passkeys
 remain available under Other ways to sign in, and existing recovery codes work in
 the password field.
 
