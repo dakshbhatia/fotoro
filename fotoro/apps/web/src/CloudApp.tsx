@@ -120,6 +120,8 @@ export default function CloudApp({
     uploadAbort = useRef<AbortController | null>(null),
     localSynced = useRef(new WeakMap<File, string>());
   const input = useRef<HTMLInputElement>(null);
+  const backButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {if (active) backButton.current?.focus({preventScroll: true});}, [active]);
   const accountPanel = useRef<HTMLElement>(null);
   useDialogFocus(accountPanel, () => setMenu(false), menu && active && !!account);
   useEffect(() => {
@@ -460,6 +462,7 @@ export default function CloudApp({
           <div className="brand"><p className="eyebrow">Saved photos</p><h1>Fotoro</h1></div>
           <div className="header-actions">
           <button
+            ref={backButton}
             onClick={() => {
               if (!account) {
                 cancelEnrollment();
@@ -672,6 +675,7 @@ export default function CloudApp({
             )}
             {shown.length ? (
               <Library
+                active={active}
                 photos={shown}
                 selected={selected}
                 onSelect={(id) =>

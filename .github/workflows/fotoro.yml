@@ -56,12 +56,19 @@ jobs:
           pnpm dev:fixtures > /tmp/fotoro-fixtures.log 2>&1 &
           fixture_pid=$!
           trap 'kill "$api_pid" "$fixture_pid" 2>/dev/null || true' EXIT
+          services_ready=false
           for attempt in {1..100}; do
-            if curl --silent http://127.0.0.1:8787/v1/vault >/dev/null && curl --silent http://127.0.0.1:8790/__fixtures/accounts >/dev/null; then
+            if [[ "$(curl --silent --max-time 2 --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8787/v1/vault)" == "401" ]] && curl --silent --fail --max-time 2 http://127.0.0.1:8790/__fixtures/accounts >/dev/null; then
+              services_ready=true
               break
             fi
             sleep 0.2
           done
+          if [[ "$services_ready" != true ]]; then
+            echo "Public local services did not become ready"
+            exit 1
+          fi
+          pnpm exec tsx tools/warm-local-api.ts
           pnpm test:ios
       - name: Local Photos preview tests
         working-directory: fotoro

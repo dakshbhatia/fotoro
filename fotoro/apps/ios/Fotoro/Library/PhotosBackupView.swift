@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Photos
 
 struct ConsumerBackupLabel: View {
   let summary: ConsumerSyncSummary
@@ -18,12 +19,23 @@ struct ConsumerBackupLabel: View {
   }
 }
 
+enum SyncPhotosAccessPolicy {
+  static func needsAccess(_ permission: PHAuthorizationStatus, action: ConsumerSyncAction,
+    enabled: Bool, hasQueuedUploads: Bool) -> Bool {
+    guard !RecentPhotosPolicy.canRead(permission) else { return false }
+    if action == .start { return true }
+    return enabled && !hasQueuedUploads && (action == .continue || action == .retry)
+  }
+}
+
 struct PhotosBackupView: View {
   @Bindable var services: AppServices
   @State private var savedPhotos = false
   @State private var exchange = false
   @State private var signingOut = false
+  @State private var photosPermission = PHPhotoLibrary.authorizationStatus(for: .readWrite)
   @Environment(\.dismiss) private var dismiss
+  @Environment(\.scenePhase) private var scenePhase
   private var summary: ConsumerSyncSummary { services.consumerSyncSummary }
   var body: some View {
     NavigationStack {
@@ -61,6 +73,10 @@ struct PhotosBackupView: View {
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         .sheet(isPresented: $savedPhotos) { LibraryView(services: services) }
         .sheet(isPresented: $exchange) { ExchangeView(services: services, selected: []) }
+        .onAppear { refreshPhotosPermission() }
+        .onChange(of: scenePhase) { _, phase in
+          if phase == .active { refreshPhotosPermission() }
+        }
         .onChange(of: services.vault.isUnlocked) { _, unlocked in
           if !unlocked { savedPhotos = false; exchange = false }
         }
@@ -72,7 +88,9 @@ struct PhotosBackupView: View {
         } message: {
           Text("Pending unsent imports, account wrappers and local account caches will be removed from this iPhone. Your Photos library stays here.")
         }
-        .alert("Fotoro", isPresented: Binding(get: { services.error != nil }, set: { if !$0 { services.error = nil } })) {
+        .alert("Fotoro", isPresented: Binding(
+          get: { services.error != nil && !exchange && !savedPhotos },
+          set: { if !$0 && !exchange && !savedPhotos { services.error = nil } })) {
           Button("OK") { services.error = nil }
         } message: { Text(services.error ?? "") }
     }
@@ -96,7 +114,7 @@ struct PhotosBackupView: View {
         if let detail = summary.detail, summary.state != .needsAttention {
           Text(detail).font(.footnote).foregroundStyle(.secondary)
         }
-        action
+        action.disabled(services.busy)
         if ![.notStarted, .paused].contains(summary.state) || services.journal.backgroundPending > 0 {
           Button("Pause sync") { services.pauseSync() }
         }
@@ -109,6 +127,23 @@ struct PhotosBackupView: View {
     }
   }
   @ViewBuilder private var action: some View {
+    if requiresPhotosAccess {
+      if photosPermission == .notDetermined {
+        Button("Allow Photos") {
+          services.run {
+            defer { refreshPhotosPermission() }
+            try await services.requestPhotosAccessForSync()
+          }
+        }.buttonStyle(.borderedProminent)
+          .disabled(!NativeBackupPolicy.allowsPrivatePhotos(accountId: services.session.accountId, fixture: services.session.fixture))
+        Text("Allow selected photos or full access to find your picks.").font(.footnote).foregroundStyle(.secondary)
+      } else {
+        Button("Open Settings", action: openPhotosSettings).buttonStyle(.borderedProminent)
+        Text("Photos access is off. Your saved photos are still available.").font(.footnote).foregroundStyle(.secondary)
+      }
+    } else { syncAction }
+  }
+  @ViewBuilder private var syncAction: some View {
     switch summary.action {
     case .start:
       Button("Sync your picks") {
@@ -134,10 +169,22 @@ struct PhotosBackupView: View {
     case .review:
       Button("Review saved photos") { savedPhotos = true }.buttonStyle(.borderedProminent)
     case .openSettings:
-      Button("Open Settings") { UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!) }
+      Button("Open Settings", action: openPhotosSettings)
         .buttonStyle(.borderedProminent)
     case .signIn, .none: EmptyView()
     }
+  }
+  private var requiresPhotosAccess: Bool {
+    SyncPhotosAccessPolicy.needsAccess(photosPermission, action: summary.action,
+      enabled: (try? services.store.syncEnabled()) == true,
+      hasQueuedUploads: (try? services.journal.entries().isEmpty) == false)
+  }
+  private func refreshPhotosPermission() {
+    photosPermission = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+  }
+  private func openPhotosSettings() {
+    guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+    UIApplication.shared.open(url)
   }
   private var title: String {
     switch summary.state {

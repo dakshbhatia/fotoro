@@ -3,6 +3,12 @@ import Nuke
 import Observation
 import Photos
 
+extension NativeDiagnosticOutcome {
+  static func failure(for error: Error, taskCancelled: Bool) -> Self {
+    taskCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled ? .cancelled : .failed
+  }
+}
+
 struct PendingSave: Codable {
   var request: SaveRequestV1
   var local: LocalPhoto
@@ -33,6 +39,14 @@ enum PhotoPicksBackupPolicy {
   var photoAnnotations: [String: PhotoAnnotationsV1] = [:]
   @ObservationIgnored private weak var recentPhotos: RecentPhotosStore?
   func bindRecentPhotos(_ recent: RecentPhotosStore) { recentPhotos = recent }
+  func requestPhotosAccessForSync() async throws {
+    guard let recentPhotos else { throw FotoroError("Open Photos before syncing.") }
+    let started = ProcessInfo.processInfo.systemUptime
+    await recentPhotos.open()
+    NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .consent,
+      outcome: RecentPhotosPolicy.canRead(recentPhotos.status) ? .completed : .failed,
+      elapsed: ProcessInfo.processInfo.systemUptime - started))
+  }
   @ObservationIgnored private weak var localSearch: LocalSearchStore?
   let storageRoot: URL
   var photos: [LocalPhoto] = []
@@ -152,6 +166,16 @@ enum PhotoPicksBackupPolicy {
     return try export(bytes)
   }
   func refreshConsumerSyncSummary() {
+    let previous = consumerSyncSummary.state
+    defer {
+      if consumerSyncSummary.state != previous {
+        NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .sync, outcome: .changed,
+          state: consumerSyncSummary.state, completed: consumerSyncSummary.completedPhotos,
+          pending: consumerSyncSummary.totalPhotos.flatMap { total in
+            consumerSyncSummary.completedPhotos.map { max(0, total - $0 - consumerSyncSummary.skippedPhotos) }
+          }))
+      }
+    }
     guard vault.isUnlocked, let account = session.accountId, store.root.lastPathComponent == account else {
       consumerSyncSummary = ConsumerSyncSummary()
       return
@@ -267,6 +291,7 @@ enum PhotoPicksBackupPolicy {
       ImageCache.shared.removeAll()
     }
     resetConsumerSyncObservation()
+    NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .app, outcome: .started))
   }
   func activateAccount() throws {
     backup.pause()
@@ -616,6 +641,13 @@ enum PhotoPicksBackupPolicy {
   }
   func sync() async throws {
     let bundle = try vault.requireBundle()
+    let started = ProcessInfo.processInfo.systemUptime
+    var outcome = NativeDiagnosticOutcome.failed
+    defer {
+      NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .sync,
+        outcome: outcome,
+        elapsed: ProcessInfo.processInfo.systemUptime - started))
+    }
     let authorizedAccount = session.accountId
     let generation = vault.generation
     let catalog = store
@@ -683,7 +715,9 @@ enum PhotoPicksBackupPolicy {
     try catalog.setConsumerLastChecked(Date())
     consumerOffline = false
     consumerFailure = nil
+    outcome = .completed
     } catch {
+      outcome = .failure(for: error, taskCancelled: Task.isCancelled)
       if vault.generation == generation, store === catalog, session.accountId == authorizedAccount { recordConsumerSyncFailure(error) }
       throw error
     }

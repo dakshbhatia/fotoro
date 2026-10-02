@@ -16,6 +16,13 @@ bucket_name = "fotoro-private-local"
 [env.production]
 routes = [{ pattern = "fotoro.cloud", custom_domain = true }]
 
+[env.production.observability]
+enabled = true
+head_sampling_rate = 1
+
+[env.production.observability.logs]
+invocation_logs = false
+
 [env.production.vars]
 AUTH_MODE = "production"
 APPLE_APP_IDS = "A7TGPQ27JF.cloud.fotoro.Fotoro"

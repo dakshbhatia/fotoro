@@ -13,7 +13,7 @@ it("unexpected failures emit a support-correlated record without raw request or 
     const records = emitted.mock.calls.flatMap(call => call.filter(value => typeof value === "string").map(value => {
       try {return JSON.parse(value);} catch {return null;}
     })).filter(Boolean);
-    expect(records).toEqual([{event: "api.error", requestId: body.requestId, method: "GET", status: 500, code: "INTERNAL_ERROR"}]);
+    expect(records).toEqual([{event: "api.error", requestId: body.requestId, method: "GET", status: 500, code: "INTERNAL_ERROR", phase: "request", errorClass: "unexpected"}]);
     expect(body.requestId).toMatch(/^[a-f0-9-]{36}$/);
     expect(JSON.stringify(emitted.mock.calls)).not.toMatch(/PRIVATE_|private-photo-name|authorization|cap=/);
   } finally {emitted.mockRestore();}

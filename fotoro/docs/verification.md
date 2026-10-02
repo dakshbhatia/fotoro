@@ -3,8 +3,8 @@
 The web app and API are live at [fotoro.cloud](https://fotoro.cloud). The separate
 local Photos preview 0.1.0 (3) is uploaded and in internal TestFlight. Its matching
 development build was installed and launched on the physical iPhone;
-personal Photos access remains uninspected. Full encrypted build 5 is installed
-and launched on the physical iPhone. Apple has processed full build 4; its
+personal Photos access remains uninspected. Full encrypted build 6 is installed
+and its exact version is read back on the physical iPhone. Launch is awaiting device unlock. Apple has processed full build 4; its
 TestFlight access awaits an export-compliance declaration. Independent reviews reproduced
 retrieval, permission, cancellation, persistence and navigation defects; fixes
 include permanent regressions and were re-reviewed.
@@ -36,11 +36,11 @@ Real-account phone-to-Safari acceptance remains open.
 
 | Check | Evidence |
 | --- | --- |
-| Contracts, crypto and loopback fixtures | 12 tests pass: schema boundaries, bounded annotations, signatures, media binding, preservation and closed diagnostic-method vocabulary |
-| Worker/D1/R2 API | 36 tests pass, including bounded JSON bodies, malformed completion input and concurrent idempotent photo commits: real cryptographic WebAuthn ceremonies, recovery, uploads, renewal, grants, encrypted annotation revisions, capability-bound ciphertext PUTs, Apple association metadata and diagnostic privacy |
-| Web | 160 tests pass, including visible dialog controls, viewer identity and compact selection controls: consumer choices/status, account-isolated Pause, combined local/saved search, linear merge read budget, preview fences, original Share/fallback, rank-key read budget, bounded HTTP errors and existing retrieval/retention/annotation checks |
+| Contracts, crypto and loopback fixtures | 15 tests pass: schema boundaries, bounded annotations, signatures, media binding, preservation, closed diagnostic-method vocabulary and bounded public-fixture readiness retries |
+| Worker/D1/R2 API | 43 tests pass, including truncated/overlong/interrupted upload bodies, storage-write failure, retry after promotion failure, bounded JSON bodies and concurrent idempotent commits; existing authentication/exchange/annotation and diagnostic privacy checks pass |
+| Web | 164 tests pass, including immediate single-attempt sharing, cancellation/retry and original fallback; existing consumer status, search, compact selection, viewer, retention and annotation checks pass |
 | Web production build | TypeScript/Vite pass. Account/crypto loads after Sync photos; the large encrypted-media chunk warning remains |
-| Native | Full app 131 tests and local preview 49 tests pass locally with Xcode 27, zero failures or skips. Earlier merged releases passed native CI with expected Photos-permission interaction skips; those cases pass in the permitted local Simulator. Consumer cancellation/Continue, original-share cleanup, all-age PhotoKit labels, isolated preview storage and existing crypto/journal/background checks are included |
+| Native | Full app 139 tests and local preview 49 tests pass locally with Xcode 27, zero failures or skips; final preview analyzer changes also pass all six lifecycle cases. Consent, recovery-code acknowledgement, bounded diagnostic rotation/privacy/cancellation and existing crypto/journal/background/search checks are included |
 | TestFlight metadata | 28 tests pass for team/individual authentication, exact app/build ownership, sparse Apple responses, notes readback and credential-safe errors. A live build 2 update preserved every existing test-note character and verified its build relationship; its processing state is VALID and beta states remain MISSING_EXPORT_COMPLIANCE. Build 3 is VALID / IN_BETA_TESTING with encryption metadata false and verified local-preview test notes |
 | Distribution IPA | Actual build 3 archive and distribution IPA pass the strict preview audit. Xcode Organizer used its existing cloud-managed certificate; the copied IPA matches the unchanged archive/dSYM/link map. Apple validation and exact-IPA upload both exit 0 with success markers |
 | Internal tester access | App Store Connect shows the existing internal group with one tester and one build; iOS 0.1.0 (3) is Testing and the requested sole owner tester is Invited. Association was automatic; no new tester/role/invitation mutation was needed. Inbox delivery and installation remain unverified |
@@ -50,7 +50,48 @@ Real-account phone-to-Safari acceptance remains open.
 | Native local lifecycle | All-age permitted enumeration, limited/denied startup, permission purge, ten-day browse, changed revisions, cancellation rollback and refresh stability are exercised |
 | Browser local lifecycle | Session-only default; retained labels/text/previews; lazy preview hydration; unavailable preview preservation; digest reselection; pending/cross-instance clear fences |
 
-## October 2 consumer finish
+## October 2 smoothness and diagnostics
+
+First-use Sync can request Photos access inline without enabling uploads; already
+queued encrypted work remains resumable. Recovery acknowledgement belongs to the
+exact displayed code. Busy account actions cannot overlap. Exchange errors stay
+visible inside the active sheet instead of dismissing it behind a parent alert.
+
+Hidden browser galleries retain their measurements and scroll anchor. Rendered
+public-fixture QA at 390×420 verifies scroll offset 169 survives Sync → Back;
+keyboard focus moves into Sync and returns to its opener. Search and the selected
+subset also survive. At 390×844, six public photos render with one picked original
+and usable search/Add controls. Share becomes disabled while its native request
+is pending. Native destination sharing and personal Safari acceptance remain open.
+No browser console warnings or errors were observed. The same six public originals
+also render on the deployed `fotoro.cloud` app at 390×844; Photos → Sync → Back
+preserves the subset and restores focus there.
+
+Full native builds now write fixed-schema launch, pick timing, consent, sync-state
+and API outcomes to OSLog and a protected 160-event/64-KiB local file excluded from
+device backup. Privacy, numeric bounds, UUID correlation, rotation and cancellation
+classification have permanent regressions. Production enables stored Worker logs
+with invocation logs disabled; console failures use allowlisted phase/class fields.
+
+Worker `dc276b07-ef33-4d12-b8ae-d053bf3b692b`, tagged
+`smooth-diagnostics-20261002`, is read back as the 100% deployment. Canonical API,
+exact signed association and byte-identical production HTML checks pass. Signed
+Release 0.1.0 (6) passes signature and Associated Domains checks and is installed
+on the physical iPhone. iOS blocked launch because the phone is locked; physical
+runtime-log capture, personal sync and restore await owner testing.
+
+The final local checks pass 43 API, 164 web, 139 full-native, 49 preview and three
+isolated HTTP exchange tests. Main CI run `37037972537` failed one earlier native
+case when Wrangler's local ProxyWorker lost a recovery-verification connection;
+the final native suite passes that case locally. CI now requires exact service
+readiness and performs a loopback public-fixture recovery preflight with fresh
+challenges and three bounded proxy-only attempts. Application JSON errors fail
+immediately. Three regressions and actual local preflight pass; the low-level
+proxy disconnect cause is unconfirmed. This is distinct from a Hono response,
+which carries a request reference. The inherited Ente documentation
+deployment jobs are now restricted to their upstream repository.
+
+## October 2 preceding consumer finish
 
 Recovered the native automatic-picks work and PR 10's compact browser controls.
 Native home defaults to suggestions, keeps All Photos available and adds only

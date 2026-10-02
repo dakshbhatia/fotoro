@@ -27,6 +27,7 @@ export function deriveConsumerSyncSummary(facts: ConsumerSyncFacts): ConsumerSyn
     facts.skippedPhotos ? `${facts.skippedPhotos} skipped` : "",
     facts.pendingEdits ? `${facts.pendingEdits} photo edits waiting` : "",
     facts.conflictingEdits ? `${facts.conflictingEdits} photo edits to review` : "",
+    facts.localPhotos ? `${facts.localPhotos} selected to sync` : "",
   ].filter(Boolean).join(" · ");
   const base = {completedPhotos: facts.committedPhotos, skippedPhotos: facts.skippedPhotos, lastCheckedAt: facts.lastCheckedAt ?? undefined, detail: details};
   if (facts.paused) return {...base, state: "paused", action: "continue"};
@@ -36,6 +37,6 @@ export function deriveConsumerSyncSummary(facts: ConsumerSyncFacts): ConsumerSyn
   if (facts.queuedPhotos) return {...base, state: "uploading", action: facts.busy ? "none" : "retry"};
   if (facts.busy) return {...base, state: "checking", action: "none"};
   if (facts.pendingEdits || facts.skippedPhotos) return {...base, state: "needsAttention", action: facts.skippedPhotos ? "review" : "retry"};
-  if (facts.localPhotos) return {...base, state: "notStarted", action: "start", detail: `${details} · ${facts.localPhotos} selected to sync`};
+  if (facts.localPhotos) return {...base, state: "notStarted", action: "start"};
   return {...base, state: facts.lastCheckedAt ? "upToDate" : "notStarted", action: facts.lastCheckedAt ? "none" : "start"};
 }

@@ -1,4 +1,121 @@
 import Foundation
+import OSLog
+
+enum NativeDiagnosticPhase: String, Codable, Sendable { case app, api, sync, share, consent, picks }
+enum NativeDiagnosticOutcome: String, Codable, Sendable { case started, completed, failed, cancelled, changed }
+enum NativeDiagnosticEndpoint: String, Codable, Sendable {
+  case auth, account, catalog, upload, annotations, exchange, device, other
+  init(path: String) {
+    let parts = path.split(separator: "/")
+    guard parts.first == "v1", parts.count > 1 else { self = .other; return }
+    switch parts[1] {
+    case "auth", "recovery", "sessions": self = .auth
+    case "accounts", "vault": self = .account
+    case "changes", "photos", "representations": self = .catalog
+    case "uploads", "staging": self = .upload
+    case "background": self = parts.count > 2 && parts[2] == "uploads" ? .upload : .other
+    case "annotations": self = .annotations
+    case "grants", "moments", "saves": self = .exchange
+    case "devices": self = .device
+    default: self = .other
+    }
+  }
+}
+enum NativeDiagnosticMethod: String, Codable, Sendable {
+  case GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD, OTHER
+  init(_ method: String) { self = Self(rawValue: method) ?? .OTHER }
+}
+struct NativeDiagnosticEvent: Codable, Sendable {
+  let timestamp: Double
+  let phase: NativeDiagnosticPhase
+  let outcome: NativeDiagnosticOutcome
+  let endpoint: NativeDiagnosticEndpoint?
+  let method: NativeDiagnosticMethod?
+  let elapsedMS: Int?
+  let status: Int?
+  let networkCode: Int?
+  let requestId: UUID?
+  let state: ConsumerSyncState?
+  let completed: Int?
+  let pending: Int?
+  let build: String
+  init(phase: NativeDiagnosticPhase, outcome: NativeDiagnosticOutcome,
+    endpoint: NativeDiagnosticEndpoint? = nil, method: String? = nil,
+    elapsed: Double? = nil, status: Int? = nil, networkError: URLError? = nil,
+    requestId: String? = nil, state: ConsumerSyncState? = nil, completed: Int? = nil, pending: Int? = nil) {
+    timestamp = Date().timeIntervalSince1970
+    self.phase = phase; self.outcome = outcome; self.endpoint = endpoint
+    self.method = method.map(NativeDiagnosticMethod.init)
+    elapsedMS = elapsed.map { Int(max(0, min($0.isFinite ? $0 * 1000 : 0, 3_600_000))) }
+    self.status = status.flatMap { (100...599).contains($0) ? $0 : nil }
+    networkCode = networkError?.code.rawValue
+    self.requestId = requestId.flatMap(UUID.init(uuidString:))
+    self.state = state
+    self.completed = completed.map { max(0, min($0, 1_000_000)) }
+    self.pending = pending.map { max(0, min($0, 1_000_000)) }
+    let value = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
+    build = String(value.prefix(16).filter { $0.isNumber || $0 == "." })
+  }
+}
+final class NativeDiagnostics: @unchecked Sendable {
+  static let shared = NativeDiagnostics()
+  static let maximumBytes = 64 * 1024
+  private let queue = DispatchQueue(label: "cloud.fotoro.runtime-diagnostics", qos: .utility)
+  private let logger = Logger(subsystem: "cloud.fotoro.Fotoro", category: "runtime")
+  private let fileURL: URL?
+  private let emitSystemLog: Bool
+  private var events: [NativeDiagnosticEvent] = []
+  private var pendingFlush = false
+  init(fileURL: URL? = NativeDiagnostics.defaultFileURL, emitSystemLog: Bool = true) {
+    self.fileURL = fileURL; self.emitSystemLog = emitSystemLog
+    if let fileURL, let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+      size <= Self.maximumBytes, let data = try? Data(contentsOf: fileURL) {
+      events = data.split(separator: 10).suffix(160).compactMap {
+        try? JSONDecoder().decode(NativeDiagnosticEvent.self, from: Data($0))
+      }
+    }
+  }
+  private static var defaultFileURL: URL? {
+    FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+      .appendingPathComponent("FotoroDiagnostics/runtime.jsonl")
+  }
+  func record(_ event: NativeDiagnosticEvent) {
+    queue.async {
+      self.events.append(event)
+      if self.events.count > 160 { self.events.removeFirst(self.events.count - 160) }
+      if self.emitSystemLog, let data = try? JSONEncoder().encode(event),
+        let line = String(data: data, encoding: .utf8) {
+        if event.outcome == .failed { self.logger.error("\(line, privacy: .public)") }
+        else { self.logger.info("\(line, privacy: .public)") }
+      }
+      guard !self.pendingFlush else { return }
+      self.pendingFlush = true
+      self.queue.asyncAfter(deadline: .now() + 0.25) {
+        self.pendingFlush = false
+        self.persist()
+      }
+    }
+  }
+  func flush() { queue.sync { persist() } }
+  private func persist() {
+    guard let fileURL else { return }
+    do {
+      var directory = fileURL.deletingLastPathComponent()
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+        attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
+      var resources = URLResourceValues(); resources.isExcludedFromBackup = true
+      try directory.setResourceValues(resources)
+      let encoder = JSONEncoder()
+      var lines = try events.map { try encoder.encode($0) + Data([10]) }
+      var size = lines.reduce(0) { $0 + $1.count }
+      while size > Self.maximumBytes, !lines.isEmpty { size -= lines.removeFirst().count }
+      try lines.reduce(Data(), +).write(to: fileURL,
+        options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    } catch {
+      if emitSystemLog { logger.error("runtime diagnostics persistence failed") }
+    }
+  }
+}
 
 private final class APIRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
   func urlSession(_ session: URLSession, task: URLSessionTask,
@@ -32,9 +149,12 @@ private struct APIFailure: Decodable {
   }
   var rpId: String { origin == "https://fotoro.cloud" ? "fotoro.cloud" : "localhost" }
   private let network: URLSession
-  init(session: AccountSession, baseURL: URL, networkConfiguration: URLSessionConfiguration = .ephemeral) {
+  private let diagnostics: NativeDiagnostics
+  init(session: AccountSession, baseURL: URL, networkConfiguration: URLSessionConfiguration = .ephemeral,
+    diagnostics: NativeDiagnostics = .shared) {
     self.session = session
     self.baseURL = baseURL
+    self.diagnostics = diagnostics
     network = URLSession(
       configuration: networkConfiguration, delegate: APIRedirectPolicy(), delegateQueue: nil)
   }
@@ -64,13 +184,31 @@ private struct APIFailure: Decodable {
     {
       r.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     }
-    let (data, response) = try await network.data(for: r)
+    let started = ProcessInfo.processInfo.systemUptime
+    let endpoint = NativeDiagnosticEndpoint(path: url.path)
+    let data: Data
+    let response: URLResponse
+    do { (data, response) = try await network.data(for: r) }
+    catch {
+      diagnostics.record(NativeDiagnosticEvent(phase: .api,
+        outcome: error is CancellationError || (error as? URLError)?.code == .cancelled ? .cancelled : .failed,
+        endpoint: endpoint, method: method, elapsed: ProcessInfo.processInfo.systemUptime - started,
+        networkError: error as? URLError))
+      throw error
+    }
     guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
       let failure = try? JSONDecoder().decode(APIFailure.self, from: data)
+      diagnostics.record(NativeDiagnosticEvent(phase: .api, outcome: .failed,
+        endpoint: endpoint, method: method, elapsed: ProcessInfo.processInfo.systemUptime - started,
+        status: (response as? HTTPURLResponse)?.statusCode, requestId: failure?.requestId))
       throw FotoroError(
         failure?.code ?? "Network request failed (\((response as? HTTPURLResponse)?.statusCode ?? 0))",
         requestId: failure?.requestId, retryable: failure?.retryable ?? false)
     }
+    diagnostics.record(NativeDiagnosticEvent(phase: .api, outcome: .completed,
+      endpoint: endpoint, method: method, elapsed: ProcessInfo.processInfo.systemUptime - started,
+      status: (response as? HTTPURLResponse)?.statusCode,
+      requestId: (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "x-request-id")))
     return data
   }
   func get<T: Decodable>(_ path: String) async throws -> T {

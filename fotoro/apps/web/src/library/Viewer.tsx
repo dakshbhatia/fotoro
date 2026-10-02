@@ -5,7 +5,7 @@ import { Icon } from "./icons";
 import { saveReceivedPhoto } from "../exchange/Exchange";
 import {requireVault, type UnlockedVault} from "../vault/vault";
 import {sameVault} from "../vault/scope";
-import {canShareOriginal, downloadOriginal, shareOriginal} from "./system-share";
+import {canShareOriginal, downloadOriginal, OriginalShareAttempt} from "./system-share";
 import {useDialogFocus} from "./dialog-focus";
 export function viewerPhotoIndex(photos: Photo[], selected: string) {
   return Math.max(0, photos.findIndex(photo => photo.manifest.photoId === selected));
@@ -31,6 +31,8 @@ export function Viewer({
     [label, setLabel] = useState(""),
     [saving, setSaving] = useState(false),
     [preparingShare, setPreparingShare] = useState(false),
+    [sharing, setSharing] = useState(false),
+    [shareAttempt] = useState(() => new OriginalShareAttempt()),
     [prepared, setPrepared] = useState<{file: File; photo: Photo; session: UnlockedVault} | null>(null);
   const touch = useRef<{ x: number; y: number } | undefined>(undefined);
   const panel = useRef<HTMLDivElement>(null);
@@ -167,10 +169,10 @@ export function Viewer({
         </button>
         <button onClick={() => setZoom(!zoom)}>{zoom ? "Fit" : "Zoom"}</button>
         <button
-          disabled={preparingShare}
+          disabled={preparingShare || sharing}
           onClick={() => void prepareShare()}
         >
-          {preparingShare ? "Preparing…" : "Share"}
+          {preparingShare ? "Preparing…" : sharing ? "Sharing…" : "Share"}
         </button>
         {photo.grantId && (
           <button
@@ -192,11 +194,16 @@ export function Viewer({
         <button className="close" aria-label="Close share options" onClick={() => setPrepared(null)}><Icon kind="close" /></button>
         <h2>Original ready</h2><p className="hint">{photo.metadata.filename} · verified, unchanged</p>
         <div className="actions">
-          {canShareOriginal(prepared.file) && <button onClick={() => {
+          {canShareOriginal(prepared.file) && <button disabled={sharing} onClick={() => {
+            if (shareAttempt.pending) return;
             const current = () => authorized(prepared.photo, prepared.session);
-            void shareOriginal(prepared.file, current).then(result => {if (current()) {setPrepared(null); if (result === "downloaded") setStatus("Original downloaded");}}).catch(error => {if (current()) setStatus("Sharing could not finish. You can download the original instead.");});
-          }}>Share original</button>}
-          <button onClick={() => {if (!authorized(prepared.photo, prepared.session)) return; downloadOriginal(prepared.file); setPrepared(null); setStatus("Original downloaded");}}>Download original</button>
+            setSharing(true); setStatus("");
+            void shareAttempt.run(prepared.file, current).then(result => {
+              if (current() && result !== "cancelled" && result !== "busy") {setPrepared(null); if (result === "downloaded") setStatus("Original downloaded");}
+            }).catch(error => {if (current()) setStatus("Sharing could not finish. You can download the original instead.");})
+              .finally(() => {if (mounted.current) setSharing(false);});
+          }}>{sharing ? "Sharing…" : "Share original"}</button>}
+          <button disabled={sharing} onClick={() => {if (!authorized(prepared.photo, prepared.session)) return; downloadOriginal(prepared.file); setPrepared(null); setStatus("Original downloaded");}}>Download original</button>
         </div>
       </aside>}
       {details && (

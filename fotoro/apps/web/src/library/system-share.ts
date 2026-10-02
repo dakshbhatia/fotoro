@@ -25,3 +25,14 @@ export async function shareOriginal(file: File, current: () => boolean, environm
   environment.download(file);
   return "downloaded";
 }
+
+/* Keep the native share call inside the click, while coalescing overlapping gestures. */
+export class OriginalShareAttempt {
+  private running = false;
+  get pending() {return this.running;}
+  run(file: File, current: () => boolean, environment?: ShareEnvironment): Promise<"shared" | "downloaded" | "cancelled" | "busy"> {
+    if (this.running) return Promise.resolve("busy");
+    this.running = true;
+    return shareOriginal(file, current, environment).finally(() => {this.running = false;});
+  }
+}

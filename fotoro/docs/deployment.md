@@ -24,16 +24,17 @@ A Worker preview with a different RP creates different passkey credentials. Do n
 
 ## Current state
 
-Worker `82df2ca2-b808-42f8-a38c-ac26779ac157`, tagged
-`consumer-finish-20261002`, now serves the compact gallery and retry-safe API.
+Worker `dc276b07-ef33-4d12-b8ae-d053bf3b692b`, tagged
+`smooth-diagnostics-20261002`, now serves the stable gallery, guarded sharing and
+upload-failure fixes, with bounded failure fields and stored Worker logs.
 All production bindings remain the existing isolated D1/R2 resources. No new
 migration is required. Canonical API and exact signed association checks pass.
 
-Native automatic picks and picks-only new sync work pass 131 full-app and 49
-local-preview tests. Development-signed Release 0.1.0 (5) is built for iPhoneOS,
+Native automatic picks, sync consent and diagnostics pass 139 full-app and 49
+local-preview tests. Development-signed Release 0.1.0 (6) is built for iPhoneOS,
 with the exact production association intact and no local-preview encryption
-exemption. Build 5 was subsequently installed on the physical iPhone; CoreDevice read back
-0.1.0 (5) and launched the exact bundle successfully. Build 4's TestFlight compliance gate remains unchanged. See
+exemption. Build 6 is installed on the physical iPhone; CoreDevice read back
+0.1.0 (6). iOS blocked launch while the device was locked. Build 4's TestFlight compliance gate remains unchanged. See
 [verification](verification.md) for the consumer acceptance evidence.
 
 ## Earlier release checkpoints

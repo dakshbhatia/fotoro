@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { LocalTrial } from "./local/LocalTrial";
 import type { LocalPhoto } from "./local/resources";
 import type { ConsumerSyncSummary } from "./library/consumer-sync";
@@ -12,6 +12,16 @@ export default function App() {
     [syncSummary, setSyncSummary] = useState<ConsumerSyncSummary>({state: "notStarted", skippedPhotos: 0, action: "signIn"}),
     [ownedPhotos, setOwnedPhotos] = useState<OwnedPhotoSnapshot | null>(null),
     [savedViewer, setSavedViewer] = useState<string | null>(null);
+  const syncOpener = useRef<HTMLElement | null>(null);
+  const returnToPhotos = () => {
+    setCloud(false);
+    requestAnimationFrame(() => {
+      const opener = syncOpener.current;
+      const target = opener?.isConnected && !opener.closest("[hidden],[inert]")
+        ? opener : document.querySelector<HTMLButtonElement>(".local-trial .sync-pill");
+      target?.focus({preventScroll: true});
+    });
+  };
   useEffect(() => {
     const locked = () => {setOwnedPhotos(null); setSavedViewer(null);};
     window.addEventListener("fotoro-lock", locked); return () => window.removeEventListener("fotoro-lock", locked);
@@ -22,11 +32,13 @@ export default function App() {
     <>
       <div hidden={cloud} inert={viewingSaved ? true : undefined}>
         <LocalTrial
+          active={!cloud}
           onPhotosChange={setLocalPhotos}
           syncSummary={syncSummary}
           ownedPhotos={ownedPhotos}
           onOpenSaved={setSavedViewer}
           onBackup={() => {
+            syncOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
             setOpened(true);
             setCloud(true);
           }}
@@ -40,7 +52,7 @@ export default function App() {
               localPhotos={localPhotos}
               onSyncSummary={setSyncSummary}
               onOwnedPhotos={setOwnedPhotos}
-              onBack={() => setCloud(false)}
+              onBack={returnToPhotos}
             />
           </Suspense>
         </div>

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Icon } from "../library/icons";
 import { type LocalPhoto, LocalResources } from "./resources";
 import type { LocalOcrPhoto } from "./useLocalOcr";
-import {canShareOriginal, downloadOriginal, shareOriginal} from "../library/system-share";
+import {canShareOriginal, downloadOriginal, OriginalShareAttempt} from "../library/system-share";
 import {useDialogFocus} from "../library/dialog-focus";
 export function LocalViewer({photos, initial, resources, onClose, onLabels, onUse, onConfirm, onPin, meaning, onReselect}: {
   photos: LocalPhoto[]; initial: string; resources: LocalResources; onClose: () => void;
@@ -11,7 +11,8 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onUs
   meaning?: string; onReselect?: () => void;
 }) {
   const [selected, setSelected] = useState(initial), [loaded, setLoaded] = useState({id: "", url: ""}),
-    [details, setDetails] = useState(false), [zoom, setZoom] = useState(false), [status, setStatus] = useState(""), [label, setLabel] = useState("");
+    [details, setDetails] = useState(false), [zoom, setZoom] = useState(false), [status, setStatus] = useState(""), [label, setLabel] = useState(""),
+    [sharing, setSharing] = useState(false), [shareAttempt] = useState(() => new OriginalShareAttempt());
   const panel = useRef<HTMLDivElement>(null), touch = useRef<{x: number; y: number} | undefined>(undefined);
   const index = Math.max(0, photos.findIndex(p => p.id === selected)), photo = photos[index] as LocalOcrPhoto | undefined;
   const currentPhoto = useRef(photo), alive = useRef(false);
@@ -63,19 +64,21 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onUs
     <div className="viewer-bottom glass">
       <button aria-label="Previous photo" disabled={index === 0} onClick={() => setSelected(photos[index - 1].id)}><Icon kind="previous" /></button>
       <button onClick={() => setZoom(!zoom)}>{zoom ? "Fit" : "Zoom"}</button>
-      {canShare ? <button onClick={async () => {
-        if (!photo.file) return;
+      {canShare ? <button disabled={sharing} onClick={async () => {
+        if (!photo.file || shareAttempt.pending) return;
         const current = () => alive.current && currentPhoto.current === photo;
-        try {const result = await shareOriginal(photo.file, current); if (current() && result !== "cancelled") onUse?.(photo.id);}
+        setSharing(true); setStatus("");
+        try {const result = await shareAttempt.run(photo.file, current); if (current() && result !== "cancelled" && result !== "busy") onUse?.(photo.id);}
         catch (error) {if (current()) setStatus("The photo could not be shared. Download the original from Info.");}
-      }}>Share</button> : <button onClick={download} disabled={!photo.file}>Download</button>}
+        finally {if (alive.current) setSharing(false);}
+      }}>{sharing ? "Sharing…" : "Share"}</button> : <button onClick={download} disabled={!photo.file || sharing}>Download</button>}
       <button aria-label="Next photo" disabled={index === photos.length - 1} onClick={() => setSelected(photos[index + 1].id)}><Icon kind="next" /></button>
     </div>
     {details && <aside className="details local-details">
       <p>{photo.filename}</p><p>{photo.width} × {photo.height}{(photo.originalSize ?? photo.file?.size) ? ` · ${((photo.originalSize ?? photo.file!.size) / 1024 / 1024).toFixed(1)} MB` : ""}</p>
       <p>{new Date(photo.date).toLocaleString()}</p><p>{photo.dateSource === "exif" ? "Date from the photo" : "Capture date unavailable · date selected"}</p>
       <p>{photo.file ? "Original file unchanged" : "Retained preview · original not selected"}</p>
-      {canShare && <button onClick={download}>Download original</button>}
+      {canShare && <button onClick={download} disabled={sharing}>Download original</button>}
       <h3>Labels</h3>
       <div className="local-labels">{(photo.labels ?? []).map((value, i) => <button key={i} aria-label={"Remove label " + value} onClick={() => onLabels?.(photo.id, photo.labels!.filter((_, position) => position !== i))}>{value} ×</button>)}</div>
       {onLabels && <form className="local-label-form" onSubmit={event => {

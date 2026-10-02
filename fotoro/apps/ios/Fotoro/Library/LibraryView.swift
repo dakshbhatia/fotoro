@@ -194,7 +194,8 @@ struct LibraryView: View {
         .alert(
           "Fotoro",
           isPresented: Binding(
-            get: { services.error != nil }, set: { if !$0 { services.error = nil } })
+            get: { services.error != nil && !showExchange && !showingBackup && viewer == nil && !sharingOriginals },
+            set: { if !$0 && !showExchange && !showingBackup && viewer == nil && !sharingOriginals { services.error = nil } })
         ) {
           Button("OK") { services.error = nil }
         } message: {
