@@ -1,7 +1,8 @@
 import Foundation
 import OSLog
+import AuthenticationServices
 
-enum NativeDiagnosticPhase: String, Codable, Sendable { case app, api, sync, share, consent, picks }
+enum NativeDiagnosticPhase: String, Codable, Sendable { case app, api, auth, sync, share, consent, picks }
 enum NativeDiagnosticOutcome: String, Codable, Sendable { case started, completed, failed, cancelled, changed }
 enum NativeDiagnosticEndpoint: String, Codable, Sendable {
   case auth, account, catalog, upload, annotations, exchange, device, other
@@ -34,6 +35,7 @@ struct NativeDiagnosticEvent: Codable, Sendable {
   let elapsedMS: Int?
   let status: Int?
   let networkCode: Int?
+  let authorizationCode: Int?
   let requestId: UUID?
   let state: ConsumerSyncState?
   let completed: Int?
@@ -42,13 +44,15 @@ struct NativeDiagnosticEvent: Codable, Sendable {
   init(phase: NativeDiagnosticPhase, outcome: NativeDiagnosticOutcome,
     endpoint: NativeDiagnosticEndpoint? = nil, method: String? = nil,
     elapsed: Double? = nil, status: Int? = nil, networkError: URLError? = nil,
-    requestId: String? = nil, state: ConsumerSyncState? = nil, completed: Int? = nil, pending: Int? = nil) {
+    authorizationCode: ASAuthorizationError.Code? = nil, requestId: String? = nil,
+    state: ConsumerSyncState? = nil, completed: Int? = nil, pending: Int? = nil) {
     timestamp = Date().timeIntervalSince1970
     self.phase = phase; self.outcome = outcome; self.endpoint = endpoint
     self.method = method.map(NativeDiagnosticMethod.init)
     elapsedMS = elapsed.map { Int(max(0, min($0.isFinite ? $0 * 1000 : 0, 3_600_000))) }
     self.status = status.flatMap { (100...599).contains($0) ? $0 : nil }
     networkCode = networkError?.code.rawValue
+    self.authorizationCode = authorizationCode?.rawValue
     self.requestId = requestId.flatMap(UUID.init(uuidString:))
     self.state = state
     self.completed = completed.map { max(0, min($0, 1_000_000)) }
@@ -140,6 +144,37 @@ private struct APIFailure: Decodable {
   }
 }
 
+enum APIURLPolicy {
+  static let canonical = URL(string: "https://fotoro.cloud")!
+  static var developmentBuild: Bool {
+    #if DEBUG
+      true
+    #else
+      false
+    #endif
+  }
+  static func restored(_ saved: String?, development: Bool) -> URL {
+    guard development, let saved, let url = configured(saved, development: true) else {
+      return canonical
+    }
+    return url
+  }
+  static func configured(_ value: String, development: Bool) -> URL? {
+    guard var components = URLComponents(string: value),
+      let scheme = components.scheme?.lowercased(), let host = components.host?.lowercased(),
+      !host.isEmpty, components.user == nil, components.password == nil,
+      components.query == nil, components.fragment == nil,
+      ["", "/"].contains(components.percentEncodedPath),
+      components.port.map({ (1...65535).contains($0) }) ?? true,
+      scheme == "https" || (scheme == "http" && ["localhost", "127.0.0.1"].contains(host))
+    else { return nil }
+    components.scheme = scheme; components.host = host; components.path = ""
+    guard let url = components.url else { return nil }
+    if development { return url }
+    return BackgroundUploadPolicy.origin(url) == BackgroundUploadPolicy.origin(canonical) ? canonical : nil
+  }
+}
+
 @MainActor final class APIClient {
   let session: AccountSession
   var baseURL: URL
@@ -160,35 +195,44 @@ private struct APIFailure: Decodable {
   }
   func request(_ path: String, method: String = "GET", body: Data? = nil) async throws -> Data {
     guard let url = URL(string: path, relativeTo: baseURL) else {
+      recordInvalidURL(method: method)
       throw FotoroError("Invalid API URL")
     }
     return try await perform(url, method: method, body: body)
   }
+  private func recordInvalidURL(method: String) {
+    diagnostics.record(NativeDiagnosticEvent(phase: .api, outcome: .started, endpoint: .other, method: method))
+    diagnostics.record(NativeDiagnosticEvent(phase: .api, outcome: .failed, endpoint: .other, method: method))
+  }
   private func perform(_ url: URL, method: String, body: Data?) async throws -> Data {
-    guard let expected = BackgroundUploadPolicy.origin(baseURL),
-      BackgroundUploadPolicy.origin(url) == expected,
-      URLComponents(url: url, resolvingAgainstBaseURL: true)?.fragment == nil
-    else { throw FotoroError("Untrusted API URL") }
-    var r = URLRequest(url: url)
-    r.httpMethod = method
-    r.httpBody = body
-    r.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    r.setValue(origin, forHTTPHeaderField: "Origin")
-    if session.fixture {
-      guard ["127.0.0.1", "localhost"].contains(baseURL.host ?? ""),
-        ["127.0.0.1", "localhost"].contains(url.host ?? "")
-      else { throw FotoroError("Fixture secrets cannot leave loopback") }
-      r.setValue(session.accountId, forHTTPHeaderField: "x-fotoro-fixture-account")
-    } else if url.scheme == baseURL.scheme, url.host == baseURL.host, url.port == baseURL.port,
-      let token = session.bearerToken
-    {
-      r.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-    }
     let started = ProcessInfo.processInfo.systemUptime
     let endpoint = NativeDiagnosticEndpoint(path: url.path)
+    diagnostics.record(NativeDiagnosticEvent(phase: .api, outcome: .started, endpoint: endpoint, method: method))
     let data: Data
     let response: URLResponse
-    do { (data, response) = try await network.data(for: r) }
+    do {
+      guard let expected = BackgroundUploadPolicy.origin(baseURL),
+        BackgroundUploadPolicy.origin(url) == expected,
+        URLComponents(url: url, resolvingAgainstBaseURL: true)?.fragment == nil
+      else { throw FotoroError("Untrusted API URL") }
+      var r = URLRequest(url: url)
+      r.httpMethod = method
+      r.httpBody = body
+      if endpoint == .auth { r.timeoutInterval = 20 }
+      r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+      r.setValue(origin, forHTTPHeaderField: "Origin")
+      if session.fixture {
+        guard ["127.0.0.1", "localhost"].contains(baseURL.host ?? ""),
+          ["127.0.0.1", "localhost"].contains(url.host ?? "")
+        else { throw FotoroError("Fixture secrets cannot leave loopback") }
+        r.setValue(session.accountId, forHTTPHeaderField: "x-fotoro-fixture-account")
+      } else if url.scheme == baseURL.scheme, url.host == baseURL.host, url.port == baseURL.port,
+        let token = session.bearerToken
+      {
+        r.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+      }
+      (data, response) = try await network.data(for: r)
+    }
     catch {
       diagnostics.record(NativeDiagnosticEvent(phase: .api,
         outcome: error is CancellationError || (error as? URLError)?.code == .cancelled ? .cancelled : .failed,
@@ -222,6 +266,7 @@ private struct APIFailure: Decodable {
   }
   func upload(_ bytes: Data, to location: String) async throws {
     guard let url = URL(string: location, relativeTo: baseURL) else {
+      recordInvalidURL(method: "PUT")
       throw FotoroError("Invalid upload URL")
     }
     _ = try await perform(url, method: "PUT", body: bytes)

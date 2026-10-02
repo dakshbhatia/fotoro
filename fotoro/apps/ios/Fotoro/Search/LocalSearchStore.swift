@@ -66,7 +66,7 @@ import UIKit
   }
   nonisolated func photoLibraryDidChange(_ changeInstance: PHChange) {
     Task { @MainActor [weak self] in
-      self?.refresh(status: PHPhotoLibrary.authorizationStatus(for: .readWrite))
+      self?.refresh(status: PHPhotoLibrary.authorizationStatus(for: .readWrite), retryFailedOCR: false)
     }
   }
   func pause() {
@@ -80,7 +80,7 @@ import UIKit
     if let imageRequest { images.cancelImageRequest(imageRequest) }
     indexing = false
   }
-  func refresh(status: PHAuthorizationStatus) {
+  func refresh(status: PHAuthorizationStatus, retryFailedOCR: Bool = true) {
     guard opened else { return }
     pause()
     let token = work.generation
@@ -98,7 +98,7 @@ import UIKit
       return
     }
     indexing = true
-    refreshTask = Task { await runRefresh(token: token) }
+    refreshTask = Task { await runRefresh(token: token, retryFailedOCR: retryFailedOCR) }
   }
   func auditAuthorization(
     status: PHAuthorizationStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
@@ -141,7 +141,7 @@ import UIKit
     } catch { if token == work.generation { self.error = error.localizedDescription } }
     if token == work.generation { indexing = false }
   }
-  private func runRefresh(token: UInt64) async {
+  private func runRefresh(token: UInt64, retryFailedOCR: Bool) async {
     do {
       let localIndex: SearchIndex
       if let index {
@@ -165,7 +165,8 @@ import UIKit
       guard applied, token == work.generation, !Task.isCancelled else { return }
       completePermittedSnapshotRefresh(photos: scanned.photos)
       try onSnapshotReady?()
-      let pending = try await Task.detached { try localIndex.pendingRecords() }.value
+      // Snapshot the retry list once: another Vision failure waits for an explicit/foreground refresh.
+      let pending = try await Task.detached { try localIndex.pendingRecords(retryFailed: retryFailedOCR) }.value
       for record in pending {
         try Task.checkCancellation()
         guard token == work.generation, let photo = assets[record.id] else { break }

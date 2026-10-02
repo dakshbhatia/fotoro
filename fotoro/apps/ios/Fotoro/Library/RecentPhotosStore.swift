@@ -42,6 +42,19 @@ struct RecentPhoto: Identifiable {
   }
 }
 
+struct RecentPhotoSource: Hashable {
+  let id: String
+  let revision: String
+  init(id: String, revision: String) { self.id = id; self.revision = revision }
+  init(_ photo: RecentPhoto) { id = photo.id; revision = photo.sourceRevision }
+}
+
+struct RecentPhotosPresentationValidation {
+  let viewerIsCurrent: Bool
+  let selectedIDs: Set<String>
+  let shareIsCurrent: Bool
+}
+
 enum RecentPhotosPolicy {
   static func cutoff(now: Date, calendar: Calendar = .current) -> Date {
     calendar.date(byAdding: .day, value: -10, to: now)!
@@ -100,15 +113,18 @@ struct PhotoViewerZoom {
   @ObservationIgnored private let authorization: () -> PHAuthorizationStatus
   @ObservationIgnored private let requestAccess: () async -> PHAuthorizationStatus
   @ObservationIgnored private let readPhotos: @MainActor (Date) -> [RecentPhoto]
+  @ObservationIgnored private let sourceRevisions: @MainActor ([String]) -> [String: String]
   init(
     authorization: @escaping () -> PHAuthorizationStatus = { PHPhotoLibrary.authorizationStatus(for: .readWrite) },
     requestAccess: @escaping () async -> PHAuthorizationStatus = { await PHPhotoLibrary.requestAuthorization(for: .readWrite) },
     readPhotos: @escaping @MainActor (Date) -> [RecentPhoto] = RecentPhotosStore.fetchRecentPhotos,
+    sourceRevisions: @escaping @MainActor ([String]) -> [String: String] = RecentPhotosStore.currentSourceRevisions,
     picks: PhotoPickAnalyzer? = nil
   ) {
     self.authorization = authorization
     self.requestAccess = requestAccess
     self.readPhotos = readPhotos
+    self.sourceRevisions = sourceRevisions
     self.picks = picks ?? PhotoPickAnalyzer()
     super.init()
   }
@@ -168,6 +184,28 @@ struct PhotoViewerZoom {
     status = authorization()
     opened = status != .notDetermined
     if opened { refresh(now: now) }
+  }
+
+  func validatePresentation(viewer: [RecentPhotoSource], selection: [RecentPhotoSource],
+    share: [RecentPhotoSource]) -> RecentPhotosPresentationValidation {
+    guard RecentPhotosPolicy.canRead(authorization()) else {
+      return RecentPhotosPresentationValidation(viewerIsCurrent: false, selectedIDs: [], shareIsCurrent: false)
+    }
+    let sources = viewer + selection + share
+    let current = sources.isEmpty ? [:] : sourceRevisions(Array(Set(sources.map(\.id))))
+    guard RecentPhotosPolicy.canRead(authorization()) else {
+      return RecentPhotosPresentationValidation(viewerIsCurrent: false, selectedIDs: [], shareIsCurrent: false)
+    }
+    func available(_ source: RecentPhotoSource) -> Bool { current[source.id] == source.revision }
+    return RecentPhotosPresentationValidation(viewerIsCurrent: viewer.allSatisfy(available),
+      selectedIDs: Set(selection.filter(available).map(\.id)), shareIsCurrent: share.allSatisfy(available))
+  }
+  private static func currentSourceRevisions(_ ids: [String]) -> [String: String] {
+    var result: [String: String] = [:]
+    PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil).enumerateObjects { asset, _, _ in
+      if !asset.isHidden, asset.mediaType == .image { result[asset.localIdentifier] = RecentPhoto.sourceRevision(asset) }
+    }
+    return result
   }
 
   func open() async {

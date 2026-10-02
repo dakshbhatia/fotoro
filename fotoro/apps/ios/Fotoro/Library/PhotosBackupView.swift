@@ -89,8 +89,8 @@ struct PhotosBackupView: View {
           Text("Pending unsent imports, account wrappers and local account caches will be removed from this iPhone. Your Photos library stays here.")
         }
         .alert("Fotoro", isPresented: Binding(
-          get: { services.error != nil && !exchange && !savedPhotos },
-          set: { if !$0 && !exchange && !savedPhotos { services.error = nil } })) {
+          get: { services.error != nil && services.vault.isUnlocked && !exchange && !savedPhotos },
+          set: { if !$0 && services.vault.isUnlocked && !exchange && !savedPhotos { services.error = nil } })) {
           Button("OK") { services.error = nil }
         } message: { Text(services.error ?? "") }
     }

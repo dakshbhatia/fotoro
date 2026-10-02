@@ -4,6 +4,207 @@ import XCTest
 @testable import Fotoro
 
 final class RecentPhotosTests: XCTestCase {
+  @MainActor func testPendingPreviewDoesNotRestoreDeletedOrChangedPhotoAndPreservesFreshCache() async throws {
+    for mutation in PreviewCatalogMutation.allCases {
+      let services = try await previewServices()
+      defer { services.vault.lock(); Keychain.remove(services.session.accountId!); try? FileManager.default.removeItem(at: services.storageRoot) }
+      let (photo, cipher, plain) = try previewPhoto(owner: services.session.accountId!)
+      try services.store.put(photo)
+      let gate = PreviewDownloadGate(bytes: cipher, started: expectation(description: "Preview request started"))
+      let objectID = photo.manifest.representations[0].objectId
+      PreviewDownloadProtocol.registry.set(gate, id: objectID)
+      defer { gate.release.signal(); PreviewDownloadProtocol.registry.remove(objectID) }
+      let loading = Task { try await services.ensurePreview(photo) }
+      await fulfillment(of: [gate.started], timeout: 3)
+      var changed = photo
+      switch mutation {
+      case .deleted:
+        try services.store.apply(ChangePageV1(version: 1, changes: [ChangeV1(cursor: "deleted", entity: "photo", entityId: photo.id, deleted: true, payload: nil)], nextCursor: nil, hasMore: false))
+      case .metadata:
+        changed.metadata.originalSha256 = Data("changed-original".utf8).digest
+        try services.store.put(changed)
+      case .manifest:
+        changed.manifest.representations[0].objectId = Wire.id()
+        try services.store.put(changed)
+      case .cacheOnly:
+        changed.originalURL = services.storageRoot.appendingPathComponent("fresh-original.jpg")
+        try services.store.put(changed)
+      }
+      gate.release.signal()
+      if mutation == .cacheOnly {
+        try await loading.value
+        let current = try XCTUnwrap(services.store.backupPhoto(photo.id))
+        XCTAssertEqual(current.originalURL, changed.originalURL)
+        XCTAssertEqual(try Data(contentsOf: XCTUnwrap(current.previewURL)), plain)
+      } else {
+        do { try await loading.value; XCTFail("A withdrawn preview source must not write back") }
+        catch { XCTAssertTrue(error is CancellationError, "\(error)") }
+        let current = try services.store.backupPhoto(photo.id)
+        if mutation == .deleted { XCTAssertNil(current) }
+        else {
+          XCTAssertEqual(current?.metadata, changed.metadata)
+          XCTAssertEqual(current?.manifest, changed.manifest)
+          XCTAssertNil(current?.previewURL)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: services.store.root.appendingPathComponent("Media/cache-\(photo.id)-preview.jpg").path))
+      }
+    }
+  }
+  @MainActor func testPendingReceivedPreviewRequiresCurrentReceivedSourceAndKeepsFreshCache() async throws {
+    for withdraw in [false, true] {
+      let services = try await previewServices()
+      defer { services.vault.lock(); Keychain.remove(services.session.accountId!); try? FileManager.default.removeItem(at: services.storageRoot) }
+      let (initial, cipher, plain) = try previewPhoto(owner: Wire.id())
+      var photo = initial
+      photo.transferState = "received"
+      services.received = [photo]
+      let gate = PreviewDownloadGate(bytes: cipher, started: expectation(description: "Received preview request started"))
+      let objectID = photo.manifest.representations[0].objectId
+      PreviewDownloadProtocol.registry.set(gate, id: objectID)
+      defer { gate.release.signal(); PreviewDownloadProtocol.registry.remove(objectID) }
+      let loading = Task { try await services.ensurePreview(photo) }
+      await fulfillment(of: [gate.started], timeout: 3)
+      if withdraw { services.received = [] }
+      else { services.received[0].originalURL = services.storageRoot.appendingPathComponent("received-original.jpg") }
+      gate.release.signal()
+      if withdraw {
+        do { try await loading.value; XCTFail("A removed received source must not return to the catalog") }
+        catch { XCTAssertTrue(error is CancellationError, "\(error)") }
+        XCTAssertTrue(services.received.isEmpty)
+        XCTAssertNil(try services.store.backupPhoto(photo.id))
+      } else {
+        try await loading.value
+        let current = try XCTUnwrap(services.received.first)
+        XCTAssertEqual(current.originalURL, services.storageRoot.appendingPathComponent("received-original.jpg"))
+        XCTAssertEqual(try Data(contentsOf: XCTUnwrap(current.previewURL)), plain)
+        XCTAssertEqual(try services.store.backupPhoto(photo.id)?.transferState, "received")
+      }
+    }
+  }
+  @MainActor private func previewServices() async throws -> AppServices {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [PreviewDownloadProtocol.self]
+    let services = try AppServices(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()), networkConfiguration: configuration)
+    services.api.baseURL = URL(string: "http://127.0.0.1:8799")!
+    let accounts = try fixture(FixtureAccounts.self, "accounts")
+    var card = accounts.accounts[0]
+    card.accountId = Wire.id()
+    services.session.accountId = card.accountId
+    services.session.fixture = true
+    services.session.pinnedCards[card.accountId] = card
+    let secret = accounts.testSecrets[0]
+    try await services.vault.unlock(.recoveryEnvelope(secret: Data(b64: secret.recoverySecret), wrapper: secret.encryptedBundle))
+    try services.activateAccount()
+    return services
+  }
+  private func previewPhoto(owner: String) throws -> (LocalPhoto, Data, Data) {
+    let crypto = CryptoAdapter()
+    let id = Wire.id()
+    let key = crypto.randomKey()
+    let plain = Data("controlled-preview".utf8)
+    let binding = MediaBinding(photoId: id, representationId: Wire.id(), kind: "preview")
+    let cipher = try crypto.encrypt(plain, key: key, binding: binding)
+    let preview = RepresentationV1(binding: binding, objectId: Wire.id(), header: cipher.prefix(24).b64, ciphertextBytes: cipher.count, ciphertextSha256: cipher.digest)
+    let metadata = RepresentationV1(binding: MediaBinding(photoId: id, representationId: Wire.id(), kind: "metadata"), objectId: Wire.id(), header: "", ciphertextBytes: 1, ciphertextSha256: Data("metadata".utf8).digest)
+    let photo = LocalPhoto(photoId: id, manifest: PhotoManifestV1(photoId: id, ownerAccountId: owner, representations: [preview], metadataRepresentation: metadata, ownerWrappedMetadataKey: WrappedKeyV1(nonce: "", ciphertext: "")), metadata: PhotoMetadataV1(filename: "photo.jpg", mediaType: "image/jpeg", sourceDate: Wire.date(), dateSource: "photos", originalBytes: 3, originalSha256: Data("jpg".utf8).digest, representationKeys: [binding.representationId: key.b64]), transferState: "committed")
+    return (photo, cipher, plain)
+  }
+  @MainActor func testUnchangedForegroundRefreshPreservesViewerSelectionAndOriginalShare() {
+    let first = RecentPhotoSource(id: "first", revision: "original-1")
+    let older = RecentPhotoSource(id: "older-search-result", revision: "original-2")
+    var reads = 0
+    var requests = 0
+    var lookedUp: Set<String> = []
+    let store = RecentPhotosStore(authorization: { .authorized }, requestAccess: {
+      requests += 1
+      return .authorized
+    }, readPhotos: { _ in reads += 1; return [] }, sourceRevisions: { ids in
+      lookedUp = Set(ids)
+      return [first.id: first.revision, older.id: older.revision]
+    })
+    defer { store.pauseAnalysis() }
+    for _ in 0..<2 {
+      store.restoreAccess()
+      let current = store.validatePresentation(viewer: [first, older], selection: [first], share: [older])
+      XCTAssertTrue(current.viewerIsCurrent)
+      XCTAssertEqual(current.selectedIDs, [first.id])
+      XCTAssertTrue(current.shareIsCurrent)
+    }
+    XCTAssertEqual(reads, 2)
+    XCTAssertEqual(requests, 0)
+    XCTAssertEqual(lookedUp, [first.id, older.id])
+    XCTAssertTrue(store.photos.isEmpty, "An allowed older source remains valid outside the recent gallery and search results")
+  }
+  @MainActor func testChangedAndRemovedSourcesWithdrawOnlyAffectedPresentation() {
+    let first = RecentPhotoSource(id: "first", revision: "original-1")
+    let second = RecentPhotoSource(id: "second", revision: "original-2")
+    var revisions = [first.id: first.revision, second.id: "edited"]
+    let store = RecentPhotosStore(authorization: { .limited }, readPhotos: { _ in [] },
+      sourceRevisions: { _ in revisions })
+    for _ in 0..<2 {
+      let current = store.validatePresentation(viewer: [first, second], selection: [first, second], share: [second])
+      XCTAssertFalse(current.viewerIsCurrent)
+      XCTAssertEqual(current.selectedIDs, [first.id])
+      XCTAssertFalse(current.shareIsCurrent)
+      XCTAssertTrue(store.validatePresentation(viewer: [first], selection: [], share: [first]).shareIsCurrent)
+      revisions.removeValue(forKey: second.id)
+    }
+  }
+  @MainActor func testFreshPermissionWithdrawalInvalidatesPresentationsBeforeCachedStatusChanges() {
+    var permission = PHAuthorizationStatus.authorized
+    var lookups = 0
+    let source = RecentPhotoSource(id: "photo", revision: "original")
+    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in [] }, sourceRevisions: { _ in
+      lookups += 1
+      return [source.id: source.revision]
+    })
+    store.restoreAccess()
+    defer { store.pauseAnalysis() }
+    permission = .denied
+    XCTAssertEqual(store.status, .authorized)
+    let current = store.validatePresentation(viewer: [source], selection: [source], share: [source])
+    XCTAssertFalse(current.viewerIsCurrent)
+    XCTAssertTrue(current.selectedIDs.isEmpty)
+    XCTAssertFalse(current.shareIsCurrent)
+    XCTAssertEqual(lookups, 0, "Withdrawn permission must prevent even a source metadata lookup")
+  }
+  @MainActor func testPermissionWithdrawalDuringSourceLookupRejectsMatchingRevisions() {
+    var permission = PHAuthorizationStatus.authorized
+    let source = RecentPhotoSource(id: "photo", revision: "original")
+    let store = RecentPhotosStore(authorization: { permission }, sourceRevisions: { _ in
+      permission = .denied
+      return [source.id: source.revision]
+    })
+    let current = store.validatePresentation(viewer: [source], selection: [source], share: [source])
+    XCTAssertFalse(current.viewerIsCurrent)
+    XCTAssertTrue(current.selectedIDs.isEmpty)
+    XCTAssertFalse(current.shareIsCurrent)
+  }
+  func testSavedViewerPreservesCacheRefreshButWithdrawsChangedMissingAndUnavailableSources() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
+    let catalog = try LibraryStore(root: root)
+    let id = Wire.id()
+    let rep = RepresentationV1(binding: MediaBinding(photoId: id, representationId: Wire.id(), kind: "metadata"), objectId: Wire.id(), header: "", ciphertextBytes: 1, ciphertextSha256: Data("cipher".utf8).digest)
+    let photo = LocalPhoto(photoId: id, manifest: PhotoManifestV1(photoId: id, ownerAccountId: Wire.id(), representations: [], metadataRepresentation: rep, ownerWrappedMetadataKey: WrappedKeyV1(nonce: "", ciphertext: "")), metadata: PhotoMetadataV1(filename: "receipt.jpg", mediaType: "image/jpeg", sourceDate: Wire.date(), dateSource: "photos", originalBytes: 3, originalSha256: Data("jpg".utf8).digest, representationKeys: [:]), transferState: "committed")
+    try catalog.put(photo)
+    XCTAssertTrue(SavedPhotosPresentationPolicy.isCurrent([photo], lookup: catalog.backupPhoto))
+    var changed = photo
+    changed.thumbnailURL = root.appendingPathComponent("new-preview.jpg")
+    try catalog.put(changed)
+    XCTAssertTrue(SavedPhotosPresentationPolicy.isCurrent([photo], lookup: catalog.backupPhoto))
+    changed.metadata.originalSha256 = Data("edited".utf8).digest
+    try catalog.put(changed)
+    XCTAssertFalse(SavedPhotosPresentationPolicy.isCurrent([photo], lookup: catalog.backupPhoto))
+    changed = photo
+    changed.manifest.ownerAccountId = Wire.id()
+    try catalog.put(changed)
+    XCTAssertFalse(SavedPhotosPresentationPolicy.isCurrent([photo], lookup: catalog.backupPhoto))
+    try catalog.removeAll()
+    XCTAssertFalse(SavedPhotosPresentationPolicy.isCurrent([photo], lookup: catalog.backupPhoto))
+    XCTAssertFalse(SavedPhotosPresentationPolicy.isCurrent([photo], lookup: { _ in nil }))
+    XCTAssertFalse(SavedPhotosPresentationPolicy.isCurrent([photo], lookup: { _ in throw CancellationError() }))
+  }
   func testDiagnosticFailureDistinguishesFenceCancellationAndRealErrors() {
     XCTAssertEqual(NativeDiagnosticOutcome.failure(for: CancellationError(), taskCancelled: false), .cancelled)
     XCTAssertEqual(NativeDiagnosticOutcome.failure(for: URLError(.cancelled), taskCancelled: false), .cancelled)
@@ -165,16 +366,27 @@ final class RecentPhotosTests: XCTestCase {
     let secret = try fixture(FixtureAccounts.self, "accounts").testSecrets[0]
     try await services.vault.unlock(.recoveryEnvelope(secret: Data(b64: secret.recoverySecret), wrapper: secret.encryptedBundle))
     var returnedAfterCatalog = false
+    services.auth.fallbackMessage = "Authenticated. Recover the vault with your saved code or a trusted device."
     let accountView = AccountView(services: services, onSignedIn: {
       returnedAfterCatalog = (try? services.store.cursor()) == "Y2F0YWxvZy1yZWFkeQ"
     })
     try await accountView.finishSignIn()
     XCTAssertTrue(returnedAfterCatalog)
+    XCTAssertNil(services.auth.fallbackMessage)
     XCTAssertEqual(services.store.root.lastPathComponent, card.accountId)
     XCTAssertFalse(try services.store.syncEnabled())
     XCTAssertFalse(services.backup.isRunning)
     XCTAssertTrue(try services.journal.entries().isEmpty)
     XCTAssertEqual(AccountCompletionProtocol.record.paths, ["/v1/changes", "/v1/grants"])
+    services.lockAccount()
+    XCTAssertFalse(services.vault.isUnlocked)
+    XCTAssertNil(services.auth.fallbackMessage, "Successful recovery must not hide ordinary Unlock account after a later lock")
+    try await services.vault.unlock(.localKeychain)
+    returnedAfterCatalog = false
+    try await accountView.finishSignIn()
+    XCTAssertTrue(returnedAfterCatalog)
+    XCTAssertTrue(services.vault.isUnlocked)
+    XCTAssertNil(services.auth.fallbackMessage)
     services.vault.lock()
   }
   func testLast10DaysDateBoundariesAndMissingDates() {
@@ -265,6 +477,44 @@ final class RecentPhotosTests: XCTestCase {
         capturedAt: nil, favorite: false, screenshot: false, livePhoto: false, location: nil
       ).searchText, "")
   }
+}
+
+private enum PreviewCatalogMutation: CaseIterable { case deleted, metadata, manifest, cacheOnly }
+
+private final class PreviewDownloadGate: @unchecked Sendable {
+  let bytes: Data
+  let started: XCTestExpectation
+  let release = DispatchSemaphore(value: 0)
+  init(bytes: Data, started: XCTestExpectation) { self.bytes = bytes; self.started = started }
+}
+
+private final class PreviewDownloadRegistry: @unchecked Sendable {
+  private let lock = NSLock()
+  private var gates: [String: PreviewDownloadGate] = [:]
+  func set(_ gate: PreviewDownloadGate, id: String) { lock.lock(); defer { lock.unlock() }; gates[id] = gate }
+  func gate(_ id: String) -> PreviewDownloadGate? { lock.lock(); defer { lock.unlock() }; return gates[id] }
+  func remove(_ id: String) { lock.lock(); defer { lock.unlock() }; gates.removeValue(forKey: id) }
+}
+
+private final class PreviewDownloadProtocol: URLProtocol, @unchecked Sendable {
+  static let registry = PreviewDownloadRegistry()
+  override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "127.0.0.1" && request.url?.port == 8799 }
+  override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+  override func startLoading() {
+    guard let gate = Self.registry.gate(request.url!.lastPathComponent) else {
+      client?.urlProtocol(self, didFailWithError: FotoroError("Unexpected preview request"))
+      return
+    }
+    gate.started.fulfill()
+    guard gate.release.wait(timeout: .now() + 10) == .success else {
+      client?.urlProtocol(self, didFailWithError: URLError(.timedOut))
+      return
+    }
+    client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/octet-stream"])!, cacheStoragePolicy: .notAllowed)
+    client?.urlProtocol(self, didLoad: gate.bytes)
+    client?.urlProtocolDidFinishLoading(self)
+  }
+  override func stopLoading() {}
 }
 
 private final class AccountCompletionRequests: @unchecked Sendable {

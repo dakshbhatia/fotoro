@@ -5,7 +5,8 @@ import Photos
 
 extension NativeDiagnosticOutcome {
   static func failure(for error: Error, taskCancelled: Bool) -> Self {
-    taskCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled ? .cancelled : .failed
+    taskCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled
+      || (error as? NativePasskeyError)?.isCancelled == true ? .cancelled : .failed
   }
 }
 
@@ -31,6 +32,7 @@ enum PhotoPicksBackupPolicy {
   let session: AccountSession
   let api: APIClient
   let vault: VaultStore
+  @ObservationIgnored private let diagnostics: NativeDiagnostics
   var store: LibraryStore
   var importer: PhotoImport
   var backup: PhotosBackup
@@ -43,7 +45,7 @@ enum PhotoPicksBackupPolicy {
     guard let recentPhotos else { throw FotoroError("Open Photos before syncing.") }
     let started = ProcessInfo.processInfo.systemUptime
     await recentPhotos.open()
-    NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .consent,
+    diagnostics.record(NativeDiagnosticEvent(phase: .consent,
       outcome: RecentPhotosPolicy.canRead(recentPhotos.status) ? .completed : .failed,
       elapsed: ProcessInfo.processInfo.systemUptime - started))
   }
@@ -169,7 +171,7 @@ enum PhotoPicksBackupPolicy {
     let previous = consumerSyncSummary.state
     defer {
       if consumerSyncSummary.state != previous {
-        NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .sync, outcome: .changed,
+        diagnostics.record(NativeDiagnosticEvent(phase: .sync, outcome: .changed,
           state: consumerSyncSummary.state, completed: consumerSyncSummary.completedPhotos,
           pending: consumerSyncSummary.totalPhotos.flatMap { total in
             consumerSyncSummary.completedPhotos.map { max(0, total - $0 - consumerSyncSummary.skippedPhotos) }
@@ -249,13 +251,15 @@ enum PhotoPicksBackupPolicy {
     refreshConsumerSyncSummary()
   }
   let crypto = CryptoAdapter()
-  init(root: URL? = nil, networkConfiguration: URLSessionConfiguration = .ephemeral) throws {
+  init(root: URL? = nil, networkConfiguration: URLSessionConfiguration = .ephemeral,
+    diagnostics: NativeDiagnostics = .shared) throws {
+    self.diagnostics = diagnostics
     session = AccountSession()
     api = APIClient(
       session: session,
-      baseURL: URL(
-        string: UserDefaults.standard.string(forKey: "fotoro.api") ?? "https://fotoro.cloud")!,
-      networkConfiguration: networkConfiguration)
+      baseURL: APIURLPolicy.restored(UserDefaults.standard.string(forKey: "fotoro.api"),
+        development: APIURLPolicy.developmentBuild),
+      networkConfiguration: networkConfiguration, diagnostics: diagnostics)
     vault = VaultStore(session: session, api: api)
     auth = NativeAuth(session: session, api: api, vault: vault)
     deviceTrust = DeviceTrust(session: session, api: api, vault: vault)
@@ -291,7 +295,7 @@ enum PhotoPicksBackupPolicy {
       ImageCache.shared.removeAll()
     }
     resetConsumerSyncObservation()
-    NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .app, outcome: .started))
+    diagnostics.record(NativeDiagnosticEvent(phase: .app, outcome: .started))
   }
   func activateAccount() throws {
     backup.pause()
@@ -495,9 +499,7 @@ enum PhotoPicksBackupPolicy {
     try await sync()
   }
   func configureAPI(_ value: String) throws {
-    guard let url = URL(string: value),
-      url.scheme == "https"
-        || (["localhost", "127.0.0.1"].contains(url.host ?? "") && url.scheme == "http")
+    guard let url = APIURLPolicy.configured(value, development: APIURLPolicy.developmentBuild)
     else { throw FotoroError("Use HTTPS or a loopback API") }
     journal.pause(cancelBackground: true)
     try BackgroundUploadTransport.shared.configure(accountId: nil, fixture: false, baseURL: api.baseURL)
@@ -505,7 +507,7 @@ enum PhotoPicksBackupPolicy {
     session.fixture = false
     session.bearerToken = nil
     api.baseURL = url
-    UserDefaults.standard.set(value, forKey: "fotoro.api")
+    UserDefaults.standard.set(url.absoluteString, forKey: "fotoro.api")
   }
   func loadMore() throws {
     guard let last = photos.last else { return }
@@ -626,12 +628,22 @@ enum PhotoPicksBackupPolicy {
     let plain = try await Task.detached {
       try CryptoAdapter().decrypt(bytes, key: secret, representation: rep)
     }.value
+    try Task.checkCancellation()
     guard vault.isUnlocked, vault.generation == generation, store === catalog,
       session.accountId == account
     else {
-      throw FotoroError("Vault locked during preview download")
+      throw CancellationError()
     }
-    var updated = photo
+    let current: LocalPhoto?
+    if photo.transferState == "received" {
+      current = received.first { $0.id == photo.id && $0.transferState == "received" }
+    } else {
+      current = try consumerSavedPhoto(photo.id)
+    }
+    guard var updated = current, updated.manifest.photoId == photo.id,
+      updated.metadata == photo.metadata, updated.manifest == photo.manifest else {
+      throw CancellationError()
+    }
     updated.previewURL = try catalog.write(plain, name: "cache-" + photo.photoId + "-preview.jpg")
     try catalog.put(updated)
     if let i = photos.firstIndex(where: { $0.id == photo.id }) { photos[i] = updated }
@@ -644,7 +656,7 @@ enum PhotoPicksBackupPolicy {
     let started = ProcessInfo.processInfo.systemUptime
     var outcome = NativeDiagnosticOutcome.failed
     defer {
-      NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .sync,
+      diagnostics.record(NativeDiagnosticEvent(phase: .sync,
         outcome: outcome,
         elapsed: ProcessInfo.processInfo.systemUptime - started))
     }
@@ -1129,13 +1141,35 @@ enum PhotoPicksBackupPolicy {
     let _: ContributionResult = try await api.post(
       "/v1/moments/\(grant.momentId)/contributions", input)
   }
-  func run(_ action: @escaping @MainActor () async throws -> Void) {
-    Task {
-      guard !busy else { return }
-      busy = true
-      defer { busy = false }
-      do { try await action() } catch { self.recordConsumerSyncFailure(error); self.error = error.localizedDescription }
-      self.refreshConsumerSyncSummary()
+  @discardableResult
+  func run(phase: NativeDiagnosticPhase? = nil, _ action: @escaping @MainActor () async throws -> Void) -> Task<Void, Never>? {
+    guard !busy else { return nil }
+    busy = true
+    error = nil
+    let started = ProcessInfo.processInfo.systemUptime
+    if let phase { diagnostics.record(NativeDiagnosticEvent(phase: phase, outcome: .started)) }
+    return Task {
+      var outcome = NativeDiagnosticOutcome.completed
+      var passkeyError: NativePasskeyError?
+      defer {
+        busy = false
+        refreshConsumerSyncSummary()
+        if let phase {
+          diagnostics.record(NativeDiagnosticEvent(phase: phase, outcome: outcome,
+            elapsed: ProcessInfo.processInfo.systemUptime - started,
+            authorizationCode: phase == .auth ? passkeyError?.code : nil))
+        }
+      }
+      do {
+        try Task.checkCancellation()
+        try await action()
+        if Task.isCancelled { outcome = .cancelled }
+      } catch {
+        outcome = .failure(for: error, taskCancelled: Task.isCancelled)
+        passkeyError = error as? NativePasskeyError
+        recordConsumerSyncFailure(error)
+        self.error = error.localizedDescription
+      }
     }
   }
 }

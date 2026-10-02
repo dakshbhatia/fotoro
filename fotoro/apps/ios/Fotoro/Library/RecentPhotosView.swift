@@ -13,6 +13,8 @@ struct PhotosImage: View {
   @State private var generation = UUID()
   @State private var active = false
   @State private var unavailable = false
+  @State private var receivedFinalImage = false
+  @Environment(\.displayScale) private var displayScale
   var body: some View {
     Group {
       if let image {
@@ -31,6 +33,7 @@ struct PhotosImage: View {
       if let request { store.images.cancelImageRequest(request) }
       image = nil
       unavailable = false
+      receivedFinalImage = false
       let token = UUID()
       generation = token
       active = true
@@ -39,15 +42,19 @@ struct PhotosImage: View {
       options.deliveryMode = .opportunistic
       request = store.images.requestImage(
         for: photo.asset,
-        targetSize: large ? CGSize(width: 1600, height: 1600) : CGSize(width: 360, height: 360),
+        targetSize: large ? CGSize(width: 1600, height: 1600)
+          : CGSize(width: 360 * displayScale, height: 360 * displayScale),
         contentMode: large ? .aspectFit : .aspectFill, options: options
       ) { value, info in
         guard (info?[PHImageCancelledKey] as? Bool) != true else { return }
         Task { @MainActor in
           guard active, generation == token else { return }
+          let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) == true
+          guard !degraded || !receivedFinalImage else { return }
           if let value {
             image = value
-          } else if (info?[PHImageResultIsDegradedKey] as? Bool) != true {
+            if !degraded { receivedFinalImage = true }
+          } else if !degraded {
             unavailable = true
           }
         }
@@ -142,7 +149,17 @@ struct RecentPhotoViewer: View {
 private struct RecentPhotoViewerPresentation: Identifiable {
   let initial: RecentPhoto
   let photos: [RecentPhoto]
+  let sources: [RecentPhotoSource]
   var id: String { initial.id }
+  init(initial: RecentPhoto, photos: [RecentPhoto]) {
+    self.initial = initial; self.photos = photos; sources = photos.map(RecentPhotoSource.init)
+  }
+}
+
+private struct SelectedRecentPhoto {
+  let photo: RecentPhoto
+  let source: RecentPhotoSource
+  init(_ photo: RecentPhoto) { self.photo = photo; source = RecentPhotoSource(photo) }
 }
 
 enum RecentPhotosContentMode {
@@ -169,7 +186,7 @@ struct RecentPhotosView: View {
   @State private var savedViewer: SavedPhotoViewerPresentation?
   @State private var pendingBackup = false
 #endif
-  @State private var selected: Set<String> = []
+  @State private var selectedPhotos: [String: SelectedRecentPhoto] = [:]
   @State private var selecting = false
   @State private var allPhotos = false
   @State private var viewer: RecentPhotoViewerPresentation?
@@ -180,10 +197,12 @@ struct RecentPhotosView: View {
   @State private var preparingShare = false
   @State private var shareMeaning: String?
   @State private var sharedPhotoIDs: [String] = []
+  @State private var shareSources: [RecentPhotoSource] = []
   @State private var settings = false
   @Environment(\.scenePhase) private var scenePhase
 
   private var homePhotos: [RecentPhoto] { allPhotos ? store.photos : store.pickedPhotos }
+  private var selected: Set<String> { Set(selectedPhotos.keys) }
   private var visible: [RecentPhoto] {
 #if FOTORO_LOCAL_PREVIEW
     query.isEmpty ? homePhotos : search.matchingPhotos
@@ -226,6 +245,7 @@ struct RecentPhotosView: View {
       }
       .sheet(item: $backupAccount) { PhotosBackupView(services: $0) }
       .task(id: searchTaskID) { await updateSearch() }
+      .onChange(of: services?.consumerCatalogGeneration) { validateSavedPresentation() }
       .onChange(of: services?.vault.generation) {
         store.restartAnalysis()
         savedViewer = nil
@@ -264,10 +284,7 @@ struct RecentPhotosView: View {
         }) { settingsView }
         .onChange(of: query) { search.updateQuery(query) }
         .onChange(of: search.libraryGeneration) {
-          viewer = nil
-          selected = []
-          shareTask?.cancel()
-          cleanupShare()
+          validatePhotosPresentation()
 #if !FOTORO_LOCAL_PREVIEW
           searchHits = []
           savedResults = [:]
@@ -369,7 +386,7 @@ struct RecentPhotosView: View {
         Button(allPhotos ? "Your picks" : "All Photos") {
           allPhotos.toggle()
           selecting = false
-          selected = []
+          selectedPhotos = [:]
         }.font(.subheadline).frame(minHeight: 44)
       }
       HStack {
@@ -413,7 +430,7 @@ struct RecentPhotosView: View {
     ToolbarItem(placement: .topBarTrailing) {
       if store.opened, !store.photos.isEmpty {
         if selecting {
-          Button("Done") { selecting = false; selected = [] }.disabled(preparingShare)
+          Button("Done") { selecting = false; selectedPhotos = [:] }.disabled(preparingShare)
         } else {
           Menu {
             Button("Select photos", systemImage: "checkmark.circle") { selecting = true }
@@ -437,7 +454,9 @@ struct RecentPhotosView: View {
             .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
         }
         if !selected.isEmpty {
-          Button("Share", systemImage: "square.and.arrow.up") { share(store.photos.filter { selected.contains($0.id) }) }
+          Button("Share", systemImage: "square.and.arrow.up") {
+            share(selectedPhotos.values.map(\.photo).sorted { ($0.capturedAt ?? .distantPast) > ($1.capturedAt ?? .distantPast) })
+          }
             .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44).disabled(preparingShare || showShare)
         }
       }.padding(.leading, 18).padding(.trailing, 8).frame(minHeight: 44)
@@ -468,16 +487,50 @@ struct RecentPhotosView: View {
           if store.status == .limited { Button("Manage selected photos") { settings = false; addPhotos() } }
           Button("Open system settings", action: openSettings)
         }
+        Section { Text(buildDescription).font(.caption).foregroundStyle(.secondary) }
       }.navigationTitle("Settings").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { settings = false } } }
     }
   }
+  private var buildDescription: String {
+    let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+    let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
+#if FOTORO_LOCAL_PREVIEW
+    return "Local-only beta · \(version) (\(build))"
+#else
+    return "Encrypted sync · \(version) (\(build))"
+#endif
+  }
+  private func validatePhotosPresentation() {
+    let selection = selectedPhotos.values.map(\.source)
+    let pending = pendingShare.map { [RecentPhotoSource($0)] } ?? []
+    let validation = store.validatePresentation(viewer: viewer?.sources ?? [], selection: selection,
+      share: shareSources + pending)
+    selectedPhotos = selectedPhotos.filter { validation.selectedIDs.contains($0.key) }
+    if !validation.shareIsCurrent {
+      pendingShare = nil
+      shareTask?.cancel()
+      cleanupShare()
+    }
+    if !validation.viewerIsCurrent { viewer = nil }
+  }
   private func restorePhotos() {
     store.restoreAccess()
+    validatePhotosPresentation()
+#if !FOTORO_LOCAL_PREVIEW
+    validateSavedPresentation()
+#endif
     if RecentPhotosPolicy.canRead(store.status) { search.open(status: store.status) }
     else { search.auditAuthorization() }
   }
 #if !FOTORO_LOCAL_PREVIEW
+  private func validateSavedPresentation() {
+    guard let presentation = savedViewer else { return }
+    guard let services, SavedPhotosPresentationPolicy.isCurrent(presentation.photos, lookup: services.consumerSavedPhoto) else {
+      savedViewer = nil
+      return
+    }
+  }
   private func openBackup() {
     queryFocused = false
     do {
@@ -515,7 +568,7 @@ struct RecentPhotosView: View {
   }
   private func toggleSelection(_ photo: RecentPhoto) {
     selecting = true
-    if selected.contains(photo.id) { selected.remove(photo.id) } else { selected.insert(photo.id) }
+    if selectedPhotos.removeValue(forKey: photo.id) == nil { selectedPhotos[photo.id] = SelectedRecentPhoto(photo) }
   }
   private func openSettings() {
     UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
@@ -533,14 +586,15 @@ struct RecentPhotosView: View {
   private func share(_ photos: [RecentPhoto]) {
     guard !preparingShare, !showShare, !photos.isEmpty else { return }
     preparingShare = true
-    let generation = search.libraryGeneration
+    let sources = photos.map(RecentPhotoSource.init)
+    shareSources = sources
     shareTask = Task {
-      defer { preparingShare = false; shareTask = nil }
+      defer { preparingShare = false; shareTask = nil; if !showShare { shareSources = [] } }
       var exported: [URL] = []
       do {
         exported = try await store.shareOriginals(photos)
         try Task.checkCancellation()
-        guard generation == search.libraryGeneration, RecentPhotosPolicy.canRead(store.status) else { throw CancellationError() }
+        guard store.validatePresentation(viewer: [], selection: [], share: sources).shareIsCurrent else { throw CancellationError() }
         sharing = exported
         shareMeaning = query.isEmpty ? nil : search.response.meaning?.id
         sharedPhotoIDs = photos.map(\.id)
@@ -560,10 +614,20 @@ struct RecentPhotosView: View {
     showShare = false
     shareMeaning = nil
     sharedPhotoIDs = []
+    shareSources = []
   }
 }
 
 #if !FOTORO_LOCAL_PREVIEW
+enum SavedPhotosPresentationPolicy {
+  static func isCurrent(_ photos: [LocalPhoto], lookup: (String) throws -> LocalPhoto?) -> Bool {
+    photos.allSatisfy { photo in
+      guard let current = try? lookup(photo.id) else { return false }
+      return current.metadata == photo.metadata && current.manifest == photo.manifest
+    }
+  }
+}
+
 struct ConsumerSearchPresentationID: Equatable {
   var query: String
   var library: UInt64
