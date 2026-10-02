@@ -18,14 +18,21 @@ actor PhotoImport {
   let store: LibraryStore
   let crypto = CryptoAdapter()
   let sourceReader: (@Sendable (SelectedResource) async throws -> (Data, String, Bool))?
+  private let sourceRevision: @Sendable (String) -> String?
   var failures: [ImportFailure] = []
   var notices: [String] = []
   init(
     store: LibraryStore,
-    sourceReader: (@Sendable (SelectedResource) async throws -> (Data, String, Bool))? = nil
+    sourceReader: (@Sendable (SelectedResource) async throws -> (Data, String, Bool))? = nil,
+    sourceRevision: (@Sendable (String) -> String?)? = nil
   ) {
     self.store = store
     self.sourceReader = sourceReader
+    self.sourceRevision = sourceRevision ?? { id in
+      PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject.map {
+        RecentPhoto.sourceRevision($0)
+      }
+    }
   }
   func importResources(
     _ selected: [SelectedResource], accountId: String, bundle: AccountBundle,
@@ -173,8 +180,7 @@ actor PhotoImport {
     if let existing = try store.backupPhoto(source.photoId) { return existing }
     func checkRevision() throws {
       guard let expected = source.sourceRevision else { return }
-      guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [source.id], options: nil).firstObject,
-        RecentPhoto.sourceRevision(asset) == expected else { throw FotoroError("Photo changed during sync. Try again.") }
+      guard sourceRevision(source.id) == expected else { throw FotoroError("Photo changed during sync. Try again.") }
     }
     try checkRevision()
     try Task.checkCancellation()

@@ -25,6 +25,22 @@ enum PhotoPicksBackupPolicy {
   }
 }
 
+enum ReviewedPhotosBackupPolicy {
+  static func select(_ candidates: [BackupCandidate], selection: [RecentPhotoSource]) throws -> [BackupCandidate] {
+    guard !selection.isEmpty, Set(selection.map(\.id)).count == selection.count else {
+      throw FotoroError("Choose photos to save.")
+    }
+    let current = Dictionary(candidates.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+    return try selection.map { source in
+      guard !source.revision.isEmpty, let candidate = current[source.id],
+        candidate.sourceRevision == source.revision else {
+        throw FotoroError("Selected photos changed or are unavailable. Review your selection and try again.")
+      }
+      return candidate
+    }
+  }
+}
+
 @MainActor @Observable final class AppServices: Identifiable {
   let id = UUID()
   let deviceTrust: DeviceTrust
@@ -334,7 +350,7 @@ enum PhotoPicksBackupPolicy {
     try hydrateLocalAnnotations()
     resetConsumerSyncObservation()
   }
-  func startPhotosBackup() throws {
+  func startPhotosBackup(selection: [RecentPhotoSource]? = nil) throws {
     guard session.isSignedIn else { throw FotoroError("Sign in to save your picks.") }
     guard !backup.isRunning, !journal.running else { throw FotoroError("Saving is already in progress.") }
     guard
@@ -342,7 +358,14 @@ enum PhotoPicksBackupPolicy {
     else {
       throw FotoroError("Public test accounts cannot sync your Photos library. Use a real account.")
     }
+    if let selection {
+      guard !selection.isEmpty, Set(selection.map(\.id)).count == selection.count,
+        selection.allSatisfy({ !$0.id.isEmpty && !$0.revision.isEmpty }) else {
+        throw FotoroError("Choose photos to save.")
+      }
+    }
     guard let account = session.accountId else { throw FotoroError("Sign in first") }
+    guard store.root.lastPathComponent == account else { throw FotoroError("Open this account before saving photos.") }
     let bundle = try vault.requireBundle()
     try store.setSyncIntent(enabled: false, uploadsPaused: false)
     consumerOffline = false
@@ -366,29 +389,40 @@ enum PhotoPicksBackupPolicy {
             "An existing upload remains pending. Retry it before syncing more photos.")
         }
         #if DEBUG
-          if let snapshot = self.photosBackupSnapshot { return try snapshot(RecentPhotosPolicy.cutoff(now: Date())) }
+          if let snapshot = self.photosBackupSnapshot {
+            let candidates = try snapshot(RecentPhotosPolicy.cutoff(now: Date()))
+            if let selection { return try ReviewedPhotosBackupPolicy.select(candidates, selection: selection) }
+            return candidates
+          }
         #endif
         let permission = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard RecentPhotosPolicy.canRead(permission) else {
           throw FotoroError("Allow Photos access to sync.")
         }
-        guard let recent = self.recentPhotos else {
-          throw FotoroError("Open Photos to find your picks before syncing.")
+        let assets: PHFetchResult<PHAsset>
+        if let selection {
+          assets = PHAsset.fetchAssets(withLocalIdentifiers: selection.map(\.id), options: nil)
+        } else {
+          guard let recent = self.recentPhotos else {
+            throw FotoroError("Open Photos to find your picks before syncing.")
+          }
+          let picks = try await recent.completedPicks()
+          try Task.checkCancellation()
+          guard self.vault.generation == generation, self.session.accountId == account,
+            self.store === catalog, picks.matches(recent.pickCandidates),
+            PhotoPickAnalyzer.isCurrent(picks.candidates) else { throw CancellationError() }
+          acceptedPicks = picks
+          let now = Date()
+          let options = PHFetchOptions()
+          options.predicate = NSPredicate(
+            format: "creationDate >= %@ AND creationDate <= %@",
+            RecentPhotosPolicy.cutoff(now: now) as NSDate, now as NSDate)
+          options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+          assets = PHAsset.fetchAssets(with: options)
         }
-        let picks = try await recent.completedPicks()
-        try Task.checkCancellation()
-        guard self.vault.generation == generation, self.session.accountId == account,
-          self.store === catalog, picks.matches(recent.pickCandidates),
-          PhotoPickAnalyzer.isCurrent(picks.candidates) else { throw CancellationError() }
-        acceptedPicks = picks
-        let now = Date()
-        let options = PHFetchOptions()
-        options.predicate = NSPredicate(
-          format: "creationDate >= %@ AND creationDate <= %@",
-          RecentPhotosPolicy.cutoff(now: now) as NSDate, now as NSDate)
-        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         var candidates: [BackupCandidate] = []
-        PHAsset.fetchAssets(with: options).enumerateObjects { asset, _, _ in
+        assets.enumerateObjects { asset, _, _ in
+          if selection != nil && (asset.isHidden || asset.mediaType != .image) { return }
           let skip =
             asset.mediaType != .image
             ? "Video is not backed up."
@@ -398,7 +432,8 @@ enum PhotoPicksBackupPolicy {
               id: asset.localIdentifier, capturedAt: asset.creationDate, skipReason: skip,
               sourceRevision: RecentPhoto.sourceRevision(asset)))
         }
-        candidates = PhotoPicksBackupPolicy.select(candidates, snapshot: picks)
+        if let selection { candidates = try ReviewedPhotosBackupPolicy.select(candidates, selection: selection) }
+        else { candidates = PhotoPicksBackupPolicy.select(candidates, snapshot: acceptedPicks) }
         for candidate in candidates where candidate.skipReason == nil {
           var source = try catalog.backupSource(candidate.id)
           if source.phase == .committed, source.sourceRevision != candidate.sourceRevision || source.originalSha256 == nil,
@@ -433,8 +468,21 @@ enum PhotoPicksBackupPolicy {
               self.session.accountId == account, self.store === catalog,
               (try? catalog.uploadsPaused()) == false else { return false }
             #if DEBUG
-              if self.photosBackupSnapshot != nil { return true }
+              if let snapshot = self.photosBackupSnapshot {
+                guard let selection else { return true }
+                guard let selected = selection.first(where: { $0.id == source.id }),
+                  selected.revision == source.sourceRevision else { return false }
+                return (try? ReviewedPhotosBackupPolicy.select(snapshot(RecentPhotosPolicy.cutoff(now: Date())), selection: [selected])) != nil
+              }
             #endif
+            if let selection {
+              guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+                let selected = selection.first(where: { $0.id == source.id }),
+                selected.revision == source.sourceRevision,
+                let asset = PHAsset.fetchAssets(withLocalIdentifiers: [source.id], options: nil).firstObject,
+                !asset.isHidden, asset.mediaType == .image else { return false }
+              return RecentPhoto.sourceRevision(asset) == selected.revision
+            }
             guard let picks = acceptedPicks, let recent = self.recentPhotos,
               picks.matches(recent.pickCandidates),
               let candidate = picks.candidates.first(where: { $0.id == source.id }),

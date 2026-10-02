@@ -433,3 +433,192 @@ private final class AuthTimeoutProtocol: URLProtocol, @unchecked Sendable {
   }
   override func stopLoading() {}
 }
+
+extension ConsumerCoreTests {
+  @MainActor func testExplicitSavedLibraryOpenFetchesCatalogWithoutSendingQueuedOriginalsOrLocalDrafts() async throws {
+    let gate = SavedLibraryRequestGate(started: expectation(description: "Explicit catalog read started"))
+    defer { gate.release.signal() }
+    try await withSavedLibrary(gate: gate) { services, server in
+      var queued = try self.samplePhoto()
+      queued.manifest.ownerAccountId = services.session.accountId!
+      queued.transferState = "pending"
+      try services.store.put(queued)
+      try services.journal.enqueue(queued, publicSample: true)
+      try services.reload()
+      try services.setLabels(["local-only-draft"], photo: queued)
+      let drafts = try services.annotations.ledger.pendingIDs()
+      let refresh = SavedLibraryRefresh()
+      XCTAssertTrue(server.requests.isEmpty)
+      let opening = Task { await refresh.open(services) }
+      await fulfillment(of: [gate.started], timeout: 3)
+      XCTAssertTrue(refresh.isRefreshing)
+      await refresh.open(services)
+      await refresh.refresh(services)
+      XCTAssertEqual(server.requests.count, 1, "Repeated taps cannot start a second catalog request")
+      gate.release.signal()
+      await opening.value
+      XCTAssertFalse(refresh.isRefreshing)
+      XCTAssertNil(refresh.error)
+      XCTAssertEqual(try services.consumerSavedPhoto(server.photoID)?.metadata.filename, "remote-receipt.jpg")
+      XCTAssertEqual(try services.journal.entries().map { $0.photo.id }, [queued.id])
+      XCTAssertEqual(try services.annotations.ledger.pendingIDs(), drafts)
+      XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" })
+      XCTAssertEqual(Set(server.requests.map(\.path)), ["/v1/changes", "/v1/objects/" + server.objectID, "/v1/grants"])
+      let completed = server.requests.count
+      await refresh.open(services)
+      await services.resumeSavedAccount()
+      XCTAssertEqual(server.requests.count, completed, "Reappearing and foreground restoration must not fetch again")
+      services.vault.lock()
+      refresh.cancel()
+      try await services.vault.unlock(.localKeychain)
+      await refresh.open(services)
+      XCTAssertGreaterThan(server.requests.count, completed, "Explicit unlock opens a fresh vault binding")
+      XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" })
+    }
+  }
+  @MainActor func testSavedLibraryRefreshShowsFailureAndRetriesOnlyReadOnlyCatalogWork() async throws {
+    try await withSavedLibrary(failFirst: true) { services, server in
+      let refresh = SavedLibraryRefresh()
+      await refresh.open(services)
+      XCTAssertFalse(refresh.isRefreshing)
+      XCTAssertEqual(refresh.error, "CONTROLLED_CATALOG_UNAVAILABLE")
+      XCTAssertNil(try services.consumerSavedPhoto(server.photoID))
+      await refresh.refresh(services)
+      XCTAssertFalse(refresh.isRefreshing)
+      XCTAssertNil(refresh.error)
+      XCTAssertNotNil(try services.consumerSavedPhoto(server.photoID))
+      XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" })
+      XCTAssertEqual(server.requests.filter { $0.path == "/v1/changes" }.count, 2)
+    }
+  }
+  @MainActor func testSavedLibrarySelectionSharesBothSearchChoicesAndRejectsChangedOrWithdrawnSources() async throws {
+    try await withSavedLibrary { services, _ in
+      var first = try self.samplePhoto(), second = try self.samplePhoto()
+      first.manifest.ownerAccountId = services.session.accountId!
+      second.manifest.ownerAccountId = services.session.accountId!
+      first.metadata.filename = "first.jpg"; second.metadata.filename = "second.jpg"
+      first.originalURL = try services.store.write(Data("one".utf8), name: "first-original.jpg")
+      second.originalURL = try services.store.write(Data("two".utf8), name: "second-original.jpg")
+      first.metadata.originalSha256 = Data("one".utf8).digest
+      second.metadata.originalSha256 = Data("two".utf8).digest
+      try services.store.put(first); try services.store.put(second); try services.reload()
+      var selection = SavedPhotoSelection()
+      selection.toggle(first)
+      let secondQuery = try await services.searchCatalog("second.jpg")
+      XCTAssertEqual(secondQuery.map(\.id), [second.id])
+      selection.toggle(try XCTUnwrap(secondQuery.first))
+      XCTAssertEqual(selection.count, 2)
+      let choices = try selection.resolve(using: services.consumerSavedPhoto)
+      XCTAssertEqual(Set(choices.map(\.id)), [first.id, second.id])
+      var exports: [URL] = []
+      defer { ConsumerShareExports.remove(exports) }
+      for photo in choices { exports.append(try await services.consumerShareOriginal(photo)) }
+      XCTAssertEqual(exports.count, selection.count)
+      XCTAssertEqual(try Set(exports.map { try Data(contentsOf: $0) }), [Data("one".utf8), Data("two".utf8)])
+      first.previewURL = try services.store.write(Data("preview".utf8), name: "fresh-preview.jpg")
+      try services.store.put(first)
+      selection.removeWithdrawn(using: services.consumerSavedPhoto)
+      XCTAssertEqual(selection.count, 2, "Fresh cache fields do not change the chosen original")
+      XCTAssertEqual(try selection.resolve(using: services.consumerSavedPhoto).first { $0.id == first.id }?.previewURL, first.previewURL)
+      first.metadata.originalSha256 = Data("changed-original".utf8).digest
+      try services.store.put(first)
+      XCTAssertThrowsError(try selection.resolve(using: services.consumerSavedPhoto))
+      selection.removeWithdrawn(using: services.consumerSavedPhoto)
+      XCTAssertEqual(selection.count, 1)
+      XCTAssertFalse(selection.contains(first.id))
+      XCTAssertEqual(try selection.resolve(using: services.consumerSavedPhoto).map(\.id), [second.id])
+      services.vault.lock()
+      selection.removeWithdrawn(using: services.consumerSavedPhoto)
+      XCTAssertEqual(selection.count, 0)
+    }
+  }
+  @MainActor private func withSavedLibrary(gate: SavedLibraryRequestGate? = nil, failFirst: Bool = false,
+    check: @MainActor (AppServices, SavedLibraryServer) async throws -> Void) async throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    let previousCards = UserDefaults.standard.object(forKey: "fotoro.pinnedCards")
+    let accounts = try fixture(FixtureAccounts.self, "accounts")
+    var card = accounts.accounts[0]; card.accountId = Wire.id()
+    let secret = accounts.testSecrets[0]
+    let server = try SavedLibraryServer(card: card, secret: secret, gate: gate, failFirst: failFirst)
+    SavedLibraryProtocol.server = server
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [SavedLibraryProtocol.self]
+    let services = try AppServices(root: directory, networkConfiguration: configuration,
+      diagnostics: NativeDiagnostics(fileURL: nil, emitSystemLog: false))
+    defer {
+      SavedLibraryProtocol.server = nil
+      services.vault.lock(); Keychain.remove(card.accountId)
+      if let previousCards { UserDefaults.standard.set(previousCards, forKey: "fotoro.pinnedCards") }
+      else { UserDefaults.standard.removeObject(forKey: "fotoro.pinnedCards") }
+      try? FileManager.default.removeItem(at: directory)
+    }
+    services.api.baseURL = URL(string: "http://127.0.0.1:8796")!
+    services.session.accountId = card.accountId; services.session.fixture = true
+    try services.session.pin(card)
+    try await services.vault.unlock(.recoveryEnvelope(secret: Data(b64: secret.recoverySecret), wrapper: secret.encryptedBundle))
+    try services.activateAccount()
+    try await check(services, server)
+  }
+}
+
+private final class SavedLibraryRequestGate: @unchecked Sendable {
+  let started: XCTestExpectation
+  let release = DispatchSemaphore(value: 0)
+  init(started: XCTestExpectation) { self.started = started }
+}
+private final class SavedLibraryServer: @unchecked Sendable {
+  struct Request { var method: String; var path: String }
+  let photoID = Wire.id(), objectID = Wire.id()
+  private let lock = NSLock()
+  private var recorded: [Request] = []
+  private let gate: SavedLibraryRequestGate?
+  private var failFirst: Bool
+  private let page: Data
+  private let metadata: Data
+  init(card: AccountCardV1, secret: FixtureSecrets, gate: SavedLibraryRequestGate?, failFirst: Bool) throws {
+    self.gate = gate; self.failFirst = failFirst
+    let crypto = CryptoAdapter(), key = crypto.randomKey()
+    let binding = MediaBinding(photoId: photoID, representationId: Wire.id(), kind: "metadata")
+    let value = PhotoMetadataV1(filename: "remote-receipt.jpg", mediaType: "image/jpeg", sourceDate: Wire.date(),
+      dateSource: "photos", originalBytes: 3, originalSha256: Data("jpg".utf8).digest, representationKeys: [:])
+    metadata = try crypto.encrypt(Wire.encode(value), key: key, binding: binding)
+    let rep = RepresentationV1(binding: binding, objectId: objectID, header: metadata.prefix(24).b64,
+      ciphertextBytes: metadata.count, ciphertextSha256: metadata.digest)
+    let manifest = PhotoManifestV1(photoId: photoID, ownerAccountId: card.accountId, representations: [],
+      metadataRepresentation: rep, ownerWrappedMetadataKey: try crypto.wrap(key, key: Data(b64: secret.vaultKey)))
+    let signed = try crypto.sign(manifest, kind: "photo-manifest", accountId: card.accountId,
+      secret: Data(b64: secret.signingSecretKey))
+    page = try Wire.encode(ChangePageV1(version: 1,
+      changes: [ChangeV1(cursor: "1", entity: "photo", entityId: photoID, deleted: false, payload: signed)],
+      nextCursor: "1", hasMore: false))
+  }
+  var requests: [Request] { lock.lock(); defer { lock.unlock() }; return recorded }
+  func response(_ request: URLRequest) throws -> (Int, Data) {
+    guard request.httpMethod == "GET", let path = request.url?.path else { throw FotoroError("Catalog reading sent a write") }
+    lock.lock(); recorded.append(Request(method: "GET", path: path)); let first = recorded.count == 1
+    let fail = failFirst && path == "/v1/changes"; if fail { failFirst = false }; lock.unlock()
+    if first, let gate { gate.started.fulfill(); _ = gate.release.wait(timeout: .now() + 5) }
+    if fail { return (503, Data(#"{"code":"CONTROLLED_CATALOG_UNAVAILABLE","retryable":true}"#.utf8)) }
+    if path == "/v1/changes" { return (200, page) }
+    if path == "/v1/objects/" + objectID { return (200, metadata) }
+    if path == "/v1/grants" { return (200, try Wire.encode(GrantInboxV1(version: 1, grants: []))) }
+    throw FotoroError("Unexpected catalog read")
+  }
+}
+private final class SavedLibraryProtocol: URLProtocol, @unchecked Sendable {
+  nonisolated(unsafe) static var server: SavedLibraryServer?
+  override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "127.0.0.1" && request.url?.port == 8796 }
+  override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+  override func startLoading() {
+    do {
+      guard let url = request.url, let server = Self.server else { throw FotoroError("Missing controlled catalog") }
+      let (status, body) = try server.response(request)
+      let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: nil,
+        headerFields: ["Content-Type": "application/json"])!
+      client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+      client?.urlProtocol(self, didLoad: body)
+      client?.urlProtocolDidFinishLoading(self)
+    } catch { client?.urlProtocol(self, didFailWithError: error) }
+  }
+  override func stopLoading() {}
+}

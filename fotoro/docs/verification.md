@@ -3,10 +3,10 @@
 The web app and API are live at [fotoro.cloud](https://fotoro.cloud). The separate
 local Photos preview 0.1.0 (3) is uploaded and in internal TestFlight. Its matching
 development build was installed and launched on the physical iPhone;
-personal Photos access remains uninspected. Full encrypted build 11 is installed,
+personal Photos access remains uninspected. Full encrypted build 12 is installed,
 its exact version is read back, and its running process and protected diagnostic
 file are verified on the unlocked physical iPhone. The owner's screenshots show
-local Photos and a signed-out Sync screen. Build 11's protected account-state event
+local Photos and a signed-out Sync screen. Build 12's protected account-state event
 independently reports signed out; real-account authentication remains unverified.
 Apple has processed full build 4; its
 TestFlight access awaits an export-compliance declaration. Independent reviews reproduced
@@ -42,9 +42,9 @@ Real-account phone-to-Safari acceptance remains open.
 | --- | --- |
 | Contracts, crypto and loopback fixtures | 15 tests pass: schema boundaries, bounded annotations, signatures, media binding, preservation, closed diagnostic-method vocabulary and bounded public-fixture readiness retries |
 | Worker/D1/R2 API | 51 tests pass, including nonce-bound password signup, challenge replay/conflicts and unchanged legacy login; upload/storage, authentication/exchange/annotation and diagnostic privacy checks pass |
-| Web | 176 tests pass, including one-password entry, same-account setup retry, cancellation/account/storage fences, sharing and existing search/viewer/retention/annotation checks |
+| Web | 180 tests pass, including read-only account/lifecycle refresh, explicit queue/annotation saving, one-password entry, setup retry, cancellation/account/storage fences and existing search/viewer checks |
 | Web production build | TypeScript/Vite pass. Account/crypto loads after Sync photos; the large encrypted-media chunk warning remains |
-| Native | Latest full app 184 tests and local preview 50 tests pass locally with Xcode 27, zero failures or skips. One-password entry and signup, compact/legacy credential parity, protected storage failures, late auth cancellation, manual saving and existing crypto/journal/background/search checks are included |
+| Native | Latest full app 190 tests and local preview 50 tests pass locally with Xcode 27, zero failures or skips. Reviewed-photo saving, read-only saved-library loading and complete sharing selections join the account, crypto/journal/background/search regressions |
 | TestFlight metadata | 28 tests pass for team/individual authentication, exact app/build ownership, sparse Apple responses, notes readback and credential-safe errors. A live build 2 update preserved every existing test-note character and verified its build relationship; its processing state is VALID and beta states remain MISSING_EXPORT_COMPLIANCE. Build 3 is VALID / IN_BETA_TESTING with encryption metadata false and verified local-preview test notes |
 | Distribution IPA | Actual build 3 archive and distribution IPA pass the strict preview audit. Xcode Organizer used its existing cloud-managed certificate; the copied IPA matches the unchanged archive/dSYM/link map. Apple validation and exact-IPA upload both exit 0 with success markers |
 | Internal tester access | App Store Connect shows the existing internal group with one tester and one build; iOS 0.1.0 (3) is Testing and the requested sole owner tester is Invited. Association was automatic; no new tester/role/invitation mutation was needed. Inbox delivery and installation remain unverified |
@@ -53,6 +53,36 @@ Real-account phone-to-Safari acceptance remains open.
 | Real local HTTP exchange | Three isolated tests cover fresh migrations, recovery sessions, bidirectional contribution/save, revocation, restore, byte-preserved HEIC, background ciphertext staging, encrypted labels/OCR in a fresh account session, cross-account denial and idempotent revision conflicts |
 | Native local lifecycle | All-age permitted enumeration, limited/denied startup, permission purge, ten-day browse, changed revisions, cancellation rollback and refresh stability are exercised |
 | Browser local lifecycle | Session-only default; retained labels/text/previews; lazy preview hydration; unavailable preview preservation; digest reselection; pending/cross-instance clear fences |
+
+## October 2 chosen-photo saving and saved-library handoffs
+
+Build 12 adds Save to the native photo viewer and selection bar. The account sheet
+carries an immutable source/revision selection through sign-in; Save N photos
+starts that exact manual batch, including permitted older search results. Missing,
+hidden or changed sources cannot silently enter the batch. Opening Saved photos
+loads the remote catalog with loading/error/retry feedback and sends GET requests
+only. Saved-photo sharing preserves selected sources across searches, so the
+displayed count and exported originals agree.
+
+The browser separates read-only catalog refresh from explicit queue/annotation
+saving. Sign-in, returning to a tab, reconnecting and editing labels cannot send
+queued originals or edits. Save, Continue saving and Sync changes send them
+explicitly. Idle queued work shows paused; account-sheet failures stay visible.
+Read/save operations serialize per vault and retain stale-account fences.
+
+All 190 native, 50 local-preview and 180 web tests pass, with core checks,
+typechecks and the production web build. Six new native workflows and four web
+regressions cover the handoffs above. Public Simulator UI verifies viewer Save
+carrying the chosen count into Account. An initial test expected paused for a
+changed source; the final assertion correctly requires failed/needs-attention,
+with no staged rows or upload writes.
+
+Worker `5ce1ce81-2445-4e20-91f0-967778520fb4` is read back at 100%; canonical
+API and exact production Apple association checks pass. Signed full Release
+0.1.0 (12) passes signature and entitlement checks, is installed over the existing
+phone app, and its exact version and running executable are independently read
+back. The bounded protected build-12 account-state event is signedOut. Owner
+authentication and private-photo save/restore remain unverified.
 
 ## October 2 account screen cleanup
 

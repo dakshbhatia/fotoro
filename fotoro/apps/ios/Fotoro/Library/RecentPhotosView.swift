@@ -86,17 +86,20 @@ struct RecentPhotoViewer: View {
   let photos: [RecentPhoto]
   let initialID: String
   var search: LocalSearchStore? = nil
+  var save: ((RecentPhoto) -> Void)? = nil
   var share: (RecentPhoto) -> Void
   @State private var selected = ""
   @State private var zoom = PhotoViewerZoom()
   @State private var details = false
   @Environment(\.dismiss) private var dismiss
   init(store: RecentPhotosStore, photos: [RecentPhoto], initialID: String,
-    search: LocalSearchStore? = nil, share: @escaping (RecentPhoto) -> Void) {
+    search: LocalSearchStore? = nil, save: ((RecentPhoto) -> Void)? = nil,
+    share: @escaping (RecentPhoto) -> Void) {
     self.store = store
     self.photos = photos
     self.initialID = initialID
     self.search = search
+    self.save = save
     self.share = share
     _selected = State(initialValue: initialID)
   }
@@ -131,6 +134,13 @@ struct RecentPhotoViewer: View {
           ToolbarItem(placement: .bottomBar) {
             Button("Info", systemImage: "info.circle") { details.toggle() }
           }
+          if let save {
+            ToolbarItem(placement: .bottomBar) {
+              Button("Save", systemImage: "icloud.and.arrow.up") {
+                if let current { save(current) }
+              }.accessibilityIdentifier("photo.save")
+            }
+          }
           ToolbarItem(placement: .bottomBar) {
             Button("Share", systemImage: "square.and.arrow.up") {
               if let current { share(current) }
@@ -162,6 +172,14 @@ private struct SelectedRecentPhoto {
   init(_ photo: RecentPhoto) { self.photo = photo; source = RecentPhotoSource(photo) }
 }
 
+#if !FOTORO_LOCAL_PREVIEW
+private struct PhotosAccountPresentation: Identifiable {
+  let id = UUID()
+  let services: AppServices
+  let selection: [RecentPhotoSource]?
+}
+#endif
+
 enum RecentPhotosContentMode {
   case openPhotos, accessOff, gallery, search
 
@@ -180,11 +198,12 @@ struct RecentPhotosView: View {
   @FocusState private var queryFocused: Bool
 #if !FOTORO_LOCAL_PREVIEW
   @State private var services: AppServices?
-  @State private var backupAccount: AppServices?
+  @State private var backupAccount: PhotosAccountPresentation?
   @State private var searchHits: [ConsumerSearchHit] = []
   @State private var savedResults: [String: LocalPhoto] = [:]
   @State private var savedViewer: SavedPhotoViewerPresentation?
   @State private var pendingBackup = false
+  @State private var pendingSavePhoto: RecentPhoto?
 #endif
   @State private var selectedPhotos: [String: SelectedRecentPhoto] = [:]
   @State private var selecting = false
@@ -243,7 +262,9 @@ struct RecentPhotosView: View {
       .sheet(item: $savedViewer) { presentation in
         if let services { PhotoViewer(services: services, initialID: presentation.initial.id, displayedPhotos: presentation.photos) }
       }
-      .sheet(item: $backupAccount) { PhotosBackupView(services: $0) }
+      .sheet(item: $backupAccount) {
+        PhotosBackupView(services: $0.services, selection: $0.selection)
+      }
       .task(id: searchTaskID) { await updateSearch() }
       .onChange(of: services?.consumerCatalogGeneration) { validateSavedPresentation() }
       .onChange(of: services?.vault.generation) {
@@ -263,8 +284,15 @@ struct RecentPhotosView: View {
         }
         .sheet(item: $viewer, onDismiss: {
           if let photo = pendingShare { pendingShare = nil; share([photo]) }
+#if !FOTORO_LOCAL_PREVIEW
+          if let photo = pendingSavePhoto {
+            pendingSavePhoto = nil
+            reviewSave([RecentPhotoSource(photo)])
+          }
+#endif
         }) { presentation in
-          RecentPhotoViewer(store: store, photos: presentation.photos, initialID: presentation.initial.id, search: search) {
+          RecentPhotoViewer(store: store, photos: presentation.photos, initialID: presentation.initial.id,
+            search: search, save: saveFromViewer) {
             pendingShare = $0
             viewer = nil
           }
@@ -432,9 +460,8 @@ struct RecentPhotosView: View {
         if selecting {
           Button("Done") { selecting = false; selectedPhotos = [:] }.disabled(preparingShare)
         } else {
-          Menu {
-            Button("Select photos", systemImage: "checkmark.circle") { selecting = true }
-          } label: { Label("Review", systemImage: "ellipsis") }.disabled(preparingShare)
+          Button("Select", systemImage: "checkmark.circle") { selecting = true }
+            .accessibilityIdentifier("gallery.select").disabled(preparingShare)
         }
       }
     }
@@ -444,6 +471,24 @@ struct RecentPhotosView: View {
   }
   @ViewBuilder private var searchBar: some View {
     if canSearch {
+      if selecting {
+        HStack(spacing: 12) {
+          Text(selected.isEmpty ? "Select photos" : "\(selected.count) selected")
+            .font(.subheadline).monospacedDigit()
+          Spacer(minLength: 0)
+#if !FOTORO_LOCAL_PREVIEW
+          Button("Save", systemImage: "icloud.and.arrow.up") {
+            reviewSave(selectedPhotos.values.map(\.source).sorted { $0.id < $1.id })
+          }.buttonStyle(.borderedProminent).accessibilityIdentifier("selection.save")
+            .disabled(selected.isEmpty || preparingShare || showShare)
+#endif
+          Button("Share", systemImage: "square.and.arrow.up") {
+            share(selectedPhotos.values.map(\.photo).sorted { ($0.capturedAt ?? .distantPast) > ($1.capturedAt ?? .distantPast) })
+          }.labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+            .disabled(selected.isEmpty || preparingShare || showShare)
+        }.padding(.horizontal, 14).frame(minHeight: 52)
+          .glassEffect(.regular.interactive()).padding(.horizontal).padding(.bottom, 6)
+      } else {
       HStack(spacing: 12) {
         Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
         TextField("Search photos", text: $query).focused($queryFocused)
@@ -453,15 +498,17 @@ struct RecentPhotosView: View {
           Button("Clear search", systemImage: "xmark.circle.fill") { query = ""; queryFocused = false }
             .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
         }
-        if !selected.isEmpty {
-          Button("Share", systemImage: "square.and.arrow.up") {
-            share(selectedPhotos.values.map(\.photo).sorted { ($0.capturedAt ?? .distantPast) > ($1.capturedAt ?? .distantPast) })
-          }
-            .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44).disabled(preparingShare || showShare)
-        }
       }.padding(.leading, 18).padding(.trailing, 8).frame(minHeight: 44)
         .glassEffect(.regular.interactive()).padding(.horizontal).padding(.bottom, 6)
+      }
     }
+  }
+  private var saveFromViewer: ((RecentPhoto) -> Void)? {
+#if FOTORO_LOCAL_PREVIEW
+    nil
+#else
+    { photo in pendingSavePhoto = photo; viewer = nil }
+#endif
   }
   private var canSearch: Bool {
 #if FOTORO_LOCAL_PREVIEW
@@ -516,6 +563,12 @@ struct RecentPhotosView: View {
       cleanupShare()
     }
     if !validation.viewerIsCurrent { viewer = nil }
+#if !FOTORO_LOCAL_PREVIEW
+    if let photo = pendingSavePhoto,
+      !store.validatePresentation(viewer: [], selection: [], share: [RecentPhotoSource(photo)]).shareIsCurrent {
+      pendingSavePhoto = nil
+    }
+#endif
   }
   private func restorePhotos() {
     store.restoreAccess()
@@ -535,12 +588,24 @@ struct RecentPhotosView: View {
     }
   }
   private func openBackup() {
+    presentAccount()
+  }
+  private func reviewSave(_ sources: [RecentPhotoSource]) {
+    guard !sources.isEmpty else { return }
+    let validation = store.validatePresentation(viewer: [], selection: sources, share: [])
+    guard validation.selectedIDs.count == sources.count else {
+      store.error = "Some selected photos changed or are no longer available. Select them again."
+      return
+    }
+    presentAccount(selection: sources)
+  }
+  private func presentAccount(selection: [RecentPhotoSource]? = nil) {
     queryFocused = false
     do {
       if services == nil { services = try AppServices() }
       services?.bindLocalSearch(search)
       services?.bindRecentPhotos(store)
-      backupAccount = services
+      if let services { backupAccount = PhotosAccountPresentation(services: services, selection: selection) }
     } catch { store.error = error.localizedDescription }
   }
   private func updateSearch() async {
@@ -660,6 +725,7 @@ private struct RecentPhotoCell: View {
           if selected { Image(systemName: "checkmark.circle.fill").padding(8) }
         }
     }.buttonStyle(.plain).id(photo.id)
+      .accessibilityValue(selected ? "Selected" : "")
       .onAppear { store.cache([photo.asset], start: true) }
       .onDisappear { store.cache([photo.asset], start: false) }
       .contextMenu { Button(selected ? "Deselect" : "Select", action: toggle) }

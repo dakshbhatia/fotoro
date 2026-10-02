@@ -24,21 +24,23 @@ A Worker preview with a different RP creates different passkey credentials. Do n
 
 ## Current state
 
-Worker `4fe935ab-892b-43e3-b8ee-8b586196c3cc`, tagged
-`password-entry-20261002`, serves one-password account entry on iPhone and web,
-alongside the stable gallery, guarded sharing and upload-failure fixes.
+Worker `5ce1ce81-2445-4e20-91f0-967778520fb4`, tagged
+`manual-saving-20261002`, serves one-password account entry and keeps web uploads
+and annotation writes explicit. Account/lifecycle refresh reads the catalog only;
+save failures appear inside the account sheet.
 Bounded failure fields and stored Worker logs remain enabled.
 All production bindings remain the existing isolated D1/R2 resources. No new
 migration is required. Canonical API and exact signed association checks pass.
 
-The password release passed 184 full-app and 50 local-preview tests. Build 11's
-account-screen cleanup also passes all 29 account tests. Development-signed
-Release 0.1.0 (11) is built for iPhoneOS,
+The chosen-photo release passed 190 full-app, 50 local-preview and 180 web tests,
+core checks, typechecks and the production web build. Development-signed
+Release 0.1.0 (12) is built for iPhoneOS,
 with the exact production association intact and no local-preview encryption
-exemption. Build 11 is installed and launched on the physical iPhone; CoreDevice
-read back 0.1.0 (11) and its running executable. The initial protected account-state
+exemption. Build 12 is installed and launched on the physical iPhone; CoreDevice
+read back 0.1.0 (12) and its running executable. The initial protected account-state
 event reports signed out. The owner can create or open an account with one Fotoro
-password; owner authentication and private-photo saving remain acceptance checks.
+password, save a reviewed selection and load Saved photos explicitly. Owner
+authentication and private-photo saving remain acceptance checks.
 Build 4's TestFlight compliance gate remains unchanged. See
 [verification](verification.md) for the consumer acceptance evidence.
 

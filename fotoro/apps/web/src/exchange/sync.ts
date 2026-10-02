@@ -58,8 +58,19 @@ export async function lastSync(session = requireVault()) {
   assertVault(session);
   return value ? decryptPrivate<string>(value) : null;
 }
-const flight = new ScopedFlight<Awaited<ReturnType<typeof performSync>>>();
+const readFlight = new ScopedFlight<Awaited<ReturnType<typeof performRefresh>>>();
+const saveFlight = new ScopedFlight<Awaited<ReturnType<typeof performSave>>>();
+const operations = new WeakMap<UnlockedVault, Promise<unknown>>();
 const controllers = new WeakMap<UnlockedVault, AbortController>();
+function serializeSync<T>(session: UnlockedVault, task: () => Promise<T>) {
+  const next = (operations.get(session) ?? Promise.resolve()).catch(() => undefined).then(() => {
+    assertVault(session);
+    return task();
+  });
+  operations.set(session, next);
+  void next.finally(() => {if (operations.get(session) === next) operations.delete(session);}).catch(() => undefined);
+  return next;
+}
 export function pauseSync(session = requireVault()) {
   controllers.get(session)?.abort();
 }
@@ -101,7 +112,31 @@ export async function clearSkipped(session: UnlockedVault, file: File) {
   await put("settings", key, encryptPrivate(sources));
   assertVault(session);
 }
-async function performSync(session: UnlockedVault, signal: AbortSignal) {
+export async function cachedSync(session = requireVault()) {
+  assertVault(session);
+  const photos = await cachedCatalog();
+  assertVault(session);
+  const pending = await pendingImports();
+  assertVault(session);
+  const annotations = await pendingAnnotations(session);
+  assertVault(session);
+  const lastSuccessfulSync = await lastSync(session);
+  assertVault(session);
+  const skipped = await skippedImports(session);
+  assertVault(session);
+  return { photos, pending, annotations, lastSuccessfulSync, skipped };
+}
+async function performRefresh(session: UnlockedVault, signal?: AbortSignal) {
+  assertVault(session);
+  await syncCatalog(signal);
+  assertVault(session);
+  signal?.throwIfAborted();
+  const lastSuccessfulSync = new Date().toISOString();
+  await put("settings", session.accountId + ":last-checked", encryptPrivate(lastSuccessfulSync));
+  assertVault(session);
+  return cachedSync(session);
+}
+async function performSave(session: UnlockedVault, signal: AbortSignal) {
   assertVault(session);
   await resumePendingImports(signal);
   assertVault(session);
@@ -112,32 +147,20 @@ async function performSync(session: UnlockedVault, signal: AbortSignal) {
   await flushAnnotations(session, signal);
   assertVault(session);
   signal.throwIfAborted();
-  const annotations = await pendingAnnotations(session);
+  const lastSuccessfulSync = new Date().toISOString();
+  await put("settings", session.accountId + ":last-checked", encryptPrivate(lastSuccessfulSync));
   assertVault(session);
-  const pending = await pendingImports();
-  assertVault(session);
-  let lastSuccessfulSync = await lastSync(session);
-  {
-    lastSuccessfulSync = new Date().toISOString();
-    assertVault(session);
-    await put(
-      "settings",
-      session.accountId + ":last-checked",
-      encryptPrivate(lastSuccessfulSync),
-    );
-    assertVault(session);
-  }
-  const photos = await cachedCatalog();
-  assertVault(session);
-  const skipped = await skippedImports(session);
-  assertVault(session);
-  return { photos, pending, annotations, lastSuccessfulSync, skipped };
+  return cachedSync(session);
 }
+// Viewing the account can read saved photos, but never drains locally queued uploads or edits.
 export function refreshSync(session = requireVault()) {
-  return flight.run(session, () => {
+  return readFlight.run(session, () => serializeSync(session, () => performRefresh(session)));
+}
+export function saveSync(session = requireVault()) {
+  return saveFlight.run(session, () => {
     const controller = new AbortController();
     controllers.set(session, controller);
-    return performSync(session, controller.signal).finally(() => {
+    return serializeSync(session, () => performSave(session, controller.signal)).finally(() => {
       if (controllers.get(session) === controller) controllers.delete(session);
     });
   });
