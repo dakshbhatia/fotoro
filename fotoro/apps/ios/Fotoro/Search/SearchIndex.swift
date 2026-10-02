@@ -143,12 +143,13 @@ final class SearchIndex: @unchecked Sendable {
       try db.execute(sql: "DELETE FROM searchTerms WHERE meaning NOT IN (SELECT meaning FROM searchPostings)")
     }
   }
-  func pendingRecords() throws -> [SearchRecord] {
+  func pendingRecords(retryFailed: Bool = false) throws -> [SearchRecord] {
     try database.read { db in
       try Row.fetchAll(
         db,
         sql:
-          "SELECT value FROM searchRecords WHERE ocrState IN ('pending','unavailable') ORDER BY favorite DESC,capture DESC,id"
+          "SELECT value FROM searchRecords WHERE ocrState IN ('pending','unavailable') OR (? AND ocrState='failed') ORDER BY favorite DESC,capture DESC,id",
+        arguments: [retryFailed]
       ).map(decode)
     }
   }

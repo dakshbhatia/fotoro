@@ -3,8 +3,11 @@
 The web app and API are live at [fotoro.cloud](https://fotoro.cloud). The separate
 local Photos preview 0.1.0 (3) is uploaded and in internal TestFlight. Its matching
 development build was installed and launched on the physical iPhone;
-personal Photos access remains uninspected. Full encrypted build 6 is installed
-and its exact version is read back on the physical iPhone. Launch is awaiting device unlock. Apple has processed full build 4; its
+personal Photos access remains uninspected. Full encrypted build 8 is installed,
+its exact version is read back, and its running process and protected diagnostic
+file are verified on the unlocked physical iPhone. The owner's screenshots show
+local Photos and a signed-out Sync screen; real-account authentication remains
+unverified. Apple has processed full build 4; its
 TestFlight access awaits an export-compliance declaration. Independent reviews reproduced
 retrieval, permission, cancellation, persistence and navigation defects; fixes
 include permanent regressions and were re-reviewed.
@@ -50,6 +53,39 @@ Real-account phone-to-Safari acceptance remains open.
 | Native local lifecycle | All-age permitted enumeration, limited/denied startup, permission purge, ten-day browse, changed revisions, cancellation rollback and refresh stability are exercised |
 | Browser local lifecycle | Session-only default; retained labels/text/previews; lazy preview hydration; unavailable preview preservation; digest reselection; pending/cross-instance clear fences |
 
+## October 2 iPhone sign-in and refresh correction
+
+Release always uses the production API, ignoring persisted development overrides.
+Sign-in begins visibly, rejects overlapping attempts, and reports errors inside
+Sync. Apple passkey cancellation/failure messages explain how to retry. An accepted
+session with missing local vault keys stays in recovery; it cannot activate or
+request the encrypted catalog. Successful recovery clears stale guidance so a
+later Lock account still offers ordinary local unlock.
+
+Foreground refresh keeps valid photo viewers, immutable selections and original
+Share exports. Fresh permission and source revisions still withdraw edited,
+removed or revoked photos. A delayed preview download cannot restore a deleted
+catalog row or overwrite newer metadata, manifests or cache fields. Failed OCR
+retries once on explicit/foreground refresh. Gallery thumbnails account for display
+scale and reject degraded callbacks after a final image. Settings shows build and
+encrypted/local-preview flavor.
+
+The final full suite passes 160 tests; the shared local-preview suite passes 50,
+both with zero failures or skips. The 24 preview-artifact verifier tests also pass.
+Actual public Simulator QA keeps the viewer and original system Share sheet
+across Home → foreground with the same running process, and confirms Settings
+shows `Encrypted sync · 0.1.0 (8)`.
+
+Signed Release build 8 compiles, passes signature, exact application identity and
+Associated Domains checks, and carries no local-preview encryption exemption.
+CoreDevice independently verifies installation, successful launch and protected
+build-8 runtime events on the physical iPhone. Installation preserves the app
+container. Auth/API logs now include request starts, rejected preflight outcomes
+and numeric Apple authorization codes, while retaining the existing bounded,
+fixed schema without URLs, payloads or credentials. The owner reports opening
+Sync status; no physical auth/API attempt is recorded yet, so real-account sign-in,
+personal upload and restore remain unverified.
+
 ## October 2 smoothness and diagnostics
 
 First-use Sync can request Photos access inline without enabling uploads; already
@@ -77,8 +113,12 @@ Worker `dc276b07-ef33-4d12-b8ae-d053bf3b692b`, tagged
 `smooth-diagnostics-20261002`, is read back as the 100% deployment. Canonical API,
 exact signed association and byte-identical production HTML checks pass. Signed
 Release 0.1.0 (6) passes signature and Associated Domains checks and is installed
-on the physical iPhone. iOS blocked launch because the phone is locked; physical
-runtime-log capture, personal sync and restore await owner testing.
+on the physical iPhone. After unlock, CoreDevice revealed that the installed app
+had been replaced by local-preview build 3. Reinstalling full build 6 without
+uninstalling restored the correct executable and version. Successful launch and
+bounded launch/pick events were read back from the protected diagnostic file;
+no photo contents or credentials were copied. Personal sign-in, sync and restore
+remain unverified.
 
 The final local checks pass 43 API, 164 web, 139 full-native, 49 preview and three
 isolated HTTP exchange tests. Main CI run `37037972537` failed one earlier native
@@ -88,7 +128,12 @@ readiness and performs a loopback public-fixture recovery preflight with fresh
 challenges and three bounded proxy-only attempts. Application JSON errors fail
 immediately. Three regressions and actual local preflight pass; the low-level
 proxy disconnect cause is unconfirmed. This is distinct from a Hono response,
-which carries a request reference. The inherited Ente documentation
+which carries a request reference. The exact PR 12 head subsequently passes every
+required check in [run 37041989323](https://github.com/dakshbhatia/fotoro/actions/runs/37041989323):
+137 full-native and 47 preview tests pass, with the same two public Simulator
+Photos permission/initialization cases skipped in each suite. Those cases pass
+locally. [PR 12](https://github.com/dakshbhatia/fotoro/pull/12) is merged at
+`f3e9b8e247db3dff43733d634997735308bfc582`. The inherited Ente documentation
 deployment jobs are now restricted to their upstream repository.
 
 ## October 2 preceding consumer finish

@@ -70,6 +70,24 @@ struct CredentialResult {
   var credentialId: String
   var prf: Data?
 }
+enum NativeSignInOutcome: Equatable, Sendable {
+  case unlocked, recoveryRequired
+}
+struct NativePasskeyError: LocalizedError {
+  let code: ASAuthorizationError.Code
+  var isCancelled: Bool { code == .canceled }
+  var errorDescription: String? {
+    switch code {
+    case .canceled:
+      return "Sign-in was cancelled. Tap Sign in to try again."
+    case .failed, .notHandled:
+      return "Passkey sign-in could not finish. If this is your first time, create an account. Otherwise try again or use your recovery code or a trusted device."
+    default:
+      return "Passkey sign-in could not finish. Try again or use your recovery code."
+    }
+  }
+}
+typealias NativeCredentialCeremony = @MainActor (ASAuthorizationRequest) async throws -> CredentialResult
 
 @MainActor
 final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
@@ -155,14 +173,23 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
   let api: APIClient
   let vault: VaultStore
   private let crypto = CryptoAdapter()
-  private let ceremony = PasskeyCeremony()
+  private let credentialCeremony: NativeCredentialCeremony
   var pending: PendingEnrollment?
   var recoveryCode: String? { pending.map { "fotoro1.\($0.card.accountId).\($0.recovery.b64)" } }
   var fallbackMessage: String?
-  init(session: AccountSession, api: APIClient, vault: VaultStore) {
+  init(session: AccountSession, api: APIClient, vault: VaultStore,
+    credentialCeremony: NativeCredentialCeremony? = nil) {
     self.session = session
     self.api = api
     self.vault = vault
+    let ceremony = PasskeyCeremony()
+    self.credentialCeremony = credentialCeremony ?? { request in
+      try await ceremony.perform(request)
+    }
+  }
+  private func performCredential(_ request: ASAuthorizationRequest) async throws -> CredentialResult {
+    do { return try await credentialCeremony(request) }
+    catch let error as ASAuthorizationError { throw NativePasskeyError(code: error.code) }
   }
   private func options(_ path: String, accountId: String? = nil) async throws -> [String: Any] {
     let bytes = try await api.request(
@@ -220,7 +247,7 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
       challenge: pending.challenge, name: "Fotoro", userID: pending.userID)
     request.prf = .inputValues(.saltInput1(pending.salt))
     request.userVerificationPreference = .required
-    let credential = try await ceremony.perform(request)
+    let credential = try await performCredential(request)
     let proof = try crypto.sign(
       EnrollmentProof(accountCard: pending.card, recoveryWrapper: pending.wrapper),
       kind: "account-enrollment", accountId: pending.card.accountId,
@@ -260,7 +287,8 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
     }
     self.pending = nil
   }
-  func login() async throws {
+  @discardableResult func login() async throws -> NativeSignInOutcome {
+    fallbackMessage = nil
     guard !session.fixture else {
       throw FotoroError("Fixture authentication cannot create passkeys")
     }
@@ -285,7 +313,7 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
       }
       if !values.isEmpty { request.prf = .perCredentialInputValues(values) }
     }
-    let credential = try await ceremony.perform(request)
+    let credential = try await performCredential(request)
     let body: [String: Any] = [
       "version": 1, "challengeId": challengeId,
       "response": try JSONSerialization.jsonObject(with: credential.response), "client": "native",
@@ -304,8 +332,10 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
       do { try await vault.unlock(.localKeychain) } catch {
         fallbackMessage =
           "Authenticated. Recover the vault with your saved code or a trusted device."
+        return .recoveryRequired
       }
     }
+    return .unlocked
   }
   func unlockWithPRF() async throws {
     let v: VaultV1 = try await api.get("/v1/vault")
@@ -332,7 +362,7 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
     ).createCredentialAssertionRequest(challenge: try Data(b64: challenge))
     request.prf = .perCredentialInputValues(values)
     request.userVerificationPreference = .required
-    let credential = try await ceremony.perform(request)
+    let credential = try await performCredential(request)
     guard let output = credential.prf, output.count == 32,
       let wrapper = v.wrappers.first(where: {
         $0.credentialId == credential.credentialId && $0.kind == "prf"

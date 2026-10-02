@@ -55,6 +55,33 @@ final class SearchLifecycleTests: XCTestCase {
     XCTAssertEqual(try i.record("a")?.labels, [])
     XCTAssertEqual(try i.search("anything").indexed, 1)
   }
+  func testFailedOCRRetriesOnSameRevisionRefreshAndSuccessfulTextBecomesSearchable() throws {
+    let i = try SearchIndex()
+    let record = SearchRecord(id: "unchanged")
+    try i.setWorkGeneration(1)
+    XCTAssertTrue(try i.replacePermitted([record], generation: 1))
+    XCTAssertTrue(try i.applyOCR(nil, status: .failed, photoID: record.id, revision: record.revision, generation: 1))
+    XCTAssertTrue(try i.pendingRecords().isEmpty, "A failure must not immediately reenter the work queue")
+    XCTAssertNil(try i.search("receipt").leading)
+
+    try i.setWorkGeneration(2)
+    XCTAssertTrue(try i.replacePermitted([record], generation: 2))
+    XCTAssertEqual(try i.record(record.id)?.ocrStatus, .failed)
+    let firstRetry = try i.pendingRecords(retryFailed: true)
+    XCTAssertEqual(firstRetry.map(\.id), [record.id])
+    XCTAssertEqual(firstRetry.first?.revision, record.revision)
+    XCTAssertTrue(try i.applyOCR(nil, status: .failed, photoID: record.id, revision: record.revision, generation: 2))
+    XCTAssertTrue(try i.pendingRecords().isEmpty, "Another failure waits for the next requested refresh")
+
+    try i.setWorkGeneration(3)
+    XCTAssertTrue(try i.replacePermitted([record], generation: 3))
+    let retry = try XCTUnwrap(i.pendingRecords(retryFailed: true).first)
+    XCTAssertTrue(try i.applyOCR(SearchOCRResult(text: "receipt recovered", confidence: 0.9), status: .complete,
+      photoID: retry.id, revision: retry.revision, generation: 3))
+    XCTAssertEqual(try i.search("receipt").leading?.id, record.id)
+    XCTAssertEqual(try i.record(record.id)?.revision, record.revision)
+    XCTAssertTrue(try i.pendingRecords(retryFailed: true).isEmpty, "Completed OCR stays cached on later refreshes")
+  }
   func testDatabaseGenerationRejectsLateSnapshotAndOCRAfterWithdrawal() throws {
     let i = try SearchIndex()
     try i.setWorkGeneration(1)
