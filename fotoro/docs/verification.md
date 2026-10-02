@@ -388,11 +388,13 @@ records; it cannot enumerate an iPhone photo library automatically.
   `MISSING_EXPORT_COMPLIANCE`. Its actual encryption declaration and France
   distribution answer are open. Local Photos preview build 3 is separately
   `VALID / IN_BETA_TESTING`; personal TestFlight installation remains unverified.
-  Signed full build 5 is installed and launched directly on the physical iPhone.
+  Signed full build 10 is installed and launched directly on the physical iPhone.
   Production HTTPS, API routing and the signed passkey association now pass.
   Universal-link handling remains unimplemented.
-- Physical passkey/PRF and non-PRF flows, original PhotoKit/iCloud resources and a
-  complete iPhone-to-Safari restore. See [release setup](deployment.md).
+- Owner password signup/sign-in, protected credential restoration, original
+  PhotoKit/iCloud resources and a complete iPhone-to-Safari restore. Existing
+  secondary passkey/PRF flows still need physical acceptance. See
+  [release setup](deployment.md).
 - Physical background continuation, file protection, daemon reconnection and
   termination/relaunch checks. Background URLSession can continue an already
   scheduled encrypted file; reservation, additional PhotoKit preparation, signing
