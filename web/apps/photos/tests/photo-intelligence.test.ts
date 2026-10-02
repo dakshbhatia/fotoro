@@ -56,26 +56,27 @@ test("a missing key and an unsupported derivative fail before transmission", asy
 });
 
 test("3.8 receives only the JPEG derivative, uses low thinking, and returns measured usage", async () => {
-    const fetcher = vi.fn(async () => response());
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response());
     const result = await describePhoto({
         jpeg,
         apiKey: "test-key",
         allowCloud: true,
         fetcher,
     });
-    const [url, init] = fetcher.mock.calls[0]! as unknown as [
-        string,
-        RequestInit,
-    ];
+    const [url, init] = fetcher.mock.calls[0]!;
     expect(url).toBe(
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
     );
     expect(url).not.toContain("test-key");
-    const request = JSON.parse(init.body as string);
-    expect((init.headers as Record<string, string>)["x-goog-api-key"]).toBe(
+    expect(typeof init?.body).toBe("string");
+    const request = JSON.parse(init!.body as string) as {
+        contents: { parts: unknown[] }[];
+        generationConfig: { thinkingConfig: { thinkingLevel: string } };
+    };
+    expect((init!.headers as Record<string, string>)["x-goog-api-key"]).toBe(
         "test-key",
     );
-    expect(request.contents[0].parts[1]).toEqual({
+    expect(request.contents[0]!.parts[1]).toEqual({
         inlineData: { mimeType: "image/jpeg", data: "/9j/2Q==" },
     });
     expect(request.generationConfig.thinkingConfig).toEqual({
@@ -86,17 +87,20 @@ test("3.8 receives only the JPEG derivative, uses low thinking, and returns meas
 });
 
 test("provider errors never echo private provider response bodies", async () => {
-    const fetcher = vi.fn(
-        async () => new Response("PRIVATE PIXELS AND KEY", { status: 429 }),
-    );
+    const fetcher = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+            new Response("PRIVATE PIXELS AND KEY", { status: 429 }),
+        );
     await expect(
         describePhoto({ jpeg, apiKey: "test-key", allowCloud: true, fetcher }),
     ).rejects.toThrow("Gemini request failed (429)");
 });
 
 test("truncated or blocked results never become successful index records", async () => {
-    const fetcher = vi.fn(
-        async () =>
+    const fetcher = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
             new Response(
                 JSON.stringify({
                     candidates: [
@@ -109,7 +113,7 @@ test("truncated or blocked results never become successful index records", async
                     ],
                 }),
             ),
-    );
+        );
     await expect(
         describePhoto({ jpeg, apiKey: "test-key", allowCloud: true, fetcher }),
     ).rejects.toThrow("complete description");
