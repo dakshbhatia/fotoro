@@ -1,17 +1,24 @@
 import SwiftUI
 
+struct RecoveryCodeAcknowledgement {
+  private var savedCode: String?
+  func isSaved(_ code: String?) -> Bool { code != nil && savedCode == code }
+  mutating func setSaved(_ saved: Bool, code: String?) { savedCode = saved ? code : nil }
+}
+
 struct AccountView: View {
   @Bindable var services: AppServices
   var onSignedIn: () -> Void = {}
   @State private var recovery = ""
   @State private var recovering = false
-  @State private var recoverySaved = false
+  @State private var recoveryAcknowledgement = RecoveryCodeAcknowledgement()
   @State private var apiURL = ""
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
         Text("Your photos, everywhere").font(.title2.bold())
         Text("Create an account or sign in to find your saved photos on any device.").foregroundStyle(.secondary)
+        if services.busy { ProgressView("Connecting your account…") }
         Button("Sign in") {
           services.run {
             if services.session.accountId != nil {
@@ -41,13 +48,15 @@ struct AccountView: View {
           Text("Save your recovery code").font(.headline)
           Text(code).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
           ShareLink("Save recovery code", item: code)
-          Toggle("I saved this recovery code", isOn: $recoverySaved)
+          Toggle("I saved this recovery code", isOn: Binding(
+            get: { recoveryAcknowledgement.isSaved(code) },
+            set: { recoveryAcknowledgement.setSaved($0, code: code) }))
           Button("Continue") {
             services.run {
-              try await services.auth.completeEnrollment(recoverySaved: recoverySaved)
+              try await services.auth.completeEnrollment(recoverySaved: recoveryAcknowledgement.isSaved(services.auth.recoveryCode))
               try await finishSignIn()
             }
-          }.disabled(!recoverySaved)
+          }.disabled(!recoveryAcknowledgement.isSaved(code))
         }
         if let fallback = services.auth.fallbackMessage { Text(fallback).font(.caption) }
         DisclosureGroup("More options") {
@@ -84,7 +93,7 @@ struct AccountView: View {
             }
           }
         #endif
-      }.padding()
+      }.padding().disabled(services.busy)
     }
   }
   func finishSignIn() async throws {

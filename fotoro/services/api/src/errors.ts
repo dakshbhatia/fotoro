@@ -1,5 +1,6 @@
 import { validateWire } from "@fotoro/contracts/validate";
 import type { SignedPayloadV1 } from "@fotoro/contracts";
+import type { ErrorDiagnostic } from "./diagnostics";
 export interface Env {
   DB: D1Database;
   BUCKET: R2Bucket;
@@ -15,9 +16,11 @@ export class ApiError extends Error {
   constructor(
     public code: string,
     public status = 400,
+    public diagnostic?: ErrorDiagnostic,
   ) {
     super(code);
   }
+  get retryable() { return this.status >= 500 || this.status === 408; }
 }
 export const fail = (code: string, status = 400): never => {
   throw new ApiError(code, status);

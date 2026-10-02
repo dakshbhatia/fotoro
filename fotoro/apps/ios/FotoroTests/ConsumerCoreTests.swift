@@ -189,3 +189,60 @@ private final class CatalogScanGate: @unchecked Sendable {
     if first { _ = release.wait(timeout: .now() + 10) }
   }
 }
+
+extension ConsumerCoreTests {
+  func testRuntimeDiagnosticsCannotIncludeRequestPathsOrUntrustedIdentifiers() throws {
+    XCTAssertEqual(NativeDiagnosticEndpoint(path: "/v1/background/uploads/private-id/staging"), .upload)
+    let secret = "private-photo-recovery-query-token"
+    let url = try XCTUnwrap(URL(string: "https://fotoro.cloud/v1/grants/\(secret)?token=\(secret)"))
+    let event = NativeDiagnosticEvent(phase: .api, outcome: .failed,
+      endpoint: NativeDiagnosticEndpoint(path: url.path), method: secret,
+      elapsed: .infinity, status: 999, networkError: URLError(.notConnectedToInternet), requestId: secret)
+    let serialized = try XCTUnwrap(String(data: JSONEncoder().encode(event), encoding: .utf8))
+    XCTAssertFalse(serialized.contains(secret))
+    XCTAssertFalse(serialized.contains("https://"))
+    XCTAssertEqual(event.endpoint, .exchange)
+    XCTAssertEqual(event.method, .OTHER)
+    XCTAssertEqual(event.elapsedMS, 0)
+    XCTAssertEqual(event.networkCode, URLError.notConnectedToInternet.rawValue)
+    XCTAssertNil(event.requestId)
+    XCTAssertNil(event.status)
+  }
+  func testRuntimeDiagnosticsPreserveCorrelationAndBoundTimingAndCounts() throws {
+    let request = UUID()
+    let event = NativeDiagnosticEvent(phase: .api, outcome: .failed, endpoint: .upload,
+      method: "PUT", elapsed: 1.25, status: 408, requestId: request.uuidString,
+      state: .offline, completed: -1, pending: Int.max)
+    let decoded = try JSONDecoder().decode(NativeDiagnosticEvent.self, from: JSONEncoder().encode(event))
+    XCTAssertEqual(decoded.requestId, request)
+    XCTAssertEqual(decoded.elapsedMS, 1250)
+    XCTAssertEqual(decoded.status, 408)
+    XCTAssertEqual(decoded.completed, 0)
+    XCTAssertEqual(decoded.pending, 1_000_000)
+    XCTAssertEqual(decoded.state, .offline)
+  }
+  func testRuntimeDiagnosticsRotatePersistAndExcludeDeviceBackup() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let file = directory.appendingPathComponent("runtime.jsonl")
+    let diagnostics = NativeDiagnostics(fileURL: file, emitSystemLog: false)
+    for index in 0..<200 {
+      diagnostics.record(NativeDiagnosticEvent(phase: .sync, outcome: .changed, completed: index))
+    }
+    diagnostics.flush()
+    let data = try Data(contentsOf: file)
+    XCTAssertLessThanOrEqual(data.count, NativeDiagnostics.maximumBytes)
+    var events = try data.split(separator: 10).map { try JSONDecoder().decode(NativeDiagnosticEvent.self, from: Data($0)) }
+    XCTAssertEqual(events.count, 160)
+    XCTAssertEqual(events.first?.completed, 40)
+    XCTAssertEqual(events.last?.completed, 199)
+    XCTAssertEqual(try directory.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+    let restored = NativeDiagnostics(fileURL: file, emitSystemLog: false)
+    restored.record(NativeDiagnosticEvent(phase: .app, outcome: .started))
+    restored.flush()
+    events = try Data(contentsOf: file).split(separator: 10).map { try JSONDecoder().decode(NativeDiagnosticEvent.self, from: Data($0)) }
+    XCTAssertEqual(events.count, 160)
+    XCTAssertEqual(events.first?.completed, 41)
+    XCTAssertEqual(events.last?.phase, .app)
+  }
+}

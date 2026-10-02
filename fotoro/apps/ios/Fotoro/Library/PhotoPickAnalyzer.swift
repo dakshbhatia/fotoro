@@ -34,6 +34,18 @@ struct PhotoPicksSnapshot: Sendable {
   }
   func invalidate() { generation = UUID(); analyzing = false }
   func snapshot(_ candidates: [AutomaticPhotoPickCandidate], valid: @escaping @MainActor () -> Bool = { true }) async throws -> PhotoPicksSnapshot {
+    var signals: [String: AutomaticPhotoPickSignals] = [:]
+    #if !FOTORO_LOCAL_PREVIEW
+      let started = ProcessInfo.processInfo.systemUptime
+      var outcome = NativeDiagnosticOutcome.failed
+      defer {
+        NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .picks,
+          outcome: outcome,
+          elapsed: ProcessInfo.processInfo.systemUptime - started,
+          completed: signals.count, pending: candidates.count - signals.count))
+      }
+    #endif
+    do {
     let token = UUID()
     generation = token
     func check(_ sources: [AutomaticPhotoPickCandidate]) throws {
@@ -48,7 +60,6 @@ struct PhotoPicksSnapshot: Sendable {
     // Discard removed sources and old revisions; this cache has no disk or account persistence.
     let keys = Set(candidates.map { $0.id + "|" + $0.sourceRevision })
     cache = cache.filter { keys.contains($0.key) }
-    var signals: [String: AutomaticPhotoPickSignals] = [:]
     for candidate in candidates {
       try check([candidate])
       let key = candidate.id + "|" + candidate.sourceRevision
@@ -63,7 +74,16 @@ struct PhotoPicksSnapshot: Sendable {
       await Task.yield()
     }
     try check(candidates)
+    #if !FOTORO_LOCAL_PREVIEW
+      outcome = .completed
+    #endif
     return PhotoPicksSnapshot(candidates: candidates, recommendations: AutomaticPhotoPickPolicy.recommend(candidates, signals: signals))
+    } catch {
+      #if !FOTORO_LOCAL_PREVIEW
+        outcome = .failure(for: error, taskCancelled: Task.isCancelled)
+      #endif
+      throw error
+    }
   }
   static func isCurrent(_ candidates: [AutomaticPhotoPickCandidate]) -> Bool {
     guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)) else { return false }

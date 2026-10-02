@@ -14,7 +14,7 @@ export async function readJson<T = unknown>(request: Request, limit = 2 * 1024 *
       if (done) break;
       length += value.length;
       if (length > limit) {
-        await reader.cancel();
+        await reader.cancel().catch(() => {});
         fail("TOO_LARGE", 413);
       }
       chunks.push(value);

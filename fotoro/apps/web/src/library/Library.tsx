@@ -66,11 +66,13 @@ export function Library({
   selected,
   onSelect,
   onOpen,
+  active = true,
 }: {
   photos: Photo[];
   selected: Set<string>;
   onSelect: (id: string) => void;
   onOpen: (id: string) => void;
+  active?: boolean;
 }) {
   const parent = useRef<HTMLDivElement>(null),
     [columns, setColumns] = useState(3),
@@ -78,6 +80,7 @@ export function Library({
   useEffect(() => {
     const observer = new ResizeObserver((entries) => {
       const w = entries[0].contentRect.width;
+      if (w <= 0) return;
       setWidth(w);
       setColumns(w < 700 ? 3 : Math.max(3, Math.floor(w / 250)));
     });
@@ -122,9 +125,10 @@ export function Library({
       3,
     overscan: 3,
     getItemKey: (index) => rows[index].key,
+    useCachedMeasurements: !active,
   });
   useLayoutEffect(() => {
-    if (anchor.current && parent.current) {
+    if (active && anchor.current && parent.current) {
       const index = rows.findIndex((row) =>
         row.photos.some((photo) => photo.manifest.photoId === anchor.current!.id),
       );
@@ -132,12 +136,13 @@ export function Library({
         index >= 0 ? virtual.getOffsetForIndex(index, "start") : undefined;
       if (offset) virtual.scrollToOffset(offset[0] + anchor.current.offset);
     }
-  }, [rows, width, virtual]);
+  }, [rows, width, virtual, active]);
   return (
     <div
       className="canvas"
       ref={parent}
       onScroll={() => {
+        if (!active) return;
         const top = parent.current?.scrollTop ?? 0;
         const row = virtual
           .getVirtualItems()

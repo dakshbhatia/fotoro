@@ -7,7 +7,7 @@ import * as devices from "./devices";
 import * as grants from "./grants";
 import { savePhoto } from "./saves";
 import * as annotations from "./annotations";
-import {diagnosticMethod} from "./diagnostics";
+import {diagnosticMethod, diagnosticPhase, diagnosticErrorClass} from "./diagnostics";
 import { readJson } from "./requests";
 const app = new Hono<{ Bindings: Env; Variables: { actor: Actor } }>();
 app.onError((error, c) => {
@@ -24,14 +24,16 @@ app.onError((error, c) => {
         );
   const requestId = crypto.randomUUID();
   const method = diagnosticMethod(c.req.method);
-  const diagnostic = JSON.stringify({event: "api.error", requestId, method, status: e.status, code: e.code});
+  const phase = e.diagnostic?.phase ?? diagnosticPhase(c.req.path);
+  const errorClass = e.diagnostic?.errorClass ?? diagnosticErrorClass(e.code, e.status);
+  const diagnostic = JSON.stringify({event: "api.error", requestId, method, status: e.status, code: e.code, phase, errorClass});
   if (e.status >= 500) console.error(diagnostic);
   else console.warn(diagnostic);
   return c.json(
     {
       version: 1,
       code: e.code,
-      retryable: e.status >= 500,
+      retryable: e.retryable,
       requestId,
     },
     e.status as any,

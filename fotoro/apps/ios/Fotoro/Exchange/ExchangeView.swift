@@ -11,6 +11,7 @@ struct ExchangeView: View {
   var body: some View {
     NavigationStack {
       List {
+        if services.busy { ProgressView("Working…") }
         if !selected.isEmpty {
           Section("Share \(selected.count) photos") {
             ForEach(selected) { Text($0.metadata.filename) }
@@ -92,8 +93,11 @@ struct ExchangeView: View {
             }
           }
         }
-      }.navigationTitle("Encrypted sharing")
+      }.disabled(services.busy).navigationTitle("Encrypted sharing")
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+        .alert("Fotoro", isPresented: Binding(get: { services.error != nil }, set: { if !$0 { services.error = nil } })) {
+          Button("OK") { services.error = nil }
+        } message: { Text(services.error ?? "") }
     }
   }
 }

@@ -1,6 +1,6 @@
 import Foundation
 
-enum ConsumerSyncState: String, Sendable { case notStarted, preparing, uploading, checking, upToDate, paused, offline, needsAttention }
+enum ConsumerSyncState: String, Codable, Sendable { case notStarted, preparing, uploading, checking, upToDate, paused, offline, needsAttention }
 enum ConsumerSyncAction: String, Sendable { case start, `continue`, retry, signIn, openSettings, review, none }
 struct ConsumerSyncSummary: Equatable, Sendable {
   var state: ConsumerSyncState = .notStarted

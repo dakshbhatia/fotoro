@@ -66,3 +66,15 @@ it("declared oversized JSON is rejected before reading its stream", async () => 
   expect(response.status).toBe(413);
   expect(read).toBe(false);
 });
+
+it("a failed oversized-body cancellation cannot replace the 413 response", async () => {
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) { controller.enqueue(new Uint8Array(2 * 1024 * 1024 + 1)); },
+    cancel() { throw new Error("PRIVATE_CANCEL_FAILURE"); },
+  }, { highWaterMark: 0 });
+  const response = await app.fetch(new Request("http://localhost:8787/v1/auth/login/options", {
+    method: "POST", headers: { origin: "http://localhost:4310" }, body,
+  }), env as any);
+  expect(response.status).toBe(413);
+  expect(await response.json()).toMatchObject({ code: "TOO_LARGE", retryable: false });
+});

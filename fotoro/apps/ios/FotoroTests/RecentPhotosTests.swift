@@ -4,6 +4,78 @@ import XCTest
 @testable import Fotoro
 
 final class RecentPhotosTests: XCTestCase {
+  func testDiagnosticFailureDistinguishesFenceCancellationAndRealErrors() {
+    XCTAssertEqual(NativeDiagnosticOutcome.failure(for: CancellationError(), taskCancelled: false), .cancelled)
+    XCTAssertEqual(NativeDiagnosticOutcome.failure(for: URLError(.cancelled), taskCancelled: false), .cancelled)
+    XCTAssertEqual(NativeDiagnosticOutcome.failure(for: URLError(.notConnectedToInternet), taskCancelled: false), .failed)
+    XCTAssertEqual(NativeDiagnosticOutcome.failure(for: URLError(.notConnectedToInternet), taskCancelled: true), .cancelled)
+  }
+  func testSyncAccessActionDoesNotBlockAlreadyQueuedEncryptedUploads() {
+    for permission in [PHAuthorizationStatus.notDetermined, .denied, .restricted] {
+      XCTAssertTrue(SyncPhotosAccessPolicy.needsAccess(permission, action: .start, enabled: false, hasQueuedUploads: false))
+      for action in [ConsumerSyncAction.continue, .retry] {
+        XCTAssertFalse(SyncPhotosAccessPolicy.needsAccess(permission, action: action, enabled: false, hasQueuedUploads: false))
+        XCTAssertFalse(SyncPhotosAccessPolicy.needsAccess(permission, action: action, enabled: true, hasQueuedUploads: true))
+        XCTAssertTrue(SyncPhotosAccessPolicy.needsAccess(permission, action: action, enabled: true, hasQueuedUploads: false))
+      }
+      XCTAssertFalse(SyncPhotosAccessPolicy.needsAccess(permission, action: .review, enabled: true, hasQueuedUploads: false))
+    }
+    for permission in [PHAuthorizationStatus.limited, .authorized] {
+      XCTAssertFalse(SyncPhotosAccessPolicy.needsAccess(permission, action: .start, enabled: false, hasQueuedUploads: false))
+    }
+  }
+  func testReplacementRecoveryCodeNeedsItsOwnAcknowledgement() {
+    var acknowledgement = RecoveryCodeAcknowledgement()
+    XCTAssertFalse(acknowledgement.isSaved(nil))
+    XCTAssertFalse(acknowledgement.isSaved("first code"))
+    acknowledgement.setSaved(true, code: "first code")
+    XCTAssertTrue(acknowledgement.isSaved("first code"))
+    XCTAssertFalse(acknowledgement.isSaved("replacement code"))
+    acknowledgement.setSaved(true, code: "replacement code")
+    XCTAssertTrue(acknowledgement.isSaved("replacement code"))
+    acknowledgement.setSaved(false, code: "replacement code")
+    XCTAssertFalse(acknowledgement.isSaved("replacement code"))
+  }
+  @MainActor func testSyncPermissionActionRequestsOnceAndDoesNotEnableUploads() async throws {
+    let services = try AppServices(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
+    var permission = PHAuthorizationStatus.notDetermined
+    var requests = 0
+    var reads = 0
+    let recent = RecentPhotosStore(authorization: { permission }, requestAccess: {
+      requests += 1
+      permission = .limited
+      return permission
+    }, readPhotos: { _ in reads += 1; return [] })
+    services.bindRecentPhotos(recent)
+    try await services.requestPhotosAccessForSync()
+    XCTAssertEqual(recent.status, .limited)
+    XCTAssertEqual(requests, 1)
+    XCTAssertEqual(reads, 1)
+    XCTAssertFalse(try services.store.syncEnabled())
+    XCTAssertFalse(services.backup.isRunning)
+    XCTAssertTrue(try services.journal.entries().isEmpty)
+    try await services.requestPhotosAccessForSync()
+    XCTAssertEqual(requests, 1)
+    XCTAssertFalse(try services.store.syncEnabled())
+    recent.pauseAnalysis()
+  }
+  @MainActor func testDeniedSyncPermissionDoesNotRequestAgainOrReadAssets() async throws {
+    let services = try AppServices(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
+    var requests = 0
+    var reads = 0
+    let recent = RecentPhotosStore(authorization: { .denied }, requestAccess: {
+      requests += 1
+      return .denied
+    }, readPhotos: { _ in reads += 1; return [] })
+    services.bindRecentPhotos(recent)
+    try await services.requestPhotosAccessForSync()
+    XCTAssertEqual(recent.status, .denied)
+    XCTAssertEqual(requests, 0)
+    XCTAssertEqual(reads, 0)
+    XCTAssertFalse(try services.store.syncEnabled())
+    XCTAssertFalse(services.backup.isRunning)
+    XCTAssertTrue(try services.journal.entries().isEmpty)
+  }
   func testViewerZoomContinuesFromPinchAndDoubleTap() {
     var zoom = PhotoViewerZoom()
     zoom.settle(2)

@@ -37,6 +37,18 @@ test("explicit pause wins over offline and pending uploads; locked snapshots dis
   assert.equal(locked.state, "notStarted"); assert.equal(locked.action, "signIn");
   assert.equal(locked.completedPhotos, undefined); assert.equal(locked.lastCheckedAt, undefined);
 });
+test("partial sync always reports unstaged selected originals while preserving verified saved counts", async () => {
+  const {deriveConsumerSyncSummary} = await import("../src/library/consumer-sync");
+  const cases = [{paused: true}, {online: false}, {needsAttention: true}, {preparing: true}, {busy: true}, {queuedPhotos: 0}];
+  for (const extra of cases) {
+    const summary = deriveConsumerSyncSummary({...facts, localPhotos: 4, ...extra});
+    assert.equal(summary.completedPhotos, 3); assert.equal(summary.totalPhotos, undefined);
+    assert.match(summary.detail!, /3 photos saved/); assert.match(summary.detail!, /4 selected to sync/);
+    assert.equal((summary.detail!.match(/selected to sync/g) ?? []).length, 1);
+  }
+  assert.doesNotMatch(deriveConsumerSyncSummary(facts).detail!, /selected to sync/);
+  assert.equal(deriveConsumerSyncSummary({...facts, unlocked: false, localPhotos: 4}).detail, undefined);
+});
 test("skipped photos and pending or conflicting edits prevent an unconditional completion", async () => {
   const {deriveConsumerSyncSummary} = await import("../src/library/consumer-sync");
   for (const extra of [{skippedPhotos: 1}, {pendingEdits: 1}, {conflictingEdits: 1}]) {

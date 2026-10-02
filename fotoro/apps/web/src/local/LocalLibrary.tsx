@@ -68,12 +68,14 @@ export function LocalLibrary({
   onOpen,
   onFailure,
   selection,
+  active = true,
 }: {
   photos: LocalPhoto[];
   resources: LocalResources;
   onOpen: (id: string) => void;
   onFailure: (id: string, message: string) => void;
   selection?: PickSelection;
+  active?: boolean;
 }) {
   const parent = useRef<HTMLDivElement>(null),
     [width, setWidth] = useState(800),
@@ -82,6 +84,7 @@ export function LocalLibrary({
   useEffect(() => {
     const observer = new ResizeObserver((entries) => {
       const w = entries[0].contentRect.width;
+      if (w <= 0) return;
       setWidth(w);
       setColumns(w < 700 ? 3 : Math.max(3, Math.floor(w / 250)));
     });
@@ -126,21 +129,23 @@ export function LocalLibrary({
       (rows[index].heading ? 44 : 0) +
       3,
     overscan: 3,
+    useCachedMeasurements: !active,
   });
   useLayoutEffect(() => {
-    if (!anchor.current) return;
+    if (!active || !anchor.current) return;
     const index = rows.findIndex((row) =>
       row.photos.some((photo) => photo.id === anchor.current!.id),
     );
     const offset =
       index >= 0 ? virtual.getOffsetForIndex(index, "start") : undefined;
     if (offset) virtual.scrollToOffset(offset[0] + anchor.current.offset);
-  }, [rows, width, virtual]);
+  }, [rows, width, virtual, active]);
   return (
     <div
       className="canvas"
       ref={parent}
       onScroll={() => {
+        if (!active) return;
         const top = parent.current?.scrollTop ?? 0;
         const row = virtual
           .getVirtualItems()

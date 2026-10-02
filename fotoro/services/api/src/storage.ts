@@ -5,7 +5,8 @@ import type {
 } from "@fotoro/contracts";
 import { validateWire } from "@fotoro/contracts/validate";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { type Env, type Actor, fail, json, b64 } from "./errors";
+import { ApiError, type Env, type Actor, fail, json, b64 } from "./errors";
+import type { ErrorPhase } from "./diagnostics";
 type Upload = {
   id: string;
   account_id: string;
@@ -21,6 +22,64 @@ type Upload = {
 };
 // Each renewed capability gets a separate staging key, isolating late PUTs.
 const stagingKey = (row: Upload) => `staging/${row.id}/${row.cap}`;
+
+async function storageCall<T>(phase: ErrorPhase, operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    throw new ApiError("INTERNAL_ERROR", 500, { phase, errorClass: "storage" });
+  }
+}
+
+async function writeStaging(env: Env, key: string, body: ReadableStream<Uint8Array>, expected: number) {
+  const reader = body.getReader();
+  const stop = new AbortController();
+  let observed = 0;
+  let bodyFailure: ApiError | undefined;
+  let storageFailed = false;
+  const checked = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const item = await reader.read();
+        if (storageFailed) return;
+        if (item.done) {
+          if (observed !== expected) {
+            bodyFailure = new ApiError("DIGEST_MISMATCH", 422, { phase: "upload.staging", errorClass: "integrity" });
+            controller.error(bodyFailure);
+          } else controller.close();
+          return;
+        }
+        observed += item.value.length;
+        if (observed > expected) {
+          bodyFailure = new ApiError("TOO_LARGE", 413, { phase: "upload.staging", errorClass: "body_limit" });
+          controller.error(bodyFailure);
+          await reader.cancel().catch(() => {});
+          return;
+        }
+        controller.enqueue(item.value);
+      } catch {
+        if (storageFailed) return;
+        bodyFailure = new ApiError("UPLOAD_INCOMPLETE", 408, { phase: "upload.staging", errorClass: "client_abort" });
+        controller.error(bodyFailure);
+      }
+    },
+    async cancel() { await reader.cancel().catch(() => {}); },
+  }, { highWaterMark: 0 });
+  const fixed = new FixedLengthStream(expected);
+  const pumping = checked.pipeTo(fixed.writable, { signal: stop.signal });
+  const writing = storageCall("upload.staging", () => env.BUCKET.put(key, fixed.readable)).catch(error => {
+    storageFailed = true;
+    stop.abort();
+    throw error;
+  });
+  const [pump, write] = await Promise.allSettled([pumping, writing]);
+  reader.releaseLock();
+  if (bodyFailure) throw bodyFailure;
+  if (write.status === "rejected" || pump.status === "rejected" || !write.value)
+    throw new ApiError("INTERNAL_ERROR", 500, { phase: "upload.staging", errorClass: "storage" });
+  return write.value;
+}
 async function owned(env: Env, actor: Actor, id: string) {
   const row = await env.DB.prepare(
     "SELECT * FROM uploads WHERE id=? AND account_id=?",
@@ -101,11 +160,7 @@ export async function putStaging(
   const len = Number(request.headers.get("content-length"));
   if (request.headers.has("content-length") && len !== input.ciphertextBytes)
     fail("DIGEST_MISMATCH", 422);
-  const fixed = new FixedLengthStream(input.ciphertextBytes);
-  const pumping = request.body!.pipeTo(fixed.writable);
-  const object = await env.BUCKET.put(stagingKey(row), fixed.readable);
-  await pumping;
-  if (!object) fail("UPLOAD_INCOMPLETE", 409);
+  const object = await writeStaging(env, stagingKey(row), request.body!, input.ciphertextBytes);
   const result = await env.DB.prepare(
     "UPDATE uploads SET state='uploaded',etag=?,revision=revision+1 WHERE id=? AND account_id=? AND state='reserved' AND revision=? AND expires>?",
   )
@@ -149,34 +204,34 @@ export async function commitUpload(
   if (row.state !== "uploaded" || !row.etag) fail("UPLOAD_INCOMPLETE", 409);
   const input = JSON.parse(row.input) as ReserveUploadV1;
   const finalKey = "final/" + row.object_id;
-  let promoted = await env.BUCKET.head(finalKey);
+  let promoted = await storageCall("upload.commit", () => env.BUCKET.head(finalKey));
   if (!promoted) {
-    const staging = await env.BUCKET.get(stagingKey(row), {
+    const staging = await storageCall("upload.commit", () => env.BUCKET.get(stagingKey(row), {
       onlyIf: { etagMatches: row.etag! },
-    });
+    }));
     if (!staging || !("body" in staging)) fail("UPLOAD_INCOMPLETE", 409);
-    const observed = await hashObject(
+    const observed = await storageCall("upload.commit", () => hashObject(
       (staging as R2ObjectBody).body,
       input.ciphertextBytes,
-    );
+    ));
     if (
       observed.bytes !== input.ciphertextBytes ||
       observed.digest !== input.ciphertextSha256
     )
       fail("DIGEST_MISMATCH", 422);
-    const same = await env.BUCKET.get(stagingKey(row), {
+    const same = await storageCall("upload.commit", () => env.BUCKET.get(stagingKey(row), {
       onlyIf: { etagMatches: row.etag! },
-    });
+    }));
     if (!same || !("body" in same)) fail("UPLOAD_INCOMPLETE", 409);
-    await env.BUCKET.put(finalKey, (same as R2ObjectBody).body, {
+    await storageCall("upload.commit", () => env.BUCKET.put(finalKey, (same as R2ObjectBody).body, {
       onlyIf: { etagDoesNotMatch: "*" },
       customMetadata: {
         uploadId: id,
         digest: observed.digest,
         binding: json(input.binding),
       },
-    });
-    promoted = await env.BUCKET.head(finalKey);
+    }));
+    promoted = await storageCall("upload.commit", () => env.BUCKET.head(finalKey));
   }
   if (
     !promoted ||
