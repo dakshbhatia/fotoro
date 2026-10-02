@@ -17,7 +17,7 @@ struct PhotoPicksSnapshot: Sendable {
   }
 }
 
-/// Only previews enter this service. Original reads, account keys and uploads belong to explicit Sync.
+// Only previews enter this service. Original reads, account keys and uploads belong to explicit Sync.
 @MainActor @Observable final class PhotoPickAnalyzer {
   typealias Preview = @MainActor (AutomaticPhotoPickCandidate) async throws -> AutomaticPhotoPickSignals?
   private(set) var completed = 0
@@ -121,7 +121,7 @@ struct PhotoPicksSnapshot: Sendable {
   }
 }
 
-/// A late PhotoKit result and cancellation may race; exactly one continuation completes.
+// A late PhotoKit result and cancellation may race; exactly one continuation completes.
 private final class PickImageRequest: @unchecked Sendable {
   private let lock = NSLock()
   private let manager: PHImageManager
