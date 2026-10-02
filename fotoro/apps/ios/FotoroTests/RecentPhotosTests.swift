@@ -345,7 +345,7 @@ final class RecentPhotosTests: XCTestCase {
     XCTAssertEqual(RecentPhotosContentMode.select(query: "", opened: true, status: .denied), .accessOff)
     XCTAssertEqual(RecentPhotosContentMode.select(query: "", opened: true, status: .limited), .gallery)
   }
-  @MainActor func testAccountCompletionRefreshesCatalogBeforeReturningWithoutStartingPhotosBackup() async throws {
+  @MainActor func testAccountCompletionReturnsLocallyWithoutNetworkOrAutomaticBackup() async throws {
     let savedCards = UserDefaults.standard.data(forKey: "fotoro.pinnedCards")
     var card = try fixture(FixtureAccounts.self, "accounts").accounts[0]
     card.accountId = Wire.id()
@@ -365,26 +365,27 @@ final class RecentPhotosTests: XCTestCase {
     try services.session.pin(card)
     let secret = try fixture(FixtureAccounts.self, "accounts").testSecrets[0]
     try await services.vault.unlock(.recoveryEnvelope(secret: Data(b64: secret.recoverySecret), wrapper: secret.encryptedBundle))
-    var returnedAfterCatalog = false
+    var completed = false
     services.auth.fallbackMessage = "Authenticated. Recover the vault with your saved code or a trusted device."
     let accountView = AccountView(services: services, onSignedIn: {
-      returnedAfterCatalog = (try? services.store.cursor()) == "Y2F0YWxvZy1yZWFkeQ"
+      completed = services.store.root.lastPathComponent == card.accountId
     })
     try await accountView.finishSignIn()
-    XCTAssertTrue(returnedAfterCatalog)
+    XCTAssertTrue(completed)
     XCTAssertNil(services.auth.fallbackMessage)
     XCTAssertEqual(services.store.root.lastPathComponent, card.accountId)
     XCTAssertFalse(try services.store.syncEnabled())
     XCTAssertFalse(services.backup.isRunning)
     XCTAssertTrue(try services.journal.entries().isEmpty)
-    XCTAssertEqual(AccountCompletionProtocol.record.paths, ["/v1/changes", "/v1/grants"])
+    XCTAssertTrue(AccountCompletionProtocol.record.paths.isEmpty, "Sign-in must finish without depending on a network catalog refresh")
     services.lockAccount()
     XCTAssertFalse(services.vault.isUnlocked)
     XCTAssertNil(services.auth.fallbackMessage, "Successful recovery must not hide ordinary Unlock account after a later lock")
     try await services.vault.unlock(.localKeychain)
-    returnedAfterCatalog = false
+    completed = false
     try await accountView.finishSignIn()
-    XCTAssertTrue(returnedAfterCatalog)
+    XCTAssertTrue(completed)
+    XCTAssertTrue(AccountCompletionProtocol.record.paths.isEmpty)
     XCTAssertTrue(services.vault.isUnlocked)
     XCTAssertNil(services.auth.fallbackMessage)
     services.vault.lock()

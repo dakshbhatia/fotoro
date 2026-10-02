@@ -2,23 +2,6 @@ import SwiftUI
 import UIKit
 import Photos
 
-struct ConsumerBackupLabel: View {
-  let summary: ConsumerSyncSummary
-  var body: some View {
-    Label(title, systemImage: symbol).font(.subheadline.weight(.medium))
-  }
-  private var title: String { "Sync" }
-  private var symbol: String {
-    switch summary.state {
-    case .upToDate: return "checkmark.icloud"
-    case .paused: return "pause.circle"
-    case .offline: return "icloud.slash"
-    case .needsAttention: return "exclamationmark.icloud"
-    default: return "icloud"
-    }
-  }
-}
-
 enum SyncPhotosAccessPolicy {
   static func needsAccess(_ permission: PHAuthorizationStatus, action: ConsumerSyncAction,
     enabled: Bool, hasQueuedUploads: Bool) -> Bool {
@@ -40,16 +23,20 @@ struct PhotosBackupView: View {
   var body: some View {
     NavigationStack {
       Group {
-        if !services.vault.isUnlocked {
-          AccountView(services: services)
+        if !services.vault.isUnlocked || (!services.session.isSignedIn && !services.session.fixture) {
+          AccountView(services: services, onSignOut: { signingOut = true })
         } else {
           List {
+            Section {
+              AccountIdentityView(session: services.session, unlocked: services.vault.isUnlocked)
+                .padding(.vertical, 4)
+            }
             overview
             if summary.state == .needsAttention || summary.skippedPhotos > 0 {
               Section("Needs attention") {
                 if let detail = summary.detail { Text(detail) }
                 if summary.skippedPhotos > 0 {
-                  Text("\(summary.skippedPhotos) skipped · videos and Live Photo motion aren't backed up.")
+                  Text("\(summary.skippedPhotos) skipped · videos and Live Photo motion aren't saved.")
                 }
                 Button("Review saved photos") { savedPhotos = true }
                 ForEach(Array(services.annotations.errors.keys.sorted()), id: \.self) { id in
@@ -59,17 +46,19 @@ struct PhotosBackupView: View {
             }
             Section {
               Button("Saved photos", systemImage: "photo.stack") { savedPhotos = true }
-              DisclosureGroup("Account & privacy") {
-                Text("Original quality. Encrypted photos, labels and text. Only you can open your account.")
-                  .font(.footnote).foregroundStyle(.secondary)
-                Button("Lock account", systemImage: "lock") { services.lockAccount() }
+                .accessibilityIdentifier("account.savedPhotos")
+              Button("Refresh saved photos", systemImage: "arrow.clockwise") {
+                services.run { try await services.sync() }
+              }.disabled(services.busy)
+              DisclosureGroup("More options") {
+                Button("Lock saved photos", systemImage: "lock") { services.lockAccount() }
                 Button("Encrypted sharing", systemImage: "person.2") { exchange = true }
                 Button("Sign out", role: .destructive) { signingOut = true }
               }
             }
           }
         }
-      }.navigationTitle("Sync").navigationBarTitleDisplayMode(.inline)
+      }.navigationTitle("Account").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         .sheet(isPresented: $savedPhotos) { LibraryView(services: services) }
         .sheet(isPresented: $exchange) { ExchangeView(services: services, selected: []) }
@@ -88,19 +77,13 @@ struct PhotosBackupView: View {
         } message: {
           Text("Pending unsent imports, account wrappers and local account caches will be removed from this iPhone. Your Photos library stays here.")
         }
-        .alert("Fotoro", isPresented: Binding(
-          get: { services.error != nil && services.vault.isUnlocked && !exchange && !savedPhotos },
-          set: { if !$0 && services.vault.isUnlocked && !exchange && !savedPhotos { services.error = nil } })) {
-          Button("OK") { services.error = nil }
-        } message: { Text(services.error ?? "") }
     }
   }
   private var overview: some View {
     Section {
       VStack(alignment: .leading, spacing: 14) {
-        Image(systemName: symbol).font(.system(size: 30)).foregroundStyle(.tint)
         Text(title).font(.title2.bold())
-        Text("Only your picks from the last 10 days are added. Previously queued photos still finish syncing.").foregroundStyle(.secondary)
+        Text("Automatic sync is off. Save your current picks when you choose.").foregroundStyle(.secondary)
         if let completed = summary.completedPhotos {
           if let total = summary.totalPhotos {
             Text("\(completed) of \(total) photos saved").font(.headline).monospacedDigit()
@@ -114,15 +97,16 @@ struct PhotosBackupView: View {
         if let detail = summary.detail, summary.state != .needsAttention {
           Text(detail).font(.footnote).foregroundStyle(.secondary)
         }
+        if let error = services.error {
+          Text(error).foregroundStyle(.red).accessibilityIdentifier("account.error")
+        }
         action.disabled(services.busy)
-        if ![.notStarted, .paused].contains(summary.state) || services.journal.backgroundPending > 0 {
-          Button("Pause sync") { services.pauseSync() }
+        if [.preparing, .uploading].contains(summary.state) || services.journal.backgroundPending > 0 {
+          Button("Pause saving") { services.pauseSync() }
         }
         if !NativeBackupPolicy.allowsPrivatePhotos(accountId: services.session.accountId, fixture: services.session.fixture) {
-          Text("Use your own account to back up personal photos.").font(.footnote).foregroundStyle(.secondary)
+          Text("Sign in to your own account to save photos.").font(.footnote).foregroundStyle(.secondary)
         }
-        Text("Open Fotoro to find and prepare photos. Scheduled encrypted uploads can continue in the background.")
-          .font(.footnote).foregroundStyle(.secondary)
       }.padding(.vertical, 8)
     }
   }
@@ -136,7 +120,7 @@ struct PhotosBackupView: View {
           }
         }.buttonStyle(.borderedProminent)
           .disabled(!NativeBackupPolicy.allowsPrivatePhotos(accountId: services.session.accountId, fixture: services.session.fixture))
-        Text("Allow selected photos or full access to find your picks.").font(.footnote).foregroundStyle(.secondary)
+        Text("Choose which photos Fotoro can access.").font(.footnote).foregroundStyle(.secondary)
       } else {
         Button("Open Settings", action: openPhotosSettings).buttonStyle(.borderedProminent)
         Text("Photos access is off. Your saved photos are still available.").font(.footnote).foregroundStyle(.secondary)
@@ -146,25 +130,18 @@ struct PhotosBackupView: View {
   @ViewBuilder private var syncAction: some View {
     switch summary.action {
     case .start:
-      Button("Sync your picks") {
+      Button("Save picks") {
         do { try services.startPhotosBackup() } catch { services.error = error.localizedDescription }
       }.buttonStyle(.borderedProminent)
+        .accessibilityIdentifier("account.savePicks")
         .disabled(!NativeBackupPolicy.allowsPrivatePhotos(accountId: services.session.accountId, fixture: services.session.fixture))
     case .continue:
-      Button("Continue sync") {
+      Button("Continue saving") {
         services.run { try await services.continueSync() }
       }.buttonStyle(.borderedProminent)
     case .retry:
       Button("Try again") {
-        services.run {
-          if try services.store.syncEnabled() {
-            try services.startPhotosBackup()
-          } else {
-            try await services.resumeTransfers()
-            await services.syncAnnotations()
-            try await services.sync()
-          }
-        }
+        services.run { try await services.continueSync() }
       }.buttonStyle(.borderedProminent)
     case .review:
       Button("Review saved photos") { savedPhotos = true }.buttonStyle(.borderedProminent)
@@ -188,23 +165,14 @@ struct PhotosBackupView: View {
   }
   private var title: String {
     switch summary.state {
-    case .notStarted: return "Keep your picks with you"
-    case .preparing: return "Preparing your picks"
-    case .uploading: return "Backing up your photos"
-    case .checking: return "Checking your backup"
-    case .upToDate: return "Your saved photos are up to date"
-    case .paused: return "Backup paused"
+    case .notStarted: return "Save your picks"
+    case .preparing: return "Preparing photos"
+    case .uploading: return "Saving photos"
+    case .checking: return "Refreshing saved photos"
+    case .upToDate: return "Photos saved"
+    case .paused: return "Saving paused"
     case .offline: return "Waiting for a connection"
     case .needsAttention: return "Some photos need attention"
-    }
-  }
-  private var symbol: String {
-    switch summary.state {
-    case .upToDate: return "checkmark.icloud"
-    case .paused: return "pause.circle"
-    case .offline: return "icloud.slash"
-    case .needsAttention: return "exclamationmark.icloud"
-    default: return "icloud"
     }
   }
 }

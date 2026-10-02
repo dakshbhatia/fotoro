@@ -254,13 +254,13 @@ markers. Keep credentials and receipts outside Git. Verify the exact app, iOS
 marketing version/build, beta state and internal group through App Store Connect;
 an upload receipt alone does not establish tester availability.
 
-Foreground Photos sync is implemented. On the installed full build:
-create or unlock one account on iPhone, save its recovery code, then start
-Sync your picks. Open the same HTTPS service in Safari and sign in or recover
-that account to load committed photos. Open and unlock the iPhone app to scan and
-prepare more photos and finish catalog commits. An encrypted upload already
-scheduled with iOS can continue in the background. Whole-library background
-processing and a personal physical-device acceptance run remain release gates;
+Manual Photos saving is implemented. On the installed full build:
+open Account, create or sign in to one account on iPhone, save its recovery code,
+then tap Save picks. Open the same HTTPS service in Safari and sign in or recover
+that account to load committed photos. Another Save picks tap prepares another
+current selection; Continue saving resumes only queued encrypted files. Automatic
+sync is off. An encrypted upload scheduled by a manual save can finish in the
+background. A personal physical-device acceptance run remains a release gate;
 localhost on this Mac is not an installable iPhone service.
 
 Before cutover, read-only API and association checks returned the old Vercel

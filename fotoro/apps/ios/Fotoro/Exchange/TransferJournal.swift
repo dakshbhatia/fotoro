@@ -27,13 +27,13 @@ struct TransferEntry: Codable {
     if let error = background.storageError { return error }
     let records = background.records(accountId: sourceAccount)
     if records.contains(where: { $0.state == .transferring }) {
-      return "Encrypted files are scheduled with iOS. Open Fotoro to finish catalog sync. Force quitting pauses uploads."
+      return "Encrypted files are scheduled with iOS. Continue saving to finish this batch. Force quitting pauses uploads."
     }
     if let failure = records.first(where: { $0.state == .failed })?.message { return failure }
     if records.contains(where: { $0.state == .uploaded }) {
-      return "Encrypted uploads finished. Unlock Fotoro to finish catalog sync."
+      return "Encrypted uploads finished. Unlock your account and continue saving to finish this batch."
     }
-    return "Open Fotoro to scan and encrypt photos. iOS can continue already scheduled encrypted uploads."
+    return "Save picks to prepare a batch. iOS can finish already scheduled encrypted uploads."
   }
   func pause(cancelBackground: Bool = false) {
     foregroundGeneration = UUID()
@@ -109,7 +109,7 @@ struct TransferEntry: Codable {
     let backgroundAllowed = BackgroundUploadPolicy.permits(
       accountId: account, fixture: api.session.fixture)
     func stillAuthorized() -> Bool {
-      vault.isUnlocked && vault.generation == generation && api.session.accountId == account
+      api.session.isSignedIn && vault.isUnlocked && vault.generation == generation && api.session.accountId == account
         && foregroundGeneration == foreground
     }
     func fence() throws {

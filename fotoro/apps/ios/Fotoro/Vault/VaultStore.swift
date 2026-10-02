@@ -17,6 +17,10 @@ enum UnlockMethod {
   private(set) var generation = UUID()
   private(set) var bundle: AccountBundle?
   var isUnlocked: Bool { bundle != nil }
+  var canUnlockLocally: Bool {
+    guard let id = session.accountId else { return false }
+    return Keychain.contains(id)
+  }
   private let session: AccountSession
   private let api: APIClient
   private let crypto = CryptoAdapter()
@@ -77,6 +81,7 @@ enum UnlockMethod {
       try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: Data(b64: candidate.boxSecretKey))
         .publicKey.rawRepresentation.b64 == card.boxPublicKey
     else { throw FotoroError("Recovered box identity mismatch") }
+    try Task.checkCancellation()
     guard session.accountId == id, generation == unlockingGeneration else {
       throw CancellationError()
     }
@@ -109,13 +114,24 @@ enum Keychain {
     ]
   }
   static func write(_ bytes: Data, id: String) throws {
-    remove(id)
+    let attributes: [String: Any] = [
+      kSecValueData as String: bytes,
+      kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+    ]
+    let updated = SecItemUpdate(query(id) as CFDictionary, attributes as CFDictionary)
+    if updated == errSecSuccess { return }
+    guard updated == errSecItemNotFound else {
+      throw FotoroError("Cannot enroll protected local access")
+    }
     var q = query(id)
     q[kSecValueData as String] = bytes
     q[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
     guard SecItemAdd(q as CFDictionary, nil) == errSecSuccess else {
       throw FotoroError("Cannot enroll protected local access")
     }
+  }
+  static func contains(_ id: String) -> Bool {
+    SecItemCopyMatching(query(id) as CFDictionary, nil) == errSecSuccess
   }
   static func read(_ id: String) throws -> Data {
     var q = query(id)

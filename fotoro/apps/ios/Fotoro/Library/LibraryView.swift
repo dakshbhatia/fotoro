@@ -64,8 +64,8 @@ struct LibraryView: View {
             if filtered.isEmpty {
               ContentUnavailableView(
                 "No photos", systemImage: "photo",
-                description: Text(query.isEmpty ? "Sync your photos to find them on every device." : "Try a label, filename or words in a photo."))
-              if query.isEmpty { Button("Sync my photos") { showingBackup = true }.buttonStyle(.borderedProminent) }
+                description: Text(query.isEmpty ? "Save picks from your account, or refresh photos you've already saved." : "Try a label, filename or words in a photo."))
+              if query.isEmpty { Button("Account") { showingBackup = true }.buttonStyle(.borderedProminent) }
             }
             ForEach(services.notices, id: \.self) { Text($0).font(.caption).padding() }
           }.scrollPosition(id: $scrollID, anchor: .top)
@@ -88,9 +88,7 @@ struct LibraryView: View {
             }
             .toolbar {
               ToolbarItem(placement: .topBarLeading) {
-                Button {
-                  showingBackup = true
-                } label: { ConsumerBackupLabel(summary: services.consumerSyncSummary) }
+                Button("Account", systemImage: "person.crop.circle") { showingBackup = true }
               }
               ToolbarItem(placement: .topBarTrailing) {
                 Menu("More", systemImage: "ellipsis") {
@@ -132,7 +130,6 @@ struct LibraryView: View {
         }
         .onChange(of: scenePhase) {
           if scenePhase != .active { services.backup.pause() }
-          else if services.vault.isUnlocked { services.run { try await services.sync() } }
         }
         .sheet(isPresented: $showingBackup) { PhotosBackupView(services: services) }
         .sheet(isPresented: $sharingOriginals, onDismiss: cleanupShare) {

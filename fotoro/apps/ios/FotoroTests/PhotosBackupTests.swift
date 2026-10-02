@@ -4,6 +4,116 @@ import XCTest
 @testable import Fotoro
 
 final class PhotosBackupTests: XCTestCase {
+  @MainActor func testUnpausedLegacyEnrollmentAndLocalEditsNeverSendOnForegroundOrRelaunch() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore() }
+    let services = try await context.enroll()
+    try await services.importFiles([context.sample])
+    let queued = try XCTUnwrap(services.journal.entries().first)
+    var source = try services.store.backupSource("controlled-photos-source")
+    source.photoId = queued.photo.id
+    source.phase = .queued
+    source.sourceRevision = "current"
+    try services.store.putBackupSource(source)
+    let index = try SearchIndex()
+    try index.replacePermitted([SearchRecord(id: source.id, revision: "current")])
+    let search = LocalSearchStore(index: index)
+    services.bindLocalSearch(search)
+    try services.setLabels(["Saved on this device"], photo: queued.photo)
+    XCTAssertTrue(search.setLabels(["Edited while browsing"], photoID: source.id))
+    try search.onSnapshotReady?()
+    var scans = 0
+    services.photosBackupSnapshot = { _ in scans += 1; return [] }
+    try services.store.setSyncIntent(enabled: true, uploadsPaused: false)
+    await services.resumeSavedAccount()
+    XCTAssertEqual(scans, 0)
+    XCTAssertFalse(try services.store.syncEnabled())
+    XCTAssertFalse(try services.store.uploadsPaused())
+    XCTAssertTrue(PausedUploadProtocol.server.requests.isEmpty)
+    XCTAssertEqual(try services.journal.entries().map { $0.photo.id }, [queued.photo.id])
+    XCTAssertEqual(try services.annotations.ledger.pendingIDs(), [queued.photo.id])
+    XCTAssertEqual(try services.annotations.ledger.state(queued.photo.id)?.revision, 0)
+    try context.persistSession(services)
+    try services.store.setSyncEnabled(true)
+    let restored = try context.restoredServices()
+    await restored.resumeSavedAccount(initialRestoration: true)
+    XCTAssertTrue(restored.vault.isUnlocked)
+    XCTAssertFalse(try restored.store.syncEnabled())
+    XCTAssertTrue(PausedUploadProtocol.server.requests.isEmpty)
+    XCTAssertEqual(try restored.journal.entries().map { $0.photo.id }, [queued.photo.id])
+    XCTAssertEqual(try restored.annotations.ledger.pendingIDs(), [queued.photo.id])
+    try await restored.sync()
+    XCTAssertTrue(PausedUploadProtocol.server.requests.allSatisfy { $0.method == "GET" }, "Explicit catalog refresh must not flush queued photo or annotation writes")
+    XCTAssertEqual(try restored.journal.entries().map { $0.photo.id }, [queued.photo.id])
+    XCTAssertEqual(try restored.annotations.ledger.pendingIDs(), [queued.photo.id])
+    services.vault.lock()
+    restored.vault.lock()
+  }
+  @MainActor func testManualSaveTakesOneSnapshotAndLaterPicksWaitForAnotherTap() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore() }
+    let services = try await context.enroll()
+    let bytes = try Data(contentsOf: context.sample)
+    services.importer = PhotoImport(store: services.store, sourceReader: { selected in
+      (selected.resourceIdentifier == "later-pick" ? bytes + Data([0]) : bytes, "source.jpg", false)
+    })
+    var current = [BackupCandidate(id: "first-pick")]
+    var scans = 0
+    services.photosBackupSnapshot = { _ in scans += 1; return current }
+    try services.startPhotosBackup()
+    XCTAssertThrowsError(try services.startPhotosBackup(), "Repeated taps must not create concurrent batches")
+    await services.backup.waitUntilSettled()
+    XCTAssertEqual(scans, 1)
+    XCTAssertFalse(try services.store.syncEnabled())
+    XCTAssertEqual(try services.store.consumerCommittedCount(accountId: services.session.accountId!), 1)
+    current.append(BackupCandidate(id: "later-pick"))
+    let requestsBeforeForeground = PausedUploadProtocol.server.requests.count
+    await services.resumeSavedAccount()
+    XCTAssertEqual(PausedUploadProtocol.server.requests.count, requestsBeforeForeground)
+    try await services.continueSync()
+    XCTAssertEqual(scans, 1, "Continue cannot scan new picks, even after a successful batch")
+    XCTAssertEqual(try services.store.backupSources().map(\.id), ["first-pick"])
+    XCTAssertEqual(services.consumerSyncSummary.action, .start)
+    try services.startPhotosBackup()
+    await services.backup.waitUntilSettled()
+    XCTAssertEqual(scans, 2)
+    XCTAssertEqual(try services.store.backupSources().map(\.id), ["first-pick", "later-pick"])
+    XCTAssertEqual(try services.store.consumerCommittedCount(accountId: services.session.accountId!), 2)
+    XCTAssertFalse(try services.store.syncEnabled())
+    services.vault.lock()
+  }
+  @MainActor func testPausedManualBatchReportsUnpreparedPicksWithoutRescanningOnContinue() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore() }
+    let services = try await context.enroll()
+    let bytes = try Data(contentsOf: context.sample)
+    let gate = BackupGate()
+    services.importer = PhotoImport(store: services.store, sourceReader: { selected in
+      if selected.resourceIdentifier != "pick-0" { await gate.wait() }
+      return (bytes, "source.jpg", false)
+    })
+    var scans = 0
+    services.photosBackupSnapshot = { _ in
+      scans += 1
+      return (0..<5).map { BackupCandidate(id: "pick-\($0)") }
+    }
+    try services.startPhotosBackup()
+    while !gate.entered { await Task.yield() }
+    services.pauseSync()
+    gate.open()
+    await services.backup.waitUntilSettled()
+    services.refreshConsumerSyncSummary()
+    XCTAssertEqual(services.consumerSyncSummary.completedPhotos, 1)
+    XCTAssertEqual(services.consumerSyncSummary.totalPhotos, 5)
+    XCTAssertEqual(services.consumerSyncSummary.state, .needsAttention)
+    XCTAssertEqual(services.consumerSyncSummary.action, .start)
+    XCTAssertEqual(try services.backup.unpreparedSources().count, 4)
+    try await services.continueSync()
+    XCTAssertEqual(scans, 1)
+    XCTAssertEqual(try services.backup.unpreparedSources().count, 4)
+    XCTAssertEqual(services.consumerSyncSummary.totalPhotos, 5)
+    services.vault.lock()
+  }
   @MainActor func testExplicitPausePreservesQueuedFilesAcrossForegroundAndProcessRestoration() async throws {
     let context = try PausedUploadContext()
     defer { context.restore() }
@@ -15,8 +125,7 @@ final class PhotosBackupTests: XCTestCase {
     services.pauseSync()
     await services.resumeSavedAccount()
     XCTAssertEqual(try services.journal.entries().map { $0.photo.id }, [queued.photo.id])
-    XCTAssertTrue(PausedUploadProtocol.server.requests.allSatisfy { $0.method == "GET" })
-    XCTAssertTrue(PausedUploadProtocol.server.requests.contains { $0.path == "/v1/changes" })
+    XCTAssertTrue(PausedUploadProtocol.server.requests.isEmpty, "Foreground restoration must not read or write the server")
     do {
       try await services.resumeTransfers()
       XCTFail("Retrying an upload must respect explicit Pause")
@@ -27,7 +136,7 @@ final class PhotosBackupTests: XCTestCase {
     await restarted.resumeSavedAccount(initialRestoration: true)
     XCTAssertTrue(restarted.vault.isUnlocked)
     XCTAssertEqual(try restarted.journal.entries().map { $0.photo.id }, [queued.photo.id])
-    XCTAssertTrue(PausedUploadProtocol.server.requests.allSatisfy { $0.method == "GET" })
+    XCTAssertTrue(PausedUploadProtocol.server.requests.isEmpty, "Process restoration must not resume uploads or catalog refresh")
     XCTAssertEqual(try Data(contentsOf: XCTUnwrap(queued.photo.originalURL)), try Data(contentsOf: context.sample))
     XCTAssertTrue(queued.photo.staged.values.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
     restarted.vault.lock()
@@ -67,26 +176,25 @@ final class PhotosBackupTests: XCTestCase {
     services.vault.lock()
   }
 
-  @MainActor func testOptedInPausePreservesScope() async throws {
+  @MainActor func testLegacyAutomaticIntentIsNeutralizedAndContinueDoesNotScanPhotos() async throws {
     let context = try PausedUploadContext()
     defer { context.restore() }
     let services = try await context.enroll()
     try services.store.setSyncIntent(enabled: true, uploadsPaused: false)
     services.pauseSync()
-    XCTAssertTrue(try services.store.syncEnabled(), "Pause must retain previously explicit Photos consent")
+    XCTAssertFalse(try services.store.syncEnabled(), "An old automatic enrollment must not survive Pause")
     XCTAssertTrue(try services.store.uploadsPaused())
     var observedCutoff: Date?
     services.photosBackupSnapshot = { cutoff in observedCutoff = cutoff; return [] }
-    let before = RecentPhotosPolicy.cutoff(now: Date())
     try await services.continueSync()
     await services.backup.waitUntilSettled()
     XCTAssertFalse(try services.store.uploadsPaused())
-    XCTAssertTrue(try services.store.syncEnabled())
-    XCTAssertEqual(try XCTUnwrap(observedCutoff).timeIntervalSince(before), 0, accuracy: 2)
+    XCTAssertFalse(try services.store.syncEnabled())
+    XCTAssertNil(observedCutoff, "Continue resumes only encrypted queued work")
     services.vault.lock()
   }
 
-  @MainActor func testContinueWaitsForCancelledRunBeforeRestartingOptedInPhotos() async throws {
+  @MainActor func testContinueWaitsForCancelledRunWithoutScanningPhotosAgain() async throws {
     let context = try PausedUploadContext()
     defer { context.restore() }
     let services = try await context.enroll()
@@ -104,7 +212,9 @@ final class PhotosBackupTests: XCTestCase {
     gate.open()
     try await continuing.value
     await services.backup.waitUntilSettled()
-    XCTAssertEqual(resumedScans, 1, "Continue must restart the opted-in scan after the cancelled task settles")
+    XCTAssertEqual(resumedScans, 0, "Continue must not discover or stage any Photos sources")
+    XCTAssertEqual(try services.store.backupSource("cancelled-source").phase, .pending)
+    XCTAssertFalse(try services.store.syncEnabled())
     services.vault.lock()
   }
 
