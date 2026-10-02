@@ -7,6 +7,7 @@ import * as devices from "./devices";
 import * as grants from "./grants";
 import { savePhoto } from "./saves";
 import * as annotations from "./annotations";
+import {diagnosticMethod} from "./diagnostics";
 const app = new Hono<{ Bindings: Env; Variables: { actor: Actor } }>();
 app.onError((error, c) => {
   const e =
@@ -20,12 +21,17 @@ app.onError((error, c) => {
             ? 400
             : 500,
         );
+  const requestId = crypto.randomUUID();
+  const method = diagnosticMethod(c.req.method);
+  const diagnostic = JSON.stringify({event: "api.error", requestId, method, status: e.status, code: e.code});
+  if (e.status >= 500) console.error(diagnostic);
+  else console.warn(diagnostic);
   return c.json(
     {
       version: 1,
       code: e.code,
       retryable: e.status >= 500,
-      requestId: crypto.randomUUID(),
+      requestId,
     },
     e.status as any,
   );

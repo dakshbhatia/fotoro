@@ -38,12 +38,24 @@ export function setFixtureAccount(id?: string) {
   fixtureAccount = id;
 }
 export class ApiError extends Error {
+  readonly requestId?: string;
   constructor(
     readonly code: string,
     readonly retryable = false,
+    requestId?: unknown,
   ) {
     super(code);
+    if (typeof requestId === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(requestId))
+      this.requestId = requestId;
   }
+}
+async function responseError(response: Response) {
+  const error = await response.json().catch(() => null);
+  return new ApiError(
+    typeof error?.code === "string" ? error.code : `HTTP_${response.status}`,
+    error?.retryable === true,
+    error?.requestId,
+  );
 }
 export async function api<T>(
   path: string,
@@ -65,10 +77,7 @@ export async function api<T>(
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!response.ok) {
-    const e = await response
-      .json()
-      .catch(() => ({ code: `HTTP_${response.status}` }));
-    throw new ApiError(e.code, e.retryable);
+    throw await responseError(response);
   }
   const result = await response.json();
   return schema ? (validateWire(schema as never, result) as T) : result;
@@ -82,8 +91,7 @@ export async function fetchCipher(objectId: string) {
         : {},
   });
   if (!r.ok) {
-    const e = await r.json();
-    throw new ApiError(e.code);
+    throw await responseError(r);
   }
   return new Uint8Array(await r.arrayBuffer());
 }
