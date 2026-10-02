@@ -73,8 +73,13 @@ has an isolated empty D1 database `fotoro-production` and R2 bucket
 bindings and the signed application's association identifier are configured in
 `services/api/wrangler.toml`. A production packaging dry-run lists all five
 bindings without warnings. Remote migrations, Worker deployment and domain
-routing remain unapplied. The action-time Wrangler access grant remains
-unanswered; no new CLI credential has been created.
+routing remain unapplied. The owner approved the account-scoped Wrangler grant,
+and its normal OAuth flow saved the credential in the macOS keychain. The first
+remote migration stopped before application tables were created: D1's remote
+parser rejected the unparenthesized `CASE ... END` inside `retention_live`.
+Parenthesizing that expression preserves the live-object guard. All five
+migrations then applied successfully to a separate temporary remote database;
+production migrations and deployment still await the reviewed fix.
 
 `fotoro.cloud` is absent from this account's Cloudflare zones and currently uses
 Vercel DNS. Its HTTPS response reports a missing Vercel deployment. The domain

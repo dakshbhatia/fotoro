@@ -10,5 +10,5 @@ CREATE TRIGGER photo_retain AFTER INSERT ON photos BEGIN
  INSERT INTO changes(account_id,entity,entity_id,payload) VALUES(NEW.account_id,'photo',NEW.id,NEW.signed);
 END;
 CREATE TRIGGER retention_live BEFORE INSERT ON retention BEGIN
- SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM objects WHERE id=NEW.object_id AND state='live') THEN RAISE(ABORT,'OBJECT_UNAVAILABLE') END;
+ SELECT (CASE WHEN NOT EXISTS(SELECT 1 FROM objects WHERE id=NEW.object_id AND state='live') THEN RAISE(ABORT,'OBJECT_UNAVAILABLE') END);
 END;
