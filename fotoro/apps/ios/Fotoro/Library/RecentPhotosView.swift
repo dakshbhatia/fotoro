@@ -215,6 +215,10 @@ private enum PhotoHomeScope: String, CaseIterable, Identifiable, Hashable {
 struct RecentPhotosView: View {
   @State private var store = RecentPhotosStore()
   @State private var search = LocalSearchStore()
+  @State private var bestShots = FindBestShotsReview()
+  @State private var bestShotsTask: Task<Void, Never>?
+  @State private var preparingBestShots = false
+  @State private var bestShotsRequest = UUID()
   @State private var query = ""
   @FocusState private var queryFocused: Bool
 #if !FOTORO_LOCAL_PREVIEW
@@ -279,19 +283,31 @@ struct RecentPhotosView: View {
       selected.count + selectedSavedPhotos.count
     #endif
   }
-  private var visible: [RecentPhoto] {
+  private var searchPhotos: [RecentPhoto] {
 #if FOTORO_LOCAL_PREVIEW
-    query.isEmpty ? homePhotos : search.matchingPhotos
+    search.matchingPhotos
 #else
-    query.isEmpty ? homePhotos : searchHits.compactMap {
+    searchHits.compactMap {
       if case .device(let id) = $0.photo { return search.assets[id] }
       return nil
     }
 #endif
   }
+  private var visible: [RecentPhoto] {
+    guard !query.isEmpty else { return homePhotos }
+    guard let result = bestShots.snapshot else { return searchPhotos }
+    return searchPhotos.filter { result.recommendations.ids.contains("device:" + $0.id) }
+  }
+  private var searchMatchCount: Int {
+    #if FOTORO_LOCAL_PREVIEW
+      searchPhotos.count
+    #else
+      searchHits.count
+    #endif
+  }
 #if !FOTORO_LOCAL_PREVIEW
   private var savedPhotos: [LocalPhoto] {
-    searchHits.compactMap {
+    searchHits.filter { bestShots.snapshot?.recommendations.ids.contains($0.id) ?? true }.compactMap {
       if case .saved(let id) = $0.photo { return savedResults[id] }
       return nil
     }
@@ -423,8 +439,11 @@ struct RecentPhotosView: View {
         } catch { store.error = error.localizedDescription }
       }
       .task(id: searchTaskID) { await updateSearch() }
-      .onChange(of: services?.consumerCatalogGeneration) { validateSavedPresentation() }
+      .onChange(of: services?.consumerCatalogGeneration) { cancelBestShots(); validateSavedPresentation() }
+      .onChange(of: services?.session.accountId) { cancelBestShots() }
+      .onChange(of: searchHits) { cancelBestShots() }
       .onChange(of: services?.vault.generation) {
+        cancelBestShots()
         store.restartAnalysis()
         savedViewer = nil
         selectedSavedPhotos.removeAll()
@@ -472,14 +491,19 @@ struct RecentPhotosView: View {
           if pendingBackup { pendingBackup = false; openBackup() }
 #endif
         }) { settingsView }
-        .onChange(of: query) { search.updateQuery(query) }
+        .onChange(of: query) { cancelBestShots(); search.updateQuery(query) }
+        .onChange(of: search.response.generation) { cancelBestShots() }
+        .onChange(of: search.acceptedMeaningID) { cancelBestShots() }
+        .onChange(of: store.status) { cancelBestShots() }
         .onChange(of: scope) {
+          cancelBestShots()
           queryFocused = false
           #if !FOTORO_LOCAL_PREVIEW
             if scope != .saved { homeAuthenticationTask?.cancel(); homeAuthenticationTask = nil; savedRefresh.cancel() }
           #endif
         }
         .onChange(of: search.libraryGeneration) {
+          cancelBestShots()
           validatePhotosPresentation()
 #if !FOTORO_LOCAL_PREVIEW
           searchHits = []
@@ -494,6 +518,7 @@ struct RecentPhotosView: View {
             if let services { Task { await services.resumeSavedAccount() } }
 #endif
           } else {
+            cancelBestShots()
 #if !FOTORO_LOCAL_PREVIEW
             services?.backup.pause()
             if scenePhase == .background {
@@ -519,6 +544,7 @@ struct RecentPhotosView: View {
 #endif
         }
         .onDisappear {
+          cancelBestShots()
           shareTask?.cancel(); cleanupShare()
           #if !FOTORO_LOCAL_PREVIEW
             homeAuthenticationTask?.cancel(); homeAuthenticationTask = nil; savedRefresh.cancel()
@@ -571,14 +597,15 @@ struct RecentPhotosView: View {
             Spacer()
             selectionToggle
           }.padding(.horizontal, 16).padding(.bottom, 12)
+          bestShotsControls
 #if FOTORO_LOCAL_PREVIEW
-          LocalSearchView(search: search, photos: store, choseMeaning: { queryFocused = false },
+          LocalSearchView(search: search, photos: store, review: bestShots.snapshot, choseMeaning: { queryFocused = false },
             selectedIDs: selected, selecting: selecting, toggleSelection: toggleSelection) {
             queryFocused = false
             openViewer($0)
           }
 #else
-          ConsumerSearchResultsView(hits: searchHits, saved: savedResults, search: search, photos: store,
+          ConsumerSearchResultsView(hits: searchHits, saved: savedResults, search: search, photos: store, review: bestShots.snapshot,
             selected: selectedReferences, selecting: selecting,
             toggleDevice: toggleSelection, toggleSaved: toggleSavedSelection,
             inspectDevice: { queryFocused = false; openViewer($0) },
@@ -616,6 +643,184 @@ struct RecentPhotosView: View {
       if query.isEmpty { browseScrollIDs[scope] = $0 }
     })
   }
+  private var bestShotsControls: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      HStack {
+        Button("All matches", action: cancelBestShots)
+          .tint(bestShots.showing || preparingBestShots ? .gray : .accentColor)
+          .accessibilityValue(bestShots.showing || preparingBestShots ? "" : "Selected")
+          .accessibilityIdentifier("find.allMatches")
+        Button("Best shots", action: beginBestShots)
+          .tint(bestShots.showing || preparingBestShots ? .accentColor : .gray)
+          .disabled(searchMatchCount == 0 || preparingBestShots || bestShots.reviewing)
+          .accessibilityValue(bestShots.showing || preparingBestShots ? "Selected" : "")
+          .accessibilityIdentifier("find.bestShots")
+      }.buttonStyle(.bordered)
+      if preparingBestShots || bestShots.reviewing {
+        ProgressView(preparingBestShots ? "Checking matches…" : "Reviewing previews…")
+          .font(.footnote)
+      } else if let result = bestShots.snapshot {
+        Text("\(result.recommendations.ids.count) suggestions · \(result.candidates.count) of \(bestShots.matchCount) matches reviewed")
+          .font(.footnote).foregroundStyle(.secondary)
+        if result.recommendations.unassessed > 0 {
+          Text("\(result.recommendations.unassessed) previews unavailable. All matches keeps every photo reviewable.")
+            .font(.caption).foregroundStyle(.secondary)
+        }
+      }
+      if bestShots.showing || preparingBestShots {
+        Text("Uses available previews on this device. Your selection is unchanged.")
+          .font(.caption).foregroundStyle(.secondary)
+      }
+      if let error = bestShots.error {
+        Text(error).font(.caption).foregroundStyle(.secondary)
+        Button("Try again", action: beginBestShots)
+      }
+    }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.bottom, 12)
+  }
+  private func cancelBestShots() {
+    bestShotsRequest = UUID()
+    bestShotsTask?.cancel(); bestShotsTask = nil
+    preparingBestShots = false
+    bestShots.showAll()
+  }
+  private func beginBestShots() {
+    cancelBestShots()
+    queryFocused = false
+    let request = bestShotsRequest
+    #if FOTORO_LOCAL_PREVIEW
+      let matches = searchPhotos
+    #endif
+    let matchCount = searchMatchCount
+    let queryToken = query
+    let library = search.libraryGeneration
+    let response = search.response.generation
+    let meaning = search.acceptedMeaningID
+    #if !FOTORO_LOCAL_PREVIEW
+      let token = searchTaskID
+      let hits = searchHits
+      let originalServices = services
+      let catalog = services?.store
+    #endif
+    @MainActor func valid() -> Bool {
+      guard bestShotsRequest == request, scenePhase == .active, !queryToken.isEmpty,
+        query == queryToken, search.libraryGeneration == library,
+        search.response.generation == response, search.acceptedMeaningID == meaning else { return false }
+      #if !FOTORO_LOCAL_PREVIEW
+        return token == searchTaskID && hits == searchHits && services === originalServices
+          && services?.store === catalog
+      #else
+        return true
+      #endif
+    }
+    preparingBestShots = true
+    bestShotsTask = Task {
+      defer {
+        if bestShotsRequest == request { preparingBestShots = false; bestShotsTask = nil }
+      }
+      do {
+        var candidates: [AutomaticPhotoPickCandidate] = []
+        #if !FOTORO_LOCAL_PREVIEW
+          var saved: [String: LocalPhoto] = [:]
+          var previews: [String: FindBestShotsCachedPreview] = [:]
+          for hit in hits.prefix(FindBestShotsReview.maximumCandidates) {
+            try Task.checkCancellation()
+            guard valid() else { throw CancellationError() }
+            switch hit.photo {
+            case .device(let id):
+              guard let photo = search.assets[id] else { throw CancellationError() }
+              candidates.append(bestShotsCandidate(photo))
+            case .saved(let id):
+              guard let originalServices, let catalog,
+                let shown = savedResults[id], let current = try originalServices.consumerSavedPhoto(id),
+                shown.metadata == current.metadata, shown.manifest == current.manifest else { throw CancellationError() }
+              let preview = try await cachedBestShotsPreview(current, root: catalog.root)
+              try Task.checkCancellation()
+              guard valid() else { throw CancellationError() }
+              let annotations = originalServices.annotation(current)
+              let revision = try Wire.encode(current.manifest).digest + "|" + Wire.encode(current.metadata).digest
+                + "|" + (preview?.revision ?? "unavailable")
+              candidates.append(AutomaticPhotoPickCandidate(id: hit.id, sourceRevision: revision,
+                capturedAt: ["photos", "exif"].contains(current.metadata.dateSource) ? Wire.parseDate(current.metadata.sourceDate) : nil,
+                width: preview?.width ?? 0, height: preview?.height ?? 0,
+                favorite: annotations.favorite == true, isScreenshot: annotations.facts?.contains("screenshot") == true))
+              saved[hit.id] = current
+              previews[hit.id] = preview
+            }
+            await Task.yield()
+          }
+          @MainActor func current(_ sources: [AutomaticPhotoPickCandidate]) -> Bool {
+            guard valid() else { return false }
+            let device = sources.filter { $0.id.hasPrefix("device:") }.map { source in
+              var value = source; value.id = String(source.id.dropFirst("device:".count)); return value
+            }
+            guard device.isEmpty || PhotoPickAnalyzer.isCurrent(device) else { return false }
+            for source in sources where source.id.hasPrefix("saved:") {
+              guard let originalServices, let captured = saved[source.id],
+                let now = try? originalServices.consumerSavedPhoto(captured.id),
+                now.metadata == captured.metadata, now.manifest == captured.manifest else { return false }
+              let annotations = originalServices.annotation(now)
+              guard (annotations.favorite == true) == source.favorite,
+                (annotations.facts?.contains("screenshot") == true) == source.isScreenshot,
+                previews[source.id]?.isCurrent ?? true else { return false }
+            }
+            return true
+          }
+          try Task.checkCancellation()
+          guard valid() else { throw CancellationError() }
+          bestShots.start(candidates, matchCount: matchCount, preview: { source in
+            if source.id.hasPrefix("device:") {
+              var device = source; device.id = String(source.id.dropFirst("device:".count))
+              return try await PhotoPickAnalyzer.preview(device)
+            }
+            return try await previews[source.id]?.signals()
+          }, isCurrent: current, valid: valid)
+        #else
+          for photo in matches.prefix(FindBestShotsReview.maximumCandidates) {
+            try Task.checkCancellation()
+            guard valid() else { throw CancellationError() }
+            candidates.append(bestShotsCandidate(photo))
+            await Task.yield()
+          }
+          try Task.checkCancellation()
+          guard valid() else { throw CancellationError() }
+          bestShots.start(candidates, matchCount: matchCount, preview: { source in
+            var device = source; device.id = String(source.id.dropFirst("device:".count))
+            return try await PhotoPickAnalyzer.preview(device)
+          }, isCurrent: { sources in
+            PhotoPickAnalyzer.isCurrent(sources.map { source in
+              var device = source; device.id = String(source.id.dropFirst("device:".count)); return device
+            })
+          }, valid: valid)
+        #endif
+      } catch is CancellationError {
+        if bestShotsRequest == request { cancelBestShots() }
+      } catch {
+        if bestShotsRequest == request { cancelBestShots(); store.error = error.localizedDescription }
+      }
+    }
+  }
+  private func bestShotsCandidate(_ photo: RecentPhoto) -> AutomaticPhotoPickCandidate {
+    AutomaticPhotoPickCandidate(id: "device:" + photo.id, sourceRevision: photo.sourceRevision,
+      capturedAt: photo.capturedAt, width: photo.asset.pixelWidth, height: photo.asset.pixelHeight,
+      favorite: photo.isFavorite, isScreenshot: photo.isScreenshot)
+  }
+  #if !FOTORO_LOCAL_PREVIEW
+  private func cachedBestShotsPreview(_ photo: LocalPhoto, root: URL) async throws -> FindBestShotsCachedPreview? {
+    let urls = [("thumbnail", photo.thumbnailURL), ("preview", photo.previewURL)].compactMap { kind, url -> URL? in
+      guard let url, url != photo.originalURL,
+        photo.manifest.representations.contains(where: { $0.binding.kind == kind && $0.binding.photoId == photo.id }) else { return nil }
+      return url
+    }
+    let worker = Task.detached(priority: .userInitiated) { () -> FindBestShotsCachedPreview? in
+      for url in urls {
+        guard !Task.isCancelled else { return nil }
+        if let preview = FindBestShotsCachedPreview(url: url, root: root) { return preview }
+      }
+      return nil
+    }
+    return await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
+  }
+  #endif
   private var galleryHeader: some View {
     VStack(alignment: .leading, spacing: 8) {
       HStack {

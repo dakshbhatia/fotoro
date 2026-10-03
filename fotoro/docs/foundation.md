@@ -26,3 +26,31 @@ setup keeps the selected photos and uploads nothing; an explicit save starts the
 batch. Local OCR, metadata search and preview-based picks are implemented.
 Semantic visual search, named face recognition, trips and automatic cleanup
 remain outside this build.
+
+## Intelligence wiring — October 2026
+
+Find resolves eligible photos through the existing index. Best shots applies the
+versioned `quality-picks-v1` policy to that matching subset before grouping or
+computing a quota. Suggestions carry measured reasons and never become a Save
+intent or replace a user's selection. Preview work is serial and cancellable;
+query, source revision, permission and account changes invalidate the result.
+The fixed `picks-v1.json` checks compose retrieval with shortlisting in CI.
+Synthetic policy checks do not qualify real-photo ranking or model accuracy.
+
+The next native image representation to evaluate is Apple's
+[Vision feature print](https://developer.apple.com/documentation/vision/analyzing-image-similarity-with-feature-print)
+for image-to-image similarity. It can improve reviewed similar-shot diversity;
+it does not supply text embeddings or identify named people. Store any qualified
+representation in the existing revision-bound intelligence index, with request
+revision and processor version in its identity. Do not add a second index.
+
+For broader text/image retrieval, Google's published
+[SigLIP 2 model card](https://huggingface.co/google/siglip2-base-patch16-224)
+lists Apache-2.0 and image-text retrieval, making it a candidate for evaluation.
+It is not bundled: qualify a pinned converted artifact, tokenizer/preprocessing,
+size, memory, cold/warm latency and negative-query behavior on actual iPhone and
+Safari before selecting it. Apple's published
+[MobileCLIP2 model license](https://raw.githubusercontent.com/apple-aiml-research/ml-mobileclip/main/LICENSE_MODELS)
+excludes product development from its research grant, so those weights are not
+selected for this app. Cloud inference still requires explicit opt-in and a
+spending bound; ordinary browsing and local intelligence upload nothing.

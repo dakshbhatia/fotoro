@@ -24,6 +24,7 @@ struct AutomaticPhotoPickRecommendations: Sendable {
   var unassessed = 0
 }
 enum AutomaticPhotoPickPolicy {
+  static let processor = "quality-picks-v1"
   enum MeasurementError: Error { case unavailable }
   static func analyzePixels(width: Int, height: Int, rgba: [UInt8]) throws
     -> AutomaticPhotoPickSignals

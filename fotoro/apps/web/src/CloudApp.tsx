@@ -50,6 +50,10 @@ import { cloudSearchRecords } from "./library/search";
 import {deriveConsumerSyncSummary, syncStateLabel, type ConsumerSyncSummary} from "./library/consumer-sync";
 import {loadUploadPause, saveUploadPause} from "./library/consumer-preferences";
 import type {OwnedPhotoSnapshot} from "./library/consumer-search";
+import {savedSearchPhotos} from "./library/consumer-search";
+import {findMatchPhotos, shortlistSearchResult} from "./local/find-best-shots";
+import {useFindBestShots} from "./local/useFindBestShots";
+import {FindBestShots} from "./local/FindBestShots";
 import {useDialogFocus} from "./library/dialog-focus";
 import {AccountAccess} from "./vault/AccountAccess";
 import {ChosenSaveIntent, type ChosenSaveSnapshot} from "./exchange/chosen-save";
@@ -473,6 +477,7 @@ export default function CloudApp({
       await editAnnotations(photo, changes, session);
     }, preview: async photo => {
       if (!current() || !photos.includes(photo) || photo.manifest.ownerAccountId !== account || photo.grantId) throw new Error("VAULT_LOCKED");
+      if (!photo.manifest.representations.some(representation => representation.binding.kind === "preview")) throw new Error("Saved preview unavailable.");
       const bytes = await photoBytes(photo, "preview");
       try {if (!current()) throw new Error("VAULT_LOCKED"); return new Blob([new Uint8Array(bytes)], {type: "image/jpeg"});}
       finally {bytes.fill(0);}
@@ -482,8 +487,13 @@ export default function CloudApp({
   const searchable = received ?? photos;
   const index = useMemo(() => new PhotoSearchIndex(cloudSearchRecords(searchable)), [searchable]);
   const searchResult = useMemo(() => index.search(query, {scope: "account:" + account, committedMeaning}), [index, query, account, committedMeaning]);
-  const shown = normalizeSearch(query) ? searchResult.photoIds.flatMap(id => {const photo = searchable.find(photo => photo.manifest.photoId === id); return photo ? [photo] : [];}) : searchable;
-  const viewing = !!viewer && shown.length > 0;
+  const findPhotos = useMemo(() => savedSearchPhotos(ownedSnapshot, []).map(photo => ({...photo, id: photo.id.slice(6)})), [ownedSnapshot]);
+  const findMatches = useMemo(() => findMatchPhotos(findPhotos, searchResult), [findPhotos, searchResult]);
+  const bestShots = useFindBestShots(findMatches, normalizeSearch(query) && !received ? JSON.stringify([query, searchResult.scope, searchResult.meaning?.id]) : "", ownedSnapshot,
+    () => activeRef.current && !!ownedSnapshot?.current(), active && unlocked && !received);
+  const filteredSearchResult = bestShots.active ? shortlistSearchResult(searchResult, bestShots.recommendations) : searchResult;
+  const shown = normalizeSearch(query) ? filteredSearchResult.photoIds.flatMap(id => {const photo = searchable.find(photo => photo.manifest.photoId === id); return photo ? [photo] : [];}) : searchable;
+  const viewing = !!viewer && shown.some(photo => photo.manifest.photoId === viewer);
   useEffect(() => {if (viewer && !viewing) setViewer(null);}, [viewer, viewing]);
   const publishLocalAnnotations = async (sources: Photo[], session: UnlockedVault, current = () => true) => {
     const original = new Map(sources.map(photo => [photo.manifest.photoId, photo]));
@@ -697,24 +707,27 @@ export default function CloudApp({
                 <span>Also try</span>{searchResult.meanings.filter(meaning => meaning.id !== searchResult.meaning?.id && meaning.photoIds.some(id => !searchResult.photoIds.includes(id))).slice(0, 3).map(meaning => <button key={meaning.id} onClick={() => setCommittedMeaning(meaning.id)}>{meaning.term}</button>)}
               </div>
             )}
+            {normalizeSearch(query) && !received && (findMatches.length > 0 || bestShots.active) && <FindBestShots total={findMatches.length} review={bestShots} showCount />}
             {shown.length ? (
               <Library
                 active={active}
                 photos={shown}
                 selected={selected}
                 selecting={selecting}
+                reasons={bestShots.active ? bestShots.recommendations?.reasons : undefined}
                 onSelect={toggleSelection}
                 onOpen={id => selecting && !received ? toggleSelection(id) : setViewer(id)}
               />
             ) : (
               <div className="empty">
                 <p>
-                  {query
+                  {bestShots.active ? bestShots.busy ? "Choosing best shots…" : "No best shots to suggest" : query
                     ? "No matching photos"
                     : received
                       ? "No received photos"
                       : "Your Saved photos will appear here"}
                 </p>
+                {bestShots.active && <p className="hint">All matches remain available. You choose what to Share.</p>}
                 {!query && !received && <button onClick={onBack}>Choose photos to Save</button>}
                 {query && (
                   <button onClick={() => setQuery("")}>Clear search</button>

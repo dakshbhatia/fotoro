@@ -14,7 +14,7 @@ export function mergeConsumerSearchPhotos<T extends {id: string}>(local: T[], sa
     if (!source || original.dateSource !== "selected" || !(original.file instanceof File) || original.file !== source.file
       || !source.digest || comparableDigest(original) !== source.digest
       || !["photos", "exif"].includes(source.dateSource) || !Number.isFinite(Date.parse(source.date))) return photo;
-    return {...photo, date: source.date, dateSource: source.dateSource};
+    return {...photo, date: source.date, dateSource: source.dateSource, captureVerified: source.dateSource === "exif" ? true : original.captureVerified};
   });
   return [...displayed, ...currentSaved.filter(photo => !localIDs.has(photo.id))];
 }
@@ -60,6 +60,7 @@ export function savedSearchPhotos(snapshot: OwnedPhotoSnapshot | null, local: Lo
     const photo = owned[index];
     const original = record.digest ? selected.get(record.digest) : undefined;
     const adapted = {...record, id: original?.id ?? "saved:" + photo.manifest.photoId, originalSize: photo.metadata.originalBytes,
+      captureVerified: record.dateSource === "exif" ? true as const : undefined,
       previewLoader: async () => {
         if (!snapshot.current()) throw new Error("Your saved library is locked.");
         const blob = await snapshot.preview(photo);

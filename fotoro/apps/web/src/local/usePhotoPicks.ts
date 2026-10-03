@@ -2,7 +2,7 @@ import {useCallback, useEffect, useMemo, useState} from "react";
 import {analyzePixels, PickAnalyzer, type PhotoRecommendations} from "./auto-picks";
 import {LocalResources, type LocalPhoto} from "./resources";
 
-async function readSignals(photo: LocalPhoto, resources: LocalResources) {
+export async function readPickSignals(photo: LocalPhoto, resources: LocalResources) {
   const thumbnail = await resources.load(photo, "thumbnail");
   const image = await createImageBitmap(thumbnail.blob);
   const canvas = document.createElement("canvas");
@@ -12,7 +12,7 @@ async function readSignals(photo: LocalPhoto, resources: LocalResources) {
     const context = canvas.getContext("2d");
     if (!context) throw new Error("Preview measurements unavailable.");
     context.drawImage(image, 0, 0, canvas.width, canvas.height);
-    return analyzePixels(context.getImageData(0, 0, canvas.width, canvas.height));
+    return {...analyzePixels(context.getImageData(0, 0, canvas.width, canvas.height)), width: thumbnail.width, height: thumbnail.height};
   } finally {image.close(); canvas.width = 0; canvas.height = 0;}
 }
 
@@ -27,10 +27,10 @@ export function usePhotoPicks(photos: LocalPhoto[], resources: LocalResources, e
   useEffect(() => {
     let alive = true;
     if (!photos.length) {clear(); return;}
-    setBusy(true); setDone(0);
-    if (enabled) void analyzer.run(photos, photo => readSignals(photo, resources), completed => {if (alive) setDone(completed);})
+    setRecommendations(undefined); setBusy(enabled); setDone(0);
+    if (enabled) void analyzer.run(photos, photo => readPickSignals(photo, resources), completed => {if (alive) setDone(completed);})
       .then(result => {if (alive && result) {setRecommendations(result); setBusy(false);}});
-    return () => {alive = false;};
+    return () => {alive = false; analyzer.clear();};
   }, [photos, resources, analyzer, enabled, clear]);
   useEffect(() => () => analyzer.clear(), [analyzer]);
   const ids = useMemo(() => new Set(photos.filter(photo => selection.has(photo.id)).map(photo => photo.id)), [photos, selection]);

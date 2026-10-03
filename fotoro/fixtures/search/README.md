@@ -25,3 +25,10 @@ swift tools/create-search-fixtures.swift "$PWD/fixtures/search"
 Source images are 2400×1600 on the development Mac's Retina drawing context.
 Indexing must resize them to the declared preview limit. Pixel/font rendering
 can differ between macOS versions; expected words remain fixed.
+
+`picks-v1.json` freezes seven Find → quality shortlist checks. The subset must
+be chosen before the quota and similarity grouping. Cases cover an outside
+favorite, verified bursts, capture-date variety, unknown dates, unavailable
+previews and unsupported visual meaning. Its measurements are synthetic inputs;
+passing establishes policy composition, not real-photo ranking accuracy. Run
+`pnpm test:picks:fixtures`. A processor version change requires requalification.

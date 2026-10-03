@@ -81,16 +81,32 @@ interface Raster {
   height: number;
   used: number;
 }
+function rasterSource(photo: LocalPhoto) {
+  const source = photo.file ?? photo.preview ?? photo.previewLoader;
+  return {source: source ? new WeakRef<object>(source) : undefined, digest: photo.digest, width: photo.width, height: photo.height, available: photo.previewAvailable};
+}
 /* File references stay in memory. Raster generation is sequential and caches are bounded. */
 export class LocalResources {
   private cache = new Map<string, Raster>();
   private queue: Promise<unknown> = Promise.resolve();
   private pending = new Map<string, Promise<Raster>>();
   private generation = 0;
+  private sources = new Map<string, ReturnType<typeof rasterSource>>();
   async load(
     photo: LocalPhoto,
     kind: "thumbnail" | "preview",
   ): Promise<Raster> {
+    const source = rasterSource(photo), previous = this.sources.get(photo.id);
+    if (!previous || previous.source?.deref() !== source.source?.deref() || previous.digest !== source.digest || previous.width !== source.width || previous.height !== source.height || previous.available !== source.available) {
+      this.sources.set(photo.id, source);
+      for (const kind of ["thumbnail", "preview"]) {
+        const key = photo.id + ":" + kind, old = this.cache.get(key);
+        if (old) URL.revokeObjectURL(old.url);
+        this.cache.delete(key); this.pending.delete(key);
+      }
+    }
+    const identity = this.sources.get(photo.id);
+    if (!source.source || photo.previewAvailable === false) throw new Error("Preview unavailable. Reselect this photo.");
     const key = photo.id + ":" + kind;
     const found = this.cache.get(key);
     if (found) {
@@ -101,9 +117,9 @@ export class LocalResources {
     if (pending) return pending;
     const generation = this.generation;
     const promise = this.queue.then(async () => {
-      if (generation !== this.generation)
+      if (generation !== this.generation || this.sources.get(photo.id) !== identity)
         throw new Error("Photos were cleared.");
-      const check = () => {if (generation !== this.generation) throw new Error("Photos were cleared.");};
+      const check = () => {if (generation !== this.generation || this.sources.get(photo.id) !== identity) throw new Error("Photos were cleared.");};
       let raster: Awaited<ReturnType<typeof photoPreview>>;
       try {
         if (!photo.width || !photo.height) throw new Error("Photo dimensions are unavailable.");
@@ -150,7 +166,7 @@ export class LocalResources {
     try {
       return await promise;
     } finally {
-      this.pending.delete(key);
+      if (this.pending.get(key) === promise) this.pending.delete(key);
     }
   }
   clear() {
@@ -158,6 +174,7 @@ export class LocalResources {
     for (const value of this.cache.values()) URL.revokeObjectURL(value.url);
     this.cache.clear();
     this.pending.clear();
+    this.sources.clear();
   }
   get decodedBytes() {
     return [...this.cache.values()].reduce((n, v) => n + v.decoded, 0);
