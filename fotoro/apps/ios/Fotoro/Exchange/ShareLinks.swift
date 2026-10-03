@@ -35,7 +35,7 @@ enum FotoroShareLinks {
     guard let bytes = Data(base64Encoded: standard), encoded(bytes) == value else { throw FotoroShareLinkError() }
     return bytes
   }
-  /// Public identity validation never pins or trusts the card.
+  // Public identity validation never pins or trusts the card.
   static func validatePublicAccountCard(_ card: AccountCardV1) throws -> AccountCardV1 {
     guard card.version == 1, canonicalUUID(card.accountId), card.boxPublicKey.utf8.count == 43,
       card.signingPublicKey.utf8.count == 43, try decoded(card.boxPublicKey).count == 32,
@@ -81,7 +81,7 @@ enum FotoroShareLinks {
   static func parse(_ url: URL, expectedOrigin: String = FotoroShareLinks.origin) throws -> FotoroShareLink {
     try parse(url.absoluteString, expectedOrigin: expectedOrigin)
   }
-  /// Reencoding rejects unknown fields, duplicate JSON keys and noncanonical JSON/base64url.
+  // Reencoding rejects unknown fields, duplicate JSON keys and noncanonical JSON/base64url.
   static func parse(_ value: String, expectedOrigin: String = FotoroShareLinks.origin) throws -> FotoroShareLink {
     let prefix = try checkedOrigin(expectedOrigin) + "/#"
     guard value.utf8.count <= maximumLength, value.hasPrefix(prefix) else { throw FotoroShareLinkError() }

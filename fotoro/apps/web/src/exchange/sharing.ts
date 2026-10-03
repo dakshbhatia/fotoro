@@ -46,7 +46,7 @@ function freezePublic<T>(value: T): T {
   return value;
 }
 
-/** A Share click keeps its own photo/key snapshot until the sheet is closed. */
+// A Share click keeps its own photo/key snapshot until the sheet is closed.
 export class ShareSelection {
   readonly photos: Photo[];
   private disposed = false;
@@ -59,7 +59,7 @@ export class ShareSelection {
   dispose() {if (!this.disposed) {this.disposed = true; for (const photo of this.photos) photo.metadataKey.fill(0);}}
 }
 
-/** Public links survive only their own password unlock; acceptance stays explicit. */
+// Public links survive only their own password unlock; acceptance stays explicit.
 export class IncomingShareIntent {
   readonly link: FotoroShareLink;
   private cancelled = false;

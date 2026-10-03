@@ -34,7 +34,7 @@ function decoded(value: unknown): Uint8Array {
     return bytes;
   } catch { return invalid(); }
 }
-/** Validates public identity only. Callers must ask the user before pinning keys. */
+// Validates public identity only. Callers must ask the user before pinning keys.
 export function validatePublicAccountCard(value: unknown): AccountCardV1 {
   if (!exactKeys(value, ["accountId", "boxPublicKey", "signingPublicKey", "version"]) ||
       value.version !== 1 || !uuid(value.accountId)) return invalid();
@@ -71,7 +71,7 @@ export function createContactLink(card: AccountCardV1, origin = FOTORO_SHARE_ORI
 export function createMomentLink(grantId: string, senderCard: AccountCardV1, origin = FOTORO_SHARE_ORIGIN): string {
   return encode("moment", invitation({ version: 1, grantId, senderCard }), origin);
 }
-/** Strict canonical parsing rejects hidden fields, duplicate JSON/fragment keys and URL normalization tricks. */
+// Strict canonical parsing rejects hidden fields, duplicate JSON/fragment keys and URL normalization tricks.
 export function parseShareLink(value: string, expectedOrigin = FOTORO_SHARE_ORIGIN): FotoroShareLink {
   const prefix = checkedOrigin(expectedOrigin) + "/#";
   if (typeof value !== "string" || value.length > SHARE_LINK_MAX_LENGTH || !value.startsWith(prefix)) return invalid();
