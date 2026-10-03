@@ -57,10 +57,10 @@ queries on native and web, retaining capture-date provenance. Public Safari QA
 renders a verified HEIC original in the gallery and viewer; unsupported Brave
 intake shows a clear alternative with no runtime errors or upload writes. Browser
 gallery thumbnails use 512 px within the existing decoded-cache budget.
-Development-signed Release 0.1.0 (19) passes strict signature and exact production
+Development-signed Release 0.1.0 (20) passes strict signature and exact production
 association checks without a local-preview encryption exemption. CoreDevice
-verifies installation, exact version 19 and successful launch after a fresh
-unlocked-state check. The preceding build's protected diagnostics reported signed out
+verifies installation and exact version 20. The fresh post-install check reports
+a locked device, so launch was not attempted; preceding build 19 launched. The preceding build's protected diagnostics reported signed out
 and completed picks. Owner authentication and private-photo saving remain unverified.
 Build 4's TestFlight compliance gate is unchanged. See
 [verification](verification.md) for the consumer acceptance evidence.

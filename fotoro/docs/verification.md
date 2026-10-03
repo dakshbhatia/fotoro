@@ -36,7 +36,10 @@ Rendered web checks cover 390×844, 320×568 and desktop 1440×1000/1504×1047.
 They verify no horizontal overflow, 44 px controls, selection through Find/scopes,
 password cancellation, viewer return and original download. The 320 px cloud
 header overflow found in this pass is fixed. Simulator QA verifies Photos first,
-selection through Done/Picks/Saved and local viewer Info. The Find typing tool
+selection through Done/Picks/Saved and local viewer Info. Accessibility-medium
+QA found wrapping Save/Share labels; intrinsic button sizes and a vertical
+fallback fix the tray. Both native suites pass after the correction, and the
+simulator content-size setting is restored to large. The Find typing tool
 reported success without changing the field; native typed-query interaction is
 not established by that tool run. Existing deterministic Find tests pass.
 Physical Safari, owner credentials/private Photos and physical performance remain
@@ -52,10 +55,11 @@ dependency, second search index or second durable queue was introduced. The old
 PhotoPicks production component and its unused CSS were removed; normal account
 entry retains one password path.
 
-The full encrypted Release 0.1.0 (19) is built and passes strict signature checks,
-with production associated domains and no local-preview encryption exemption.
-CoreDevice confirms the installed version 0.1.0 (19), and launch succeeds after
-a fresh unlocked-state check. No private app data or Photos were inspected. Apple has processed
+The full encrypted Release 0.1.0 (20), including the accessibility correction,
+is built and passes strict signature checks, with production associated domains
+and no local-preview encryption exemption. CoreDevice confirms installation
+and exact version 20. The fresh post-install check reports the device locked, so
+launch was not attempted. The preceding build 19 launched while unlocked. No private app data or Photos were inspected. Apple has processed
 full build 4, whose TestFlight release still requires the owner's accurate
 export-compliance declaration. Preview build 3 remains a separate binary.
 

@@ -96,7 +96,7 @@ are separate checks. “Partial” identifies a concrete remaining capability.
 | --- | --- | --- |
 | 1 | One-password sign-in | Implemented on native/web; wrong-password, interrupted enrollment and retry regressions pass. Owner acceptance remains open. |
 | 2 | Remember the current user | Protected session/password persistence, account reference and expired-session renewal are implemented. Initial restoration respects manual lock; explicit Open retries a failed renewal. |
-| 3 | Install the current full build | Signed encrypted build 19 passes strict signature and production association checks; CoreDevice confirms installation, exact version and successful launch. Owner authentication acceptance remains open. |
+| 3 | Install the current full build | Signed encrypted build 20 passes strict signature and production association checks; CoreDevice confirms installation and exact version. Post-install launch awaits unlock; preceding build 19 launched. Owner authentication acceptance remains open. |
 | 4 | Save chosen photos through sign-in | Immutable reviewed sources and one-shot authenticated Save are implemented. Fresh native signup → selected PNG Save and fresh-browser password restore pass against isolated D1/R2. |
 | 5 | Restore identical originals in Safari | Isolated D1/R2 tests verify JPEG/PNG/HEIC bytes in a fresh session. A native-created account restores its selected PNG byte for byte in a fresh browser. Personal phone-to-Safari acceptance remains open. |
 | 6 | Manual Save progress and Pause/Continue | Implemented. Continue uses the durable queue; it does not scan for new photos. |

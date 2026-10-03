@@ -712,6 +712,10 @@ struct RecentPhotosView: View {
         selectionSummary
         HStack(spacing: 12) { selectionActions; Spacer(minLength: 0) }
       }
+      VStack(alignment: .leading, spacing: 8) {
+        selectionSummary
+        selectionActions
+      }
     }.padding(14).background(.regularMaterial, in: .rect(cornerRadius: 24))
       .padding(.horizontal, 12).padding(.bottom, 8)
   }
@@ -725,28 +729,28 @@ struct RecentPhotosView: View {
       #if !FOTORO_LOCAL_PREVIEW
         selectedSavedPhotos.removeAll()
       #endif
-    }.buttonStyle(.bordered).disabled(selectedCount == 0 || preparingShare)
+    }.buttonStyle(.bordered).fixedSize(horizontal: true, vertical: false).disabled(selectedCount == 0 || preparingShare)
       .accessibilityIdentifier("selection.clear")
     #if !FOTORO_LOCAL_PREVIEW
     Button(selected.isEmpty && selectedSavedPhotos.count > 0 ? "Saved" : "Save", systemImage: "icloud.and.arrow.up") {
       reviewSave(selectedPhotos.values.map(\.source).sorted { $0.id < $1.id })
-    }.buttonStyle(.borderedProminent).accessibilityIdentifier("selection.save")
+    }.buttonStyle(.borderedProminent).fixedSize(horizontal: true, vertical: false).accessibilityIdentifier("selection.save")
       .disabled(selected.isEmpty || preparingShare || showShare)
     if selectedSavedPhotos.count > 0 && !selected.isEmpty {
       Menu("Share", systemImage: "square.and.arrow.up") {
         Button("Share \(selected.count) originals") { shareSelectedDevicePhotos() }
         Button("Share \(selectedSavedPhotos.count) in Fotoro") { shareSelectedSavedPhotos() }
-      }.buttonStyle(.bordered).disabled(preparingShare || showShare)
+      }.buttonStyle(.bordered).fixedSize(horizontal: true, vertical: false).disabled(preparingShare || showShare)
     } else if selectedSavedPhotos.count > 0 {
       Button("Share", systemImage: "square.and.arrow.up", action: shareSelectedSavedPhotos)
-        .buttonStyle(.bordered).disabled(preparingShare || showShare)
+        .buttonStyle(.bordered).fixedSize(horizontal: true, vertical: false).disabled(preparingShare || showShare)
     } else {
       Button("Share", systemImage: "square.and.arrow.up", action: shareSelectedDevicePhotos)
-        .buttonStyle(.bordered).disabled(selected.isEmpty || preparingShare || showShare)
+        .buttonStyle(.bordered).fixedSize(horizontal: true, vertical: false).disabled(selected.isEmpty || preparingShare || showShare)
     }
     #else
     Button("Share", systemImage: "square.and.arrow.up", action: shareSelectedDevicePhotos)
-      .buttonStyle(.bordered).disabled(selected.isEmpty || preparingShare || showShare)
+      .buttonStyle(.bordered).fixedSize(horizontal: true, vertical: false).disabled(selected.isEmpty || preparingShare || showShare)
     #endif
   }
   private func shareSelectedDevicePhotos() {
