@@ -24,7 +24,10 @@ password entry completes the same Save if needed. Automatic sync is off.
 
 One Fotoro password opens the same saved photos on iPhone and the web. New Fotoro
 creates that password; Open Fotoro opens the account. The iPhone keeps it in
-protected Keychain. Settings shows the current account reference, Fotoro password
+protected Keychain. A remembered account opens locally while its session is valid;
+expired sessions renew through a signed password proof at initial launch or an
+explicit Open Fotoro. Manual lock is respected and reopening never starts uploads.
+Settings shows the current account reference, Fotoro password
 and Sign out. Existing passkeys remain under Settings, and existing recovery codes
 work in the password field.
 

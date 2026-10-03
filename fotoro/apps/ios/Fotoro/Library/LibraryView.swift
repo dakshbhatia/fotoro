@@ -135,10 +135,7 @@ struct LibraryView: View {
         }
       }.navigationTitle("Saved photos").navigationBarTitleDisplayMode(.inline)
         .task {
-          if authenticationTask == nil, services.auth.startPassword == nil {
-            saveIntent?.authorize(services.photoAccountAccess)
-          }
-          startSelectedSave()
+          resumeSelectedSave()
           openIncomingLink()
         }
         .toolbar {
@@ -158,14 +155,18 @@ struct LibraryView: View {
           ExchangeView(services: services, selected: presentation.photos, incoming: presentation.incoming)
         }
         .onChange(of: authenticationTask == nil) { openIncomingLink() }
-        .onChange(of: services.photoAccountAccess) { openIncomingLink() }
+        .onChange(of: services.photoAccountAccess) {
+          resumeSelectedSave()
+          openIncomingLink()
+        }
         .onChange(of: scenePhase) {
           if scenePhase == .background {
             pendingIncoming = nil; sharedPhotos = nil
             cancelAuthentication()
             services.pauseSync()
           } else if scenePhase == .active {
-            startSelectedSave()
+            resumeSelectedSave()
+            openIncomingLink()
           } else {
             services.backup.pause()
           }
@@ -186,9 +187,14 @@ struct LibraryView: View {
           }
         }
         .onChange(of: services.vault.generation) {
-          sharedPhotos = nil
-          if authenticationTask == nil { pendingIncoming = nil }
+          if !services.vault.isUnlocked {
+            sharedPhotos = nil
+            if authenticationTask == nil { pendingIncoming = nil }
+          }
           shareTask?.cancel(); cleanupShare(); selection.removeAll(); catalogRefresh.cancel()
+        }
+        .onChange(of: services.session.accountId) {
+          if authenticationTask == nil { pendingIncoming = nil; sharedPhotos = nil }
         }
         .onChange(of: services.consumerCatalogGeneration) { validateSelection() }
         .onDisappear { cancelAuthentication(); shareTask?.cancel(); cleanupShare(); catalogRefresh.cancel() }
@@ -230,6 +236,11 @@ struct LibraryView: View {
       saveIntent?.cancel()
       services.error = error.localizedDescription
     }
+  }
+  private func resumeSelectedSave() {
+    guard scenePhase == .active, authenticationTask == nil, services.auth.startPassword == nil else { return }
+    saveIntent?.authorize(services.photoAccountAccess)
+    startSelectedSave()
   }
   private func cancelAuthentication() {
     saveIntent?.cancel()

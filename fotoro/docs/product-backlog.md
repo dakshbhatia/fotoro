@@ -12,12 +12,12 @@ are separate checks. “Partial” identifies a concrete remaining capability.
 | # | Work | Current state and remaining work |
 | --- | --- | --- |
 | 1 | One-password sign-in | Implemented on native/web; wrong-password, interrupted enrollment and retry regressions pass. Owner acceptance remains open. |
-| 2 | Remember the current user | Protected session/password persistence and account reference in Settings are implemented. |
-| 3 | Install the current full build | Signed encrypted build 17 is installed, its exact version is read back, and launch succeeds. Protected runtime diagnostics report signed out and a completed picks pass; owner authentication acceptance remains open. |
-| 4 | Save chosen photos through sign-in | Immutable reviewed sources and one-shot authenticated Save are implemented; public-service tests pass. |
-| 5 | Restore identical originals in Safari | Isolated D1/R2 tests verify JPEG/PNG/HEIC bytes in a fresh session. Personal phone-to-Safari acceptance remains open. |
+| 2 | Remember the current user | Protected session/password persistence, account reference and expired-session renewal are implemented. Initial restoration respects manual lock; explicit Open retries a failed renewal. |
+| 3 | Install the current full build | Signed encrypted build 18 is installed and its exact version is read back. iOS blocked launch while the phone was locked; unlock/open and owner authentication acceptance remain open. |
+| 4 | Save chosen photos through sign-in | Immutable reviewed sources and one-shot authenticated Save are implemented. Fresh native signup → selected PNG Save and fresh-browser password restore pass against isolated D1/R2. |
+| 5 | Restore identical originals in Safari | Isolated D1/R2 tests verify JPEG/PNG/HEIC bytes in a fresh session. A native-created account restores its selected PNG byte for byte in a fresh browser. Personal phone-to-Safari acceptance remains open. |
 | 6 | Manual Save progress and Pause/Continue | Implemented. Continue uses the durable queue; it does not scan for new photos. |
-| 7 | Offline/background/relaunch recovery | Durable ciphertext transfers, pause and stale-account fences are implemented. Physical daemon/relaunch acceptance remains open. |
+| 7 | Offline/background/relaunch recovery | Fixed cold launch after a chosen Save: persisted selection now reads its own encoding. Regression and rendered Simulator reopening pass without scanning or uploading. Physical daemon/relaunch acceptance remains open. |
 | 8 | Retry without losing selection | Implemented for authentication, manual Save and sharing; incomplete work preserves exact sources for explicit Retry, and concurrent recipient Saves reuse one durable request. |
 | 9 | Green release checks | Core/API/web/native checks are required on each exact PR head. |
 | 10 | Full TestFlight release | Full build 4 awaits Apple's export-compliance declaration. Preview build 3 is a separate binary. |

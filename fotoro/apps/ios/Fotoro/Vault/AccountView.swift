@@ -46,13 +46,20 @@ struct AccountView: View {
             }
           }.buttonStyle(.borderedProminent).disabled(services.busy)
           Button("Cancel") { services.auth.cancelStart(); services.error = nil }.disabled(services.busy)
-        } else if services.session.isSignedIn && services.vault.canUnlockLocally {
+        } else if services.auth.hasRememberedPassword || services.session.isSignedIn && services.vault.canUnlockLocally {
           Button("Open Fotoro") {
             authenticate {
-              try await services.vault.unlock(.localKeychain)
+              let generation: UUID
+              if services.session.fixture {
+                try await services.vault.unlock(.localKeychain)
+                generation = services.vault.generation
+              } else {
+                generation = try await services.auth.openRememberedAccount()
+              }
+              guard services.vault.generation == generation else { throw CancellationError() }
               try await finishSignIn()
             }
-          }.buttonStyle(.borderedProminent).disabled(services.busy)
+          }.buttonStyle(.borderedProminent).disabled(services.busy || services.auth.isOpeningRememberedAccount)
             .accessibilityIdentifier("account.unlock")
         } else {
           Text("Open your Fotoro").font(.title2.bold())
@@ -74,7 +81,7 @@ struct AccountView: View {
         if let error = services.error {
           Text(error).foregroundStyle(.red).accessibilityIdentifier("account.error")
         }
-        if services.busy {
+        if services.busy || services.auth.isOpeningRememberedAccount {
           ProgressView("Opening your Fotoro…").accessibilityIdentifier("account.connecting")
         }
         #if DEBUG

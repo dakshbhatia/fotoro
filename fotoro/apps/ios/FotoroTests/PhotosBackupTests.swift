@@ -4,6 +4,68 @@ import XCTest
 @testable import Fotoro
 
 final class PhotosBackupTests: XCTestCase {
+  @MainActor func testChosenSaveColdReopensPaddedSelectionWithoutRescanningOrUploading() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
+    let services = try await context.enroll()
+    defer { services.vault.lock() }
+    let bytes = try Data(contentsOf: context.sample)
+    services.importer = PhotoImport(store: services.store, sourceReader: { _ in (bytes, "public-sample.jpg", false) },
+      sourceRevision: { id in id == "chosen" ? "reviewed" : nil })
+    var scans = 0
+    services.photosBackupSnapshot = { _ in
+      scans += 1
+      return [BackupCandidate(id: "chosen", sourceRevision: "reviewed")]
+    }
+    try services.startPhotosBackup(selection: [RecentPhotoSource(id: "chosen", revision: "reviewed")])
+    await services.backup.waitUntilSettled()
+    XCTAssertEqual(services.backup.status.phase, .complete)
+    XCTAssertEqual(try services.store.consumerCommittedCount(accountId: XCTUnwrap(services.session.accountId)), 1)
+    let encoded = try await services.store.database.read { db in
+      try XCTUnwrap(String.fetchOne(db, sql: "SELECT value FROM state WHERE key='backupSelection'"))
+    }
+    XCTAssertTrue(encoded.contains("="), "Exercise the padded local format that previously blocked cold startup")
+    try context.persistSession(services)
+    let before = PausedUploadProtocol.server.requests.count
+    let scansBeforeReopen = scans
+    let reopened = try context.restoredServices()
+    defer { reopened.vault.lock() }
+    await reopened.resumeSavedAccount(initialRestoration: true)
+    XCTAssertNotNil(reopened.photoAccountAccess)
+    XCTAssertEqual(reopened.photos.count, 1)
+    XCTAssertEqual(reopened.backup.status.phase, .complete)
+    XCTAssertEqual(reopened.backup.status.completed, 1)
+    XCTAssertTrue(try reopened.journal.entries().isEmpty)
+    XCTAssertFalse(try reopened.store.syncEnabled())
+    XCTAssertGreaterThan(scansBeforeReopen, 0)
+    XCTAssertEqual(scans, scansBeforeReopen)
+    XCTAssertEqual(PausedUploadProtocol.server.requests.count, before)
+  }
+  @MainActor func testBackupSelectionRestoresStandardAndLegacyURLFormatsWithoutWideningSelection() throws {
+    for encoded in [try Wire.encode(["chosen"]).base64EncodedString(), try Wire.encode(["chosen"]).b64] {
+      let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+      defer { try? FileManager.default.removeItem(at: root) }
+      let store = try LibraryStore(root: root)
+      var selected = try store.backupSource("chosen")
+      selected.phase = .failed
+      try store.putBackupSource(selected)
+      try store.putBackupSource(store.backupSource("unselected"))
+      try store.database.write { db in
+        try db.execute(sql: "INSERT INTO state(key,value) VALUES('backupSelection',?)", arguments: [encoded])
+      }
+      let reopened = try PhotosBackup(store: LibraryStore(root: root))
+      XCTAssertEqual(try reopened.unpreparedSources().map(\.id), ["chosen"])
+      XCTAssertEqual(reopened.status.failed, 1)
+      XCTAssertEqual(reopened.status.pending, 0)
+    }
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try LibraryStore(root: root)
+    try store.database.write { db in
+      try db.execute(sql: "INSERT INTO state(key,value) VALUES('backupSelection','invalid@@')")
+    }
+    XCTAssertThrowsError(try PhotosBackup(store: store))
+  }
   func testReviewedPhotoSelectionRequiresEveryOriginalRevisionAndKeepsReviewOrder() throws {
     let candidates = [BackupCandidate(id: "other", sourceRevision: "1"),
       BackupCandidate(id: "chosen", capturedAt: Date(timeIntervalSince1970: 0), sourceRevision: "2")]

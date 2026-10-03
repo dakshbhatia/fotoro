@@ -230,6 +230,11 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
   var pending: PendingEnrollment?
   var recoveryCode: String? { pending.map { "fotoro1.\($0.card.accountId).\($0.recovery.b64)" } }
   var startPassword: String? { pendingStart?.password }
+  private(set) var isOpeningRememberedAccount = false
+  var hasRememberedPassword: Bool {
+    guard !session.fixture, let account = session.accountId else { return false }
+    return (try? rememberedPassword(for: account)) != nil
+  }
   var hasSavedPassword: Bool {
     guard session.isSignedIn, let account = session.accountId else { return false }
     return Keychain.contains("password-" + account)
@@ -294,11 +299,45 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
   }
   func savedPassword() throws -> String {
     guard session.isSignedIn, let account = session.accountId else { throw FotoroError("Sign in to see your Fotoro password.") }
+    return try rememberedPassword(for: account)
+  }
+  private func rememberedPassword(for account: String) throws -> String {
     guard let bytes = try? Keychain.read("password-" + account),
       let value = String(data: bytes, encoding: .utf8), let code = try? RecoveryCode(value),
       code.accountId == account
     else { throw FotoroError("This iPhone hasn't saved a Fotoro password yet.") }
     return try RecoveryCode.format(accountId: account, secret: code.secret)
+  }
+  func openRememberedAccount() async throws -> UUID {
+    try Task.checkCancellation()
+    guard !session.fixture, let account = session.accountId else {
+      throw FotoroError("Enter your Fotoro password to sign in.")
+    }
+    guard !isOpeningRememberedAccount else { throw FotoroError("Your Fotoro is already opening.") }
+    let generation = vault.generation, origin = api.origin, server = api.baseURL
+    isOpeningRememberedAccount = true
+    defer { isOpeningRememberedAccount = false }
+    do {
+      if session.isSignedIn {
+        if !vault.isUnlocked {
+          if vault.canUnlockLocally { try await vault.unlock(.localKeychain) }
+          else { try await recover(rememberedPassword(for: account)) }
+        }
+      } else {
+        try await recover(rememberedPassword(for: account))
+      }
+      try Task.checkCancellation()
+      guard session.accountId == account, session.isSignedIn, vault.isUnlocked,
+        api.origin == origin, api.baseURL == server else {
+        throw CancellationError()
+      }
+      fallbackMessage = nil
+      return vault.generation
+    } catch {
+      try checkAuthentication(account: account, generation: generation)
+      guard api.origin == origin, api.baseURL == server else { throw CancellationError() }
+      throw error
+    }
   }
   private func savePassword(_ password: RecoveryCode) throws {
     let value = try RecoveryCode.format(accountId: password.accountId, secret: password.secret)
@@ -651,7 +690,7 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
   }
   func recover(_ code: String, missingAccountIsPasswordError: Bool = true,
     validation: (() throws -> Void)? = nil, accepted: (() -> Void)? = nil) async throws {
-    let account = session.accountId, generation = vault.generation, origin = api.origin
+    let account = session.accountId, generation = vault.generation, origin = api.origin, server = api.baseURL
     let recovery: RecoveryCode
     do { recovery = try RecoveryCode(code) }
     catch { throw FotoroError("Check your Fotoro password and try again.") }
@@ -665,7 +704,7 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
     }
     let options = try Wire.decode(RecoveryOptionsResponse.self, bytes)
     try checkAuthentication(account: account, generation: generation)
-    guard api.origin == origin else { throw CancellationError() }
+    guard api.origin == origin, api.baseURL == server else { throw CancellationError() }
     try validation?()
     let wrapper: VaultWrapperV1
     let signed: SignedPayloadV1
@@ -703,7 +742,7 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
       throw FotoroError("Check your Fotoro password and try again.")
     }
     try checkAuthentication(account: account, generation: generation)
-    guard api.origin == origin else { throw CancellationError() }
+    guard api.origin == origin, api.baseURL == server else { throw CancellationError() }
     try validation?()
     try accept(result, preservingStart: validation != nil)
     try session.pin(options.vault.accountCard)

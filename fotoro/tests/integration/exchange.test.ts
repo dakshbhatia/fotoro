@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import accounts from "../../fixtures/accounts.json";
+import { formatFotoroPassword, parseFotoroPassword } from "../../apps/web/src/vault/password.js";
 import { validateWire } from "../../packages/contracts/src/validate.js";
 import type {
   PhotoManifestV1,
@@ -19,6 +20,9 @@ import type {
   PhotoAnnotationsV1,
   PhotoAnnotationsUpdateV1,
   PhotoAnnotationsReplyV1,
+  AccountCardV1,
+  StartOptionsV1,
+  VaultV1,
 } from "../../packages/contracts/src/models.js";
 import {
   ready,
@@ -88,7 +92,7 @@ async function api<T>(
   return body as T;
 }
 async function authenticate(index: number) {
-  const card = accounts.accounts[index],
+  const card = validateWire<AccountCardV1>("AccountCardV1", accounts.accounts[index]),
     secrets = accounts.testSecrets[index];
   const options = await api<RecoveryOptionsV1>(
     "/v1/auth/recovery/options",
@@ -127,7 +131,78 @@ async function authenticate(index: number) {
   assert.ok(session.token);
   return { card, secrets, token: session.token! };
 }
-type Client = Awaited<ReturnType<typeof authenticate>>;
+type Client = {
+  card: AccountCardV1;
+  secrets: { vaultKey: string; boxSecretKey: string; signingSecretKey: string };
+  token: string;
+};
+async function createCompactPassword() {
+  const options = validateWire<StartOptionsV1>("StartOptionsV1", await api(
+    "/v1/auth/start/options", undefined, { version: 1, client: "native" },
+  ));
+  const box = sodium.crypto_box_keypair(), signing = sodium.crypto_sign_keypair(),
+    vaultKey = sodium.randombytes_buf(32), recovery = sodium.randombytes_buf(32);
+  const bundle = utf8({ vaultKey: b64(vaultKey), boxSecretKey: b64(box.privateKey), signingSecretKey: b64(signing.privateKey) });
+  try {
+    const card: AccountCardV1 = { version: 1, accountId: options.accountId,
+      boxPublicKey: b64(box.publicKey), signingPublicKey: b64(signing.publicKey) };
+    const password = formatFotoroPassword(card.accountId, recovery);
+    assert.equal(/^foto_[A-Za-z0-9_-]{64}$/.test(password), true, "Signup must use the compact password format");
+    const wrapper = { version: 1, wrapperId: randomUUID(), kind: "recovery",
+      credentialId: null, prfSalt: null, verified: true, wrappedBundle: wrapKey(bundle, recovery) };
+    const input = {
+      version: 1, challengeId: options.challengeId, client: "native",
+      enrollment: { version: 1, accountCard: card, recoveryWrapper: wrapper,
+        proof: signPayload("account-enrollment", card.accountId, utf8({ accountCard: card, recoveryWrapper: wrapper }), signing.privateKey) },
+      signedPayload: signPayload("start-enrollment", card.accountId, utf8({
+        version: 1, accountId: card.accountId, challengeId: options.challengeId,
+        challenge: options.challenge, client: "native", origin,
+      }), signing.privateKey),
+    };
+    assert.equal(JSON.stringify(input).includes(password), false, "The test credential must stay client-side");
+    const session = validateWire<SessionV1>("SessionV1", await api("/v1/auth/start/verify", undefined, input));
+    assert.equal(session.accountId, card.accountId);
+    assert.ok(session.token);
+    const stored = validateWire<VaultV1>("VaultV1", await api("/v1/vault", session.token));
+    assert.deepEqual(stored.accountCard, card);
+    assert.deepEqual(stored.wrappers, [wrapper]);
+    const empty = await api<{changes: unknown[]}>("/v1/changes?limit=100", session.token);
+    assert.deepEqual(empty.changes, [], "Signup alone must not save photos");
+    await api("/v1/auth/logout", session.token, {});
+    assert.equal((await request("/v1/vault", session.token)).status, 401);
+    return password;
+  } finally {
+    for (const secret of [box.privateKey, signing.privateKey, vaultKey, recovery, bundle]) secret.fill(0);
+  }
+}
+async function authenticateCompactPassword(password: string): Promise<Client> {
+  const {accountId, secret} = parseFotoroPassword(password);
+  try {
+    const options = validateWire<RecoveryOptionsV1>("RecoveryOptionsV1", await api(
+      "/v1/auth/recovery/options", undefined, {version: 1, accountId, client: "native"},
+    ));
+    const card = options.vault.accountCard;
+    assert.equal(card.accountId, accountId);
+    const wrapper = options.vault.wrappers.find(value => value.kind === "recovery" && value.verified);
+    assert.ok(wrapper);
+    const plaintext = unwrapKey(wrapper.wrappedBundle, secret);
+    let secrets: Client["secrets"];
+    try {secrets = JSON.parse(new TextDecoder().decode(plaintext));}
+    finally {plaintext.fill(0);}
+    assert.equal(b64(sodium.crypto_scalarmult_base(unb64(secrets.boxSecretKey))), card.boxPublicKey);
+    assert.equal(b64(sodium.crypto_sign_ed25519_sk_to_pk(unb64(secrets.signingSecretKey))), card.signingPublicKey);
+    const session = validateWire<SessionV1>("SessionV1", await api("/v1/auth/recovery/verify", undefined, {
+      version: 1, challengeId: options.challengeId, client: "native",
+      signedPayload: signPayload("recovery-session", accountId, utf8({
+        version: 1, challengeId: options.challengeId, challenge: options.challenge,
+        accountId, client: "native", origin,
+      }), unb64(secrets.signingSecretKey)),
+    }));
+    assert.equal(session.accountId, accountId);
+    assert.ok(session.token);
+    return {card, secrets, token: session.token};
+  } finally {secret.fill(0);}
+}
 async function upload(client: Client, filename = "singapore.jpg", background = false) {
   const photoId = randomUUID(),
     metadataKey = sodium.randombytes_buf(32),
@@ -331,6 +406,35 @@ async function save(
   assert.deepEqual(await api("/v1/saves", client.token, input), save);
   return manifest;
 }
+test("real local D1/R2: compact-password signup, manual Save and fresh-session original restore", async () => {
+  await ready;
+  const password = await createCompactPassword();
+  const owner = await authenticateCompactPassword(password);
+  const beforeSave = await api<{changes: unknown[]}>("/v1/changes?limit=100", owner.token);
+  assert.deepEqual(beforeSave.changes, [], "Opening a new session must remain read-only");
+  const photo = await upload(owner);
+  await api("/v1/auth/logout", owner.token, {});
+  assert.equal((await request("/v1/vault", owner.token)).status, 401);
+  const fresh = await authenticateCompactPassword(password);
+  assert.equal(fresh.token === owner.token, false, "Restore must authenticate a new session");
+  const page = await api<{changes: {entity: string; entityId: string; payload: SignedPayloadV1 | null}[]}>(
+    "/v1/changes?limit=100", fresh.token,
+  );
+  const photos = page.changes.filter(change => change.entity === "photo");
+  assert.equal(photos.length, 1);
+  assert.equal(photos[0].entityId, photo.manifest.photoId);
+  const signed = validateWire<SignedPayloadV1>("SignedPayloadV1", photos[0].payload);
+  assert.equal(signed.kind, "photo-manifest");
+  assert.equal(signed.accountId, fresh.card.accountId);
+  const manifest = validateWire<PhotoManifestV1>("PhotoManifestV1", JSON.parse(
+    new TextDecoder().decode(verifyPayload(signed, unb64(fresh.card.signingPublicKey))),
+  ));
+  assert.equal(manifest.ownerAccountId, fresh.card.accountId);
+  const restored = await restore(fresh, manifest);
+  assert.equal(Buffer.from(restored).equals(photo.original), true, "Fresh password recovery must restore unchanged public-original bytes");
+  assert.equal(sha(restored), sha(photo.original));
+});
+
 test("real local D1/R2: recover, encrypted originals both ways, independent saves after revocation", async () => {
   await ready;
   const A = await authenticate(0),

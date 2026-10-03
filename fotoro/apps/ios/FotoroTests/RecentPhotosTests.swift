@@ -237,6 +237,9 @@ final class RecentPhotosTests: XCTestCase {
     XCTAssertNil(intent.consume(active: true, access: PhotoAccountAccess(account: "another", vault: access.vault, catalog: access.catalog)))
     XCTAssertNil(intent.consume(active: true, access: PhotoAccountAccess(account: access.account, vault: UUID(), catalog: access.catalog)))
     XCTAssertNil(intent.consume(active: true, access: PhotoAccountAccess(account: access.account, vault: access.vault, catalog: ObjectIdentifier(replacement))))
+    let otherAccess = PhotoAccountAccess(account: "another", vault: UUID(), catalog: ObjectIdentifier(replacement))
+    intent.authorize(otherAccess)
+    XCTAssertNil(intent.consume(active: true, access: otherAccess), "Access restoration cannot move an authorized Save to another account")
     XCTAssertEqual(intent.consume(active: true, access: access), [source])
     XCTAssertTrue(intent.wasConsumed)
     XCTAssertNil(intent.consume(active: true, access: access))
@@ -248,6 +251,18 @@ final class RecentPhotosTests: XCTestCase {
     var empty = ManualPhotoSaveIntent([])
     empty.authorize(access)
     XCTAssertNil(empty.consume(active: true, access: access))
+  }
+  func testPendingManualSaveCanAuthorizeWhenAccountRestorationFinishes() {
+    let source = RecentPhotoSource(id: "chosen", revision: "original")
+    let catalog = NSObject()
+    let access = PhotoAccountAccess(account: "remembered", vault: UUID(), catalog: ObjectIdentifier(catalog))
+    var intent = ManualPhotoSaveIntent([source])
+    intent.authorize(nil)
+    XCTAssertNil(intent.consume(active: true, access: nil))
+    intent.authorize(access)
+    XCTAssertEqual(intent.consume(active: true, access: access), [source])
+    intent.authorize(access)
+    XCTAssertNil(intent.consume(active: true, access: access))
   }
   @MainActor func testSyncPermissionActionRequestsOnceAndDoesNotEnableUploads() async throws {
     let services = try AppServices(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
