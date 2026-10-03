@@ -19,10 +19,11 @@ function readIncomingLink() {
 const CloudApp = lazy(() => import("./CloudApp"));
 const SavedViewer = lazy(() => import("./library/Viewer").then(module => ({default: module.Viewer})));
 export default function App() {
+  const savedEntry = location.pathname === "/saved" || location.pathname === "/saved/";
   const [incoming, setIncoming] = useState(readIncomingLink);
   const [incomingError, setIncomingError] = useState(() => /^#(?:contact|moment)(?:=|$)/.test(location.hash) && !incoming ? "This link could not be opened. Ask the sender for a new Fotoro link." : "");
-  const [cloud, setCloud] = useState(() => !!incoming || !!incomingError),
-    [opened, setOpened] = useState(() => !!incoming || !!incomingError),
+  const [cloud, setCloud] = useState(() => savedEntry || !!incoming || !!incomingError),
+    [opened, setOpened] = useState(() => savedEntry || !!incoming || !!incomingError),
     [localPhotos, setLocalPhotos] = useState<LocalPhoto[]>([]),
     [syncSummary, setSyncSummary] = useState<ConsumerSyncSummary>({state: "notStarted", skippedPhotos: 0, action: "signIn"}),
     [ownedPhotos, setOwnedPhotos] = useState<OwnedPhotoSnapshot | null>(null),
@@ -58,6 +59,8 @@ export default function App() {
   };
   const returnToPhotos = () => {
     cancelSave(); cancelIncoming(); setSharePhotos(null);
+    if (location.pathname === "/saved" || location.pathname === "/saved/")
+      history.replaceState(null, "", "/" + location.search + location.hash);
     setCloud(false);
     requestAnimationFrame(() => {
       const opener = syncOpener.current;

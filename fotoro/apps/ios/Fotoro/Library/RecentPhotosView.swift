@@ -201,6 +201,15 @@ private enum PhotoHomeScope: String, CaseIterable, Identifiable, Hashable {
     case saved = "Saved"
   #endif
   var id: String { rawValue }
+  var hint: String {
+    switch self {
+    case .photos: "Photos you allow Fotoro to access on this device."
+    case .picks: "Suggested best shots from the last 10 days. You choose what to Save."
+    #if !FOTORO_LOCAL_PREVIEW
+    case .saved: "Only photos you explicitly Save, available across devices."
+    #endif
+    }
+  }
 }
 
 struct RecentPhotosView: View {
@@ -616,7 +625,6 @@ struct RecentPhotosView: View {
         selectionToggle
       }
       if !allPhotos {
-        Text("Last 10 days").font(.footnote).foregroundStyle(.secondary)
         if store.picksSnapshot == nil {
           Text("Finding your picks. Showing recent photos for now.")
             .font(.footnote).foregroundStyle(.secondary)
@@ -693,9 +701,14 @@ struct RecentPhotosView: View {
         }
       }.padding(.leading, 16).padding(.trailing, 8).frame(minHeight: 48)
         .background(.white.opacity(0.10), in: .rect(cornerRadius: 16))
-      Picker("Photo library", selection: $scope) {
-        ForEach(PhotoHomeScope.allCases) { Text($0.rawValue).tag($0) }
-      }.pickerStyle(.segmented).accessibilityIdentifier("home.scope")
+      VStack(alignment: .leading, spacing: 6) {
+        Picker("Photo library", selection: $scope) {
+          ForEach(PhotoHomeScope.allCases) { Text($0.rawValue).tag($0) }
+        }.pickerStyle(.segmented).accessibilityIdentifier("home.scope")
+        Text(scope.hint).font(.footnote).foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+          .accessibilityIdentifier("home.scopeDescription")
+      }
       #if !FOTORO_LOCAL_PREVIEW
         if let services { ConsumerSaveStatus(services: services) }
       #endif
@@ -790,10 +803,10 @@ struct RecentPhotosView: View {
           Button("Saved photos") { pendingBackup = true; settings = false }
           if let services {
             if services.auth.hasSavedPassword {
-              Button("Fotoro password", systemImage: "key") {
+              Button("Open on another device", systemImage: "laptopcomputer.and.iphone") {
                 do { savedPassword = FotoroPassword(value: try services.auth.savedPassword()) }
                 catch { services.error = error.localizedDescription }
-              }
+              }.accessibilityIdentifier("account.otherDevice")
             }
             if !services.session.isSignedIn || !services.vault.isUnlocked {
               Button("Open Fotoro") { pendingBackup = true; settings = false }.disabled(services.busy)

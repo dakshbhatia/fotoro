@@ -3,9 +3,20 @@ import {cloudSearchRecords} from "./search";
 import type {LocalPhoto} from "../local/resources";
 import {LocalResources, imageDimensions} from "../local/resources";
 import type {SearchResult, SearchMeaning} from "../local/search";
+const savedSources = new WeakMap<object, {snapshot: OwnedPhotoSnapshot; date: string; dateSource: LocalPhoto["dateSource"]; digest?: string; file?: File}>();
 export function mergeConsumerSearchPhotos<T extends {id: string}>(local: T[], saved: T[]): T[] {
   const localIDs = new Set(local.map(photo => photo.id));
-  return [...local, ...saved.filter(photo => !localIDs.has(photo.id))];
+  const currentSaved = saved.filter(photo => savedSources.get(photo)?.snapshot.current() ?? true);
+  const savedByID = new Map(currentSaved.map(photo => [photo.id, photo]));
+  const displayed = local.map(photo => {
+    const savedPhoto = savedByID.get(photo.id), source = savedPhoto && savedSources.get(savedPhoto);
+    const original = photo as T & Partial<LocalPhoto>;
+    if (!source || original.dateSource !== "selected" || !(original.file instanceof File) || original.file !== source.file
+      || !source.digest || comparableDigest(original) !== source.digest
+      || !["photos", "exif"].includes(source.dateSource) || !Number.isFinite(Date.parse(source.date))) return photo;
+    return {...photo, date: source.date, dateSource: source.dateSource};
+  });
+  return [...displayed, ...currentSaved.filter(photo => !localIDs.has(photo.id))];
 }
 export interface OwnedPhotoSnapshot {
   accountId: string;
@@ -31,7 +42,7 @@ export class ConsumerPreviewResources extends LocalResources {
   }
   override clear() {this.sourceGeneration++; super.clear();}
 }
-function comparableDigest(photo: LocalPhoto) {
+function comparableDigest(photo: Pick<LocalPhoto, "digest">) {
   const digest = photo.digest;
   if (!digest) return undefined;
   if (!/^[a-f0-9]{64}$/i.test(digest)) return digest;
@@ -40,17 +51,23 @@ function comparableDigest(photo: LocalPhoto) {
 /* This adapter consumes verified owned catalog records. Account records never enter local retention. */
 export function savedSearchPhotos(snapshot: OwnedPhotoSnapshot | null, local: LocalPhoto[]): LocalPhoto[] {
   if (!snapshot?.current()) return [];
-  const selected = new Map(local.filter(photo => photo.file).map(photo => [comparableDigest(photo), photo.id]));
+  const selected = new Map(local.flatMap(photo => {
+    const digest = comparableDigest(photo);
+    return photo.file instanceof File && digest ? [[digest, photo] as const] : [];
+  }));
   const owned = snapshot.photos.filter(photo => !photo.grantId && photo.manifest.ownerAccountId === snapshot.accountId);
   return cloudSearchRecords(owned).map((record, index) => {
     const photo = owned[index];
-    return {...record, id: selected.get(record.digest) ?? "saved:" + photo.manifest.photoId, originalSize: photo.metadata.originalBytes,
+    const original = record.digest ? selected.get(record.digest) : undefined;
+    const adapted = {...record, id: original?.id ?? "saved:" + photo.manifest.photoId, originalSize: photo.metadata.originalBytes,
       previewLoader: async () => {
         if (!snapshot.current()) throw new Error("Your saved library is locked.");
         const blob = await snapshot.preview(photo);
         if (!snapshot.current()) throw new Error("Your saved library is locked.");
         return blob;
       }};
+    savedSources.set(adapted, {snapshot, date: record.date, dateSource: record.dateSource, digest: record.digest, file: original?.file});
+    return adapted;
   });
 }
 export function combineConsumerSearch(local: SearchResult, saved: SearchResult, committed?: string): SearchResult {

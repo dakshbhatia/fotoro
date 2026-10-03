@@ -1,7 +1,7 @@
 import { captureDate } from "../library/exif";
 import {photoFormat, displayPhotoDimensions, safePhotoDimensions, boundedPhotoBitmap, photoPreview, PHOTO_HEADER_BYTES} from "../media/photo-source";
 export {imageDimensions} from "../media/photo-source";
-import type { SearchOcr } from "./search";
+import type { SearchOcr, SearchPhoto } from "./search";
 export interface LocalPhoto {
   id: string;
   file?: File;
@@ -19,7 +19,7 @@ export interface LocalPhoto {
   ocr?: SearchOcr;
   filename: string;
   date: string;
-  dateSource: "exif" | "selected";
+  dateSource: SearchPhoto["dateSource"];
   captureVerified?: true;
   width?: number;
   height?: number;

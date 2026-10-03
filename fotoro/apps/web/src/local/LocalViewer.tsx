@@ -82,7 +82,7 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
     </div>
     {details && <aside className="details local-details">
       <p>{photo.filename}</p><p>{photo.width} × {photo.height}{(photo.originalSize ?? photo.file?.size) ? ` · ${((photo.originalSize ?? photo.file!.size) / 1024 / 1024).toFixed(1)} MB` : ""}</p>
-      <p>{new Date(photo.date).toLocaleString()}</p><p>{photo.dateSource === "exif" ? "Date from the photo" : "Capture date unavailable · date selected"}</p>
+      <p>{new Date(photo.date).toLocaleString()}</p><p>{photo.dateSource === "photos" ? "Date from Photos" : photo.dateSource === "exif" ? "Date from the photo" : "Capture date unavailable · date selected"}</p>
       <p>{photo.file ? "Original file unchanged" : "Retained preview · original not selected"}</p>
       {onFavorite && <button aria-pressed={!!photo.favorite} onClick={() => {
         if (alive.current && currentPhoto.current === photo) onFavorite(photo.id, !photo.favorite);

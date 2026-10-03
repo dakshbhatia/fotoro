@@ -1,6 +1,9 @@
 # Fotoro finish plan
 
-Fotoro opens to photos worth looking at. Find reaches the photo the user means.
+Fotoro is for enjoying your photos, finding the shot you mean, and sharing a
+chosen moment. Photos shows this device’s library. Picks suggests highlights;
+Saved holds the originals you explicitly keep in Fotoro across devices. Find
+reaches the photo the user means.
 The viewer makes it easy to enjoy the original. Choosing Save keeps that photo
 available on another device; choosing Share sends a deliberate set to a person.
 Account handling supports that journey. Automatic uploads remain off.
@@ -24,7 +27,7 @@ parallel feature project.
 | 5 | Picks and moments worth opening | Tune existing quality, burst and capture-time policies against a fixed public corpus and owner-selected examples. Keep All Photos reachable. | Picks favor useful variety and suppress junk; each moment uses real capture evidence and keeps every original accessible. |
 | 6 | Quiet identity | Keep the existing password protocol, protected remembered password and renewal. Remove competing consumer setup paths and technical credential terminology. | First Save offers one password entry or New Fotoro; returning users continue their action without retyping a remembered password. |
 | 7 | Obvious manual Save | Keep one durable queue and explicit authorization. Present the chosen count, progress, Saved, Pause and one appropriate Continue/Retry action in context. | Backgrounding, offline recovery, re-sign-in and repeated taps cannot lose selection, create duplicate copies or save unrelated photos. |
-| 8 | Dependable other-device library | Keep signed catalog verification, encrypted previews and unchanged originals. Make Saved understandable on native and web. | A fresh device opens the same account, sees the chosen photos and retrieves identical JPEG/PNG/HEIC originals. |
+| 8 | Dependable other-device library | Keep signed catalog verification, encrypted previews and unchanged originals. Make Saved understandable on native and web, with direct /saved entry and the same password on each device. | A fresh device opens the same account, sees the chosen photos and retrieves identical JPEG/PNG/HEIC originals. |
 | 9 | Share a chosen moment | Keep accepted contacts, selected grants, canonical invitations and recipient-owned Save. Present one recipient picker and the selected set. | A two-person journey sends the intended set, opens it and saves an independent copy without resuming unrelated uploads. |
 | 10 | Simple receiving and adding back | Keep explicit identity acceptance, access-ended states and contribution checks. Show the sender, photos and one next action. | A valid invitation survives sign-in and returning to the app; the recipient can view, Save and add selected owned photos back. |
 | 11 | Useful corrections | Keep favorites, user-authored labels and the signed encrypted annotation outbox. Put corrections in photo details. | An explicit save of changes reaches the other device; concurrent edits preserve unrelated fields and require a choice for real conflicts. |
@@ -73,6 +76,13 @@ through the complete journey; separate green components are insufficient.
 
 ## Next capabilities after the core journey closes
 
+The next intelligence loop is Find a moment → review the strongest shots →
+choose Save or Share. Current Picks uses clarity, exposure, favorites and
+similarity rules; native recent Picks covers the last 10 days while browser
+Picks covers photos opened there. Current Find uses verified dates, supplied
+labels, text and bounded native visual categories. Broader visual meaning and
+People require the evaluations below before product claims change.
+
 | Capability | Complete scope before exposing it |
 | --- | --- |
 | Visual meaning search | Choose and measure one local image-representation approach. Bind results to current permitted sources, combine them with date/text evidence and evaluate retrieval on a fixed corpus. |
@@ -96,7 +106,7 @@ are separate checks. “Partial” identifies a concrete remaining capability.
 | --- | --- | --- |
 | 1 | One-password sign-in | Implemented on native/web; wrong-password, interrupted enrollment and retry regressions pass. Owner acceptance remains open. |
 | 2 | Remember the current user | Protected session/password persistence, account reference and expired-session renewal are implemented. Initial restoration respects manual lock; explicit Open retries a failed renewal. |
-| 3 | Install the current full build | Signed encrypted build 20 passes strict signature and production association checks; CoreDevice confirms installation and exact version. Post-install launch awaits unlock; preceding build 19 launched. Owner authentication acceptance remains open. |
+| 3 | Install the current full build | Signed encrypted build 21 passes strict signature and production association checks. Build 20 is installed and launched successfully; build 21 awaits the unavailable device connection. Owner authentication acceptance remains open. |
 | 4 | Save chosen photos through sign-in | Immutable reviewed sources and one-shot authenticated Save are implemented. Fresh native signup → selected PNG Save and fresh-browser password restore pass against isolated D1/R2. |
 | 5 | Restore identical originals in Safari | Isolated D1/R2 tests verify JPEG/PNG/HEIC bytes in a fresh session. A native-created account restores its selected PNG byte for byte in a fresh browser. Personal phone-to-Safari acceptance remains open. |
 | 6 | Manual Save progress and Pause/Continue | Implemented. Continue uses the durable queue; it does not scan for new photos. |

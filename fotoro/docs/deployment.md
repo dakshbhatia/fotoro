@@ -24,20 +24,20 @@ A Worker preview with a different RP creates different passkey credentials. Do n
 
 ## Current state
 
-The preceding production Worker `d38236c7-1994-4474-b2cc-e2ae5ce1c8d9`, tagged
-`real-photo-loop-20261002`, is read back at 100% in deployment
-`1078fed6-2af1-4271-91fc-16badce99a40`. Saved photos opens read-only;
+The preceding production Worker `c4d9a626-43f5-422b-be96-24dff8d9e5d1`, tagged
+`consumer-experience-20261003`, is read back at 100% in deployment
+`f7c6871a-0549-45de-8c0b-a7a9bc9a3e56`. Saved photos opens read-only;
 chosen Save continues through one password entry. Sharing uses accepted
 contacts and public invitations, with explicit recipient Save and selected-photo
 contributions. Public contact/moment links are included in the exact signed
 Apple association alongside passkeys. The preceding Worker
-`cd60ed44-589f-4c70-86d0-dda73e9fb676` remains available for rollback.
+`d38236c7-1994-4474-b2cc-e2ae5ce1c8d9` remains available for rollback.
 Uploads and annotation writes still require an explicit Save or Continue.
 Bounded failure fields and stored Worker logs remain enabled. Production D1/R2
 bindings and five migrations are unchanged. Canonical API and exact signed
 association checks pass.
 
-The current source passes 250 full-app, 86 local-preview, 251 web, 53 API,
+The current source passes 250 full-app, 86 local-preview, 256 web, 53 API,
 19 core and 28 release-metadata tests, typechecks and the production web build.
 Each native suite explicitly skips one Vision integration test because the iOS 27
 simulator cannot create its inference context. Seven sharing-safety tests also
@@ -57,11 +57,16 @@ queries on native and web, retaining capture-date provenance. Public Safari QA
 renders a verified HEIC original in the gallery and viewer; unsupported Brave
 intake shows a clear alternative with no runtime errors or upload writes. Browser
 gallery thumbnails use 512 px within the existing decoded-cache budget.
-Development-signed Release 0.1.0 (20) passes strict signature and exact production
+The clarification adds direct `/saved` entry, concise Photos/Picks/Saved scope
+hints and same-password cross-device instructions. Browser Find preserves native
+PhotoKit capture provenance; imported timestamps stay excluded. Current verified
+capture evidence can appear beside a matching local File without entering local
+retention. There are no protocol, binding, migration or dependency changes.
+Development-signed Release 0.1.0 (21) passes strict signature and exact production
 association checks without a local-preview encryption exemption. CoreDevice
-verifies installation and exact version 20. The fresh post-install check reports
-a locked device, so launch was not attempted; preceding build 19 launched. The preceding build's protected diagnostics reported signed out
-and completed picks. Owner authentication and private-photo saving remain unverified.
+previously verified installation and successful unlocked launch of build 20.
+The paired connection is currently unavailable for build 21 installation.
+Owner authentication and private-photo saving remain unverified.
 Build 4's TestFlight compliance gate is unchanged. See
 [verification](verification.md) for the consumer acceptance evidence.
 

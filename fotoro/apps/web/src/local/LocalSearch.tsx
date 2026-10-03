@@ -9,7 +9,7 @@ export function meaningRelation(meaning: SearchMeaning) {
 function evidence(photo: LocalOcrPhoto, meaning: SearchMeaning) {
   const source = meaning.evidence[photo.id] ?? meaning.kind;
   if (source === "label") return "Supplied label · " + meaning.term;
-  if (source === "date") return photo.dateSource === "exif" ? "Date from the photo" : "Date selected · capture date unavailable";
+  if (source === "date") return photo.dateSource === "photos" ? "Date from Photos" : photo.dateSource === "exif" ? "Date from the photo" : "Date selected · capture date unavailable";
   const term = normalizeSearch(meaning.term), extra = photo as LocalOcrPhoto & {caption?: string; keywords?: string[]; facts?: string[]};
   const keyword = extra.keywords?.find(value => normalizeSearch(value).includes(term));
   if (source === "keyword" && keyword) return "Keyword · " + keyword;
