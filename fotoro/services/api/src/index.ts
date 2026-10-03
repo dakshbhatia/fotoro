@@ -46,7 +46,16 @@ app.get("/.well-known/apple-app-site-association", (c) => {
     return c.json({error: "ASSOCIATION_NOT_CONFIGURED"}, 503);
   }
   c.header("Cache-Control", "public, max-age=3600");
-  return c.json({webcredentials: {apps}});
+  return c.json({
+    webcredentials: {apps},
+    applinks: {details: [{
+      appIDs: apps,
+      components: [
+        {"/": "/", "#": "contact=*"},
+        {"/": "/", "#": "moment=*"},
+      ],
+    }]},
+  });
 });
 app.use("/v1/*", async (c, next) => {
   if (c.req.header("x-fotoro-fixture-account")) fail("UNAUTHENTICATED", 401);

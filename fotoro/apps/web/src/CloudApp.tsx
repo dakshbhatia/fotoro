@@ -24,6 +24,7 @@ import {
   isPublicDemoAccount,
 } from "./exchange/api";
 import { Exchange } from "./exchange/Exchange";
+import {IncomingShareIntent} from "./exchange/sharing";
 import {
   stageImport,
   pendingImports,
@@ -72,6 +73,11 @@ export default function CloudApp({
   onSyncSummary,
   onOwnedPhotos,
   saveIntent = null,
+  incoming = null,
+  incomingError = "",
+  onIncomingDone,
+  sharePhotos = null,
+  onShareDone,
 }: {
   onBack: () => void;
   localPhotos?: LocalPhoto[];
@@ -79,6 +85,11 @@ export default function CloudApp({
   onSyncSummary?: (summary: ConsumerSyncSummary) => void;
   onOwnedPhotos?: (snapshot: OwnedPhotoSnapshot | null) => void;
   saveIntent?: ChosenSaveIntent | null;
+  incoming?: IncomingShareIntent | null;
+  incomingError?: string;
+  onIncomingDone?: () => void;
+  sharePhotos?: Photo[] | null;
+  onShareDone?: () => void;
 }) {
   const [account, setAccount] = useState(() => {
       try {
@@ -93,6 +104,8 @@ export default function CloudApp({
     [selected, setSelected] = useState(new Set<string>()),
     [viewer, setViewer] = useState<string | null>(null),
     [exchange, setExchange] = useState(false),
+    [exchangePhotos, setExchangePhotos] = useState<Photo[]>([]),
+    [exchangeVersion, setExchangeVersion] = useState(0),
     [menu, setMenu] = useState(false),
     [status, setStatus] = useState(""),
     [busy, setBusy] = useState(false),
@@ -118,8 +131,8 @@ export default function CloudApp({
     uploadAbort = useRef<AbortController | null>(null),
     localSynced = useRef(new WeakMap<File, string>());
   const input = useRef<HTMLInputElement>(null);
-  const activeRef = useRef(active), saveIntentRef = useRef(saveIntent);
-  activeRef.current = active; saveIntentRef.current = saveIntent;
+  const activeRef = useRef(active), saveIntentRef = useRef(saveIntent), incomingRef = useRef(incoming);
+  activeRef.current = active; saveIntentRef.current = saveIntent; incomingRef.current = incoming;
   const backButton = useRef<HTMLButtonElement>(null);
   useEffect(() => {if (active) backButton.current?.focus({preventScroll: true});}, [active]);
   const accountPanel = useRef<HTMLElement>(null);
@@ -275,16 +288,19 @@ export default function CloudApp({
     const request = saveIntentRef.current, version = authIntent.current;
     return run(async () => {
       const ticket = request?.beginAuthentication(vaultGeneration());
+      const shareRequest = incomingRef.current, shareTicket = shareRequest?.beginAuthentication(vaultGeneration());
       try {await fn();}
-      catch (error) {request?.finishAuthentication(ticket, undefined, error); throw error;}
-      if (!activeRef.current || authIntent.current !== version) {request?.cancel(); return;}
+      catch (error) {request?.finishAuthentication(ticket, undefined, error); shareRequest?.finishAuthentication(shareTicket); throw error;}
+      if (!activeRef.current || authIntent.current !== version) {request?.cancel(); shareRequest?.cancel(); return;}
       try {
         const session = requireVault();
         request?.finishAuthentication(ticket, {session, generation: vaultGeneration(), current: () => sameVault(session)});
+        shareRequest?.finishAuthentication(shareTicket, session, vaultGeneration());
         setAccount(session.accountId);
         if (request?.pending && request.boundVault === session) setMenu(true);
       } catch {
         request?.finishAuthentication(ticket);
+        shareRequest?.finishAuthentication(shareTicket);
         setStatus(
           "Enter your Fotoro password to unlock photos on this device.",
         );
@@ -490,11 +506,24 @@ export default function CloudApp({
     return () => {alive = false;};
   }, [account, localPhotos, photos, publicDemo]);
   const chosen = photos.filter((p) => selected.has(p.manifest.photoId));
+  const openSharing = (items: Photo[] = []) => {setExchangePhotos([...items]); setExchangeVersion(version => version + 1); setExchange(true);};
+  const closeSharing = () => {setExchange(false); setExchangePhotos([]); onShareDone?.(); onIncomingDone?.();};
+  const priorIncoming = useRef(incoming);
+  useEffect(() => {
+    const previous = priorIncoming.current; priorIncoming.current = incoming;
+    if (previous && !incoming) {setExchange(false); setExchangePhotos([]);}
+    if (!active || !account || !incoming?.pending) return;
+    const session = requireVault(); incoming.bindInitialVault(session);
+    if (incoming.current(session)) openSharing();
+  }, [active, account, incoming]);
+  useEffect(() => {
+    if (active && account && sharePhotos?.length) openSharing(sharePhotos);
+  }, [active, account, sharePhotos]);
   return (
     <>
       <main className={"cloud-library" + (selecting ? " exchange-selection" : "")} inert={viewing || exchange || menu ? true : undefined}>
         <header>
-          <div className="brand"><p className="eyebrow">Saved photos{accountReference && " · " + accountReference}</p><h1>Fotoro</h1></div>
+          <div className="brand"><p className="eyebrow">Saved photos</p><h1>Fotoro</h1></div>
           <div className="header-actions">
           <button
             ref={backButton}
@@ -510,6 +539,8 @@ export default function CloudApp({
           >
             Back to photos
           </button>
+          {unlocked && !received && <button onClick={() => {setSelecting(!selecting); setSelected(new Set());}}>{selecting ? "Done" : "Select"}</button>}
+          {unlocked && <button onClick={() => openSharing()}>Shared</button>}
           {unlocked && (
             <button
               className="menu-button glass"
@@ -528,8 +559,10 @@ export default function CloudApp({
           )}
           </div>
         </header>
+        {incomingError && <p className="hint share-link-error" role="status">{incomingError}</p>}
         {!unlocked ? (
           <section className="unlock sync-onboarding">
+            {incoming?.pending && <p className="hint">{incoming.link.kind === "moment" ? "Enter the Fotoro password this photo invitation was sent to." : "Enter your Fotoro password to accept this contact."}</p>}
             <AccountAccess
               password={recovery}
               onPassword={setRecovery}
@@ -604,7 +637,7 @@ export default function CloudApp({
             )}
             {received && (
               <div className="received-bar">
-                <span>Received · explicit save required</span>
+                <span>Shared photos · open a photo to Save</span>
                 <button
                   onClick={() => {
                     setReceived(null);
@@ -673,9 +706,9 @@ export default function CloudApp({
               <button
                 id="share-selected"
                 className="share-button glass"
-                onClick={() => setExchange(true)}
+                onClick={() => openSharing(chosen)}
               >
-                Encrypted exchange · {selected.size}
+                Share {selected.size} {selected.size === 1 ? "photo" : "photos"}
               </button>
             )}
             <input
@@ -754,7 +787,7 @@ export default function CloudApp({
               >
                 Lock
               </button>
-              <div className="actions"><button onClick={() => {setExchange(true); setMenu(false);}}>Open encrypted exchanges</button><button onClick={() => {setSelecting(true); setMenu(false);}}>Choose photos for an exchange</button>{selecting && <button onClick={() => {setSelecting(false); setSelected(new Set());}}>Finish choosing photos</button>}</div>
+              <div className="actions"><button onClick={() => {openSharing(); setMenu(false);}}>Shared photos</button><button onClick={() => {setSelecting(true); setMenu(false);}}>Choose photos to Share</button></div>
             {annotationPending.length > 0 && <details open={annotationPending.some(edit => edit.conflict)}>
               <summary>Labels and photo text · {annotationPending.length} pending</summary>
               {annotationPending.map(edit => <div key={edit.photoId}>
@@ -814,12 +847,16 @@ export default function CloudApp({
         )}
       {active && exchange && unlocked && (
         <Exchange
-          selection={chosen}
-          onClose={() => setExchange(false)}
+          key={exchangeVersion}
+          selection={exchangePhotos}
+          incoming={incoming?.pending ? incoming : undefined}
+          onClose={closeSharing}
+          onRetryPassword={incoming?.pending ? () => {incoming.retryPassword(); setExchange(false); setExchangePhotos([]); lockVault();} : undefined}
           onRefresh={() => run(refresh)}
           onReceived={(items: Photo[], _grant: GrantV1) => {
             setReceived(items);
-            setExchange(false);
+            closeSharing();
+            setQuery(""); setCommittedMeaning(undefined);
             setSelected(new Set());
           }}
         />
@@ -829,6 +866,7 @@ export default function CloudApp({
           photos={shown}
           initial={viewer}
           onSaved={() => run(refresh)}
+          onShare={!received ? photo => {setViewer(null); openSharing([photo]);} : undefined}
           onLabels={!received && !publicDemo ? (photo, labels) => {void editLabels(photo, labels);} : undefined}
           onClose={() => setViewer(null)}
         />

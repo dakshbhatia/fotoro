@@ -3,6 +3,7 @@
 Native SwiftUI app, React web app, and Hono API using private R2 objects and D1.
 The default screen is a private local photo browser. The Ente tree at repository
 root remains a reference; the new app lives here. See [what we reuse](docs/foundation.md).
+The complete implementation and acceptance list is in [product work](docs/product-backlog.md).
 
 On iOS, Open Photos requests access and shows the last 10 days using PhotoKit and
 Apple's thumbnail cache. HEIC and Live Photo still previews use the system decoder.
@@ -13,7 +14,10 @@ exports the still original through the system share sheet.
 The native home suggests roughly 10% of viable recent photo groups from small
 on-device previews. Clarity, exposure, favorites and capture-date variety guide
 the picks; similar shots within a short verified capture window share a
-representative. All Photos and search still include the originals. Saved photos
+representative. All Photos and search still include the originals. Favorites,
+screenshots and location filters use the library's existing facts. All Photos can
+group by day or bounded capture-time moments; filters preserve reviewed selections.
+Saved photos
 opens the account library directly. Select → Save and the viewer's Save preserve
 the exact reviewed sources; an unlocked account starts that manual batch, and
 password entry completes the same Save if needed. Automatic sync is off.
@@ -26,7 +30,12 @@ work in the password field.
 
 Native search covers all permitted non-hidden still photos, including older photos
 outside the 10-day canvas. It indexes supplied labels, available metadata and
-English text using Vision on one bounded local preview at a time. Indexing does
+English text using Vision on one bounded local preview at a time. Local Vision
+classification adds conservative scene categories with separate “Inferred scene”
+evidence. Date searches include today, yesterday, last week and explicit date
+ranges, with calendar/timezone boundaries. Scene classification failures preserve
+text search; this is category matching, not unrestricted semantic search or named
+person recognition. Indexing does
 not download iCloud originals. Local search lives in a protected database excluded
 from device backup. Labels and completed recognized text attached to synced
 originals also travel encrypted through the account. Search choices and pins stay
@@ -85,6 +94,15 @@ Native browsing copies are JPEG thumbnails at 320 px and previews at 1600 px, qu
 82%; they never replace the original. Safari displays HEIC through those copies
 and downloads the untouched HEIC. Browser imports accept JPEG/PNG. Live Photo
 motion pairs and videos are visibly skipped by backup.
+
+Select saved photos → Share in Fotoro chooses an accepted contact. Public contact
+links replace account-card JSON; optional contact names are encrypted locally.
+Photo invitations open in the browser or app, with explicit identity acceptance
+after password entry. Native contact and invitation QR codes carry the same public
+links. Recipients can open previews, save verified independent copies and add their
+saved photos back. Senders can end access; copies already saved remain independent.
+No sharing action resumes unrelated pending uploads. Account, vault and contact-key
+changes cancel delayed work before it can publish or update a different catalog.
 
 The encrypted exchange also provides encrypted metadata,
 metadata search, password/passkey/device-approval protocols, explicit sharing,

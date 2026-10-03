@@ -4,17 +4,21 @@ import type {
   WrappedKeyV1,
   DeviceChallengeV1,
 } from "@fotoro/contracts";
-import {
-  ready,
-  unb64,
-  unwrapKey,
-  wrapKey,
-  sodium,
-  b64,
-  verifyPayload,
-  signPayload,
-} from "@fotoro/crypto";
-import { api } from "../exchange/api";
+type VaultCrypto = typeof import("./crypto-runtime");
+let cryptoRuntime: VaultCrypto | undefined;
+// Local browsing needs the session identity and lock events, but no crypto.
+// Unlock initializes the runtime before exposing any synchronous private APIs.
+async function loadCrypto(): Promise<VaultCrypto> {
+  const runtime = cryptoRuntime ?? await import("./crypto-runtime");
+  await runtime.ready;
+  cryptoRuntime = runtime;
+  return runtime;
+}
+function unlockedCrypto(): VaultCrypto {
+  requireVault();
+  if (!cryptoRuntime) throw new Error("VAULT_LOCKED");
+  return cryptoRuntime;
+}
 export type UnlockMethod =
   | { kind: "prf" }
   | { kind: "trustedDevice"; enrollmentId: string }
@@ -75,25 +79,34 @@ export function configureDevice(id: string) {
 export async function unlockVault(
   method: UnlockMethod,
 ): Promise<UnlockedVault> {
-  await ready;
-  if (!envelope) throw new Error("AUTHENTICATION_REQUIRED");
+  const target = envelope, token = generation;
+  const checkCurrent = () => {
+    if (envelope !== target || generation !== token)
+      throw new DOMException("Vault unlock cancelled", "AbortError");
+  };
+  const { unb64, unwrapKey, sodium, b64, verifyPayload, api } = await loadCrypto();
+  checkCurrent();
+  if (!target) throw new Error("AUTHENTICATION_REQUIRED");
   let bytes: Uint8Array;
   if (method.kind === "trustedDevice") {
     if (!device || device.id !== method.enrollmentId)
       throw new Error("DEVICE_APPROVAL_REQUIRED");
+    const pendingDevice = device;
     const result = await api<any>(
       "/v1/devices/enroll/" + device.id + "/complete",
       { version: 1, challenge: device.challenge.challenge },
     );
+    checkCurrent();
+    if (device !== pendingDevice) throw new DOMException("Device approval cancelled", "AbortError");
     const signed = result.signedPayload;
     if (
       signed.kind !== "device-approval" ||
-      signed.accountId !== envelope.accountCard.accountId
+      signed.accountId !== target.accountCard.accountId
     )
       throw new Error("INVALID_DEVICE_SIGNATURE");
     const proof = JSON.parse(
       new TextDecoder().decode(
-        verifyPayload(signed, unb64(envelope.accountCard.signingPublicKey)),
+        verifyPayload(signed, unb64(target.accountCard.signingPublicKey)),
       ),
     );
     if (
@@ -113,7 +126,7 @@ export async function unlockVault(
     device = undefined;
   } else {
     const kind = method.kind === "prf" ? "prf" : "recovery";
-    const wrapper = envelope.wrappers.find(
+    const wrapper = target.wrappers.find(
       (w) =>
         w.kind === kind &&
         (kind === "recovery" ? w.verified : w.credentialId === credentialId),
@@ -129,7 +142,7 @@ export async function unlockVault(
   }
   const parsed = JSON.parse(new TextDecoder().decode(bytes));
   bytes.fill(0);
-  const card = envelope.accountCard;
+  const card = target.accountCard;
   const vaultKey = unb64(parsed.vaultKey),
     boxSecretKey = unb64(parsed.boxSecretKey),
     signingSecretKey = unb64(parsed.signingSecretKey);
@@ -142,8 +155,7 @@ export async function unlockVault(
       card.signingPublicKey
   )
     throw new Error("BUNDLE_IDENTITY_MISMATCH");
-  lockVault();
-  active = {
+  const opened: UnlockedVault = {
     accountId: card.accountId,
     card,
     vaultKey,
@@ -155,6 +167,15 @@ export async function unlockVault(
       signingSecretKey.fill(0);
     },
   };
+  checkCurrent();
+  lockVault();
+  // Lock listeners run synchronously. An explicit lock/reconfiguration from a
+  // listener must win over this operation's normal internal lock notification.
+  if (generation !== token + 1 || envelope !== target) {
+    opened.dispose();
+    throw new DOMException("Vault unlock cancelled", "AbortError");
+  }
+  active = opened;
   return active;
 }
 export function lockVault() {
@@ -188,34 +209,52 @@ export function mediaURL(
   urls.set(key, { url, size: decodedBytes });
   return url;
 }
-export const encryptPrivate = (value: unknown): WrappedKeyV1 =>
-  wrapKey(
+export const encryptPrivate = (value: unknown): WrappedKeyV1 => {
+  const { wrapKey } = unlockedCrypto();
+  return wrapKey(
     new TextEncoder().encode(JSON.stringify(value)),
     requireVault().vaultKey,
   );
-export const decryptPrivate = <T>(value: WrappedKeyV1): T =>
-  JSON.parse(
+};
+export const decryptPrivate = <T>(value: WrappedKeyV1): T => {
+  const { unwrapKey } = unlockedCrypto();
+  return JSON.parse(
     new TextDecoder().decode(unwrapKey(value, requireVault().vaultKey)),
   );
+};
 export async function requestDeviceApproval() {
-  await ready;
+  const token = generation, target = envelope, session = active;
+  const checkCurrent = () => {
+    if (generation !== token || envelope !== target || active !== session)
+      throw new DOMException("Device approval cancelled", "AbortError");
+  };
+  const { sodium, b64, api } = await loadCrypto();
+  checkCurrent();
   const kp = sodium.crypto_box_keypair();
-  const result = await api<any>(
-    "/v1/devices/enroll",
-    {
-      version: 1,
-      deviceId: sessionDeviceId ?? crypto.randomUUID(),
-      boxPublicKey: b64(kp.publicKey),
-      origin: location.origin,
-    },
-    "DeviceChallengeV1",
-  );
-  device = { id: result.enrollmentId, ...kp, challenge: result };
-  return result;
+  try {
+    const result = await api<any>(
+      "/v1/devices/enroll",
+      {
+        version: 1,
+        deviceId: sessionDeviceId ?? crypto.randomUUID(),
+        boxPublicKey: b64(kp.publicKey),
+        origin: location.origin,
+      },
+      "DeviceChallengeV1",
+    );
+    checkCurrent();
+    device?.privateKey.fill(0);
+    device = { id: result.enrollmentId, ...kp, challenge: result };
+    return result;
+  } catch (error) {
+    kp.privateKey.fill(0);
+    throw error;
+  }
 }
 
 export async function approveDeviceChallenge(text: string) {
-  const v = requireVault();
+  const { sodium, b64, unb64, signPayload, api } = unlockedCrypto();
+  const v = requireVault(), token = generation;
   const challenge = JSON.parse(text);
   if (
     challenge.accountId !== v.accountId ||
@@ -241,9 +280,11 @@ export async function approveDeviceChallenge(text: string) {
     new TextEncoder().encode(JSON.stringify({ challenge, sealedBundle })),
     v.signingSecretKey,
   );
-  return api("/v1/devices/enroll/" + challenge.enrollmentId + "/approve", {
+  const result = await api("/v1/devices/enroll/" + challenge.enrollmentId + "/approve", {
     version: 1,
     sealedBundle,
     signedPayload,
   });
+  if (generation !== token || active !== v) throw new DOMException("Device approval cancelled", "AbortError");
+  return result;
 }

@@ -91,13 +91,16 @@ export async function readPhoto(
   const key =
     metadataKey ??
     unwrapKey(manifest.ownerWrappedMetadataKey, requireVault().vaultKey);
-  const plain = await representation(manifest.metadataRepresentation, key);
-  const metadata = validateWire<PhotoMetadataV1>(
-    "PhotoMetadataV1",
-    JSON.parse(new TextDecoder().decode(plain)),
-  );
-  plain.fill(0);
-  return { manifest, metadata, metadataKey: key, grantId };
+  let plain: Uint8Array | undefined;
+  try {
+    plain = await representation(manifest.metadataRepresentation, key);
+    const metadata = validateWire<PhotoMetadataV1>(
+      "PhotoMetadataV1",
+      JSON.parse(new TextDecoder().decode(plain)),
+    );
+    return { manifest, metadata, metadataKey: key, grantId };
+  } catch (error) {key.fill(0); throw error;}
+  finally {plain?.fill(0);}
 }
 export async function photoBytes(
   photo: Photo,
@@ -114,8 +117,10 @@ export async function photoBytes(
     rep.binding.kind === "original" &&
     (bytes.length !== photo.metadata.originalBytes ||
       digest(bytes) !== photo.metadata.originalSha256)
-  )
+  ) {
+    bytes.fill(0);
     throw new Error("ORIGINAL_DIGEST_MISMATCH");
+  }
   return bytes;
 }
 export async function applyChanges(

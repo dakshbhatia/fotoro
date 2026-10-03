@@ -2,7 +2,8 @@ import { useState, useEffect, useRef } from "react";
 import { photoBytes, type Photo } from "./catalog";
 import { mediaURL } from "../vault/vault";
 import { Icon } from "./icons";
-import { saveReceivedPhoto } from "../exchange/Exchange";
+import { saveReceivedPhoto } from "../exchange/share-service";
+import {readableShareError} from "../exchange/sharing";
 import {requireVault, type UnlockedVault} from "../vault/vault";
 import {sameVault} from "../vault/scope";
 import {canShareOriginal, downloadOriginal, OriginalShareAttempt} from "./system-share";
@@ -16,12 +17,14 @@ export function Viewer({
   onClose,
   onSaved,
   onLabels,
+  onShare,
 }: {
   photos: Photo[];
   initial: string;
   onClose: () => void;
   onSaved: () => void;
   onLabels?: (photo: Photo, labels: string[]) => void;
+  onShare?: (photo: Photo) => void;
 }) {
   const [selected, setSelected] = useState(initial),
     [url, setUrl] = useState(""),
@@ -102,12 +105,12 @@ export function Viewer({
     const session = requireVault();
     savingRef.current = true; setSaving(true); setStatus("Verifying original…");
     try {
-      await saveReceivedPhoto(photo.grantId, photo.manifest.photoId);
+      await saveReceivedPhoto(photo.grantId, photo.manifest.photoId, {current: () => authorized(photo, session)});
       if (mounted.current && sameVault(session)) {
-        if (currentPhoto.current === photo) setStatus("Saved · original digest verified");
+        if (currentPhoto.current === photo) setStatus("Saved to your photos");
         onSaved();
       }
-    } catch (error) {if (authorized(photo, session)) setStatus((error as Error).message);}
+    } catch (error) {if (authorized(photo, session)) setStatus(readableShareError(error));}
     finally {savingRef.current = false; if (mounted.current) setSaving(false);}
   };
   return (
@@ -168,18 +171,19 @@ export function Viewer({
           <Icon kind="previous" />
         </button>
         <button onClick={() => setZoom(!zoom)}>{zoom ? "Fit" : "Zoom"}</button>
+        {onShare && !photo.grantId && <button onClick={() => onShare(photo)}>Share</button>}
         <button
           disabled={preparingShare || sharing}
           onClick={() => void prepareShare()}
         >
-          {preparingShare ? "Preparing…" : sharing ? "Sharing…" : "Share"}
+          {preparingShare ? "Preparing…" : sharing ? "Sharing…" : onShare ? "Original" : "Share"}
         </button>
         {photo.grantId && (
           <button
             disabled={saving}
             onClick={() => void save()}
           >
-            {saving ? "Saving…" : "Save to library"}
+            {saving ? "Saving…" : "Save"}
           </button>
         )}
         <button

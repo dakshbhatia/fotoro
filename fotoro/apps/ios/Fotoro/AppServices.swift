@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import Nuke
 import Observation
 import Photos
@@ -13,6 +14,12 @@ extension NativeDiagnosticOutcome {
 struct PendingSave: Codable {
   var request: SaveRequestV1
   var local: LocalPhoto
+}
+
+private struct SharingOperationAccess {
+  let photo: PhotoAccountAccess
+  let cards: [String: AccountCardV1]
+  var account: String { photo.account }
 }
 
 enum PhotoPicksBackupPolicy {
@@ -658,6 +665,9 @@ enum ReviewedPhotosBackupPolicy {
     let catalog = store
     guard manifest.version == 1 else { throw FotoroError("Unsupported photo version") }
     let meta = try await api.request("/v1/objects/\(manifest.metadataRepresentation.objectId)")
+    try Task.checkCancellation()
+    guard vault.isUnlocked, vault.generation == generation, store === catalog,
+      session.accountId == authorizedAccount else { throw CancellationError() }
     let metadata = try Wire.decode(
       PhotoMetadataV1.self,
       crypto.decrypt(meta, key: key, representation: manifest.metadataRepresentation))
@@ -675,13 +685,15 @@ enum ReviewedPhotosBackupPolicy {
         throw FotoroError("Representation key missing")
       }
       let bytes = try await api.request("/v1/objects/\(rep.objectId)")
+      try Task.checkCancellation()
       let representationKey = try Data(b64: encoded)
       let plain = try await Task.detached {
         try CryptoAdapter().decrypt(bytes, key: representationKey, representation: rep)
       }.value
+      try Task.checkCancellation()
       guard vault.isUnlocked, vault.generation == generation, store === catalog,
         session.accountId == authorizedAccount
-      else { throw FotoroError("Vault locked during download") }
+      else { throw CancellationError() }
       if rep.binding.kind == "original" {
         guard plain.digest == metadata.originalSha256, plain.count == metadata.originalBytes else {
           throw FotoroError("Original digest mismatch")
@@ -1079,47 +1091,145 @@ enum ReviewedPhotosBackupPolicy {
       }
     #endif
   }
+  private func sharingAccess() throws -> SharingOperationAccess {
+    guard let access = photoAccountAccess else { throw FotoroError("Open Fotoro before sharing photos.") }
+    try Task.checkCancellation()
+    return SharingOperationAccess(photo: access, cards: session.pinnedCards)
+  }
+  private func requireSharingAccess(_ access: SharingOperationAccess) throws {
+    try Task.checkCancellation()
+    guard photoAccountAccess == access.photo, session.pinnedCards == access.cards else { throw CancellationError() }
+  }
+  private func requireGrant(_ actual: GrantV1, matches expected: GrantV1, account: String) throws {
+    guard actual.grantId == expected.grantId, actual.momentId == expected.momentId,
+      actual.ownerAccountId == expected.ownerAccountId,
+      actual.recipientAccountId == expected.recipientAccountId,
+      actual.role == expected.role,
+      [actual.ownerAccountId, actual.recipientAccountId].contains(account),
+      expected.version > 0, actual.version >= expected.version, actual.revokedAt == nil,
+      actual.expiresAt.map({ (Wire.parseDate($0) ?? .distantPast) > Date() }) ?? true else {
+      throw FotoroError("This shared moment is no longer available. Ask the sender for a new invitation.")
+    }
+  }
+  private func verifiedSharingCard(_ account: String, in detail: GrantDetailV1) throws -> AccountCardV1 {
+    guard detail.version == 1 else { throw FotoroError("This photo invitation needs a newer Fotoro version.") }
+    let trusted = try session.requireCard(account)
+    guard detail.cards.first(where: { $0.accountId == account }) == trusted else {
+      throw FotoroError("This person's Fotoro has changed. Open their new contact link before sharing.")
+    }
+    return trusted
+  }
+  func refreshSharedMoments() async throws {
+    let access = try sharingAccess()
+    let inbox: GrantInboxV1 = try await api.get("/v1/grants")
+    try requireSharingAccess(access)
+    guard inbox.version == 1 else { throw FotoroError("Shared photos need a newer Fotoro version.") }
+    grants = inbox.grants.filter { $0.ownerAccountId == access.account || $0.recipientAccountId == access.account }
+  }
+  func openMoment(_ invitation: FotoroMomentInvitation) async throws {
+    let access = try sharingAccess()
+    let detail: GrantDetailV1 = try await api.get("/v1/grants/\(invitation.grantId)")
+    try requireSharingAccess(access)
+    guard detail.version == 1, detail.grant.grantId == invitation.grantId,
+      detail.grant.ownerAccountId == invitation.senderCard.accountId,
+      detail.grant.recipientAccountId == access.account,
+      try session.requireCard(invitation.senderCard.accountId) == invitation.senderCard else {
+      throw FotoroError("This invitation is for another Fotoro. Open the password for the invited Fotoro.")
+    }
+    try await receive(detail.grant)
+  }
+  func acceptContact(_ card: AccountCardV1, name: String) throws {
+    let access = try sharingAccess()
+    guard card.accountId != access.account else { throw FotoroError("This is your own Fotoro contact link.") }
+    let value = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard value.count <= 80 else { throw FotoroError("Use a shorter contact name.") }
+    _ = try FotoroShareLinks.validatePublicAccountCard(card)
+    let secret = try Data(b64: vault.requireBundle().vaultKey)
+    let wrapped = try crypto.wrap(try Wire.encode(["accountId": card.accountId, "name": value]), key: secret)
+    let encoded = try Wire.encode(wrapped).b64
+    try store.database.write { db in
+      try db.execute(sql: "INSERT INTO state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        arguments: ["contact-name:" + card.accountId, encoded])
+    }
+    try session.pin(card)
+  }
+  func contactName(_ account: String) -> String {
+    guard let raw = try? store.database.read({ db in
+      try String.fetchOne(db, sql: "SELECT value FROM state WHERE key=?", arguments: ["contact-name:" + account])
+    }), let secret = try? Data(b64: vault.requireBundle().vaultKey),
+      let wrapped = try? Wire.decode(WrappedKeyV1.self, Data(b64: raw)),
+      let plain = try? crypto.unwrap(wrapped, key: secret),
+      let value = try? Wire.decode([String: String].self, plain), value["accountId"] == account,
+      let name = value["name"], !name.isEmpty else { return "Contact " + account.suffix(8) }
+    return name
+  }
+  func endSharedAccess(_ grant: GrantV1) async throws {
+    let access = try sharingAccess()
+    guard grant.ownerAccountId == access.account else { throw FotoroError("Only the sender can end access.") }
+    _ = try await api.request("/v1/grants/\(grant.grantId)", method: "DELETE")
+    try requireSharingAccess(access)
+    try await refreshSharedMoments()
+  }
   func share(_ selected: [LocalPhoto], recipient: AccountCardV1, temporary: Bool) async throws
     -> GrantV1
   {
     guard !selected.isEmpty, selected.count <= 100 else {
       throw FotoroError("Choose between 1 and 100 photos")
     }
-    try await resumeTransfers()
+    let access = try sharingAccess()
     try reload()
     let bundle = try vault.requireBundle()
+    guard recipient.accountId != access.account,
+      try session.requireCard(recipient.accountId) == recipient else {
+      throw FotoroError("Choose a contact you've accepted in Fotoro.")
+    }
+    let current = try selected.map { p in
+      guard let photo = try consumerSavedPhoto(p.id), photo.metadata == p.metadata,
+        photo.manifest == p.manifest,
+        ["committed", "saved"].contains(photo.transferState)
+      else { throw FotoroError("Save these photos before sharing them in Fotoro.") }
+      return photo
+    }
     let moment = Wire.id()
     let grant: GrantV1 = try await api.post(
       "/v1/moments/\(moment)/grants/options",
       GrantOptions(
         recipientAccountId: recipient.accountId, role: "contributor",
         access: temporary ? "temporary" : "ongoing"))
-    let current = try selected.map { p in
-      guard let photo = photos.first(where: { $0.id == p.id }),
-        ["committed", "saved"].contains(photo.transferState)
-      else { throw FotoroError("Upload must commit before sharing") }
-      return photo
-    }
+    try requireSharingAccess(access)
+    guard grant.ownerAccountId == access.account, grant.recipientAccountId == recipient.accountId,
+      grant.momentId == moment else { throw FotoroError("Invitation does not match the chosen contact.") }
     let envelopes = try current.map { photo in
       try crypto.share(
         crypto.unwrap(photo.manifest.ownerWrappedMetadataKey, key: Data(b64: bundle.vaultKey)),
-        grantId: grant.grantId, photoId: photo.photoId, sender: session.accountId!,
+        grantId: grant.grantId, photoId: photo.photoId, sender: access.account,
         recipient: recipient, signingKey: Data(b64: bundle.signingSecretKey))
     }
     let signed = try crypto.sign(
-      GrantBody(grant: grant, envelopes: envelopes), kind: "grant", accountId: session.accountId!,
+      GrantBody(grant: grant, envelopes: envelopes), kind: "grant", accountId: access.account,
       secret: Data(b64: bundle.signingSecretKey))
-    return try await api.post(
+    try requireSharingAccess(access)
+    let created: GrantV1 = try await api.post(
       "/v1/moments/\(moment)/grants",
       CreateGrantV1(grant: grant, envelopes: envelopes, signedPayload: signed))
+    try requireSharingAccess(access)
+    try requireGrant(created, matches: grant, account: access.account)
+    return created
   }
   func receive(_ grant: GrantV1) async throws {
+    let access = try sharingAccess()
     let detail: GrantDetailV1 = try await api.get("/v1/grants/\(grant.grantId)")
+    try requireSharingAccess(access)
+    guard detail.version == 1 else { throw FotoroError("This photo invitation needs a newer Fotoro version.") }
+    try requireGrant(detail.grant, matches: grant, account: access.account)
     let bundle = try vault.requireBundle()
-    let recipient = try session.requireCard(session.accountId!)
+    let recipient = try session.requireCard(access.account)
     var loaded: [LocalPhoto] = []
     for signed in detail.manifests {
-      let sender = try session.requireCard(signed.accountId)
+      guard [detail.grant.ownerAccountId, detail.grant.recipientAccountId].contains(signed.accountId) else {
+        throw FotoroError("This photo does not belong to this shared moment.")
+      }
+      let sender = try verifiedSharingCard(signed.accountId, in: detail)
       let manifest = try Wire.decode(
         PhotoManifestV1.self, crypto.verify(signed, card: sender, kind: "photo-manifest"))
       guard manifest.ownerAccountId == sender.accountId,
@@ -1131,23 +1241,31 @@ enum ReviewedPhotosBackupPolicy {
         e, grantId: grant.grantId, photoId: manifest.photoId, sender: sender, recipient: recipient,
         boxSecret: Data(b64: bundle.boxSecretKey))
       loaded.append(try await load(manifest, key: key))
+      try requireSharingAccess(access)
+    }
+    if grant.recipientAccountId == access.account {
+      _ = try await api.request("/v1/grants/\(grant.grantId)/viewed", method: "POST")
+      try requireSharingAccess(access)
     }
     received = loaded
     selectedGrant = detail.grant
-    if grant.recipientAccountId == session.accountId {
-      _ = try await api.request("/v1/grants/\(grant.grantId)/viewed", method: "POST")
-    }
   }
   func save(_ photo: LocalPhoto) async throws {
+    let access = try sharingAccess()
     guard let grant = selectedGrant else { throw FotoroError("Select a shared moment") }
+    guard received.contains(where: { $0.id == photo.id && $0.manifest == photo.manifest && $0.metadata == photo.metadata })
+    else { throw FotoroError("Open this shared photo again before saving.") }
     let operationKey = "save-" + grant.grantId + "-" + photo.photoId
     if let pending = try store.existingOperation(operationKey, as: PendingSave.self) {
       try await finishSave(pending)
       return
     }
     let detail: GrantDetailV1 = try await api.get("/v1/grants/\(grant.grantId)")
+    try requireSharingAccess(access)
+    guard detail.version == 1 else { throw FotoroError("This photo invitation needs a newer Fotoro version.") }
+    try requireGrant(detail.grant, matches: grant, account: access.account)
     let bundle = try vault.requireBundle()
-    let recipient = try session.requireCard(session.accountId!)
+    let recipient = try session.requireCard(access.account)
     guard
       let e = detail.envelopes.first(where: {
         $0.photoId == photo.photoId && $0.recipientAccountId == recipient.accountId
@@ -1155,9 +1273,19 @@ enum ReviewedPhotosBackupPolicy {
     else { throw FotoroError("Missing save envelope") }
     let key = try crypto.openShare(
       e, grantId: grant.grantId, photoId: photo.photoId,
-      sender: session.requireCard(e.senderAccountId), recipient: recipient,
+      sender: verifiedSharingCard(e.senderAccountId, in: detail), recipient: recipient,
       boxSecret: Data(b64: bundle.boxSecretKey))
+    guard [grant.ownerAccountId, grant.recipientAccountId].contains(e.senderAccountId),
+      let source = detail.manifests.first(where: { signed in
+        guard signed.accountId == e.senderAccountId,
+          let decoded = try? Wire.decode(PhotoManifestV1.self,
+            crypto.verify(signed, card: verifiedSharingCard(e.senderAccountId, in: detail), kind: "photo-manifest")) else { return false }
+        return decoded == photo.manifest
+      }), source.accountId == photo.manifest.ownerAccountId else {
+      throw FotoroError("This shared photo has changed. Open the invitation again.")
+    }
     let verifiedOriginal = try await load(photo.manifest, key: key, original: true)
+    try requireSharingAccess(access)
     guard let original = verifiedOriginal.originalURL,
       try Data(contentsOf: original).digest == photo.metadata.originalSha256
     else { throw FotoroError("Verify original before saving") }
@@ -1173,7 +1301,7 @@ enum ReviewedPhotosBackupPolicy {
         operationId: Wire.id(), photoId: manifest.photoId, sourceGrantId: grant.grantId,
         sourcePhotoId: photo.photoId, manifest: manifest, signedPayload: signed)
       return PendingSave(
-        request: SaveRequestV1(expectedGrantVersion: grant.version, save: save),
+        request: SaveRequestV1(expectedGrantVersion: detail.grant.version, save: save),
         local: verifiedOriginal)
     }
     try await finishSave(input)
@@ -1184,38 +1312,53 @@ enum ReviewedPhotosBackupPolicy {
     }
   }
   private func finishSave(_ pending: PendingSave) async throws {
+    let access = try sharingAccess()
+    let catalog = store
+    guard pending.request.save.manifest.ownerAccountId == access.account else { throw CancellationError() }
     _ = try vault.requireBundle()
     let saved: SavedPhotoV1 = try await api.post("/v1/saves", pending.request)
+    try requireSharingAccess(access)
+    let manifest = try Wire.decode(PhotoManifestV1.self,
+      crypto.verify(saved.signedPayload, card: session.requireCard(access.account), kind: "photo-manifest"))
+    guard saved.version == 1, saved.operationId == pending.request.save.operationId,
+      saved.photoId == pending.request.save.photoId,
+      saved.sourceGrantId == pending.request.save.sourceGrantId,
+      saved.sourcePhotoId == pending.request.save.sourcePhotoId,
+      saved.manifest == pending.request.save.manifest, manifest == saved.manifest else {
+      throw FotoroError("The saved-photo receipt could not be verified. Try again.")
+    }
     var local = pending.local
     local.photoId = saved.photoId
     local.manifest = saved.manifest
     local.transferState = "saved"
-    try store.put(local)
+    try catalog.put(local)
     try reload()
   }
   func contribute(_ photos: [LocalPhoto]) async throws {
-    guard let grant = selectedGrant, grant.role == "contributor", photos.count <= 100 else {
+    guard let grant = selectedGrant, grant.role == "contributor", !photos.isEmpty, photos.count <= 100 else {
       throw FotoroError("An active contributor grant is required")
     }
-    try await resumeTransfers()
+    let access = try sharingAccess()
     try reload()
     let bundle = try vault.requireBundle()
-    let recipient = try session.requireCard(grant.ownerAccountId)
+    let recipientID = grant.ownerAccountId == access.account ? grant.recipientAccountId : grant.ownerAccountId
+    let recipient = try session.requireCard(recipientID)
     let committed = try photos.map { selected in
-      guard let photo = self.photos.first(where: { $0.id == selected.id }),
+      guard let photo = try consumerSavedPhoto(selected.id), photo.metadata == selected.metadata,
+        photo.manifest == selected.manifest,
         ["committed", "saved"].contains(photo.transferState)
       else { throw FotoroError("Upload must commit before contribution") }
       return photo
     }
     let manifests = try committed.map { photo in
       try crypto.sign(
-        photo.manifest, kind: "photo-manifest", accountId: session.accountId!,
+        photo.manifest, kind: "photo-manifest", accountId: access.account,
         secret: Data(b64: bundle.signingSecretKey))
     }
     let envelopes = try committed.map { photo in
       try crypto.share(
         crypto.unwrap(photo.manifest.ownerWrappedMetadataKey, key: Data(b64: bundle.vaultKey)),
-        grantId: grant.grantId, photoId: photo.photoId, sender: session.accountId!,
+        grantId: grant.grantId, photoId: photo.photoId, sender: access.account,
         recipient: recipient, signingKey: Data(b64: bundle.signingSecretKey))
     }
     let input: ContributionV1 = try store.operation(
@@ -1227,6 +1370,7 @@ enum ReviewedPhotosBackupPolicy {
     }
     let _: ContributionResult = try await api.post(
       "/v1/moments/\(grant.momentId)/contributions", input)
+    try requireSharingAccess(access)
   }
   @discardableResult
   func run(phase: NativeDiagnosticPhase? = nil, _ action: @escaping @MainActor () async throws -> Void) -> Task<Void, Never>? {
@@ -1254,6 +1398,7 @@ enum ReviewedPhotosBackupPolicy {
       } catch {
         outcome = .failure(for: error, taskCancelled: Task.isCancelled)
         passkeyError = error as? NativePasskeyError
+        if outcome == .cancelled { return }
         recordConsumerSyncFailure(error)
         self.error = error.localizedDescription
       }

@@ -7,7 +7,8 @@
     ".": "./src/models.ts",
     "./validate": "./src/validate.ts",
     "./schema": "./schema/contract-v1.schema.json",
-    "./auth": "./src/auth.ts"
+    "./auth": "./src/auth.ts",
+    "./share-links": "./src/share-links.ts"
   },
   "dependencies": {
     "ajv": "8.18.0",

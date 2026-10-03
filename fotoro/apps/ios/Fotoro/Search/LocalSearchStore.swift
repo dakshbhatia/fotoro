@@ -26,7 +26,7 @@ import UIKit
   @ObservationIgnored private var sessionID = UUID().uuidString
   @ObservationIgnored private let images = PHImageManager()
   @ObservationIgnored private let processor = VisionTextProcessor()
-  @ObservationIgnored private var imageRequest: PHImageRequestID?
+  @ObservationIgnored private var imageRequest: SearchImageRequest?
 
   static func defaultIndexRoot(in directory: URL) -> URL {
     #if FOTORO_LOCAL_PREVIEW
@@ -77,7 +77,8 @@ import UIKit
     }
     refreshTask?.cancel()
     queryTask?.cancel()
-    if let imageRequest { images.cancelImageRequest(imageRequest) }
+    imageRequest?.cancel()
+    imageRequest = nil
     indexing = false
   }
   func refresh(status: PHAuthorizationStatus, retryFailedOCR: Bool = true) {
@@ -166,7 +167,7 @@ import UIKit
       completePermittedSnapshotRefresh(photos: scanned.photos)
       try onSnapshotReady?()
       // Snapshot the retry list once: another Vision failure waits for an explicit/foreground refresh.
-      let pending = try await Task.detached { try localIndex.pendingRecords(retryFailed: retryFailedOCR) }.value
+      let pending = try await Task.detached { try localIndex.pendingAnalysisRecords(retryFailed: retryFailedOCR) }.value
       for record in pending {
         try Task.checkCancellation()
         guard token == work.generation, let photo = assets[record.id] else { break }
@@ -175,29 +176,52 @@ import UIKit
         guard token == work.generation, assets[record.id] != nil,
           RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite))
         else { break }
-        var result: SearchOCRResult? = nil
-        var state: SearchOCRStatus = .unavailable
-        if let preview {
-          do {
-            result = try await processor.recognize(preview)
-            state = .complete
-          } catch is CancellationError { throw CancellationError() } catch {
-            result = nil
-            state = .failed
+        let needsOCR = record.ocrStatus == .pending || record.ocrStatus == .unavailable
+          || retryFailedOCR && record.ocrStatus == .failed
+        let needsVisual = record.visualStatus == .pending || record.visualStatus == .unavailable
+          || retryFailedOCR && record.visualStatus == .failed
+        if needsVisual {
+          var result: SearchVisualResult?
+          var state: SearchVisualStatus = .unavailable
+          if let preview {
+            do { result = try await processor.classify(preview); state = .complete }
+            catch is CancellationError { throw CancellationError() }
+            catch {
+              #if targetEnvironment(simulator)
+                state = VisionTextProcessor.isUnsupportedSimulatorClassifier(error, isSimulator: true)
+                  ? .unavailable : .failed
+              #else
+                state = .failed
+              #endif
+            }
           }
-        } else {
-          result = nil
-          state = .unavailable
+          guard token == work.generation, !Task.isCancelled, assets[record.id] != nil else { break }
+          let visualResult = result
+          let visualState = state
+          _ = try await Task.detached {
+            try localIndex.applyVisual(visualResult, status: visualState, photoID: record.id,
+              revision: record.revision, generation: token)
+          }.value
+          guard token == work.generation, !Task.isCancelled else { break }
+          updateQuery(query)
         }
-        guard token == work.generation, !Task.isCancelled, assets[record.id] != nil else { break }
-        // Revision is checked inside the write transaction; removed/edited records cannot be recreated.
-        let ocrResult = result
-        let ocrState = state
-        _ = try await Task.detached {
-          try localIndex.applyOCR(
-            ocrResult, status: ocrState, photoID: record.id, revision: record.revision,
-            generation: token)
-        }.value
+        if needsOCR {
+          var result: SearchOCRResult?
+          var state: SearchOCRStatus = .unavailable
+          if let preview {
+            do { result = try await processor.recognize(preview); state = .complete }
+            catch is CancellationError { throw CancellationError() }
+            catch { state = .failed }
+          }
+          guard token == work.generation, !Task.isCancelled, assets[record.id] != nil else { break }
+          // Both writes verify the revision and permitted generation inside the transaction.
+          let ocrResult = result
+          let ocrState = state
+          _ = try await Task.detached {
+            try localIndex.applyOCR(ocrResult, status: ocrState, photoID: record.id,
+              revision: record.revision, generation: token)
+          }.value
+        }
         guard token == work.generation, !Task.isCancelled else { break }
         if let current = try localIndex.record(record.id), current.revision == record.revision {
           try onRecordChanged?(current, false)
@@ -260,22 +284,26 @@ import UIKit
     options.isNetworkAccessAllowed = false
     options.deliveryMode = .highQualityFormat
     options.resizeMode = .exact
-    options.version = .original
-    return await withCheckedContinuation { continuation in
-      imageRequest = images.requestImage(
-        for: asset, targetSize: CGSize(width: 1600, height: 1600), contentMode: .aspectFit,
-        options: options
-      ) { image, info in
-        let cancelled = (info?[PHImageCancelledKey] as? Bool) == true
-        guard !cancelled, let image, let cg = image.cgImage else {
-          continuation.resume(returning: nil)
-          return
+    options.version = .current
+    let request = SearchImageRequest(manager: images)
+    imageRequest = request
+    let preview = await withTaskCancellationHandler {
+      await withCheckedContinuation { continuation in
+        request.start(continuation)
+        let id = images.requestImage(for: asset, targetSize: CGSize(width: 1600, height: 1600),
+          contentMode: .aspectFit, options: options) { image, info in
+          guard (info?[PHImageResultIsDegradedKey] as? Bool) != true else { return }
+          guard (info?[PHImageCancelledKey] as? Bool) != true, let image, let cg = image.cgImage else {
+            request.complete(nil)
+            return
+          }
+          request.complete(SearchPreview(image: cg, orientation: Self.orientation(image.imageOrientation)))
         }
-        continuation.resume(
-          returning: SearchPreview(image: cg, orientation: Self.orientation(image.imageOrientation))
-        )
+        request.setID(id)
       }
-    }
+    } onCancel: { request.cancel() }
+    if imageRequest === request { imageRequest = nil }
+    return preview
   }
   private nonisolated static func orientation(_ value: UIImage.Orientation)
     -> CGImagePropertyOrientation
@@ -379,20 +407,20 @@ import UIKit
   func accept(_ meaning: SearchMeaning) {
     guard let index else { return }
     do {
-      try index.acceptMeaning(meaning.id, sessionID: sessionID, now: Date())
+      try index.acceptMeaning(meaning.id, scope: response.scope, sessionID: sessionID, now: Date())
       acceptedMeaningID = meaning.id
       updateQuery(query)
     } catch { self.error = error.localizedDescription }
   }
   func confirm(_ photoID: String, meaningID: String? = nil) {
     guard let index, let meaning = meaningID ?? response.meaning?.id else { return }
-    do { try index.confirmUse(meaning, photoID: photoID, sessionID: sessionID, now: Date()) } catch
+    do { try index.confirmUse(meaning, photoID: photoID, scope: response.scope, sessionID: sessionID, now: Date()) } catch
     { self.error = error.localizedDescription }
   }
   func pin(_ photoID: String) {
     guard let index, let meaning = response.meaning else { return }
     do {
-      try index.pinRepresentative(meaning.id, photoID: photoID)
+      try index.pinRepresentative(meaning.id, photoID: photoID, scope: response.scope)
       updateQuery(query)
     } catch { self.error = error.localizedDescription }
   }
@@ -430,5 +458,51 @@ import UIKit
       self.error = error.localizedDescription
       return false
     }
+  }
+}
+
+// PhotoKit can finish or cancel around the same time as a refresh. Resume the
+// continuation exactly once, including cancellation before request registration.
+private final class SearchImageRequest: @unchecked Sendable {
+  private let manager: PHImageManager
+  private let lock = NSLock()
+  private var id: PHImageRequestID?
+  private var continuation: CheckedContinuation<SearchPreview?, Never>?
+  private var finished = false
+  private var cancelled = false
+  init(manager: PHImageManager) { self.manager = manager }
+  func start(_ continuation: CheckedContinuation<SearchPreview?, Never>) {
+    lock.lock()
+    let alreadyFinished = finished
+    if !alreadyFinished { self.continuation = continuation }
+    lock.unlock()
+    if alreadyFinished { continuation.resume(returning: nil) }
+  }
+  func setID(_ id: PHImageRequestID) {
+    lock.lock()
+    self.id = id
+    let shouldCancel = cancelled
+    lock.unlock()
+    if shouldCancel { manager.cancelImageRequest(id) }
+  }
+  func complete(_ preview: SearchPreview?) {
+    lock.lock()
+    guard !finished else { lock.unlock(); return }
+    finished = true
+    let pending = continuation
+    continuation = nil
+    lock.unlock()
+    pending?.resume(returning: preview)
+  }
+  func cancel() {
+    lock.lock()
+    cancelled = true
+    let requestID = id
+    let pending = finished ? nil : continuation
+    finished = true
+    continuation = nil
+    lock.unlock()
+    pending?.resume(returning: nil)
+    if let requestID { manager.cancelImageRequest(requestID) }
   }
 }

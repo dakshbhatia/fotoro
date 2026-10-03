@@ -24,20 +24,28 @@ A Worker preview with a different RP creates different passkey credentials. Do n
 
 ## Current state
 
-Worker `3c2a139f-59d4-4c66-804b-e9c2946a00a8`, tagged
-`save-handoff-20261002`, is read back at 100%. The selection's explicit Save
-continues through password entry once the current account opens. Saved photos
-opens read-only; legacy passkeys stay in collapsed Settings.
+Worker `dd17d11a-ea35-4525-94b0-c162ccc64a78`, tagged
+`simple-moments-20261002`, is read back at 100% in deployment
+`4758c311-c964-419e-994a-6b95d7c31a74`. Saved photos opens read-only;
+chosen Save continues through one password entry. Sharing uses accepted
+contacts and public invitations, with explicit recipient Save and selected-photo
+contributions. Public contact/moment links are included in the exact signed
+Apple association alongside passkeys. The preceding Worker
+`3c2a139f-59d4-4c66-804b-e9c2946a00a8` remains available for rollback.
 Uploads and annotation writes still require an explicit Save or Continue.
 Bounded failure fields and stored Worker logs remain enabled. Production D1/R2
 bindings and five migrations are unchanged. Canonical API and exact signed
 association checks pass.
 
-The handoff passed 193 full-app, 50 local-preview and 189 web tests, core checks,
-typechecks and the production web build. Live 390×844 browser QA verifies a
-public local image's Save opens one password field, Back preserves the selection,
-and the Save target is 44 px tall without horizontal overflow.
-Development-signed Release 0.1.0 (14) passes strict signature and exact production
+The current source passes 231 full-app, 77 local-preview, 217 web, 53 API,
+19 core and 28 release-metadata tests, typechecks and the production web build.
+Each native suite explicitly skips one Vision integration test because the iOS 27
+simulator cannot create its inference context. Seven sharing-safety tests also
+pass with task-cancellation, account and trust-change cases. Public localhost
+QA verifies contact acceptance, wrong-account retry, viewing and manual Save;
+320 px and 390 px layouts have no horizontal overflow. Initial static JavaScript
+is 326,093 bytes, 80.05% smaller than the preceding measured build.
+Development-signed Release 0.1.0 (15) passes strict signature and exact production
 association checks without a local-preview encryption exemption. It is ready but
 not installed because the paired phone is disconnected. CoreDevice previously
 reported successful build 13 installation; its launch/version readback remains
@@ -135,7 +143,8 @@ The service now serves `/.well-known/apple-app-site-association` when
 entitlement from the signed build. Multiple identifiers are comma-separated.
 Missing or invalid configuration returns an uncached 503; the route does not
 fall through to the web app. It lists `webcredentials.apps` for passkeys.
-Universal-link handling remains unimplemented. See
+Universal-link handling was unimplemented at that earlier checkpoint. The current
+contact/moment links are implemented; physical acceptance remains open. See
 [Apple's associated domains documentation](https://developer.apple.com/documentation/xcode/supporting-associated-domains).
 Wrangler OAuth is authorized and the production service is live at
 `https://fotoro.cloud`. The separate local Photos preview is in internal TestFlight.

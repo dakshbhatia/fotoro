@@ -91,6 +91,7 @@ struct RecentPhotoViewer: View {
   @State private var selected = ""
   @State private var zoom = PhotoViewerZoom()
   @State private var details = false
+  @State private var controlsVisible = true
   @Environment(\.dismiss) private var dismiss
   init(store: RecentPhotosStore, photos: [RecentPhoto], initialID: String,
     search: LocalSearchStore? = nil, save: ((RecentPhoto) -> Void)? = nil,
@@ -125,7 +126,8 @@ struct RecentPhotoViewer: View {
             MagnifyGesture().onChanged { zoom.change($0.magnification) }
               .onEnded { zoom.settle($0.magnification) }
           )
-          .onTapGesture(count: 2) { zoom.toggle() }.tag(photo.id)
+          .onTapGesture(count: 2) { zoom.toggle() }
+          .onTapGesture { controlsVisible.toggle() }.tag(photo.id)
         }
       }.tabViewStyle(.page(indexDisplayMode: .never)).background(.black)
         .onChange(of: selected) { zoom.reset() }
@@ -147,6 +149,7 @@ struct RecentPhotoViewer: View {
             }
           }
         }
+        .toolbar(controlsVisible ? .visible : .hidden, for: .navigationBar, .bottomBar)
         .sheet(isPresented: $details) {
           if let current {
             LocalPhotoDetails(photo: current, search: search)
@@ -177,6 +180,7 @@ private struct PhotosAccountPresentation: Identifiable {
   let id = UUID()
   let services: AppServices
   let selection: [RecentPhotoSource]?
+  var incoming: FotoroShareLink? = nil
 }
 #endif
 
@@ -211,6 +215,8 @@ struct RecentPhotosView: View {
   @State private var selectedPhotos: [String: SelectedRecentPhoto] = [:]
   @State private var selecting = false
   @State private var allPhotos = false
+  @State private var browseFilter = PhotoBrowseFilter.all
+  @State private var groupMoments = false
   @State private var viewer: RecentPhotoViewerPresentation?
   @State private var pendingShare: RecentPhoto?
   @State private var shareTask: Task<Void, Never>?
@@ -223,7 +229,21 @@ struct RecentPhotosView: View {
   @State private var settings = false
   @Environment(\.scenePhase) private var scenePhase
 
-  private var homePhotos: [RecentPhoto] { allPhotos ? store.photos : store.pickedPhotos }
+  private var baseHomePhotos: [RecentPhoto] { allPhotos ? store.photos : store.pickedPhotos }
+  private var homeGroups: [PhotoBrowseGroup] {
+    PhotoBrowsing.groups(baseHomePhotos.map { photo in
+      PhotoBrowseItem(source: RecentPhotoSource(photo), facts: RecentPhotoFacts(
+        capturedAt: photo.capturedAt, favorite: photo.isFavorite, screenshot: photo.isScreenshot,
+        livePhoto: photo.isLivePhoto, location: photo.location))
+    }, filter: browseFilter, grouping: groupMoments ? .moments : .days)
+  }
+  private var homePhotos: [RecentPhoto] {
+    let current = Dictionary(baseHomePhotos.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+    return homeGroups.flatMap(\.sources).compactMap { source in
+      guard let photo = current[source.id], photo.sourceRevision == source.revision else { return nil }
+      return photo
+    }
+  }
   private var selected: Set<String> { Set(selectedPhotos.keys) }
   private var visible: [RecentPhoto] {
 #if FOTORO_LOCAL_PREVIEW
@@ -266,7 +286,17 @@ struct RecentPhotosView: View {
         if let services { PhotoViewer(services: services, initialID: presentation.initial.id, displayedPhotos: presentation.photos) }
       }
       .sheet(item: $backupAccount) {
-        LibraryView(services: $0.services, saveSelection: $0.selection)
+        LibraryView(services: $0.services, saveSelection: $0.selection, incomingLink: $0.incoming)
+      }
+      .onOpenURL { url in
+        do {
+          let incoming = try FotoroShareLinks.parse(url, expectedOrigin: services?.api.origin ?? FotoroShareLinks.origin)
+          if services == nil { services = try AppServices() }
+          services?.bindLocalSearch(search); services?.bindRecentPhotos(store)
+          queryFocused = false; pendingShare = nil; shareTask?.cancel(); cleanupShare()
+          settings = false; viewer = nil; savedViewer = nil
+          if let services { backupAccount = PhotosAccountPresentation(services: services, selection: nil, incoming: incoming) }
+        } catch { store.error = error.localizedDescription }
       }
       .task(id: searchTaskID) { await updateSearch() }
       .onChange(of: services?.consumerCatalogGeneration) { validateSavedPresentation() }
@@ -402,6 +432,9 @@ struct RecentPhotosView: View {
           gallery
           if store.photos.isEmpty {
             ContentUnavailableView("No recent photos", systemImage: "photo", description: Text("Search to find older photos, too."))
+          } else if browseFilter != .all, homePhotos.isEmpty {
+            ContentUnavailableView("No matching photos", systemImage: "line.3.horizontal.decrease",
+              description: Text("Choose All to see your recent photos."))
           } else if !allPhotos, store.picksSnapshot != nil, homePhotos.isEmpty {
             ContentUnavailableView("No picks yet", systemImage: "photo", description: Text("Open All Photos to browse every recent photo you’ve allowed. Some previews may be unavailable on this device."))
           }
@@ -421,19 +454,29 @@ struct RecentPhotosView: View {
         Spacer()
         Button(allPhotos ? "Your picks" : "All Photos") {
           allPhotos.toggle()
-          selecting = false
-          selectedPhotos = [:]
         }.font(.subheadline).frame(minHeight: 44)
       }
       HStack {
         Text("Last 10 days").foregroundStyle(.secondary)
         Spacer()
         if allPhotos {
-          Text("\(store.photos.count) \(store.photos.count == 1 ? "photo" : "photos")").foregroundStyle(.secondary)
+          Text("\(homePhotos.count) \(homePhotos.count == 1 ? "photo" : "photos")").foregroundStyle(.secondary)
         } else if store.picksSnapshot != nil {
-          Text("\(store.pickedPhotos.count) \(store.pickedPhotos.count == 1 ? "pick" : "picks")").foregroundStyle(.secondary)
+          Text("\(homePhotos.count) \(homePhotos.count == 1 ? "pick" : "picks")").foregroundStyle(.secondary)
         }
       }.font(.subheadline)
+      Menu {
+        Picker("Show", selection: $browseFilter) {
+          Text("All").tag(PhotoBrowseFilter.all)
+          Text("Favorites").tag(PhotoBrowseFilter.favorites)
+          Text("Screenshots").tag(PhotoBrowseFilter.screenshots)
+          Text("With a location").tag(PhotoBrowseFilter.withLocation)
+        }
+        if allPhotos { Toggle("Group by moment", isOn: $groupMoments) }
+      } label: {
+        Label(browseFilter == .all ? "Filter" : browseFilter == .favorites ? "Favorites" : browseFilter == .screenshots ? "Screenshots" : "With a location",
+          systemImage: "line.3.horizontal.decrease")
+      }.frame(minHeight: 44).accessibilityIdentifier("gallery.filter")
       if !allPhotos, store.picks.analyzing {
         ProgressView(value: Double(store.picks.completed), total: Double(max(1, store.picks.total)))
         Text("Finding your picks · \(store.picks.completed) of \(store.picks.total)")
@@ -445,11 +488,26 @@ struct RecentPhotosView: View {
     }.padding(.horizontal).padding(.bottom, 14)
   }
   private var gallery: some View {
-    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: allPhotos ? 3 : 2), spacing: 3) {
-      ForEach(homePhotos) { photo in
+    let current = Dictionary(baseHomePhotos.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+    return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: allPhotos ? 3 : 2), spacing: 3) {
+      ForEach(homeGroups) { group in
+        Section {
+          ForEach(group.sources, id: \.id) { source in
+            if let photo = current[source.id], photo.sourceRevision == source.revision {
         RecentPhotoCell(photo: photo, store: store, selected: selected.contains(photo.id), open: {
           if selecting { toggleSelection(photo) } else { openViewer(photo) }
         }, toggle: { toggleSelection(photo) })
+            }
+          }
+        } header: {
+          if allPhotos {
+            HStack {
+              Text(group.start?.formatted(date: .abbreviated, time: .omitted) ?? "Date unavailable")
+              if groupMoments, let start = group.start { Text(start.formatted(date: .omitted, time: .shortened)).foregroundStyle(.secondary) }
+              Spacer()
+            }.font(.subheadline).padding(.horizontal).padding(.vertical, 12)
+          }
+        }
       }
     }
   }
