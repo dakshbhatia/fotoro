@@ -495,6 +495,37 @@ extension ConsumerCoreTests {
       XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" })
     }
   }
+  @MainActor func testCancelledInitialSavedReadReopensSameBindingWithoutWrites() async throws {
+    for interruption in ["scope", "query"] {
+      let gate = SavedLibraryRequestGate(started: expectation(description: "Blocked initial Saved read " + interruption))
+      defer { gate.release.signal() }
+      try await withSavedLibrary(gate: gate) { services, server in
+        let refresh = SavedLibraryRefresh()
+        let access = services.photoAccountAccess
+        let opening = Task { await refresh.open(services) }
+        await fulfillment(of: [gate.started], timeout: 3)
+        XCTAssertTrue(refresh.isRefreshing)
+        XCTAssertNil(try services.consumerSavedPhoto(server.photoID))
+        if interruption == "scope" { refresh.cancel() }
+        else { opening.cancel() }
+        let reopening = Task { await refresh.open(services) }
+        gate.release.signal()
+        await opening.value
+        await reopening.value
+        XCTAssertEqual(services.photoAccountAccess, access, "Navigation must preserve the account and vault binding")
+        XCTAssertFalse(refresh.isRefreshing)
+        XCTAssertNil(refresh.error, "Cancellation is not a catalog failure")
+        XCTAssertEqual(try services.consumerSavedPhoto(server.photoID)?.metadata.filename, "remote-receipt.jpg")
+        XCTAssertEqual(server.requests.filter { $0.path == "/v1/changes" }.count, 2,
+          "Returning Saved must retry its interrupted initial read")
+        XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" })
+        let completed = server.requests.count
+        refresh.cancel()
+        await refresh.open(services)
+        XCTAssertEqual(server.requests.count, completed, "A completed binding survives later dismissal")
+      }
+    }
+  }
   @MainActor func testSavedLibraryOpenTracksStoreReplacementWithinSameAccountAndVault() async throws {
     try await withSavedLibrary { services, server in
       let refresh = SavedLibraryRefresh()

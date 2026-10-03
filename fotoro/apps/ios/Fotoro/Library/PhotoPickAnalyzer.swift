@@ -62,6 +62,11 @@ struct PhotoPicksSnapshot: Sendable {
     cache = cache.filter { keys.contains($0.key) }
     for candidate in candidates {
       try check([candidate])
+      if candidate.isScreenshot && !candidate.favorite {
+        completed += 1
+        await Task.yield()
+        continue
+      }
       let key = candidate.id + "|" + candidate.sourceRevision
       if let cached = cache[key] { signals[candidate.id] = cached }
       else if let value = try await preview(candidate) {

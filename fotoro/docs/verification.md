@@ -1,5 +1,72 @@
 # Verification — October 3, 2026
 
+The consumer experience now opens Photos immediately, with one Find field and
+Picks / Photos / Saved scopes. Native PhotoKit browsing pages all permitted
+stills in batches of 200; recent picks remain separately bounded. Changing scope,
+Find, viewer and account navigation preserves the reviewed selection. Save stays
+manual and uses the existing durable queue. Share uses exact chosen originals or
+accepted Fotoro recipients, according to the source.
+
+Final local checks pass 250 full-native and 86 preview tests, 251 web tests,
+53 API tests, 19 core tests and 28 release-metadata tests. Each native suite has
+one explicit Vision integration skip because the iOS 27 simulator cannot create
+its inference context. Four isolated HTTP exchange tests pass, including original
+HEIC preservation. Deterministic regressions cover permission changes, cancelled
+initial Saved reads, older-library paging, uniform-image rejection, screenshot
+analysis policy, exact chosen sources and local/saved ownership boundaries.
+
+Real browser acceptance uses fresh accounts and public images against isolated
+D1/R2, without seeded accounts or fixture UI. Choose → Save → New Fotoro → Open
+saves only the reviewed file. Contextual viewer Save uses the same authorization;
+returning preserves the local viewer. A fresh browser restores both originals:
+PNG 214,852 bytes (SHA-256
+`9118ddb774b564064c3d9ceae48c2127f08f87cf648353b3f9e27a6c76777d2a`) and
+JPEG 613,520 bytes (SHA-256
+`cfc5b98ec69a65f04b0e4bb7c06009ad6d43362773a5b546c19a48e467a8bf95`).
+Favorite and supplied label edits make no upload requests before explicit Save
+changes; a fresh browser then finds the label and restores Favorite state. Local
+annotation projection also passes a trapped-HTTP regression with uncached
+metadata and an in-flight account switch.
+Opening Saved makes no upload requests. The two-person flow accepts a contact,
+shares the selected photo, opens it, retries an injected 503 explicitly and saves
+an independent recipient copy with identical original bytes. Runtime and
+unexpected API errors are absent.
+
+Rendered web checks cover 390×844, 320×568 and desktop 1440×1000/1504×1047.
+They verify no horizontal overflow, 44 px controls, selection through Find/scopes,
+password cancellation, viewer return and original download. The 320 px cloud
+header overflow found in this pass is fixed. Simulator QA verifies Photos first,
+selection through Done/Picks/Saved and local viewer Info. The Find typing tool
+reported success without changing the field; native typed-query interaction is
+not established by that tool run. Existing deterministic Find tests pass.
+Physical Safari, owner credentials/private Photos and physical performance remain
+unverified.
+
+The rendered design follows the inspected mobile/desktop concept: compact black
+Fotoro header, persistent Find, stable scope controls, two-column mobile photos
+with narrow gutters and contextual count / Clear / Save / Share actions.
+Desktop adapts to available width, public fixture content replaces private
+photography, and unknown capture dates are labelled rather than inferred from
+import time. Native system controls retain accessibility behavior. No framework,
+dependency, second search index or second durable queue was introduced. The old
+PhotoPicks production component and its unused CSS were removed; normal account
+entry retains one password path.
+
+The full encrypted Release 0.1.0 (19) is built and passes strict signature checks,
+with production associated domains and no local-preview encryption exemption.
+CoreDevice confirms the installed version 0.1.0 (19), and launch succeeds after
+a fresh unlocked-state check. No private app data or Photos were inspected. Apple has processed
+full build 4, whose TestFlight release still requires the owner's accurate
+export-compliance declaration. Preview build 3 remains a separate binary.
+
+The preceding production Worker is
+`d38236c7-1994-4474-b2cc-e2ae5ce1c8d9`. This pass changes consumer clients;
+production D1/R2 bindings, five migrations and API contracts stay unchanged.
+Deployment/readback follows the exact-head required CI and merge. Feature and
+release limits are tracked in [product work](product-backlog.md).
+
+## Earlier verified checkpoint
+
 The web app and API are live at [fotoro.cloud](https://fotoro.cloud). The separate
 local Photos preview 0.1.0 (3) is uploaded and in internal TestFlight. Its matching
 development build was installed and launched on the physical iPhone;

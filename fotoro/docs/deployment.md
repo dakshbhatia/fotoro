@@ -24,7 +24,7 @@ A Worker preview with a different RP creates different passkey credentials. Do n
 
 ## Current state
 
-Worker `d38236c7-1994-4474-b2cc-e2ae5ce1c8d9`, tagged
+The preceding production Worker `d38236c7-1994-4474-b2cc-e2ae5ce1c8d9`, tagged
 `real-photo-loop-20261002`, is read back at 100% in deployment
 `1078fed6-2af1-4271-91fc-16badce99a40`. Saved photos opens read-only;
 chosen Save continues through one password entry. Sharing uses accepted
@@ -37,7 +37,7 @@ Bounded failure fields and stored Worker logs remain enabled. Production D1/R2
 bindings and five migrations are unchanged. Canonical API and exact signed
 association checks pass.
 
-The current source passes 244 full-app, 81 local-preview, 244 web, 53 API,
+The current source passes 250 full-app, 86 local-preview, 251 web, 53 API,
 19 core and 28 release-metadata tests, typechecks and the production web build.
 Each native suite explicitly skips one Vision integration test because the iOS 27
 simulator cannot create its inference context. Seven sharing-safety tests also
@@ -57,11 +57,10 @@ queries on native and web, retaining capture-date provenance. Public Safari QA
 renders a verified HEIC original in the gallery and viewer; unsupported Brave
 intake shows a clear alternative with no runtime errors or upload writes. Browser
 gallery thumbnails use 512 px within the existing decoded-cache budget.
-Development-signed Release 0.1.0 (18) passes strict signature and exact production
+Development-signed Release 0.1.0 (19) passes strict signature and exact production
 association checks without a local-preview encryption exemption. CoreDevice
-verifies installation and exact version 18 despite an interrupted install reply.
-iOS rejected launch because the phone was locked; opening build 18 on the phone
-remains pending. The preceding build's protected diagnostics reported signed out
+verifies installation, exact version 19 and successful launch after a fresh
+unlocked-state check. The preceding build's protected diagnostics reported signed out
 and completed picks. Owner authentication and private-photo saving remain unverified.
 Build 4's TestFlight compliance gate is unchanged. See
 [verification](verification.md) for the consumer acceptance evidence.

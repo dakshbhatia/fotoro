@@ -21,12 +21,13 @@ function evidence(photo: LocalOcrPhoto, meaning: SearchMeaning) {
   }
   return (source === "fact" ? "Source fact · " : "Text mention · ") + meaning.term;
 }
-export function LocalSearch({photos, result, resources, committed, pinned, canCorrect = true, coverage, onAccept, onNavigate, onOpen, onConfirm, onPin, onFailure}: {
+export function LocalSearch({photos, result, resources, committed, pinned, canCorrect = true, coverage, onAccept, onNavigate, onOpen, onConfirm, onPin, onFailure, selection}: {
   photos: LocalPhoto[]; result: SearchResult; resources: LocalResources; committed?: string; pinned?: string;
   canCorrect?: boolean;
   coverage: string; onAccept: (meaning: SearchMeaning) => void; onNavigate: (id: string) => void;
   onOpen: (id: string) => void; onConfirm: (id: string) => void; onPin: (id: string) => void;
   onFailure: (id: string, error: string) => void;
+  selection?: {ids: ReadonlySet<string>; eligible: (id: string) => boolean; disabled: boolean; onChange: (id: string, checked: boolean) => void};
 }) {
   const photo = photos.find(p => p.id === result.photoId) as LocalOcrPhoto | undefined,
     index = result.photoIds.indexOf(result.photoId ?? ""), meaning = result.meaning;
@@ -45,11 +46,12 @@ export function LocalSearch({photos, result, resources, committed, pinned, canCo
     const id = result.photoIds[index + step];
     if (id) onNavigate(id);
   };
+  const selecting = !!photo && !!selection?.eligible(photo.id);
   return <section className="local-search" aria-label="Search result">
     <div className="search-caption"><p className="local-coverage" role="status">{result.photoIds.length} {result.photoIds.length === 1 ? "match" : "matches"}</p><button className="text-button" aria-label="Search details" aria-expanded={details} onClick={() => setDetails(!details)}><Icon kind="info" /></button></div>
     {photo && meaning ? <>
-      <button className="local-leading" id={"local-photo-" + photo.id} aria-label={"Open " + photo.filename}
-        onClick={() => {if (swiped.current) {swiped.current = false; return;} onOpen(photo.id);}} onTouchStart={event => {swiped.current = false; touch.current = event.touches.length === 1 ? {x: event.touches[0].clientX, y: event.touches[0].clientY} : undefined;}}
+      <button className="local-leading" id={"local-photo-" + photo.id} aria-label={(selecting ? "Select " : "Open ") + photo.filename} aria-pressed={selecting ? selection!.ids.has(photo.id) : undefined} disabled={selecting && selection!.disabled}
+        onClick={() => {if (swiped.current) {swiped.current = false; return;} if (selecting) selection!.onChange(photo.id, !selection!.ids.has(photo.id)); else onOpen(photo.id);}} onTouchStart={event => {swiped.current = false; touch.current = event.touches.length === 1 ? {x: event.touches[0].clientX, y: event.touches[0].clientY} : undefined;}}
         onTouchEnd={event => {
           if (touch.current && event.changedTouches.length === 1) {
             const dx = event.changedTouches[0].clientX - touch.current.x, dy = event.changedTouches[0].clientY - touch.current.y;

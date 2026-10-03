@@ -106,7 +106,7 @@ test("normal sync UI uses readable failures and explicit cancellation instead of
   );
   assert.match(
     readableSyncError(new Error("PUBLIC_TEST_ACCOUNT_UPLOAD_DISABLED")),
-    /cannot sync your private files/,
+    /cannot Save your private files/,
   );
   assert.match(
     readableSyncError(new DOMException("cancelled", "NotAllowedError")),

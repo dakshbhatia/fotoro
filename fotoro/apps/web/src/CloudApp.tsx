@@ -3,7 +3,8 @@ import type { GrantV1 } from "@fotoro/contracts";
 import { ready } from "@fotoro/crypto";
 import { Library } from "./library/Library";
 import { Viewer } from "./library/Viewer";
-import { cachedCatalog, photoBytes, type Photo } from "./library/catalog";
+import { photoBytes, type Photo } from "./library/catalog";
+import {projectLocalAnnotations} from "./library/annotation-projection";
 import {
   lockVault,
   requireVault,
@@ -11,7 +12,6 @@ import {
 } from "./vault/vault";
 import {
   publicTestSession,
-  passkeyLogin,
   recover,
   prepareEnrollment,
   completeEnrollment,
@@ -140,7 +140,7 @@ export default function CloudApp({
     target?.focus({preventScroll: true});
   }, [active, account, recoveryNew]);
   const accountPanel = useRef<HTMLElement>(null);
-  const closeAccountPanel = () => {saveIntentRef.current?.cancel(); setMenu(false);};
+  const closeAccountPanel = () => setMenu(false);
   useDialogFocus(accountPanel, closeAccountPanel, menu && active && !!account);
   useEffect(() => {
     const picker = input.current;
@@ -153,7 +153,7 @@ export default function CloudApp({
   localPhotosRef.current = localPhotos;
   const currentCatalog = useRef(photos);
   currentCatalog.current = photos;
-  const allLocalFiles = [...new Set([...localPhotos.flatMap(photo => photo.file ? [photo.file] : []), ...pickedFiles])];
+  const allLocalFiles = [...new Set([...(saveIntent?.pending ? saveIntent.snapshot.files : []), ...pickedFiles])];
   const catalogDigests = new Set(photos.map(photo => photo.metadata.originalSha256));
   const localSources = new Map(localPhotos.flatMap(photo => photo.file ? [[photo.file, photo] as const] : []));
   const unsavedLocalFiles = allLocalFiles.filter(file => {
@@ -230,7 +230,7 @@ export default function CloudApp({
     setSkipped(cached.skipped);
     setSaveReady(session);
     if (send && pausedRef.current) {
-      setStatus("Sync is paused. Continue when you’re ready.");
+      setStatus("Saving is paused. Continue when you’re ready.");
       return;
     }
     if (!navigator.onLine) {
@@ -269,7 +269,7 @@ export default function CloudApp({
     } catch (e) {
       if (!session || sameVault(session)) {
         const message = readableSyncError(e);
-        setStatus(accountAction && message.startsWith("Sync could not finish.") ? "Sign-in could not finish. Check your connection and try again." : message);
+        setStatus(accountAction && message.startsWith("Save could not finish.") ? "Sign-in could not finish. Check your connection and try again." : message);
         setNeedsAttention(true);
       }
       if (session && sameVault(session)) {
@@ -304,7 +304,7 @@ export default function CloudApp({
         request?.finishAuthentication(ticket, {session, generation: vaultGeneration(), current: () => sameVault(session)});
         shareRequest?.finishAuthentication(shareTicket, session, vaultGeneration());
         setAccount(session.accountId);
-        if (request?.pending && request.boundVault === session) setMenu(true);
+        if (request?.pending && request.boundVault === session) setMenu(false);
       } catch {
         request?.finishAuthentication(ticket);
         shareRequest?.finishAuthentication(shareTicket);
@@ -352,7 +352,7 @@ export default function CloudApp({
       signal?.addEventListener("abort", abort, {once: true});
       uploadAbort.current = controller;
       let failures = 0;
-      const candidates = (snapshot?.files ?? allLocalFiles).filter(
+      const candidates = (snapshot?.files ?? pickedFiles).filter(
         (file) => localSynced.current.get(file) !== session.accountId,
       );
       try {
@@ -394,7 +394,7 @@ export default function CloudApp({
         });
         if (sameVault(session) && result.stopped)
           setStatus(
-            "A photo still needs to sync. Retry it before adding more photos.",
+            "A photo still needs to Save. Retry it before adding more photos.",
           );
         else if (sameVault(session) && failures)
           setStatus(
@@ -418,7 +418,7 @@ export default function CloudApp({
       session: saveReady,
       current: () => activeRef.current && saveIntentRef.current === request && sameVault(saveReady) && document.visibilityState !== "hidden",
       save: (snapshot, signal, current) => {
-        setMenu(true);
+        setMenu(false);
         return syncLocal(snapshot, signal, current);
       },
     });
@@ -445,7 +445,7 @@ export default function CloudApp({
     try {
       pauseSync();
     } catch {}
-    setStatus("Sync paused. Your originals are unchanged.");
+    setStatus("Saving paused. Your originals are unchanged.");
     const session = requireVault();
     void saveUploadPause(true, session).catch(error => {if (sameVault(session)) {setStatus("Pause could not be saved in this browser. Keep it open and try again."); setNeedsAttention(true);}});
   };
@@ -468,13 +468,16 @@ export default function CloudApp({
     try {session = requireVault();} catch {return null;}
     if (session.accountId !== account) return null;
     const current = () => sameVault(session) && currentCatalog.current === photos;
-    return {accountId: account, token: session, photos, current, preview: async photo => {
+    return {accountId: account, token: session, photos, current, edit: publicDemo ? undefined : async (photo, changes) => {
+      if (!current() || !photos.includes(photo) || photo.manifest.ownerAccountId !== account || photo.grantId) throw new Error("VAULT_LOCKED");
+      await editAnnotations(photo, changes, session);
+    }, preview: async photo => {
       if (!current() || !photos.includes(photo) || photo.manifest.ownerAccountId !== account || photo.grantId) throw new Error("VAULT_LOCKED");
       const bytes = await photoBytes(photo, "preview");
       try {if (!current()) throw new Error("VAULT_LOCKED"); return new Blob([new Uint8Array(bytes)], {type: "image/jpeg"});}
       finally {bytes.fill(0);}
     }};
-  }, [account, photos]);
+  }, [account, photos, publicDemo]);
   useEffect(() => {onOwnedPhotos?.(ownedSnapshot);}, [ownedSnapshot, onOwnedPhotos]);
   const searchable = received ?? photos;
   const index = useMemo(() => new PhotoSearchIndex(cloudSearchRecords(searchable)), [searchable]);
@@ -482,15 +485,29 @@ export default function CloudApp({
   const shown = normalizeSearch(query) ? searchResult.photoIds.flatMap(id => {const photo = searchable.find(photo => photo.manifest.photoId === id); return photo ? [photo] : [];}) : searchable;
   const viewing = !!viewer && shown.length > 0;
   useEffect(() => {if (viewer && !viewing) setViewer(null);}, [viewer, viewing]);
-  const editLabels = async (photo: Photo, labels: string[]) => {
-    const session = requireVault();
+  const publishLocalAnnotations = async (sources: Photo[], session: UnlockedVault, current = () => true) => {
+    const original = new Map(sources.map(photo => [photo.manifest.photoId, photo]));
+    const matchesSource = (photo: Photo, source: Photo) => !photo.grantId && photo.manifest.ownerAccountId === session.accountId
+      && photo.manifest === source.manifest && photo.metadata === source.metadata && photo.metadataKey === source.metadataKey;
+    const isCurrent = () => sameVault(session) && current()
+      && sources.every(source => currentCatalog.current.some(photo => matchesSource(photo, source)));
+    if (!isCurrent()) return;
+    const projected = await projectLocalAnnotations(sources, session);
+    if (!isCurrent()) return;
+    const edits = await pendingAnnotations(session);
+    if (!isCurrent()) return;
+    const updated = new Map(projected.map(photo => [photo.manifest.photoId, photo]));
+    setPhotos(previous => sameVault(session) && current() ? previous.map(photo => {
+      const source = original.get(photo.manifest.photoId);
+      return source && matchesSource(photo, source) ? updated.get(photo.manifest.photoId)! : photo;
+    }) : previous);
+    setAnnotationPending(previous => sameVault(session) && current() ? edits : previous);
+  };
+  const editAnnotations = async (photo: Photo, changes: {labels?: string[]; favorite?: boolean}, session = requireVault()) => {
+    if (!sameVault(session) || !currentCatalog.current.includes(photo) || photo.grantId || photo.manifest.ownerAccountId !== session.accountId) return;
     try {
-      await queueAnnotations({ownerAccountId: photo.manifest.ownerAccountId, photoId: photo.manifest.photoId, originalSha256: photo.metadata.originalSha256}, {labels}, session);
-      if (!sameVault(session)) return;
-      const cached = await cachedCatalog();
-      if (!sameVault(session)) return;
-      setPhotos(cached);
-      setAnnotationPending(await pendingAnnotations(session));
+      await queueAnnotations({ownerAccountId: photo.manifest.ownerAccountId, photoId: photo.manifest.photoId, originalSha256: photo.metadata.originalSha256}, changes, session);
+      await publishLocalAnnotations([photo], session);
     } catch (error) {if (sameVault(session)) {setStatus(readableSyncError(error)); setNeedsAttention(true);}}
   };
   useEffect(() => {
@@ -498,23 +515,30 @@ export default function CloudApp({
     const session = requireVault();
     let alive = true;
     void (async () => {
-      let changed = false;
+      const changed: Photo[] = [];
       for (const photo of photos) {
+        if (!alive || !sameVault(session) || !currentCatalog.current.includes(photo)) return;
         const local = localPhotos.find(source => localOriginalDigest(source) === photo.metadata.originalSha256);
         if (!local) continue;
-        changed = await queueLocalAnnotations({ownerAccountId: session.accountId, photoId: photo.manifest.photoId, originalSha256: photo.metadata.originalSha256}, local, session, false) || changed;
+        if (await queueLocalAnnotations({ownerAccountId: session.accountId, photoId: photo.manifest.photoId, originalSha256: photo.metadata.originalSha256}, local, session, false)) changed.push(photo);
       }
-      if (!alive || !sameVault(session) || !changed) return;
-      const cached = await cachedCatalog();
-      if (!alive || !sameVault(session)) return;
-      const edits = await pendingAnnotations(session);
-      if (!alive || !sameVault(session)) return;
-      setPhotos(cached);
-      setAnnotationPending(edits);
+      if (changed.length) await publishLocalAnnotations(changed, session, () => alive);
     })().catch(error => {if (alive && sameVault(session)) {setStatus(readableSyncError(error)); setNeedsAttention(true);}});
     return () => {alive = false;};
   }, [account, localPhotos, photos, publicDemo]);
+  useEffect(() => {
+    const available = new Set(photos.map(photo => photo.manifest.photoId));
+    setSelected(previous => {
+      const next = new Set([...previous].filter(id => available.has(id)));
+      return next.size === previous.size ? previous : next;
+    });
+  }, [photos]);
   const chosen = photos.filter((p) => selected.has(p.manifest.photoId));
+  const toggleSelection = (id: string) => setSelected(previous => {
+    const next = new Set(previous);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
   const openSharing = (items: Photo[] = []) => {setExchangePhotos([...items]); setExchangeVersion(version => version + 1); setExchange(true);};
   const closeSharing = () => {setExchange(false); setExchangePhotos([]); onShareDone?.(); onIncomingDone?.();};
   const priorIncoming = useRef(incoming);
@@ -531,10 +555,10 @@ export default function CloudApp({
   return (
     <>
       <main className={"cloud-library" + (selecting ? " exchange-selection" : "")} inert={viewing || exchange || menu ? true : undefined}>
-        <header>
-          <div className="brand"><p className="eyebrow">Saved photos</p><h1>Fotoro</h1></div>
+        <header className="consumer-navigation">
+          <div className="brand"><h1>Fotoro</h1></div>
           <div className="header-actions">
-          <button
+          {!unlocked && <button
             ref={backButton}
             onClick={() => {
               if (!account) {
@@ -547,13 +571,11 @@ export default function CloudApp({
             }}
           >
             Back to photos
-          </button>
-          {unlocked && !received && <button onClick={() => {setSelecting(!selecting); setSelected(new Set());}}>{selecting ? "Done" : "Select"}</button>}
-          {unlocked && <button onClick={() => openSharing()}>Shared</button>}
+          </button>}
           {unlocked && (
             <button
               className="menu-button glass"
-              aria-label="Save and settings"
+              aria-label="Settings"
               onClick={() => setMenu(!menu)}
             >
               <svg
@@ -562,7 +584,7 @@ export default function CloudApp({
                 stroke="currentColor"
                 strokeWidth="1.5"
               >
-                <path d="M3 6h18M3 12h18M3 18h18" />
+                <circle cx="12" cy="12" r="3" /><path d="m9 3 1 2h4l1-2 3 2-1 2 2 3 2 1v3l-2 1-2 3 1 2-3 2-1-2h-4l-1 2-3-2 1-2-2-3-2-1v-3l2-1 2-3-1-2z" />
               </svg>
             </button>
           )}
@@ -596,10 +618,7 @@ export default function CloudApp({
                 setTimeout(() => URL.revokeObjectURL(url), 1000);
               }}
             />
-            <details>
-              <summary>Settings</summary>
-              <button disabled={busy} onClick={() => {void login(passkeyLogin);}}>Use existing passkey</button>
-            </details>
+
             {fixtureMode && (
               <details>
                 <summary>Advanced DEBUG</summary>
@@ -636,14 +655,29 @@ export default function CloudApp({
                 Public test account · private uploads disabled.
               </p>
             )}
-            {unlocked && !received && (
-              <button
-                className={"cloud-sync-status state-" + consumerSummary.state}
-                onClick={() => setMenu(true)}
-              >
-                <span className="sync-dot" aria-hidden="true" />{syncStateLabel[consumerSummary.state]}<small>{consumerSummary.detail}</small>
-              </button>
-            )}
+            <div className="toolbar glass consumer-search">
+              <SearchIcon />
+              <input aria-label="Search photos" placeholder="Search photos" value={query} onChange={event => {setQuery(event.target.value); setCommittedMeaning(undefined);}} />
+              {query && <button onClick={() => {setQuery(""); setCommittedMeaning(undefined);}} aria-label="Clear search">×</button>}
+              {!received && <button onClick={() => {setReselect(undefined); input.current?.click();}} aria-label="Add photos" disabled={busy || publicDemo}><PlusIcon /></button>}
+            </div>
+            <nav className="consumer-scopes" aria-label="Photo library">
+              <button ref={backButton} onClick={onBack}>Photos</button>
+              <button aria-current={!received ? "page" : undefined} onClick={() => {setReceived(null); setQuery(""); setCommittedMeaning(undefined);}}>Saved</button>
+              <button aria-current={received ? "page" : undefined} onClick={() => openSharing()}>Shared</button>
+            </nav>
+            <div className="consumer-section">
+              <h2>{query ? "Search results" : received ? "Shared photos" : "Saved photos"}</h2>
+              {!received && <button aria-pressed={selecting} onClick={() => setSelecting(value => !value)}>{selecting ? "Done" : "Select"}</button>}
+            </div>
+            {!received && (busy || localCount > 0 || summary.pending > 0 || summary.failed > 0 || needsAttention || annotationPending.length > 0) && <section className={"consumer-save-progress state-" + consumerSummary.state} aria-label="Save progress">
+              <div><p role="status">{status || syncStateLabel[consumerSummary.state]}</p>{consumerSummary.detail && <p className="hint">{consumerSummary.detail}</p>}</div>
+              <div className="actions">
+                {busy && !paused && <button onClick={pause}>Pause</button>}
+                {!busy && (localCount > 0 || summary.pending > 0 || summary.failed > 0 || annotationPending.length > 0) && <button className="primary-action" disabled={publicDemo} onClick={() => {if (annotationPending.some(edit => edit.conflict)) setMenu(true); else if (saveIntent?.pending) void startChosenSave(); else if (localCount > 0) void syncLocal(); else void retry();}}>{annotationPending.some(edit => edit.conflict) ? "Review changes" : needsAttention || summary.failed ? "Retry" : localCount > 0 ? `Save ${localCount}` : summary.pending > 0 ? "Continue" : "Save changes"}</button>}
+                {!busy && needsAttention && <button onClick={() => setMenu(true)}>Details</button>}
+              </div>
+            </section>}
             {received && (
               <div className="received-bar">
                 <span>Shared photos · open a photo to Save</span>
@@ -667,14 +701,9 @@ export default function CloudApp({
                 active={active}
                 photos={shown}
                 selected={selected}
-                onSelect={(id) =>
-                  setSelected((s) => {
-                    const next = new Set(s);
-                    next.has(id) ? next.delete(id) : next.add(id);
-                    return next;
-                  })
-                }
-                onOpen={setViewer}
+                selecting={selecting}
+                onSelect={toggleSelection}
+                onOpen={id => selecting && !received ? toggleSelection(id) : setViewer(id)}
               />
             ) : (
               <div className="empty">
@@ -690,36 +719,11 @@ export default function CloudApp({
                 )}
               </div>
             )}
-            <div className="toolbar glass">
-              <SearchIcon />
-              <input
-                aria-label="Search photos"
-                placeholder="Search"
-                value={query}
-                onChange={(e) => {setQuery(e.target.value); setCommittedMeaning(undefined);}}
-              />
-              {query && (
-                <button onClick={() => setQuery("")} aria-label="Clear search">
-                  ×
-                </button>
-              )}
-              <button
-                onClick={() => {setReselect(undefined); input.current?.click();}}
-                aria-label="Add photos"
-                disabled={busy || publicDemo}
-              >
-                <PlusIcon />
-              </button>
-            </div>
-            {selected.size > 0 && (
-              <button
-                id="share-selected"
-                className="share-button glass"
-                onClick={() => openSharing(chosen)}
-              >
-                Share {selected.size} {selected.size === 1 ? "photo" : "photos"}
-              </button>
-            )}
+            {!received && selected.size > 0 && <div className="consumer-selection glass" aria-label="Selected photos">
+              <span role="status">{selected.size} selected</span>
+              <button onClick={() => setSelected(new Set())}>Clear</button>
+              <button className="primary-action" onClick={() => openSharing(chosen)}>Share</button>
+            </div>}
             <input
               ref={input}
               hidden
@@ -745,12 +749,12 @@ export default function CloudApp({
                 setPickedFiles((current) => [
                   ...new Set([...current, ...files]),
                 ]);
-                setMenu(true);
+                setMenu(false);
               }}
             />
           </>
         )}
-        {status && !menu && (
+        {status && !menu && (!unlocked || received || !busy && localCount === 0 && summary.pending === 0 && summary.failed === 0 && !needsAttention && annotationPending.length === 0) && (
           <p className="status" role="status">
             {status}
           </p>
@@ -762,7 +766,7 @@ export default function CloudApp({
         )}
       </main>
         {active && menu && unlocked && (
-          <aside className="account-sheet sheet" ref={accountPanel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Saved photos">
+          <aside className="account-sheet sheet" ref={accountPanel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Settings">
             <button
               className="close"
               aria-label="Close account"
@@ -770,8 +774,8 @@ export default function CloudApp({
             >
               ×
             </button>
-            <h2>Saved photos</h2>
-            <p className="hint">Fotoro · {accountReference}</p>
+            <h2>Settings</h2>
+            <p className="hint">This Fotoro · {accountReference}</p>
             <p role="status">
               {status || syncStateLabel[consumerSummary.state]}
             </p>
@@ -800,7 +804,7 @@ export default function CloudApp({
             {annotationPending.length > 0 && <details open={annotationPending.some(edit => edit.conflict)}>
               <summary>Labels and photo text · {annotationPending.length} pending</summary>
               {annotationPending.map(edit => <div key={edit.photoId}>
-                <p>{photos.find(photo => photo.manifest.photoId === edit.photoId)?.metadata.filename ?? "Photo"} · {edit.conflict ? "Changed on another device" : "Waiting to sync"}</p>
+                <p>{photos.find(photo => photo.manifest.photoId === edit.photoId)?.metadata.filename ?? "Photo"} · {edit.conflict ? "Changed on another device" : "Waiting to Save"}</p>
                 {edit.conflict && <>
                   <p className="hint">Your pending edits are kept here. Choose which changes to keep.</p>
                   <div className="actions"><button disabled={busy} onClick={() => run(async () => {await resolveAnnotationConflict(edit.photoId, "local"); await continueSync(); await refresh(true);})}>Use my edits</button><button disabled={busy} onClick={() => run(async () => {await resolveAnnotationConflict(edit.photoId, "remote"); await refresh();})}>Keep synced edits</button></div>
@@ -876,7 +880,8 @@ export default function CloudApp({
           initial={viewer}
           onSaved={() => run(refresh)}
           onShare={!received ? photo => {setViewer(null); openSharing([photo]);} : undefined}
-          onLabels={!received && !publicDemo ? (photo, labels) => {void editLabels(photo, labels);} : undefined}
+          onLabels={!received && !publicDemo ? (photo, labels) => {void editAnnotations(photo, {labels});} : undefined}
+          onFavorite={!received && !publicDemo ? (photo, favorite) => {void editAnnotations(photo, {favorite});} : undefined}
           onClose={() => setViewer(null)}
         />
       )}

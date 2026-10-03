@@ -18,6 +18,7 @@ export function Viewer({
   onSaved,
   onLabels,
   onShare,
+  onFavorite,
 }: {
   photos: Photo[];
   initial: string;
@@ -25,6 +26,7 @@ export function Viewer({
   onSaved: () => void;
   onLabels?: (photo: Photo, labels: string[]) => void;
   onShare?: (photo: Photo) => void;
+  onFavorite?: (photo: Photo, favorite: boolean) => void;
 }) {
   const [selected, setSelected] = useState(initial),
     [url, setUrl] = useState(""),
@@ -236,6 +238,7 @@ export function Viewer({
             · {new Date(photo.metadata.sourceDate).toLocaleString()}
           </p>
           {!photo.grantId && <>
+            {onFavorite && <button aria-pressed={photo.annotations?.favorite === true} onClick={() => onFavorite(photo, photo.annotations?.favorite !== true)}>{photo.annotations?.favorite ? "Unfavorite" : "Favorite"}</button>}
             <h3>Labels</h3>
             <div className="local-labels">{(photo.annotations?.labels ?? []).map((value, index) => onLabels ? <button key={index} aria-label={"Remove label " + value} onClick={() => onLabels(photo, photo.annotations!.labels!.filter((_, position) => position !== index))}>{value} ×</button> : <span key={index}>{value}</span>)}</div>
             {onLabels && <form className="local-label-form" onSubmit={event => {

@@ -179,13 +179,13 @@ export function readableSyncError(error: unknown) {
   )
     return "Paused or cancelled. Your originals have not changed.";
   if (code === "PUBLIC_TEST_ACCOUNT_UPLOAD_DISABLED")
-    return "Public test accounts cannot sync your private files. Use a real account.";
+    return "Public test accounts cannot Save your private files. Use a real account.";
   if (/ANNOTATION|VERSION_CONFLICT/.test(code))
-    return "Your labels or text could not sync. Your pending edits are saved here; open Sync photos to retry or review them.";
+    return "Your labels or text could not Save. Your pending edits are kept here; open Settings to retry or review them.";
   if (code === "VAULT_LOCKED")
     return "Your library is locked. Sign in to continue.";
   if (/UNAUTHENTICATED|FORBIDDEN/.test(code))
-    return "Sign in again to continue syncing.";
+    return "Open Fotoro again to continue saving.";
   if (code === "HEIC_NATIVE_DECODE_UNAVAILABLE")
     return "This browser cannot open that HEIC photo. Try Safari or a JPEG copy.";
   if (code === "SOURCE_DIMENSIONS_UNAVAILABLE")
@@ -194,7 +194,7 @@ export function readableSyncError(error: unknown) {
     return "Choose a JPEG, PNG or supported HEIC photo.";
   if (/50_MIB/.test(code)) return "Choose photos smaller than 50 MB.";
   if (/STAGING_MISSING/.test(code))
-    return "Choose the original file again to finish syncing.";
+    return "Choose the original file again to finish saving.";
   if (/SOURCE_MISMATCH/.test(code))
     return "That file does not match the original. Choose the same photo.";
   if (/GRANT_INACTIVE/.test(code))
@@ -216,8 +216,8 @@ export function readableSyncError(error: unknown) {
   if (/REAL_AUTH_REQUIRED/.test(code))
     return "Account setup is unavailable on this local test service.";
   if (/DIGEST|CIPHERTEXT|AUTHENTICATION/.test(code))
-    return "This photo could not be verified. It has not been marked as synced.";
+    return "This photo could not be verified. It has not been marked as saved.";
   if (/PRF_UNAVAILABLE|AUTHENTICATED_USE_RECOVERY/.test(code))
     return "Enter your Fotoro password to unlock photos on this device.";
-  return "Sync could not finish. Your originals are unchanged. Try again when online.";
+  return "Save could not finish. Your originals are unchanged. Try again when online.";
 }
