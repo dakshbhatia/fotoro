@@ -148,4 +148,102 @@ final class NaturalDateSearchTests: XCTestCase {
     XCTAssertEqual(try index.search("dog yesterday", previous: enriched, now: now, calendar: calendar).leading?.id, "yesterday")
     XCTAssertEqual(try index.search("dog today", scope: SearchScope(source: "imports"), previous: enriched, now: now, calendar: calendar).leading?.id, "imported")
   }
+  func testExplicitDateConstraintsComposeAtEitherQueryEdge() {
+    let cases: [(String, String, String)] = [
+      ("beach 2026-09", "2026-09 beach", "beach"),
+      ("beach September 2026", "September 2026 beach", "beach"),
+      ("boarding pass September 24, 2026", "September 24, 2026 boarding pass", "boarding pass"),
+      ("beach before 2026-10-02", "before 2026-10-02 beach", "beach"),
+      ("beach after 2026-09-01", "after 2026-09-01 beach", "beach"),
+      ("beach since 2026-09-01", "since 2026-09-01 beach", "beach"),
+      ("beach from 2026-09-01 through 2026-09-30", "from 2026-09-01 through 2026-09-30 beach", "beach"),
+      ("photos of beach last month", "last month photos of beach", "beach"),
+    ]
+    let scope = SearchScope(source: "imports", from: date(2026, 9, 10), through: date(2026, 9, 28))
+    for (suffix, prefix, text) in cases {
+      let expected = NaturalDateQuery.parse(suffix, scope: scope, now: now, calendar: calendar)
+      let actual = NaturalDateQuery.parse(prefix, scope: scope, now: now, calendar: calendar)
+      XCTAssertEqual(actual.text, text, prefix)
+      XCTAssertEqual(actual.datePhrase, expected.datePhrase, prefix)
+      XCTAssertEqual(actual.scope, expected.scope, prefix)
+    }
+    for query in ["February 30 2026 beach", "2026-02-30 beach", "2026-13 beach", "2026-1 beach",
+      "beach from 2026-09-30 to 2026-09-01", "from 2026-09-30 to 2026-09-01 beach",
+      "beach from 2026-02-30 to 2026-09-01", "from 2026-02-30 to 2026-09-01 beach"] {
+      XCTAssertNil(NaturalDateQuery.parse(query, now: now, calendar: calendar).datePhrase, query)
+    }
+    let spring = NaturalDateQuery.parse("2026-03-08 beach", now: now, calendar: calendar)
+    XCTAssertEqual(spring.scope.from, date(2026, 3, 8))
+    XCTAssertEqual(spring.scope.until, date(2026, 3, 9))
+    XCTAssertEqual(spring.scope.until!.timeIntervalSince(spring.scope.from!), 23 * 3600)
+  }
+  func testDateCompositionRetainsEachExistingEvidenceLane() throws {
+    let index = try SearchIndex()
+    var label = photo("label", captured: date(2026, 9, 24), labels: ["Holiday trip"])
+    label.previewAvailable = true
+    var keyword = photo("keyword", captured: date(2026, 9, 24)); keyword.keywords = ["sunset"]
+    var scene = photo("scene", captured: date(2026, 9, 24))
+    scene.visualStatus = .complete
+    scene.visualLabels = SearchVisualPolicy.labels([("beach", 0.9)])
+    var filename = photo("filename", captured: date(2026, 9, 24)); filename.filename = "Harbor.jpg"
+    var ocr = photo("ocr", captured: date(2026, 9, 24)); ocr.ocrStatus = .complete
+    ocr.ocrText = "boarding pass"; ocr.ocrConfidence = 0.8
+    var old = scene; old.id = "old-scene"; old.capturedAt = date(2026, 8, 24)
+    var missing = scene; missing.id = "missing-date"; missing.capturedAt = nil
+    var other = scene; other.id = "other-source"; other.scope = "imports"
+    try index.replacePermitted([label, keyword, scene, filename, ocr, old, missing, other])
+    for (term, id, reason) in [("holiday trip", "label", "Supplied label"),
+      ("sunset", "keyword", "Caption or keyword"), ("beach", "scene", "Inferred scene"),
+      ("harbor", "filename", "Filename mention"), ("boarding p", "ocr", "Text in photo")]
+    {
+      for query in [term + " last month", "last month " + term, "September 2026 " + term, term + " 2026-09"] {
+        let response = try index.search(query, now: now, calendar: calendar)
+        XCTAssertEqual(response.results.map(\.id), [id], query)
+        XCTAssertEqual(response.leading?.reason, reason, query)
+        XCTAssertEqual(response.scope.from, date(2026, 9, 1), query)
+        XCTAssertEqual(response.scope.until, date(2026, 10, 1), query)
+      }
+    }
+    XCTAssertEqual(try index.search("beach last month", scope: SearchScope(source: "imports"), now: now, calendar: calendar).results.map(\.id), ["other-source"])
+    XCTAssertNil(try index.search("Ronald last month", now: now, calendar: calendar).leading)
+    XCTAssertNil(try index.search("dog last month", now: now, calendar: calendar).leading)
+  }
+  func testDateCompositionDoesNotExpandNumericOrMalformedDateTokens() throws {
+    let index = try SearchIndex()
+    var exact = photo("exact", captured: date(2026, 9, 24)); exact.ocrStatus = .complete
+    exact.ocrText = "receipt 123 beach 2026 02 3"
+    var longer = photo("longer", captured: date(2026, 9, 24)); longer.ocrStatus = .complete
+    longer.ocrText = "receipt 1234 beach 2026 02 30"
+    let supplied = photo("supplied-longer", captured: date(2026, 9, 24), labels: ["1234", "beach 2026-02-30"])
+    try index.replacePermitted([exact, longer, supplied])
+    for query in ["123 last month", "receipt 123 last month", "last month receipt 123"] {
+      XCTAssertEqual(try index.search(query, now: now, calendar: calendar).results.map(\.id), ["exact"], query)
+    }
+    let malformed = try index.search("beach 2026-02-3", now: now, calendar: calendar)
+    XCTAssertNil(malformed.datePhrase)
+    XCTAssertEqual(malformed.results.map(\.id), ["exact"])
+    XCTAssertEqual(malformed.leading?.reason, "Text in photo")
+    XCTAssertNil(try index.search("12 last month", now: now, calendar: calendar).leading)
+  }
+  func testComposedFindCannotRecoverWithdrawnOrStaleSceneAndOCRWork() throws {
+    let index = try SearchIndex()
+    var scene = photo("scene", captured: date(2026, 9, 24))
+    scene.visualStatus = .complete
+    scene.visualLabels = SearchVisualPolicy.labels([("beach", 0.9)])
+    var ocr = photo("ocr", captured: date(2026, 9, 24))
+    ocr.ocrStatus = .complete; ocr.ocrText = "boarding pass"
+    try index.replacePermitted([scene, ocr])
+    let previous = try index.search("beach last month", now: now, calendar: calendar)
+    XCTAssertEqual(previous.leading?.id, "scene")
+    var changed = photo("scene", captured: date(2026, 9, 24)); changed.revision = "2"
+    try index.setWorkGeneration(2)
+    try index.replacePermitted([changed], generation: 2)
+    XCTAssertFalse(try index.applyVisual(SearchVisualResult(labels: scene.visualLabels, processor: SearchVisualPolicy.processor),
+      status: .complete, photoID: "scene", revision: "1", generation: 2))
+    XCTAssertFalse(try index.applyOCR(SearchOCRResult(text: "boarding pass", confidence: 1),
+      status: .complete, photoID: "ocr", revision: "1", generation: 2))
+    XCTAssertNil(try index.search("beach last month", previous: previous, now: now, calendar: calendar).leading)
+    XCTAssertNil(try index.search("boarding pass last month", now: now, calendar: calendar).leading)
+    XCTAssertEqual(try index.search("last month", now: now, calendar: calendar).results.map(\.id), ["scene"])
+  }
 }

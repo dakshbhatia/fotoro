@@ -38,7 +38,7 @@ test("scope filtering happens before completion limits and photo preferences", (
   assert.equal(index.search("R", { now, allowedIds: new Set() }).photoId, undefined);
 });
 test("filename noise does not become a predictive meaning and dates still search", () => {
-  const index = new PhotoSearchIndex([photo("one", "IMG_1234-fixture.jpg")]);
+  const index = new PhotoSearchIndex([photo("one", "IMG_1234-fixture.jpg", [], new Date(2020, 0, 1, 12).toISOString())]);
   assert.equal(index.search("img", { now }).photoId, undefined);
   assert.equal(index.search("jpg", { now }).photoId, undefined);
   assert.equal(index.search("2020-01", { now }).photoId, "one");

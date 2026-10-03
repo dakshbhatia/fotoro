@@ -24,20 +24,20 @@ A Worker preview with a different RP creates different passkey credentials. Do n
 
 ## Current state
 
-Worker `cd60ed44-589f-4c70-86d0-dda73e9fb676`, tagged
-`quiet-core-20261002`, is read back at 100% in deployment
-`3cdcf744-5410-4080-903a-f808513aa685`. Saved photos opens read-only;
+Worker `d38236c7-1994-4474-b2cc-e2ae5ce1c8d9`, tagged
+`real-photo-loop-20261002`, is read back at 100% in deployment
+`1078fed6-2af1-4271-91fc-16badce99a40`. Saved photos opens read-only;
 chosen Save continues through one password entry. Sharing uses accepted
 contacts and public invitations, with explicit recipient Save and selected-photo
 contributions. Public contact/moment links are included in the exact signed
 Apple association alongside passkeys. The preceding Worker
-`dd17d11a-ea35-4525-94b0-c162ccc64a78` remains available for rollback.
+`cd60ed44-589f-4c70-86d0-dda73e9fb676` remains available for rollback.
 Uploads and annotation writes still require an explicit Save or Continue.
 Bounded failure fields and stored Worker logs remain enabled. Production D1/R2
 bindings and five migrations are unchanged. Canonical API and exact signed
 association checks pass.
 
-The current source passes 231 full-app, 77 local-preview, 224 web, 53 API,
+The current source passes 235 full-app, 81 local-preview, 244 web, 53 API,
 19 core and 28 release-metadata tests, typechecks and the production web build.
 Each native suite explicitly skips one Vision integration test because the iOS 27
 simulator cannot create its inference context. Seven sharing-safety tests also
@@ -48,10 +48,15 @@ focus, uses 16 px mobile text and supports Enter. Incomplete Save keeps the exac
 chosen sources for explicit Retry; recipient Save uses one durable request across
 concurrent callers. Cancellation reaches media downloads, and rejected upload
 receipts cannot poison later retries.
-Development-signed Release 0.1.0 (16) passes strict signature and exact production
+Date search now supports relative/calendar/ISO phrases and prefix/suffix compound
+queries on native and web, retaining capture-date provenance. Public Safari QA
+renders a verified HEIC original in the gallery and viewer; unsupported Brave
+intake shows a clear alternative with no runtime errors or upload writes. Browser
+gallery thumbnails use 512 px within the existing decoded-cache budget.
+Development-signed Release 0.1.0 (17) passes strict signature and exact production
 association checks without a local-preview encryption exemption. CoreDevice
-verifies installation and exact version 16; launch is refused while the phone is
-locked. CoreDevice previously
+verifies installation and exact version 17. Launch succeeds and
+protected build-17 runtime diagnostics report signed out and completed picks. CoreDevice previously
 reported successful build 13 installation; its launch/version readback remains
 open. Owner authentication and private-photo saving remain unverified.
 Build 4's TestFlight compliance gate is unchanged. See

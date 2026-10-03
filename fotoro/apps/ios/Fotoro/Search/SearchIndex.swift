@@ -27,7 +27,7 @@ final class SearchIndex: @unchecked Sendable {
             let tokens = Set(Self.words(source))
             guard let last = words.last else { return false }
             return words.dropLast().allSatisfy { tokens.contains($0) }
-              && tokens.contains { $0.hasPrefix(last) }
+              && tokens.contains { last.contains(where: \.isLetter) ? $0.hasPrefix(last) : $0 == last }
           }
           if matches((record.captions + record.keywords).joined(separator: " ")) { return 2 }
           if matches((record.filename as NSString).deletingPathExtension) { return 3 }
@@ -318,6 +318,12 @@ final class SearchIndex: @unchecked Sendable {
     SearchNormalization.text(text).components(separatedBy: CharacterSet.alphanumerics.inverted)
       .filter { !$0.isEmpty }
   }
+  private static func permitsTermPrefix(_ query: String) -> Bool {
+    if query.allSatisfy(\.isNumber) { return false }
+    guard let last = query.split(separator: " ").last else { return false }
+    let parts = last.split(separator: "-", omittingEmptySubsequences: false)
+    return !(parts.count > 1 && parts[0].count == 4 && parts[0].allSatisfy(\.isNumber))
+  }
   private static let noise: Set<String> = [
     "a", "an", "the", "and", "or", "of", "on", "in", "to", "for", "is", "it", "at", "by", "with",
     "jpg", "jpeg", "png", "heic", "heif", "gif", "webp", "img", "dsc", "dcim",
@@ -396,7 +402,7 @@ final class SearchIndex: @unchecked Sendable {
       }
       // Query the full indexed prefix range before LIMIT. Scope and eligibility are applied in SQL.
       var meaningArgs: StatementArguments = [
-        q, now.timeIntervalSince1970, scope.key, q, q + "\u{10ffff}",
+        q, now.timeIntervalSince1970, scope.key, q, q + "\u{10ffff}", Self.permitsTermPrefix(q), q,
       ]
       meaningArgs += scopeArgs
       meaningArgs += [acceptedMeaningID ?? ""]
@@ -407,7 +413,7 @@ final class SearchIndex: @unchecked Sendable {
             max(t.term=?) exact,max(r.moment) moment,
             coalesce((SELECT sum(searchDecay(e.at,?)) FROM searchEvents e WHERE e.kind='accept' AND e.meaning=t.meaning AND e.scope=?),0) accepted
           FROM searchTerms t JOIN searchPostings p ON p.meaning=t.meaning JOIN searchRecords r ON r.id=p.photo
-          WHERE t.term>=? AND t.term<? AND \(condition)
+          WHERE t.term>=? AND t.term<? AND (? OR t.term=?) AND \(condition)
           GROUP BY t.meaning
           ORDER BY (t.meaning=?) DESC,exact DESC,accepted DESC,moment DESC,evidence ASC,term ASC,t.meaning ASC LIMIT 6
           """, arguments: meaningArgs)
@@ -535,8 +541,9 @@ final class SearchIndex: @unchecked Sendable {
     return response
   }
   private static func fullTextMatch(_ query: String) -> String {
-    words(query).enumerated().map { offset, word in
-      "\"" + word + "\"" + (offset == words(query).count - 1 ? "*" : "")
+    let words = words(query)
+    return words.enumerated().map { offset, word in
+      "\"" + word + "\"" + (offset == words.count - 1 && word.contains(where: \.isLetter) ? "*" : "")
     }.joined(separator: " AND ")
   }
   private func fullText(

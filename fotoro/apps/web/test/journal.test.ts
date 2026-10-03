@@ -21,8 +21,8 @@ function reselect(bytes: Uint8Array): PendingImport {
 }
 test("original format and size boundary are explicit", () => {
   assert.throws(
-    () => validateSource({ type: "image/heic", size: 1 }),
-    /JPEG_AND_PNG/,
+    () => validateSource({ type: "image/gif", size: 1 }),
+    /JPEG_PNG_AND_HEIC/,
   );
   assert.throws(
     () => validateSource({ type: "image/png", size: 50 * 1024 * 1024 + 1 }),

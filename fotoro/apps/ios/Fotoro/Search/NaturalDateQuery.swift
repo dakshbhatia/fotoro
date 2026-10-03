@@ -53,25 +53,26 @@ struct NaturalDateQuery: Sendable {
     if words.count >= 4 {
       let end = words.count
       let range = Array(words[(end - 4)..<end])
-      if range[0] == "from", ["to", "through"].contains(range[2]),
-        let first = strictPeriod(range[1], calendar: calendar),
-        let last = strictPeriod(range[3], calendar: calendar), first.start < last.end
-      {
+      if range[0] == "from", ["to", "through"].contains(range[2]) {
+        guard let first = strictPeriod(range[1], calendar: calendar),
+          let last = strictPeriod(range[3], calendar: calendar), first.start < last.end
+        else { return result }
         return apply(DateInterval(start: first.start, end: last.end),
           prefix: words.dropLast(4).joined(separator: " "), phrase: range.joined(separator: " "))!
       }
     }
     // Explicit English month names have fixed meaning; ambiguous 10/2 dates
     // and incomplete/invalid dates remain ordinary evidence-based text.
+    var invalidNamedSuffix = false
     for count in [3, 2] where words.count >= count {
       let phrase = words.suffix(count).joined(separator: " ")
       if let interval = namedPeriod(phrase, calendar: calendar) {
         return apply(interval, prefix: words.dropLast(count).joined(separator: " "), phrase: phrase)!
       }
-      if monthNames.contains(words[words.count - count]) { return result }
+      if monthNames.contains(words[words.count - count]) { invalidNamedSuffix = true; break }
     }
     // An ISO date may stand alone or follow a scene term and date operator.
-    if let last = words.last, let interval = strictPeriod(last, calendar: calendar) {
+    if !invalidNamedSuffix, let last = words.last, let interval = strictPeriod(last, calendar: calendar) {
       let preceding = Array(words.dropLast())
       if let operation = preceding.last, ["before", "after", "since"].contains(operation) {
         result.text = remaining(preceding.dropLast().joined(separator: " "))
@@ -83,6 +84,31 @@ struct NaturalDateQuery: Sendable {
         return result
       }
       return apply(interval, prefix: preceding.joined(separator: " "), phrase: last)!
+    }
+    if words.count >= 4, words[0] == "from", ["to", "through"].contains(words[2]) {
+      guard let first = strictPeriod(words[1], calendar: calendar),
+        let last = strictPeriod(words[3], calendar: calendar), first.start < last.end
+      else { return result }
+      return apply(DateInterval(start: first.start, end: last.end),
+        prefix: words.dropFirst(4).joined(separator: " "), phrase: words.prefix(4).joined(separator: " "))!
+    }
+    for count in [3, 2] where words.count >= count {
+      let phrase = words.prefix(count).joined(separator: " ")
+      if let interval = namedPeriod(phrase, calendar: calendar) {
+        return apply(interval, prefix: words.dropFirst(count).joined(separator: " "), phrase: phrase)!
+      }
+    }
+    if words.count >= 2, ["before", "after", "since"].contains(words[0]),
+      let interval = strictPeriod(words[1], calendar: calendar)
+    {
+      result.text = remaining(words.dropFirst(2).joined(separator: " "))
+      result.datePhrase = words.prefix(2).joined(separator: " ")
+      if words[0] == "before" { result.scope.until = minDate(scope.until, interval.start) }
+      else { result.scope.from = maxDate(scope.from, words[0] == "after" ? interval.end : interval.start) }
+      return result
+    }
+    if let first = words.first, let interval = strictPeriod(first, calendar: calendar) {
+      return apply(interval, prefix: words.dropFirst().joined(separator: " "), phrase: first)!
     }
     return result
   }
