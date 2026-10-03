@@ -58,6 +58,7 @@ struct AccountView: View {
           Text("Open your Fotoro").font(.title2.bold())
           SecureField("Fotoro password", text: $password)
             .focused($passwordFocused)
+            .onAppear { passwordFocused = !services.busy }
             .textFieldStyle(.roundedBorder)
             .textContentType(.password).textInputAutocapitalization(.never)
             .autocorrectionDisabled().submitLabel(.go).onSubmit(signIn)

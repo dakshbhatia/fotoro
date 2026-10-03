@@ -19,6 +19,7 @@ import {
 import { digest } from "../library/catalog";
 import { assertVault, sameVault } from "../vault/scope";
 import { captureDate } from "../library/exif";
+import {photoFormat, photoMime, displayPhotoDimensions, safePhotoDimensions, photoPreview, PHOTO_HEADER_BYTES} from "../media/photo-source";
 export interface PendingImport {
   operationId: string;
   photoId: string;
@@ -53,9 +54,9 @@ function verifiedCommit(commit: UploadCommitV1, part: Staged) {
     throw new Error("COMMIT_DIGEST_MISMATCH");
   return commit;
 }
-export function validateSource(file: Pick<File, "size" | "type">) {
-  if (!["image/jpeg", "image/png"].includes(file.type))
-    throw new Error("SUPPORTED_ORIGINALS_ARE_JPEG_AND_PNG");
+export function validateSource(file: Pick<File, "size" | "type"> & {name?: string}) {
+  if (!photoFormat(file))
+    throw new Error("SUPPORTED_ORIGINALS_ARE_JPEG_PNG_AND_HEIC");
   if (file.size > 50 * 1024 * 1024) throw new Error("ORIGINAL_EXCEEDS_50_MIB");
   if (!file.size) throw new Error("EMPTY_ORIGINAL");
 }
@@ -64,28 +65,6 @@ export async function sourceMatches(file: File, pending: PendingImport) {
   return (
     digest(new Uint8Array(await file.arrayBuffer())) === pending.sourceDigest
   );
-}
-async function preview(file: File, max: number) {
-  const image = await createImageBitmap(file);
-  try {
-    const scale = Math.min(1, max / Math.max(image.width, image.height));
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(image.width * scale));
-    canvas.height = Math.max(1, Math.round(image.height * scale));
-    canvas
-      .getContext("2d")!
-      .drawImage(image, 0, 0, canvas.width, canvas.height);
-    const blob = await new Promise<Blob>((resolve, reject) =>
-      canvas.toBlob(
-        (b) => (b ? resolve(b) : reject(new Error("PREVIEW_FAILED"))),
-        "image/jpeg",
-        0.85,
-      ),
-    );
-    return blob.arrayBuffer();
-  } finally {
-    image.close();
-  }
 }
 export async function stageImport(
   file: File,
@@ -98,6 +77,7 @@ export async function stageImport(
   if (isPublicDemoAccount(v.accountId))
     throw new Error("PUBLIC_TEST_ACCOUNT_UPLOAD_DISABLED");
   validateSource(file);
+  const format = photoFormat(file)!;
   if (reselect) {
     const prefix = v.accountId + ":" + reselect.operationId + ":";
     if (reselect.stagingKeys.some(key => !key.startsWith(prefix)))
@@ -114,16 +94,24 @@ export async function stageImport(
   signal?.throwIfAborted();
   const signature = new Uint8Array(original);
   if (
-    file.type === "image/jpeg"
+    format === "jpeg"
       ? signature[0] !== 255 || signature[1] !== 216
-      : ![137, 80, 78, 71, 13, 10, 26, 10].every((n, i) => signature[i] === n)
+      : format === "png" && ![137, 80, 78, 71, 13, 10, 26, 10].every((n, i) => signature[i] === n)
   )
     throw new Error("SOURCE_FORMAT_MISMATCH");
+  const dimensions = displayPhotoDimensions(signature.subarray(0, PHOTO_HEADER_BYTES), format, file.size);
+  if (!dimensions) throw new Error("SOURCE_DIMENSIONS_UNAVAILABLE");
+  safePhotoDimensions(dimensions);
+  const check = () => {assertVault(v); signal?.throwIfAborted();};
+  const preview = async (maximum: 256 | 1600) => {
+    try {const {blob} = await photoPreview(file, dimensions, maximum, check); const bytes = await blob.arrayBuffer(); check(); return bytes;}
+    catch (error) {check(); if (format === "heic") throw new Error("HEIC_NATIVE_DECODE_UNAVAILABLE"); throw error;}
+  };
   const exifDate = captureDate(new Uint8Array(original));
-  const thumb = await preview(file, 256);
+  const thumb = await preview(256);
   assertVault(v);
   signal?.throwIfAborted();
-  const medium = await preview(file, 1600);
+  const medium = await preview(1600);
   assertVault(v);
   signal?.throwIfAborted();
   const worker = new Worker(new URL("./crypto.worker.ts", import.meta.url), {
@@ -148,7 +136,7 @@ export async function stageImport(
         accountId: v.accountId,
         vaultKey: new Uint8Array(v.vaultKey),
         filename: file.name,
-        mediaType: file.type,
+        mediaType: photoMime(format),
         sourceDate: exifDate ?? new Date().toISOString(),
         dateSource: exifDate ? "exif" : "import",
         files: [

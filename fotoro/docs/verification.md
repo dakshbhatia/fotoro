@@ -9,9 +9,10 @@ file are verified on the unlocked physical iPhone. The owner's screenshots show
 local Photos and a signed-out Sync screen. Build 12's protected account-state event
 independently reports signed out; real-account authentication remains unverified.
 Build 13 subsequently installed successfully, but the phone disconnected before
-launch/version readback. Signed encrypted build 16 is installed and its exact version is read back.
-CoreDevice refuses launch while the phone is locked; build-16 runtime and owner
-authentication acceptance remain pending.
+launch/version readback. Signed encrypted build 17 is installed and its exact version is read back.
+The CoreDevice launch succeeds. Build-17 protected diagnostics report
+signed out and a completed on-device picks pass; owner authentication acceptance
+remains pending.
 Apple has processed full build 4; its
 TestFlight access awaits an export-compliance declaration. Independent reviews reproduced
 retrieval, permission, cancellation, persistence and navigation defects; fixes
@@ -25,7 +26,7 @@ opens Saved photos → Shared photos → the rendered contact QR. The localhost 
 fixture flow verifies wrong-account password retry, recipient viewing and explicit
 Save. The 320 px cloud-header overflow found during QA is fixed.
 
-Production Worker `cd60ed44-589f-4c70-86d0-dda73e9fb676` is read back at
+Production Worker `d38236c7-1994-4474-b2cc-e2ae5ce1c8d9` is read back at
 100%. Canonical HTTPS checks pass for protected API authentication and exact
 passkey/contact/moment Apple association. Production D1/R2 and five migrations
 are unchanged; the previous Worker remains available for rollback.
@@ -51,7 +52,7 @@ control removes it, and Clear selection removes the selected-photo actions.
 Info remains navigable at accessibility-medium text size, then the test setting
 is restored to large. Tests use public local-service photos only.
 
-Local checks pass 231 full-native and 77 preview tests, with one explicit Vision
+Local checks pass 235 full-native and 81 preview tests, with one explicit Vision
 classifier integration skip in each suite because the iOS 27 simulator cannot
 create its inference context. Actual classification passes on a public synthetic
 macOS fixture; physical classification remains unverified. Date parsing, visual
@@ -97,9 +98,9 @@ Real-account phone-to-Safari acceptance remains open.
 | --- | --- |
 | Contracts, crypto and loopback fixtures | 19 tests pass: schema boundaries, canonical public links, signatures, media binding, preservation, closed diagnostic-method vocabulary and bounded public-fixture readiness retries |
 | Worker/D1/R2 API | 53 tests pass, including nonce-bound password signup, canonical association links, recipient authorization, replay/conflicts and unchanged legacy login; upload/storage, authentication/exchange/annotation and diagnostic privacy checks pass |
-| Web | 224 tests pass, including chosen-photo Save through password entry, immutable selection and current-account/trust binding, verified sharing receipts, cancellation, lazy-runtime session fences and startup boundaries |
+| Web | 244 tests pass, including date-scoped evidence, bounded HEIC intake and original-preserving encrypted staging alongside chosen-photo Save, sharing, cancellation and startup boundaries |
 | Web production build | TypeScript/Vite pass. Account/crypto loads after Sync photos; the large encrypted-media chunk warning remains |
-| Native | Latest full app 231 tests and local preview 77 tests pass locally with Xcode 27, zero failures and one explicit simulator Vision integration skip per suite. Date/category search, photo grouping, public links and sharing cancellation join account/crypto/journal/background/search regressions |
+| Native | Latest full app 235 tests and local preview 81 tests pass locally with Xcode 27, zero failures and one explicit simulator Vision integration skip per suite. All 13 focused natural-date tests also pass on the frozen release source |
 | TestFlight metadata | 28 tests pass for team/individual authentication, exact app/build ownership, sparse Apple responses, notes readback and credential-safe errors. A live build 2 update preserved every existing test-note character and verified its build relationship; its processing state is VALID and beta states remain MISSING_EXPORT_COMPLIANCE. Build 3 is VALID / IN_BETA_TESTING with encryption metadata false and verified local-preview test notes |
 | Distribution IPA | Actual build 3 archive and distribution IPA pass the strict preview audit. Xcode Organizer used its existing cloud-managed certificate; the copied IPA matches the unchanged archive/dSYM/link map. Apple validation and exact-IPA upload both exit 0 with success markers |
 | Internal tester access | App Store Connect shows the existing internal group with one tester and one build; iOS 0.1.0 (3) is Testing and the requested sole owner tester is Invited. Association was automatic; no new tester/role/invitation mutation was needed. Inbox delivery and installation remain unverified |
@@ -108,6 +109,46 @@ Real-account phone-to-Safari acceptance remains open.
 | Real local HTTP exchange | Three isolated tests cover fresh migrations, recovery sessions, bidirectional contribution/save, revocation, restore, byte-preserved HEIC, background ciphertext staging, encrypted labels/OCR in a fresh account session, cross-account denial and idempotent revision conflicts |
 | Native local lifecycle | All-age permitted enumeration, limited/denied startup, permission purge, ten-day browse, changed revisions, cancellation rollback and refresh stability are exercised |
 | Browser local lifecycle | Session-only default; retained labels/text/previews; lazy preview hydration; unavailable preview preservation; digest reselection; pending/cross-instance clear fences |
+
+## October 2 date search and Safari HEIC intake
+
+Native and web accept relative/calendar/ISO date phrases, explicit inclusive
+ranges and prefix/suffix compound queries. Date filters use verified capture
+dates; selected/import dates do not qualify. Existing labels, filenames, metadata
+and completed text recognition supply compound evidence. Date-scoped web meaning
+IDs prevent feedback from carrying a representative into another date interval.
+Invalid/reversed ranges stay ordinary evidence text. Numeric native search tokens
+cannot prefix-match a longer date or label.
+
+Browser intake validates bounded JPEG/PNG/HEIC dimensions before resized decoding.
+HEIC accepts verified HEVC stills and simple grids; native codec availability is
+probed before encryption. Staged original bytes remain unchanged, with image/heic
+metadata for supported HEIC/HEIF MIME variants. The crypto-worker regressions use
+the actual public HEIC original and mock only bitmap/canvas availability. They
+prove ciphertext decrypts to the same original; they do not establish every HEIC
+layout or browser codec. Clear/account/cancellation fences prevent late preview
+URLs and staged work from appearing after the operation ends.
+
+Public native simulator QA verifies the password field opens with keyboard focus.
+Actual macOS Safari renders the public Singapore HEIC in the gallery and 1600 px
+viewer; Save opens a focused blank password field and Back retains the selection.
+Isolated Brave verifies unsupported-codec feedback with zero console/runtime
+errors and zero upload writes. Its favicon 404 was fixed using the existing app
+icon. Browser gallery thumbnails now use 512 px within the unchanged decoded
+cache budget. Browser HEIC capture-time extraction remains unimplemented.
+
+Rendered public browser date QA at 1280×720, 390×844 and 320×568 verifies
+last-month and compound searches, absent/invalid-date results, capture provenance,
+no horizontal overflow and no runtime errors or upload writes. Local checks pass
+244 web, 235 full-native, 81 preview, 53 API, 19 core and 28 release-metadata tests,
+plus three isolated D1/R2 exchange tests. Each native suite has one explicit iOS
+27 Vision integration skip; all 13 focused natural-date tests pass independently.
+
+Signed full encrypted build 17 passes strict signature and exact production
+association checks, installs over the existing iPhone app, and reads back as
+0.1.0 (17). Launch succeeds; protected diagnostics report signed out and a
+completed 226-item picks pass. Owner password authentication and private-photo
+save/restore remain open, as does full build 4's Apple compliance gate.
 
 ## October 2 Save through password entry
 
@@ -572,7 +613,9 @@ records; it cannot enumerate an iPhone photo library automatically.
 Native cloud imports preserve JPEG/PNG/HEIC originals up to 50 MiB. Copies are
 320/1600 px JPEG at quality 82%; they never replace originals. Live Photo stills
 render locally, but backup skips motion pairs and videos. Browser import accepts
-JPEG/PNG and skips unknown dimensions, including current HEIC metadata, before decode.
+JPEG/PNG and supported HEIC stills/simple grids with bounded verified dimensions
+and a native browser decoder. Unsupported layouts/codecs are skipped before
+encrypted staging; browser HEIC capture-time extraction remains open.
 
 Conservative native scene-category search and natural date filters are now
 implemented. Unrestricted semantic embeddings, inferred face groups, cleanup,

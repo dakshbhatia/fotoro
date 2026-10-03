@@ -186,8 +186,12 @@ export function readableSyncError(error: unknown) {
     return "Your library is locked. Sign in to continue.";
   if (/UNAUTHENTICATED|FORBIDDEN/.test(code))
     return "Sign in again to continue syncing.";
+  if (code === "HEIC_NATIVE_DECODE_UNAVAILABLE")
+    return "This browser cannot open that HEIC photo. Try Safari or a JPEG copy.";
+  if (code === "SOURCE_DIMENSIONS_UNAVAILABLE")
+    return "This photo's dimensions could not be verified. Choose a JPEG or PNG copy.";
   if (/SUPPORTED_ORIGINALS|SOURCE_FORMAT/.test(code))
-    return "Browser sync supports JPEG and PNG originals. HEIC photos synced from iPhone can be viewed here.";
+    return "Choose a JPEG, PNG or supported HEIC photo.";
   if (/50_MIB/.test(code)) return "Choose photos smaller than 50 MB.";
   if (/STAGING_MISSING/.test(code))
     return "Choose the original file again to finish syncing.";

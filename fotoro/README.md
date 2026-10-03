@@ -41,7 +41,7 @@ from device backup. Labels and completed recognized text attached to synced
 originals also travel encrypted through the account. Search choices and pins stay
 on each device.
 
-In the browser, Open photos selects JPEG/PNG files for a local session. Search,
+In the browser, Open photos selects JPEG/PNG files and supported HEIC stills for a local session. Search,
 day grouping, zoom and original sharing/download work without an account. The
 selection's Save action carries the chosen originals through password entry and
 starts the same manual save once the account opens. Saved photos opens read-only.
@@ -51,8 +51,13 @@ text, preferences and up to 100 MiB of previews using a browser-held key; origin
 are not retained. After reopening, reselecting the matching SHA-256 original
 enables download/share. Browser storage can be cleared or evicted. With retention
 off, reloading clears the selection.
-Unknown image dimensions, including HEIC in this browser slice, are skipped before
-decoding. Thumbnail/preview caches are bounded and generated sequentially.
+Date phrases combine with existing filename, label and text evidence; date filters
+use original capture dates, never the date a file was selected. Unknown image
+dimensions are skipped before decoding. Safari's native HEIC decoder is required
+for HEIC intake; unsupported browsers show a JPEG/PNG alternative. Bounded header
+validation accepts HEVC stills and simple grids, preserving the original bytes.
+Thumbnail/preview caches are bounded and generated sequentially; browser gallery
+thumbnails are 512 px and viewer previews are 1600 px.
 
 Browser imports automatically suggest roughly 10% of viable unique groups using
 small local previews, clarity/exposure, favorites and verified capture-date variety.
@@ -92,7 +97,10 @@ annotations are absent from shared grants.
 Native imports preserve JPEG/PNG/HEIC originals byte for byte, up to 50 MiB.
 Native browsing copies are JPEG thumbnails at 320 px and previews at 1600 px, quality
 82%; they never replace the original. Safari displays HEIC through those copies
-and downloads the untouched HEIC. Browser imports accept JPEG/PNG. Live Photo
+and downloads the untouched HEIC. Browser imports accept JPEG/PNG and supported
+HEIC stills when the native browser decoder is available. HEIC capture-time
+extraction is not implemented in browser intake, so those imports are excluded
+from capture-date searches until a verified capture date is available. Live Photo
 motion pairs and videos are visibly skipped by backup.
 
 Select saved photos → Share in Fotoro chooses an accepted contact. Public contact

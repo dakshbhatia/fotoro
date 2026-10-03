@@ -1,3 +1,5 @@
+import {parseNaturalDateQuery} from "./natural-date";
+
 export interface SearchOcr {
   photoID: string;
   revision: string;
@@ -65,6 +67,14 @@ const count = (events: Event[] | undefined, now: number) => (events ?? []).reduc
 const photoKey = (meaning: string, id: string) => JSON.stringify([meaning, id]);
 const meaningKey = (scope: string, meaning: string) => JSON.stringify([scope, meaning]);
 const words = (text: string): string[] => text.match(/[\p{L}\p{N}]+/gu) ?? [];
+type DatedMeaning = [number | null, number | null, string];
+function datedMeaning(id: string): DatedMeaning | undefined {
+  if (!id.startsWith("dated:")) return;
+  try {
+    const value: unknown = JSON.parse(id.slice(6));
+    if (Array.isArray(value) && value.length === 3 && value.slice(0, 2).every(bound => bound === null || (typeof bound === "number" && Number.isFinite(bound))) && typeof value[2] === "string") return value as DatedMeaning;
+  } catch {}
+}
 
 /* Perception happens elsewhere. Typing only retrieves supported local meanings. */
 export class PhotoSearchIndex {
@@ -127,10 +137,12 @@ export class PhotoSearchIndex {
     this.record(this.history.meanings, meaningKey(scope, id), session, now);
   }
   choosePhoto(meaning: string, id: string, session: string, now = Date.now(), pin = false, scope = "local:all") {
-    const derived = /^(?:date|text|label):/.test(meaning) ? this.search(meaning.slice(meaning.indexOf(":") + 1), { now, scope, committedMeaning: meaning }).meaning : undefined;
-    const supported = this.dictionary.some(term => term.id === meaning && term.sources.has(id)) ||
-      (derived?.id === meaning && derived.photoIds.includes(id)) ||
-      (meaning.startsWith("file:") && normalizeSearch(this.records.get(id)?.filename ?? "") === meaning.slice(5));
+    const dated = datedMeaning(meaning), baseMeaning = dated?.[2] ?? meaning, photo = this.records.get(id), captured = photo && Date.parse(photo.date);
+    if (dated && (!photo || photo.dateSource !== "exif" || !Number.isFinite(captured) || (dated[0] !== null && captured! < dated[0]) || (dated[1] !== null && captured! >= dated[1]))) return;
+    const derived = /^(?:date|text|label):/.test(baseMeaning) ? this.search(baseMeaning.slice(baseMeaning.indexOf(":") + 1), { now, scope, committedMeaning: baseMeaning }).meaning : undefined;
+    const supported = (dated && baseMeaning === "date") || this.dictionary.some(term => term.id === baseMeaning && term.sources.has(id)) ||
+      (derived?.id === baseMeaning && derived.photoIds.includes(id)) ||
+      (baseMeaning.startsWith("file:") && normalizeSearch(photo?.filename ?? "") === baseMeaning.slice(5));
     if (!supported) return;
     const key = meaningKey(scope, meaning);
     this.record(this.history.photos, photoKey(key, id), session, now);
@@ -142,13 +154,20 @@ export class PhotoSearchIndex {
     target[key] = [...events, { at, session }].slice(-64);
   }
   search(query: string, options: { allowedIds?: Set<string>; scope?: string; committedMeaning?: string; previous?: SearchResult; now?: number } = {}): SearchResult {
-    const prefix = normalizeSearch(query), now = options.now ?? Date.now(), scope = options.scope ?? "local:all";
+    const now = options.now ?? Date.now(), scope = options.scope ?? "local:all", dateQuery = parseNaturalDateQuery(query, {now});
+    const dated = dateQuery.phrase !== undefined, prefix = dated ? dateQuery.text : normalizeSearch(query);
     const empty: SearchResult = { query, scope, meanings: [], photoIds: [] };
-    if (!prefix) return empty;
-    const eligible = (id: string) => this.records.has(id) && (!options.allowedIds || options.allowedIds.has(id));
+    if (!prefix && !dated) return empty;
+    const dates = new Map<string, number>();
+    const captured = (id: string) => {
+      if (!dates.has(id)) dates.set(id, Date.parse(this.records.get(id)!.date));
+      return dates.get(id)!;
+    };
+    const eligible = (id: string) => this.records.has(id) && (!options.allowedIds || options.allowedIds.has(id)) && (!dated || (this.records.get(id)!.dateSource === "exif" && Number.isFinite(captured(id)) && (dateQuery.from === undefined || captured(id) >= dateQuery.from) && (dateQuery.until === undefined || captured(id) < dateQuery.until)));
     const candidates: SearchMeaning[] = [];
     const byId = new Map<string, SearchMeaning>();
     const include = (id: string, term: string, photoId: string, source: SearchEvidence) => {
+      if (dated) id = "dated:" + JSON.stringify([dateQuery.from ?? null, dateQuery.until ?? null, id]);
       let candidate = byId.get(id);
       if (!candidate) {
         candidate = { id, term, kind: source, photoIds: [], evidence: {} };
@@ -159,6 +178,9 @@ export class PhotoSearchIndex {
       if (!old || tier(source) > tier(old)) candidate.evidence[photoId] = source;
       if (tier(source) > tier(candidate.kind)) candidate.kind = source;
     };
+    if (dated && !prefix) {
+      for (const photo of this.records.values()) if (eligible(photo.id)) include("date", dateQuery.phrase!, photo.id, "date");
+    }
     let low = 0, high = this.dictionary.length;
     while (low < high) {
       const middle = (low + high) >>> 1;
@@ -166,6 +188,7 @@ export class PhotoSearchIndex {
     }
     for (let i = low; i < this.dictionary.length; i++) {
       const term = this.dictionary[i];
+      if (!prefix) break;
       if (!term.normalized.startsWith(prefix)) break;
       // Numeric OCR tokens require an exact query, rather than noisy digit completion.
       if (/^\d+$/.test(term.normalized) && term.normalized !== prefix) continue;
@@ -177,7 +200,7 @@ export class PhotoSearchIndex {
     if (tokens.length > 1 && tokens.length <= 16) {
       for (const position of this.phrases.get(tokens[0]) ?? []) {
         if (!eligible(position.photoId) || position.start + tokens.length > position.normalized.length) continue;
-        if (!tokens.every((token, offset) => offset === tokens.length - 1 ? position.normalized[position.start + offset].startsWith(token) : position.normalized[position.start + offset] === token)) continue;
+        if (!tokens.every((token, offset) => offset === tokens.length - 1 && !/^\d+$/.test(token) ? position.normalized[position.start + offset].startsWith(token) : position.normalized[position.start + offset] === token)) continue;
         const term = position.display.slice(position.start, position.start + tokens.length).join(" ");
         include((position.source === "label" ? "label:" : "text:") + normalizeSearch(term), term, position.photoId, position.source);
       }
@@ -192,10 +215,6 @@ export class PhotoSearchIndex {
         }
       }
     }
-    if (/^\d/.test(prefix)) {
-      const ids = [...this.records.values()].filter(photo => eligible(photo.id) && (photo.date.includes(prefix) || normalizeSearch(new Date(photo.date).toLocaleDateString()).includes(prefix))).map(photo => photo.id);
-      if (ids.length) candidates.push({ id: "date:" + prefix, term: query.trim(), kind: "date", photoIds: ids, evidence: Object.fromEntries(ids.map(id => [id, "date" as const])) });
-    }
     candidates.sort((a, b) =>
       Number(normalizeSearch(b.term) === prefix) - Number(normalizeSearch(a.term) === prefix) ||
       count(this.history.meanings[meaningKey(scope, b.id)], now) - count(this.history.meanings[meaningKey(scope, a.id)], now) ||
@@ -204,7 +223,7 @@ export class PhotoSearchIndex {
     if (!meaning) return { ...empty, meanings: candidates.slice(0, 6) };
     const key = meaningKey(scope, meaning.id), pin = this.history.pins[key];
     const ranks = new Map(meaning.photoIds.map(id => {
-      const photo = this.records.get(id)!, parsed = Date.parse(photo.date);
+      const photo = this.records.get(id)!, parsed = captured(id);
       return [id, [
         Number(id === pin), tier(meaning.evidence[id]), count(this.history.photos[photoKey(key, id)], now),
         meaning.evidence[id] === "ocr" ? photo.ocr?.confidence ?? 0 : 0,
@@ -219,7 +238,7 @@ export class PhotoSearchIndex {
       }
       return compare(a, b);
     });
-    const previous = options.previous, extending = previous && prefix.startsWith(normalizeSearch(previous.query));
+    const previous = options.previous, extending = previous && prefix.startsWith(dated ? parseNaturalDateQuery(previous.query, {now}).text : normalizeSearch(previous.query));
     const previousId = previous?.photoId;
     const bestTier = tier(meaning.evidence[sorted[0]]);
     const stable = extending && previous.scope === scope && previous.meaning?.id === meaning.id && previousId && sorted.includes(previousId) &&
