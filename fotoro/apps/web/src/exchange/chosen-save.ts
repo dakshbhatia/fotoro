@@ -9,6 +9,7 @@ export interface ChosenSaveSnapshot {
 export class ChosenSaveIntent {
   readonly snapshot: ChosenSaveSnapshot;
   private state: "pending" | "running" | "complete" | "cancelled" = "pending";
+  private started = false;
   private session?: object;
   private authentication?: { generation: number };
   private controller = new AbortController();
@@ -27,6 +28,7 @@ export class ChosenSaveIntent {
   }
 
   get pending() { return this.state === "pending"; }
+  get needsInitialSave() { return this.pending && !this.started; }
   get boundVault() { return this.session; }
   bindInitialVault(session: object) {
     if (this.pending && !this.session && !this.authentication) this.session = session;
@@ -61,6 +63,7 @@ export class ChosenSaveIntent {
   }) {
     if (!this.pending || !options.active || options.busy || !this.session) return false;
     if (this.session !== options.session || !options.current()) { this.cancel(); return false; }
+    this.started = true;
     this.state = "running";
     const current = () => this.state === "running" && options.current() && !this.controller.signal.aborted;
     try {

@@ -13,12 +13,12 @@ are separate checks. “Partial” identifies a concrete remaining capability.
 | --- | --- | --- |
 | 1 | One-password sign-in | Implemented on native/web; wrong-password, interrupted enrollment and retry regressions pass. Owner acceptance remains open. |
 | 2 | Remember the current user | Protected session/password persistence and account reference in Settings are implemented. |
-| 3 | Install the current full build | Signed encrypted build 15 is ready. Phone connection reports disconnected; exact installed version/launch remain pending. |
+| 3 | Install the current full build | Signed encrypted build 16 is installed and its exact version is read back. Launch is refused while the phone is locked; current runtime acceptance remains pending. |
 | 4 | Save chosen photos through sign-in | Immutable reviewed sources and one-shot authenticated Save are implemented; public-service tests pass. |
 | 5 | Restore identical originals in Safari | Isolated D1/R2 tests verify JPEG/PNG/HEIC bytes in a fresh session. Personal phone-to-Safari acceptance remains open. |
 | 6 | Manual Save progress and Pause/Continue | Implemented. Continue uses the durable queue; it does not scan for new photos. |
 | 7 | Offline/background/relaunch recovery | Durable ciphertext transfers, pause and stale-account fences are implemented. Physical daemon/relaunch acceptance remains open. |
-| 8 | Retry without losing selection | Implemented for authentication, manual Save and sharing; cancellation withdraws only the pending operation. |
+| 8 | Retry without losing selection | Implemented for authentication, manual Save and sharing; incomplete work preserves exact sources for explicit Retry, and concurrent recipient Saves reuse one durable request. |
 | 9 | Green release checks | Core/API/web/native checks are required on each exact PR head. |
 | 10 | Full TestFlight release | Full build 4 awaits Apple's export-compliance declaration. Preview build 3 is a separate binary. |
 | 11 | Sharp thumbnails | System-sized native thumbnails and late degraded-image rejection are implemented. |
@@ -56,7 +56,7 @@ are separate checks. “Partial” identifies a concrete remaining capability.
 | 43 | Quotas/GC/restore operations | Private R2/D1 and durable journals exist. Quotas, final-object collection and operational restore proof remain open. |
 | 44 | Private diagnostics | Bounded protected state/timing/count diagnostics are implemented; credential, filename and raw path logging is excluded. |
 | 45 | Export/delete/permissions | Original export, local retention clearing and Photos permission controls are implemented. Whole-account export/deletion remain open. |
-| 46 | Accessibility | Native labels/system controls and web focus/keyboard/dark/small-screen rules exist. Full VoiceOver/Dynamic Type acceptance remains open. |
+| 46 | Accessibility | Native keyboard submit and Clear selection, wider focused web password entry and 44 px search choices are verified. Public native Info is checked at accessibility-medium; full VoiceOver/Dynamic Type acceptance remains open. |
 | 47 | Real-device acceptance | Public local two-person exchanges and synthetic 10,000-item tests pass. Personal iPhone/Safari and older-phone performance remain open. |
 
 The next substantial capability work is broader media intake/restore, explicit

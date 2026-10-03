@@ -449,12 +449,16 @@ struct RecentPhotosView: View {
   }
   private var galleryHeader: some View {
     VStack(alignment: .leading, spacing: 8) {
-      HStack(alignment: .firstTextBaseline) {
-        Text(allPhotos ? "All Photos" : "Picked for you").font(.title2.bold())
-        Spacer()
-        Button(allPhotos ? "Your picks" : "All Photos") {
-          allPhotos.toggle()
-        }.font(.subheadline).frame(minHeight: 44)
+      ViewThatFits(in: .horizontal) {
+        HStack(alignment: .firstTextBaseline) {
+          galleryTitle.fixedSize(horizontal: true, vertical: false)
+          Spacer()
+          galleryToggle.fixedSize(horizontal: true, vertical: false)
+        }
+        VStack(alignment: .leading, spacing: 4) {
+          galleryTitle.fixedSize(horizontal: false, vertical: true)
+          galleryToggle
+        }.frame(maxWidth: .infinity, alignment: .leading)
       }
       HStack {
         Text("Last 10 days").foregroundStyle(.secondary)
@@ -486,6 +490,13 @@ struct RecentPhotosView: View {
           .font(.footnote).foregroundStyle(.secondary)
       }
     }.padding(.horizontal).padding(.bottom, 14)
+  }
+  private var galleryTitle: some View {
+    Text(allPhotos ? "All Photos" : "Picked for you").font(.title2.bold())
+  }
+  private var galleryToggle: some View {
+    Button(allPhotos ? "Your picks" : "All Photos") { allPhotos.toggle() }
+      .font(.subheadline).frame(minHeight: 44)
   }
   private var gallery: some View {
     let current = Dictionary(baseHomePhotos.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
@@ -538,20 +549,19 @@ struct RecentPhotosView: View {
   @ViewBuilder private var searchBar: some View {
     if canSearch {
       if selecting {
-        HStack(spacing: 12) {
-          Text(selected.isEmpty ? "Select photos" : "\(selected.count) selected")
-            .font(.subheadline).monospacedDigit()
-          Spacer(minLength: 0)
-#if !FOTORO_LOCAL_PREVIEW
-          Button("Save", systemImage: "icloud.and.arrow.up") {
-            reviewSave(selectedPhotos.values.map(\.source).sorted { $0.id < $1.id })
-          }.buttonStyle(.borderedProminent).accessibilityIdentifier("selection.save")
-            .disabled(selected.isEmpty || preparingShare || showShare)
-#endif
-          Button("Share", systemImage: "square.and.arrow.up") {
-            share(selectedPhotos.values.map(\.photo).sorted { ($0.capturedAt ?? .distantPast) > ($1.capturedAt ?? .distantPast) })
-          }.labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
-            .disabled(selected.isEmpty || preparingShare || showShare)
+        ViewThatFits(in: .horizontal) {
+          HStack(spacing: 12) {
+            selectionSummary.fixedSize(horizontal: true, vertical: false)
+            Spacer(minLength: 0)
+            selectionActions
+          }
+          VStack(alignment: .leading, spacing: 8) {
+            selectionSummary
+            HStack(spacing: 12) {
+              selectionActions
+              Spacer(minLength: 0)
+            }
+          }.padding(.vertical, 8)
         }.padding(.horizontal, 14).frame(minHeight: 52)
           .glassEffect(.regular.interactive()).padding(.horizontal).padding(.bottom, 6)
       } else {
@@ -568,6 +578,22 @@ struct RecentPhotosView: View {
         .glassEffect(.regular.interactive()).padding(.horizontal).padding(.bottom, 6)
       }
     }
+  }
+  private var selectionSummary: some View {
+    Text(selected.isEmpty ? "Select photos" : "\(selected.count) selected")
+      .font(.subheadline).monospacedDigit()
+  }
+  @ViewBuilder private var selectionActions: some View {
+#if !FOTORO_LOCAL_PREVIEW
+    Button("Save", systemImage: "icloud.and.arrow.up") {
+      reviewSave(selectedPhotos.values.map(\.source).sorted { $0.id < $1.id })
+    }.buttonStyle(.borderedProminent).accessibilityIdentifier("selection.save")
+      .disabled(selected.isEmpty || preparingShare || showShare)
+#endif
+    Button("Share", systemImage: "square.and.arrow.up") {
+      share(selectedPhotos.values.map(\.photo).sorted { ($0.capturedAt ?? .distantPast) > ($1.capturedAt ?? .distantPast) })
+    }.labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+      .disabled(selected.isEmpty || preparingShare || showShare)
   }
   private var saveFromViewer: ((RecentPhoto) -> Void)? {
 #if FOTORO_LOCAL_PREVIEW

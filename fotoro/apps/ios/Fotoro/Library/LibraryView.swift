@@ -91,6 +91,7 @@ struct LibraryView: View {
             }
             ForEach(services.notices, id: \.self) { Text($0).font(.caption).padding() }
           }.scrollPosition(id: $scrollID, anchor: .top)
+            .scrollDismissesKeyboard(.interactively)
             .task(id: SavedLibraryOpenBinding(services)) {
               await catalogRefresh.open(services)
             }
@@ -113,6 +114,11 @@ struct LibraryView: View {
             }
             .toolbar {
               if selection.count > 0 {
+                ToolbarItem(placement: .bottomBar) {
+                  Button("Clear selection", systemImage: "xmark.circle") { selection.removeAll() }
+                    .disabled(preparingShare || sharingOriginals)
+                    .accessibilityIdentifier("saved.selection.clear")
+                }
                 ToolbarItem(placement: .bottomBar) {
                   Menu("Share \(selection.count)", systemImage: "square.and.arrow.up") {
                     Button("Share in Fotoro") { shareInFotoro() }

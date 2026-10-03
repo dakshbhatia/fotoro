@@ -64,6 +64,7 @@ export async function api<T>(
   method = body === undefined ? "GET" : "POST",
   signal?: AbortSignal,
 ): Promise<T> {
+  signal?.throwIfAborted();
   const response = await fetch(base + path, {
     method,
     signal,
@@ -76,22 +77,29 @@ export async function api<T>(
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+  signal?.throwIfAborted();
   if (!response.ok) {
     throw await responseError(response);
   }
   const result = await response.json();
+  signal?.throwIfAborted();
   return schema ? (validateWire(schema as never, result) as T) : result;
 }
-export async function fetchCipher(objectId: string) {
+export async function fetchCipher(objectId: string, signal?: AbortSignal) {
+  signal?.throwIfAborted();
   const r = await fetch(base + "/v1/objects/" + objectId, {
+    signal,
     credentials: "include",
     headers:
       fixtureMode && fixtureAccount
         ? { "x-fotoro-fixture-account": fixtureAccount }
         : {},
   });
+  signal?.throwIfAborted();
   if (!r.ok) {
     throw await responseError(r);
   }
-  return new Uint8Array(await r.arrayBuffer());
+  const bytes = new Uint8Array(await r.arrayBuffer());
+  signal?.throwIfAborted();
+  return bytes;
 }

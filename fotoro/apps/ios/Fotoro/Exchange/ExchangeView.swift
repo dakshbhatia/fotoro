@@ -20,6 +20,8 @@ struct ExchangeView: View {
   @State private var operation: Task<Void, Never>?
   @State private var openedPhoto: LocalPhoto?
   @State private var shareCode: ShareCodePresentation?
+  private enum FocusField: Hashable { case link, name }
+  @FocusState private var focusedField: FocusField?
   @Environment(\.scenePhase) private var scenePhase
   @Environment(\.dismiss) private var dismiss
 
@@ -50,6 +52,7 @@ struct ExchangeView: View {
         if let candidateCard {
           Section(candidateIsMoment ? "Photo invitation" : "Add a contact") {
             TextField("Their name (optional)", text: $name).textContentType(.name)
+              .focused($focusedField, equals: .name).disabled(services.busy)
             Text("Confirm this link came from the person you want to share with.")
               .font(.footnote).foregroundStyle(.secondary)
             if changedContact {
@@ -65,7 +68,7 @@ struct ExchangeView: View {
                 feedback = openingPhotos ? "Photos opened." : "Contact added."
               }
             }.disabled(services.busy || name.count > 80)
-            Button("Cancel", role: .cancel) { candidate = nil; link = ""; name = "" }
+            Button("Cancel", role: .cancel) { focusedField = nil; candidate = nil; link = ""; name = "" }
           }
         }
         if !selected.isEmpty {
@@ -151,15 +154,14 @@ struct ExchangeView: View {
           }
           TextField("Paste a Fotoro contact or photo link", text: $link)
             .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-          Button("Open link") {
-            do {
-              candidate = try FotoroShareLinks.parse(link.trimmingCharacters(in: .whitespacesAndNewlines), expectedOrigin: services.api.origin)
-              if let card = candidateCard { name = contacts.contains(where: { $0.accountId == card.accountId }) ? services.contactName(card.accountId) : "" }
-            } catch { services.error = error.localizedDescription }
-          }.disabled(link.isEmpty || services.busy)
+            .focused($focusedField, equals: .link).submitLabel(.go).onSubmit(openLink)
+            .disabled(services.busy)
+          Button("Open link", action: openLink)
+            .disabled(link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || services.busy)
           ForEach(contacts, id: \.accountId) { card in Text(services.contactName(card.accountId)) }
         }
-      }.navigationTitle(selected.isEmpty ? "Shared photos" : "Share photos")
+      }.scrollDismissesKeyboard(.interactively)
+        .navigationTitle(selected.isEmpty ? "Shared photos" : "Share photos")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         .task {
@@ -193,6 +195,15 @@ struct ExchangeView: View {
     }
   }
   private var candidateIsMoment: Bool { if case .moment = candidate { return true }; return false }
+  private func openLink() {
+    let text = link.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !text.isEmpty, !services.busy else { return }
+    do {
+      candidate = try FotoroShareLinks.parse(text, expectedOrigin: services.api.origin)
+      if let card = candidateCard { name = contacts.contains(where: { $0.accountId == card.accountId }) ? services.contactName(card.accountId) : "" }
+      focusedField = nil
+    } catch { services.error = error.localizedDescription }
+  }
   private func available(_ grant: GrantV1) -> Bool {
     grant.revokedAt == nil && (grant.expiresAt.map { (Wire.parseDate($0) ?? .distantPast) > Date() } ?? true)
   }
@@ -204,6 +215,7 @@ struct ExchangeView: View {
   }
   private func perform(_ action: @escaping @MainActor () async throws -> Void) {
     guard operation == nil, scenePhase == .active else { return }
+    focusedField = nil
     if let task = services.run(phase: .share, { defer { operation = nil }; try await action() }) { operation = task }
   }
 }
