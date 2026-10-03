@@ -110,6 +110,33 @@ test("received photos verify identity, signature and exact original before an ex
   assert.equal(first.photoId, second.photoId); assert.equal(saves[0], saves[1]); assert.equal(first.manifest.ownerAccountId, accounts.accounts[1].accountId);
   assert.ok(calls.includes("/v1/objects/" + photo.manifest.representations[0].objectId));
 }));
+test("overlapping Save attempts create one durable recipient copy and retry that exact request", async () => scoped(async () => {
+  const {detail, objects, photo} = await fixture(); await open(1); await pinCard(accounts.accounts[0]);
+  const requests: string[] = [], records = new Map<string, unknown>();
+  let release!: () => void, began!: () => void;
+  const blocked = new Promise<void>(resolve => {release = resolve;}), started = new Promise<void>(resolve => {began = resolve;});
+  globalThis.fetch = (async (path, init) => {
+    if (String(path).startsWith("/v1/objects/")) return new Response(new Uint8Array(objects.get(String(path).split("/").at(-1)!)!));
+    if (String(path).endsWith("/viewed")) return response({});
+    if (path === "/v1/saves") {
+      requests.push(init!.body as string);
+      const request = JSON.parse(init!.body as string);
+      records.set(request.save.operationId, request.save);
+      return response(request.save);
+    }
+    began(); await blocked; return response(detail);
+  }) as typeof fetch;
+  const first = saveReceivedPhoto(detail.grant.grantId, photo.manifest.photoId);
+  await started;
+  const second = saveReceivedPhoto(detail.grant.grantId, photo.manifest.photoId);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  release();
+  const [a, b] = await Promise.all([first, second]);
+  assert.equal(a.operationId, b.operationId); assert.equal(a.photoId, b.photoId);
+  assert.equal(records.size, 1); assert.equal(requests[0], requests[1]);
+  await saveReceivedPhoto(detail.grant.grantId, photo.manifest.photoId);
+  assert.equal(requests[2], requests[0]);
+}));
 test("a server identity replacement or wrong grant recipient never marks an invitation viewed", async () => scoped(async () => {
   const {detail} = await fixture(); await open(1); await pinCard(accounts.accounts[0]); const calls: string[] = [];
   globalThis.fetch = (async path => {calls.push(String(path)); return response({...detail, cards: [{...accounts.accounts[0], boxPublicKey: accounts.accounts[1].boxPublicKey}, accounts.accounts[1]]});}) as typeof fetch;
@@ -133,6 +160,47 @@ test("a delayed receive cannot decrypt photos or mark them viewed after cancella
   const pending = receive(detail.grant.grantId), rejected = assert.rejects(pending, /VAULT_LOCKED/);
   await began; lockVault(); await open(0); release(response(detail)); await rejected;
   assert.deepEqual(calls, ["/v1/grants/" + detail.grant.grantId]);
+}));
+test("closing sharing aborts its metadata download without caching or marking it viewed", async () => scoped(async () => {
+  const {detail, photo} = await fixture(); await open(1); await pinCard(accounts.accounts[0]);
+  const controller = new AbortController(), calls: string[] = [];
+  let began!: () => void; const started = new Promise<void>(resolve => {began = resolve;});
+  globalThis.fetch = (async (path, init) => {
+    calls.push(String(path));
+    if (String(path).startsWith("/v1/objects/")) {
+      assert.equal(init?.signal, controller.signal);
+      began();
+      return new Promise<Response>((_resolve, reject) => init!.signal!.addEventListener("abort", () => reject(new DOMException("Sharing closed", "AbortError")), {once: true}));
+    }
+    return response(detail);
+  }) as typeof fetch;
+  const pending = receive(detail.grant.grantId, {signal: controller.signal}), rejected = assert.rejects(pending, {name: "AbortError"});
+  await started; controller.abort(); await rejected;
+  assert.equal(calls.some(path => path.endsWith("/viewed")), false);
+  assert.equal(await get("read", accounts.accounts[1].accountId + ":" + photo.manifest.metadataRepresentation.objectId), undefined);
+}));
+test("cancelling during the original response body leaves no save request or downloaded original cache", async () => scoped(async () => {
+  const {detail, objects, photo} = await fixture(); await open(1); await pinCard(accounts.accounts[0]);
+  const controller = new AbortController(), calls: string[] = [];
+  let began!: () => void, release!: (bytes: ArrayBuffer) => void; const started = new Promise<void>(resolve => {began = resolve;});
+  const originalID = photo.manifest.representations[0].objectId;
+  globalThis.fetch = (async (path, init) => {
+    calls.push(String(path));
+    if (String(path).startsWith("/v1/objects/")) {
+      assert.equal(init?.signal, controller.signal);
+      const result = new Response(new Uint8Array(objects.get(String(path).split("/").at(-1)!)!));
+      if (path === "/v1/objects/" + originalID) result.arrayBuffer = async () => {began(); return new Promise<ArrayBuffer>(resolve => {release = resolve;});};
+      return result;
+    }
+    if (String(path).endsWith("/viewed")) return response({});
+    if (path === "/v1/saves") assert.fail("A cancelled original cannot be saved");
+    return response(detail);
+  }) as typeof fetch;
+  const pending = saveReceivedPhoto(detail.grant.grantId, photo.manifest.photoId, {signal: controller.signal}), rejected = assert.rejects(pending, {name: "AbortError"});
+  await started; controller.abort(); release(new Uint8Array(objects.get(originalID)!).buffer); await rejected;
+  assert.equal(calls.includes("/v1/saves"), false);
+  assert.equal(await get("read", accounts.accounts[1].accountId + ":" + originalID), undefined);
+  assert.equal(await get("saves", accounts.accounts[1].accountId + ":" + detail.grant.grantId + ":" + photo.manifest.photoId), undefined);
 }));
 test("a sender cannot open their recipient-only invitation by possessing the public link", async () => scoped(async () => {
   const {detail} = await fixture();

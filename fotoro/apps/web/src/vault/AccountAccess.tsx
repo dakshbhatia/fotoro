@@ -10,11 +10,11 @@ export function AccountAccess({ password, onPassword, generatedPassword, busy, o
   onCopy: () => void;
   onSave: () => void;
 }) {
-  if (generatedPassword) return <form onSubmit={event => {event.preventDefault(); if (!busy) onContinue();}}>
+  if (generatedPassword) return <form aria-busy={busy} onSubmit={event => {event.preventDefault(); if (!busy) onContinue();}}>
     <p className="hint">Save your password to open Fotoro on another device.</p>
     <label>
       Fotoro password
-      <input name="password" type="text" autoComplete="new-password" value={generatedPassword} readOnly onFocus={event => event.currentTarget.select()} />
+      <input name="password" type="text" autoComplete="new-password" value={generatedPassword} readOnly onFocus={event => event.currentTarget.select()} enterKeyHint="go" />
     </label>
     <div className="header-actions">
       <button type="button" disabled={busy} onClick={onCopy}>Copy</button>
@@ -24,13 +24,13 @@ export function AccountAccess({ password, onPassword, generatedPassword, busy, o
     <button className="text-button" type="button" disabled={busy} onClick={onBack}>Back</button>
   </form>;
   return <>
-    <form onSubmit={event => {
+    <form aria-busy={busy} onSubmit={event => {
       event.preventDefault();
       if (!busy && password.trim()) onSignIn();
     }}>
       <label>
         Fotoro password
-        <input name="password" type="password" autoComplete="current-password" value={password} onChange={event => onPassword(event.target.value)} autoCapitalize="none" autoCorrect="off" spellCheck={false} />
+        <input name="password" type="password" autoComplete="current-password" value={password} onChange={event => onPassword(event.target.value)} autoCapitalize="none" autoCorrect="off" spellCheck={false} enterKeyHint="go" />
       </label>
       <button className="primary-action" type="submit" disabled={busy || !password.trim()}>Open Fotoro</button>
     </form>

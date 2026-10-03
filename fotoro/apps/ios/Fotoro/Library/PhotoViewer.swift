@@ -158,8 +158,12 @@ struct SavedPhotoDetails: View {
   @Bindable var services: AppServices
   let photo: LocalPhoto
   @State private var label = ""
+  @FocusState private var labelFocused: Bool
   @Environment(\.dismiss) private var dismiss
   private var labels: [String] { services.annotation(photo).labels ?? [] }
+  private var canAddLabel: Bool {
+    !SearchNormalization.text(label).isEmpty && label.unicodeScalars.count <= 120 && labels.count < 64
+  }
   var body: some View {
     NavigationStack {
       List {
@@ -179,15 +183,13 @@ struct SavedPhotoDetails: View {
                 var next = labels
                 next.remove(at: index)
                 do { try services.setLabels(next, photo: photo) } catch { services.error = error.localizedDescription }
-              }.labelStyle(.iconOnly)
+              }.labelStyle(.iconOnly).accessibilityLabel("Remove label \(value)")
             }
           }
           HStack {
             TextField("Add label", text: $label).autocorrectionDisabled()
-            Button("Add") {
-              do { try services.setLabels(labels + [label], photo: photo); label = "" }
-              catch { services.error = error.localizedDescription }
-            }.disabled(SearchNormalization.text(label).isEmpty || label.unicodeScalars.count > 120 || labels.count >= 64)
+              .focused($labelFocused).submitLabel(.done).onSubmit(addLabel)
+            Button("Add", action: addLabel).disabled(!canAddLabel)
           }
         }
         if (try? services.annotations.ledger.state(photo.id)?.conflict) == true {
@@ -208,8 +210,17 @@ struct SavedPhotoDetails: View {
         }
         if let message = services.annotations.errors[photo.id] { Text(message).font(.caption).foregroundStyle(.secondary) }
         if let error = services.error { Text(error).font(.caption).foregroundStyle(.secondary) }
-      }.navigationTitle("Info").navigationBarTitleDisplayMode(.inline)
+      }.scrollDismissesKeyboard(.interactively)
+        .navigationTitle("Info").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
     }.presentationDetents([.medium, .large])
+  }
+  private func addLabel() {
+    guard canAddLabel else { return }
+    do {
+      try services.setLabels(labels + [label], photo: photo)
+      label = ""
+      labelFocused = false
+    } catch { services.error = error.localizedDescription }
   }
 }

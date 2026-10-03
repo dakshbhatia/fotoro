@@ -182,6 +182,7 @@ svg {
   flex-direction: column;
   gap: 14px;
 }
+.sync-onboarding { width: min(100%,360px); }
 .hint {
   font-size: 13px;
   line-height: 1.5;
@@ -542,7 +543,8 @@ summary {
   min-height: 100px;
   word-break: break-all;
 }
-.sync-onboarding form { display: flex; flex-direction: column; gap: 14px; }
+.sync-onboarding form { display: flex; flex-direction: column; gap: 14px; width: min(100%,360px); }
+.sync-onboarding form label, .sync-onboarding form input { width: 100%; min-width: 0; }
 .sync-local-button {
   position: fixed;
   top: 93px;
@@ -654,7 +656,7 @@ h1 { font-size: 32px; letter-spacing: -1.3px; font-weight: 650; }
 .local-search-controls button { background: transparent; border: 0; width: 44px; padding: 11px; }
 .local-search-controls > span { min-width: 48px; color: #6c7468; font-variant-numeric: tabular-nums; }
 .local-alternatives { align-items: center; justify-content: center; margin: 10px 0; font-size: 12px; color: #71776a; }
-.local-alternatives button { min-height: 36px; border-radius: 18px; background: transparent; font-size: 12px; }
+.local-alternatives button { min-height: 44px; border-radius: 18px; background: transparent; font-size: 12px; }
 .search-info { margin: 14px 0; padding: 16px 20px; border: 1px solid #e2e5dc; border-radius: 16px; font-size: 13px; }
 .search-info details { margin-top: 12px; }
 .search-info summary { min-height: 44px; padding: 12px 0; }
@@ -664,7 +666,7 @@ h1 { font-size: 32px; letter-spacing: -1.3px; font-weight: 650; }
 .cloud-sync-status small { flex: 0 0 100%; margin-left: 14px; color: #81847c; font-size: 11px; }
 .cloud-library .busy { position: static; flex: 0 0 auto; margin: 0 32px 8px; font-size: 12px; }
 .cloud-search-meanings { position: static; align-self: flex-start; transform: none; margin: 0 32px 8px; padding: 0; background: transparent; box-shadow: none; font-size: 12px; align-items: center; }
-.cloud-search-meanings button { font-size: 12px; min-height: 36px; }
+.cloud-search-meanings button { font-size: 12px; min-height: 44px; }
 .account-sheet > p[role="status"] { font-size: 22px; letter-spacing: -.4px; font-weight: 550; margin: 20px 0 8px; }
 .account-sheet details { padding: 8px 0; border-top: 1px solid #eceee7; margin-top: 14px; }
 .account-sheet summary { min-height: 44px; padding: 12px 0; }
@@ -740,6 +742,7 @@ h1 { font-size: 32px; letter-spacing: -1.3px; font-weight: 650; }
 .photo-pick-toggle input { width: 24px; height: 24px; margin: 0; accent-color: #386341; cursor: pointer; }
 .photo-pick-reason { position: absolute; bottom: 4px; left: 4px; right: 4px; padding: 4px 6px; border-radius: 6px; background: #111c; color: #fff; font-size: 11px; line-height: 1.25; pointer-events: none; }
 @media (max-width: 700px) {
+  input:not([type="checkbox"]):not([type="radio"]), textarea, select { font-size: 16px; }
   .photo-picks { margin: 0 18px 4px; }
   .photo-pick-reason { font-size: 9px; padding: 3px; }
 }
@@ -783,6 +786,7 @@ h1 { font-size: 32px; letter-spacing: -1.3px; font-weight: 650; }
 .share-preview img { width: 100%; height: 100%; object-fit: cover; }
 .share-preview > span { font-size: 10px; max-width: 100%; }
 .contact-name { display: flex; flex-direction: column; gap: 8px; margin: 16px 0; font-size: 13px; }
+.original-share:focus { outline: none; }
 @media (max-width: 375px) {
   .cloud-library header { height: auto; min-height: 102px; flex-wrap: wrap; row-gap: 10px; }
   .cloud-library header .brand { flex: 1 0 100%; }

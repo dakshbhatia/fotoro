@@ -46,6 +46,13 @@ interface Staged {
   reservation?: UploadReservationV1;
   commit?: UploadCommitV1;
 }
+function verifiedCommit(commit: UploadCommitV1, part: Staged) {
+  if (commit.version !== 1 || !part.reservation || commit.uploadId !== part.reservation.uploadId)
+    throw new Error("COMMIT_BINDING_MISMATCH");
+  if (commit.ciphertextBytes !== part.ciphertextBytes || commit.ciphertextSha256 !== part.ciphertextSha256)
+    throw new Error("COMMIT_DIGEST_MISMATCH");
+  return commit;
+}
 export function validateSource(file: Pick<File, "size" | "type">) {
   if (!["image/jpeg", "image/png"].includes(file.type))
     throw new Error("SUPPORTED_ORIGINALS_ARE_JPEG_AND_PNG");
@@ -87,16 +94,24 @@ export async function stageImport(
 ): Promise<PendingImport> {
   if (fixtureMode) throw new Error("PUBLIC_TEST_ACCOUNT_UPLOAD_DISABLED");
   signal?.throwIfAborted();
-  validateSource(file);
-  if (reselect && !(await sourceMatches(file, reselect)))
-    throw new Error("SOURCE_MISMATCH");
-  const v = requireVault(),
-    operationId = reselect?.operationId ?? crypto.randomUUID(),
-    photoId = reselect?.photoId ?? crypto.randomUUID();
+  const v = requireVault();
   if (isPublicDemoAccount(v.accountId))
     throw new Error("PUBLIC_TEST_ACCOUNT_UPLOAD_DISABLED");
+  validateSource(file);
+  if (reselect) {
+    const prefix = v.accountId + ":" + reselect.operationId + ":";
+    if (reselect.stagingKeys.some(key => !key.startsWith(prefix)))
+      throw new Error("RESELECT_ACCOUNT_MISMATCH");
+    const matches = await sourceMatches(file, reselect);
+    assertVault(v);
+    signal?.throwIfAborted();
+    if (!matches) throw new Error("SOURCE_MISMATCH");
+  }
+  const operationId = reselect?.operationId ?? crypto.randomUUID(),
+    photoId = reselect?.photoId ?? crypto.randomUUID();
   const original = await file.arrayBuffer();
   assertVault(v);
+  signal?.throwIfAborted();
   const signature = new Uint8Array(original);
   if (
     file.type === "image/jpeg"
@@ -105,8 +120,10 @@ export async function stageImport(
   )
     throw new Error("SOURCE_FORMAT_MISMATCH");
   const exifDate = captureDate(new Uint8Array(original));
-  const thumb = await preview(file, 256),
-    medium = await preview(file, 1600);
+  const thumb = await preview(file, 256);
+  assertVault(v);
+  signal?.throwIfAborted();
+  const medium = await preview(file, 1600);
   assertVault(v);
   signal?.throwIfAborted();
   const worker = new Worker(new URL("./crypto.worker.ts", import.meta.url), {
@@ -178,6 +195,8 @@ export async function stageImport(
       value: encryptPrivate(pending),
     },
   ]);
+  assertVault(v);
+  signal?.throwIfAborted();
   return pending;
 }
 export async function pendingImports() {
@@ -208,21 +227,21 @@ export async function resumePendingImports(signal?: AbortSignal) {
       for (let i = 0; i < pending.parts.length; i++) {
         check();
         const part = pending.parts[i];
-        if (part.commit) continue;
+        if (part.commit) {
+          try {verifiedCommit(part.commit, part);}
+          catch {part.commit = undefined; await persist();}
+          if (part.commit) continue;
+        }
         if (part.reservation) {
           try {
-            part.commit = await api(
+            const commit = await api<UploadCommitV1>(
               "/v1/uploads/" + part.reservation.uploadId + "/commit",
               {},
               "UploadCommitV1",
               "POST",
               signal,
             );
-            if (
-              part.commit!.ciphertextBytes !== part.ciphertextBytes ||
-              part.commit!.ciphertextSha256 !== part.ciphertextSha256
-            )
-              throw new Error("COMMIT_DIGEST_MISMATCH");
+            part.commit = verifiedCommit(commit, part);
             await persist();
             continue;
           } catch (e) {
@@ -276,18 +295,14 @@ export async function resumePendingImports(signal?: AbortSignal) {
         if (!response.ok) throw new Error("UPLOAD_FAILED");
         pending.state = "committing";
         await persist();
-        part.commit = await api(
+        const commit = await api<UploadCommitV1>(
           "/v1/uploads/" + part.reservation!.uploadId + "/commit",
           {},
           "UploadCommitV1",
           "POST",
           signal,
         );
-        if (
-          part.commit!.ciphertextBytes !== part.ciphertextBytes ||
-          part.commit!.ciphertextSha256 !== part.ciphertextSha256
-        )
-          throw new Error("COMMIT_DIGEST_MISMATCH");
+        part.commit = verifiedCommit(commit, part);
         await persist();
       }
       const reps = pending.parts.map((p) => ({

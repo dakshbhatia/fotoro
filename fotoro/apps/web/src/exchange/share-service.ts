@@ -62,6 +62,25 @@ async function scopedPut(store: "settings" | "saves", key: string, value: unknow
   });
   check(session, scope);
 }
+async function saveRequestOnce(key: string, request: SaveRequestV1, session: UnlockedVault, scope: ShareScope) {
+  const database = await db(); check(session, scope);
+  const proposed = encrypt(request, session);
+  const stored = await new Promise<WrappedKeyV1>((resolve, reject) => {
+    // A readwrite transaction also serializes another tab saving the same source.
+    const transaction = database.transaction("saves", "readwrite"), store = transaction.objectStore("saves");
+    let value = proposed;
+    const reading = store.get(key);
+    reading.onsuccess = () => {
+      if (reading.result !== undefined) value = reading.result;
+      else store.put(proposed, key);
+    };
+    transaction.oncomplete = () => resolve(value);
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error ?? new Error("STORAGE_ABORTED"));
+  });
+  check(session, scope);
+  return validateWire<SaveRequestV1>("SaveRequestV1", decrypt(stored, session));
+}
 const encrypt = (value: unknown, session: UnlockedVault) => wrapKey(utf8(value), session.vaultKey);
 const decrypt = <T,>(value: WrappedKeyV1, session: UnlockedVault): T => {const plain = unwrapKey(value, session.vaultKey); try {return JSON.parse(new TextDecoder().decode(plain));} finally {plain.fill(0);}};
 export async function pinCard(value: string | AccountCardV1, scope: ShareScope = {}) {
@@ -153,7 +172,7 @@ async function receiveWithAuthority(grantId: string, authorization: SharingAutho
       if (!envelope) continue;
       checkAuthority(authorization);
       const key = openShareKey(envelope, session.boxSecretKey, card, {version: 1, grantId, photoId: manifest.photoId, senderAccountId: card.accountId, recipientAccountId: session.accountId});
-      try {const photo = await readPhoto(manifest, key, grantId); await checkTrust(authorization); photos.push(photo);} catch (error) {key.fill(0); throw error;}
+      try {const photo = await readPhoto(manifest, key, grantId, scope.signal); await checkTrust(authorization); photos.push(photo);} catch (error) {key.fill(0); throw error;}
     }
     await checkTrust(authorization);
     await api("/v1/grants/" + grantId + "/viewed", {}, undefined, "POST", scope.signal); await checkTrust(authorization);
@@ -170,11 +189,11 @@ export async function saveReceivedPhoto(grantId: string, photoId: string, scope:
     try {
       const photo = received.photos.find(item => item.manifest.photoId === photoId);
       if (!photo) throw new Error("PHOTO_NOT_GRANTED");
-      const original = await photoBytes(photo, "original"); original.fill(0); await checkTrust(authorization);
+      const original = await photoBytes(photo, "original", scope.signal); original.fill(0); await checkTrust(authorization);
       const manifest: PhotoManifestV1 = {...photo.manifest, photoId: crypto.randomUUID(), ownerAccountId: session.accountId, ownerWrappedMetadataKey: wrapKey(photo.metadataKey, session.vaultKey)};
       const save: SavedPhotoV1 = {version: 1, operationId: crypto.randomUUID(), photoId: manifest.photoId, sourceGrantId: grantId, sourcePhotoId: photoId, manifest, signedPayload: signPayload("photo-manifest", session.accountId, utf8(manifest), session.signingSecretKey)};
       request = {version: 1, expectedGrantVersion: received.grant.version, save};
-      await scopedPut("saves", key, encrypt(request, session), session, scope);
+      request = await saveRequestOnce(key, request, session, scope);
     } finally {for (const photo of received.photos) photo.metadataKey.fill(0);}
   }
   if (request.save.sourceGrantId !== grantId || request.save.sourcePhotoId !== photoId) throw new Error("SAVE_RECEIPT_MISMATCH");

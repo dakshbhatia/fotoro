@@ -9,7 +9,9 @@ file are verified on the unlocked physical iPhone. The owner's screenshots show
 local Photos and a signed-out Sync screen. Build 12's protected account-state event
 independently reports signed out; real-account authentication remains unverified.
 Build 13 subsequently installed successfully, but the phone disconnected before
-launch/version readback. Signed encrypted build 15 is ready; it is not installed yet.
+launch/version readback. Signed encrypted build 16 is installed and its exact version is read back.
+CoreDevice refuses launch while the phone is locked; build-16 runtime and owner
+authentication acceptance remain pending.
 Apple has processed full build 4; its
 TestFlight access awaits an export-compliance declaration. Independent reviews reproduced
 retrieval, permission, cancellation, persistence and navigation defects; fixes
@@ -23,20 +25,31 @@ opens Saved photos → Shared photos → the rendered contact QR. The localhost 
 fixture flow verifies wrong-account password retry, recipient viewing and explicit
 Save. The 320 px cloud-header overflow found during QA is fixed.
 
-Production Worker `dd17d11a-ea35-4525-94b0-c162ccc64a78` is read back at
+Production Worker `cd60ed44-589f-4c70-86d0-dda73e9fb676` is read back at
 100%. Canonical HTTPS checks pass for protected API authentication and exact
 passkey/contact/moment Apple association. Production D1/R2 and five migrations
 are unchanged; the previous Worker remains available for rollback.
 
-Fresh production browser QA uses an isolated Playwright/Brave context because
-the Browser plugin is unavailable and the bundled Chromium executable is absent.
-At 390×844 and 320×844, a public neutral PNG's Save opens exactly one password
-field, Back to photos preserves its selection, and Saved photos opens read-only.
-The document width equals the viewport; no framework overlay, console error,
-warning or `/v1/*` mutation is observed. Inspected screenshots confirm readable
-type, clear action hierarchy, input contrast, responsive header placement and
-unclipped controls. A native filter check also corrected the visible pick count
-to match its filtered result, including zero matches.
+Fresh production browser QA uses the Codex in-app browser with a public neutral
+PNG at 390×844: chosen Save opens one focused password field, mobile text is
+16 px, the document has no horizontal overflow, and console warnings/errors are
+absent. The initial account-loading screen provides a focused Back to photos
+button. Local 320 px checks also verify malformed invitations show a recovery
+message. Independent isolated Brave QA, used because the Browser plugin is not
+listed, covers 1280×720, 390×844 and 320×568: password Enter, original options
+focus/trapping/Escape, restored opener focus, contact Cancel, invitation progress,
+and injected 503 → explicit Retry Save → disabled Saved. No unrelated uploads or
+runtime errors are observed; the deliberately injected 503 is the expected console
+entry. Physical Safari keyboard and native system Share acceptance remain open.
+
+This pass fixes durable Save creation across concurrent recipient callers,
+account-switch reselection, rejected upload receipts poisoning retries and
+cancelled media reads. Chosen Save stays pending when work remains unresolved;
+background refresh does not automatically retry it. Native public simulator QA
+verifies keyboard Done adds a label and dismisses the keyboard, its named Remove
+control removes it, and Clear selection removes the selected-photo actions.
+Info remains navigable at accessibility-medium text size, then the test setting
+is restored to large. Tests use public local-service photos only.
 
 Local checks pass 231 full-native and 77 preview tests, with one explicit Vision
 classifier integration skip in each suite because the iOS 27 simulator cannot
@@ -48,7 +61,7 @@ also pass after adding explicit task cancellation alongside lock/account/trust
 changes. Forged save receipts never enter a catalog, and unrelated imports remain
 queued when sharing.
 
-The web startup graph was measured from actual emitted static imports: 1,634,399
+The preceding release's web startup graph was measured from actual emitted static imports: 1,634,399
 bytes became 326,093 bytes (80.05% smaller); the same gzip method measured
 439,599 → 101,930 bytes (76.81% smaller). Account crypto is loaded on demand; the
 crypto worker remains unchanged. This is a build-size measurement, not a physical
@@ -84,7 +97,7 @@ Real-account phone-to-Safari acceptance remains open.
 | --- | --- |
 | Contracts, crypto and loopback fixtures | 19 tests pass: schema boundaries, canonical public links, signatures, media binding, preservation, closed diagnostic-method vocabulary and bounded public-fixture readiness retries |
 | Worker/D1/R2 API | 53 tests pass, including nonce-bound password signup, canonical association links, recipient authorization, replay/conflicts and unchanged legacy login; upload/storage, authentication/exchange/annotation and diagnostic privacy checks pass |
-| Web | 217 tests pass, including chosen-photo Save through password entry, immutable selection and current-account/trust binding, verified sharing receipts, cancellation, lazy-runtime session fences and startup boundaries |
+| Web | 224 tests pass, including chosen-photo Save through password entry, immutable selection and current-account/trust binding, verified sharing receipts, cancellation, lazy-runtime session fences and startup boundaries |
 | Web production build | TypeScript/Vite pass. Account/crypto loads after Sync photos; the large encrypted-media chunk warning remains |
 | Native | Latest full app 231 tests and local preview 77 tests pass locally with Xcode 27, zero failures and one explicit simulator Vision integration skip per suite. Date/category search, photo grouping, public links and sharing cancellation join account/crypto/journal/background/search regressions |
 | TestFlight metadata | 28 tests pass for team/individual authentication, exact app/build ownership, sparse Apple responses, notes readback and credential-safe errors. A live build 2 update preserved every existing test-note character and verified its build relationship; its processing state is VALID and beta states remain MISSING_EXPORT_COMPLIANCE. Build 3 is VALID / IN_BETA_TESTING with encryption metadata false and verified local-preview test notes |

@@ -133,8 +133,12 @@ export default function CloudApp({
   const input = useRef<HTMLInputElement>(null);
   const activeRef = useRef(active), saveIntentRef = useRef(saveIntent), incomingRef = useRef(incoming);
   activeRef.current = active; saveIntentRef.current = saveIntent; incomingRef.current = incoming;
-  const backButton = useRef<HTMLButtonElement>(null);
-  useEffect(() => {if (active) backButton.current?.focus({preventScroll: true});}, [active]);
+  const backButton = useRef<HTMLButtonElement>(null), passwordPanel = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!active) return;
+    const target = account ? backButton.current : passwordPanel.current?.querySelector<HTMLInputElement>('input[name="password"]');
+    target?.focus({preventScroll: true});
+  }, [active, account, recoveryNew]);
   const accountPanel = useRef<HTMLElement>(null);
   const closeAccountPanel = () => {saveIntentRef.current?.cancel(); setMenu(false);};
   useDialogFocus(accountPanel, closeAccountPanel, menu && active && !!account);
@@ -249,18 +253,19 @@ export default function CloudApp({
     setStatus((previous) => (sameVault(session) ? "" : previous));
     setNeedsAttention((previous) => (sameVault(session) ? false : previous));
   };
-  const run = async (fn: () => Promise<void>, accountAction = false) => {
+  const run = async (fn: () => Promise<void | boolean>, accountAction = false) => {
     if (running.current) return false;
     running.current = true;
     setBusy(true);
     setStatus("");
+    let accepted = false;
     let session;
     try {
       session = requireVault();
     } catch {}
     try {
       await ready;
-      await fn();
+      accepted = (await fn()) !== false;
     } catch (e) {
       if (!session || sameVault(session)) {
         const message = readableSyncError(e);
@@ -268,11 +273,13 @@ export default function CloudApp({
         setNeedsAttention(true);
       }
       if (session && sameVault(session)) {
-        const queue = await pendingImports();
-        const edits = await pendingAnnotations(session);
-        if (sameVault(session)) setAnnotationPending(edits);
-        if (sameVault(session))
-          setPending((previous) => (sameVault(session) ? queue : previous));
+        try {
+          const queue = await pendingImports();
+          const edits = await pendingAnnotations(session);
+          if (sameVault(session)) setAnnotationPending(edits);
+          if (sameVault(session))
+            setPending((previous) => (sameVault(session) ? queue : previous));
+        } catch {}
       }
     } finally {
       if (uploadAbort.current?.signal.aborted) {
@@ -282,7 +289,7 @@ export default function CloudApp({
       running.current = false;
       setBusy(false);
     }
-    return true;
+    return accepted;
   };
   const login = async (fn: () => Promise<unknown>) => {
     const request = saveIntentRef.current, version = authIntent.current;
@@ -393,6 +400,8 @@ export default function CloudApp({
           setStatus(
             `${failures} photos could not be prepared. Your local originals are unchanged.`,
           );
+        check();
+        return !result.stopped && failures === 0;
       } finally {
         signal?.removeEventListener("abort", abort);
         if (uploadAbort.current === controller) uploadAbort.current = null;
@@ -420,7 +429,7 @@ export default function CloudApp({
     try {const session = requireVault(); if (session.accountId === account) saveIntent.bindInitialVault(session);} catch {}
   }, [active, saveIntent]);
   useEffect(() => {
-    if (active && !busy && saveIntent?.pending && saveReady) void startChosenSave(saveIntent);
+    if (active && !busy && saveIntent?.needsInitialSave && saveReady) void startChosenSave(saveIntent);
   }, [active, busy, saveIntent, saveReady]);
   const summary = syncStatus(
     pending,
@@ -561,7 +570,7 @@ export default function CloudApp({
         </header>
         {incomingError && <p className="hint share-link-error" role="status">{incomingError}</p>}
         {!unlocked ? (
-          <section className="unlock sync-onboarding">
+          <section className="unlock sync-onboarding" ref={passwordPanel}>
             {incoming?.pending && <p className="hint">{incoming.link.kind === "moment" ? "Enter the Fotoro password this photo invitation was sent to." : "Enter your Fotoro password to accept this contact."}</p>}
             <AccountAccess
               password={recovery}

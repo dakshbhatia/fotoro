@@ -21,6 +21,7 @@ import {
 import { api, fetchCipher } from "../exchange/api";
 import { get, all, atomic, cacheCipher } from "../exchange/cache";
 import { requireVault, encryptPrivate, decryptPrivate } from "../vault/vault";
+import {assertVault} from "../vault/scope";
 import { annotationCacheWrite, readAnnotations, serializeAnnotationWrites } from "../exchange/annotations";
 export interface Photo {
   manifest: PhotoManifestV1;
@@ -51,14 +52,18 @@ export async function collect(parts: AsyncIterable<Uint8Array>) {
   }
   return bytes;
 }
-export async function representation(rep: RepresentationV1, key: Uint8Array) {
+export async function representation(rep: RepresentationV1, key: Uint8Array, signal?: AbortSignal) {
   await ready;
+  signal?.throwIfAborted();
   const session = requireVault();
+  const check = () => {assertVault(session); signal?.throwIfAborted();};
   const account = session.accountId;
   const cacheKey = account + ":" + rep.objectId;
   let bytes = await get<Uint8Array>("read", cacheKey);
+  check();
   if (!bytes) {
-    bytes = await fetchCipher(rep.objectId);
+    bytes = await fetchCipher(rep.objectId, signal);
+    check();
     if (
       bytes.byteLength !== rep.ciphertextBytes ||
       digest(bytes) !== rep.ciphertextSha256 ||
@@ -66,6 +71,7 @@ export async function representation(rep: RepresentationV1, key: Uint8Array) {
     )
       throw new Error("CIPHERTEXT_MISMATCH");
     await cacheCipher(cacheKey, bytes);
+    check();
   }
   if (
     bytes.byteLength !== rep.ciphertextBytes ||
@@ -73,27 +79,26 @@ export async function representation(rep: RepresentationV1, key: Uint8Array) {
     b64(bytes.subarray(0, 24)) !== rep.header
   )
     throw new Error("CIPHERTEXT_MISMATCH");
-  if (requireVault() !== session) throw new Error("VAULT_LOCKED");
+  check();
   const plaintext = await collect(
     decryptMedia(source(bytes), key, rep.binding),
   );
-  if (requireVault() !== session) {
-    plaintext.fill(0);
-    throw new Error("VAULT_LOCKED");
-  }
+  try {check();} catch (error) {plaintext.fill(0); throw error;}
   return plaintext;
 }
 export async function readPhoto(
   manifest: PhotoManifestV1,
   metadataKey?: Uint8Array,
   grantId?: string,
+  signal?: AbortSignal,
 ): Promise<Photo> {
+  signal?.throwIfAborted();
   const key =
     metadataKey ??
     unwrapKey(manifest.ownerWrappedMetadataKey, requireVault().vaultKey);
   let plain: Uint8Array | undefined;
   try {
-    plain = await representation(manifest.metadataRepresentation, key);
+    plain = await representation(manifest.metadataRepresentation, key, signal);
     const metadata = validateWire<PhotoMetadataV1>(
       "PhotoMetadataV1",
       JSON.parse(new TextDecoder().decode(plain)),
@@ -105,13 +110,16 @@ export async function readPhoto(
 export async function photoBytes(
   photo: Photo,
   kind: "thumbnail" | "preview" | "original",
+  signal?: AbortSignal,
 ) {
+  signal?.throwIfAborted();
   const rep =
     photo.manifest.representations.find((r) => r.binding.kind === kind) ??
     photo.manifest.representations.find((r) => r.binding.kind === "original")!;
   const bytes = await representation(
     rep,
     unb64(photo.metadata.representationKeys[rep.binding.representationId]),
+    signal,
   );
   if (
     rep.binding.kind === "original" &&

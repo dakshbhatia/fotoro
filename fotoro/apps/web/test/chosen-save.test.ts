@@ -9,6 +9,7 @@ import {ChosenSaveIntent} from "../src/exchange/chosen-save";
 import {atomic, clearAccount} from "../src/exchange/cache";
 import {pendingImports} from "../src/exchange/journal";
 import {refreshSync, saveSync} from "../src/exchange/sync";
+import {syncSelectedSequential} from "../src/exchange/selected";
 import {prepareEnrollment, completeEnrollment, cancelEnrollment, recover} from "../src/vault/session";
 import {formatFotoroPassword} from "../src/vault/password";
 import type {LocalPhoto} from "../src/local/resources";
@@ -85,10 +86,40 @@ test("busy or rejected Save starts preserve the original request; concurrent act
   await open();const intent=new ChosenSaveIntent([photo()],requireVault());let starts=0,release:(accepted:boolean)=>void=()=>{};
   const launch=saveOptions(intent,async()=>{starts++;return new Promise<boolean>(resolve=>{release=resolve;});});
   assert.equal(await intent.start({...launch,busy:true}),false);assert.equal(intent.pending,true);assert.equal(starts,0);
+  assert.equal(intent.needsInitialSave,true);
   assert.equal(await intent.start({...launch,save:async()=>false}),false);assert.equal(intent.pending,true);
+  assert.equal(intent.needsInitialSave,false,"an incomplete attempt waits for explicit Retry");
   await assert.rejects(intent.start({...launch,save:async()=>{throw new Error("activation rejected");}}),/activation rejected/);assert.equal(intent.pending,true);
   const running=intent.start(launch);assert.equal(await intent.start(launch),false);release(true);assert.equal(await running,true);assert.equal(starts,1);
   assert.equal(await intent.start(launch),false);assert.equal(starts,1);
+}));
+
+test("an unresolved upload preserves the chosen files for explicit Retry without starting the next photo",async()=>scoped(async()=>{
+  const session=await open(),item=await queued(),chosen=photo("next-chosen.jpg"),intent=new ChosenSaveIntent([chosen],session);
+  const staged:File[]=[],requests:string[]=[];
+  globalThis.fetch=(async(path,init)=>{
+    requests.push((init?.method??"GET")+" "+path);
+    if(String(path).startsWith("/v1/changes?"))return response(page());
+    if(path==="/v1/uploads/reserve")return response({version:1,code:"UNAVAILABLE"},503);
+    throw new Error("Unexpected request "+path);
+  }) as typeof fetch;
+  const launch=saveOptions(intent,async(snapshot,signal,current)=>{
+    const result=await syncSelectedSequential([...snapshot.files],{
+      signal,current,stage:async(file)=>{staged.push(file);},
+      drain:()=>saveSync(session,signal),unresolved:async()=> (await pendingImports()).some(upload=>upload.state!=="committed"),
+      skipped:async(_file,error)=>{throw error;},
+    });
+    return !result.stopped;
+  });
+  assert.equal(await intent.start(launch),false);
+  assert.equal(intent.pending,true);assert.equal(intent.needsInitialSave,false);
+  assert.deepEqual(staged,[]);assert.deepEqual(intent.snapshot.files,[chosen.file]);
+  assert.equal(requests.filter(request=>request==="POST /v1/uploads/reserve").length,1);
+  await refreshSync(session);
+  assert.equal(requests.filter(request=>request==="POST /v1/uploads/reserve").length,1,"background refresh does not retry uploads");
+  await atomic([{store:"journal",key:owner+":"+item.operationId},{store:"staging",key:item.stagingKeys[0]}]);
+  assert.equal(await intent.start(launch),true,"explicit Retry resumes the exact selection after prior work reconciles");
+  assert.deepEqual(staged,[chosen.file]);assert.equal(intent.pending,false);
 }));
 
 test("an initially unlocked account binds the chosen Save directly without another confirmation",async()=>scoped(async()=>{

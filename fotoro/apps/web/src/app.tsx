@@ -9,7 +9,7 @@ import {parseShareLink} from "@fotoro/contracts/share-links";
 import {requireVault} from "./vault/vault";
 import type {Photo} from "./library/catalog";
 function readIncomingLink() {
-  if (!/^#(?:contact|moment)=/.test(location.hash)) return null;
+  if (!/^#(?:contact|moment)(?:=|$)/.test(location.hash)) return null;
   try {
     let session;
     try {session = requireVault();} catch {}
@@ -20,7 +20,7 @@ const CloudApp = lazy(() => import("./CloudApp"));
 const SavedViewer = lazy(() => import("./library/Viewer").then(module => ({default: module.Viewer})));
 export default function App() {
   const [incoming, setIncoming] = useState(readIncomingLink);
-  const [incomingError, setIncomingError] = useState(() => /^#(?:contact|moment)=/.test(location.hash) && !incoming ? "This link could not be opened. Ask the sender for a new Fotoro link." : "");
+  const [incomingError, setIncomingError] = useState(() => /^#(?:contact|moment)(?:=|$)/.test(location.hash) && !incoming ? "This link could not be opened. Ask the sender for a new Fotoro link." : "");
   const [cloud, setCloud] = useState(() => !!incoming || !!incomingError),
     [opened, setOpened] = useState(() => !!incoming || !!incomingError),
     [localPhotos, setLocalPhotos] = useState<LocalPhoto[]>([]),
@@ -32,13 +32,13 @@ export default function App() {
   const pendingShare = useRef(incoming);
   const cancelIncoming = useCallback(() => {
     pendingShare.current?.cancel(); pendingShare.current = null; setIncoming(null); setIncomingError("");
-    if (/^#(?:contact|moment)=/.test(location.hash)) history.replaceState(null, "", location.pathname + location.search);
+    if (/^#(?:contact|moment)(?:=|$)/.test(location.hash)) history.replaceState(null, "", location.pathname + location.search);
   }, []);
   useEffect(() => {
     const changed = () => {
       pendingShare.current?.cancel();
       const intent = readIncomingLink(); pendingShare.current = intent; setIncoming(intent);
-      const invalid = /^#(?:contact|moment)=/.test(location.hash) && !intent;
+      const invalid = /^#(?:contact|moment)(?:=|$)/.test(location.hash) && !intent;
       setIncomingError(invalid ? "This link could not be opened. Ask the sender for a new Fotoro link." : "");
       if (intent || invalid) {setOpened(true); setCloud(true);}
     };
@@ -48,6 +48,14 @@ export default function App() {
   const pendingSave = useRef<ChosenSaveIntent | null>(null);
   const cancelSave = useCallback(() => {pendingSave.current?.cancel(); pendingSave.current = null; setSaveIntent(null);}, []);
   const syncOpener = useRef<HTMLElement | null>(null);
+  const photoOpener = useRef<HTMLElement | null>(null);
+  const closeSavedPhoto = () => {
+    setSavedViewer(null);
+    requestAnimationFrame(() => {
+      if (photoOpener.current?.isConnected && !photoOpener.current.closest("[hidden],[inert]"))
+        photoOpener.current.focus({preventScroll: true});
+    });
+  };
   const returnToPhotos = () => {
     cancelSave(); cancelIncoming(); setSharePhotos(null);
     setCloud(false);
@@ -79,7 +87,10 @@ export default function App() {
           onPhotosChange={setLocalPhotos}
           syncSummary={syncSummary}
           ownedPhotos={ownedPhotos}
-          onOpenSaved={setSavedViewer}
+          onOpenSaved={photoId => {
+            photoOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+            setSavedViewer(photoId);
+          }}
           onCancelSave={cancelSave}
           onSave={photos => {
             cancelSave();
@@ -101,7 +112,7 @@ export default function App() {
       </div>
       {opened && (
         <div hidden={!cloud}>
-          <Suspense fallback={<p className="hint">Opening Fotoro…</p>}>
+          <Suspense fallback={<section className="app" aria-busy="true"><header className="topbar"><p className="hint" role="status">Opening Fotoro…</p><button autoFocus onClick={returnToPhotos}>Back to photos</button></header></section>}>
             <CloudApp
               active={cloud}
               saveIntent={saveIntent}
@@ -118,10 +129,10 @@ export default function App() {
           </Suspense>
         </div>
       )}
-      {viewingSaved && ownedPhotos && savedViewer && <Suspense fallback={<p className="busy" role="status">Opening photo…</p>}><SavedViewer key={savedViewer} photos={ownedPhotos.photos} initial={savedViewer} onSaved={() => {}} onShare={photo => {
+      {viewingSaved && ownedPhotos && savedViewer && <Suspense fallback={<div className="viewer" role="dialog" aria-modal="true" aria-label="Opening photo"><header className="viewer-top glass"><p className="hint" role="status">Opening photo…</p><button autoFocus onClick={closeSavedPhoto}>Close</button></header></div>}><SavedViewer key={savedViewer} photos={ownedPhotos.photos} initial={savedViewer} onSaved={() => {}} onShare={photo => {
         if (!ownedPhotos.current() || !ownedPhotos.photos.includes(photo)) return;
         setSavedViewer(null); setSharePhotos([photo]); setOpened(true); setCloud(true);
-      }} onClose={() => setSavedViewer(null)} /></Suspense>}
+      }} onClose={closeSavedPhoto} /></Suspense>}
     </>
   );
 }

@@ -33,17 +33,26 @@ export function Viewer({
     [status, setStatus] = useState(""),
     [label, setLabel] = useState(""),
     [saving, setSaving] = useState(false),
+    [saveState, setSaveState] = useState<"idle" | "saved" | "failed">("idle"),
     [preparingShare, setPreparingShare] = useState(false),
     [sharing, setSharing] = useState(false),
     [shareAttempt] = useState(() => new OriginalShareAttempt()),
     [prepared, setPrepared] = useState<{file: File; photo: Photo; session: UnlockedVault} | null>(null);
   const touch = useRef<{ x: number; y: number } | undefined>(undefined);
-  const panel = useRef<HTMLDivElement>(null);
+  const panel = useRef<HTMLDivElement>(null), originalPanel = useRef<HTMLElement>(null), originalButton = useRef<HTMLButtonElement>(null), hadOriginalOptions = useRef(false);
   const index = viewerPhotoIndex(photos, selected), photo = photos[index];
   const currentPhoto = useRef(photo), mounted = useRef(false), shareGeneration = useRef(0), savingRef = useRef(false);
   currentPhoto.current = photo;
   const authorized = (source: Photo, session: UnlockedVault) => mounted.current && currentPhoto.current === source && sameVault(session);
   useDialogFocus(panel, () => prepared ? setPrepared(null) : onClose());
+  useDialogFocus(originalPanel, () => setPrepared(null), !!prepared);
+  useEffect(() => {
+    if (prepared) {hadOriginalOptions.current = true; return;}
+    if (!hadOriginalOptions.current) return;
+    hadOriginalOptions.current = false;
+    const frame = requestAnimationFrame(() => originalButton.current?.focus({preventScroll: true}));
+    return () => cancelAnimationFrame(frame);
+  }, [prepared]);
   useEffect(() => {
     mounted.current = true;
     return () => {mounted.current = false; shareGeneration.current++;};
@@ -66,6 +75,7 @@ export function Viewer({
     setLabel("");
     setUrl("");
     setStatus("");
+    setSaveState("idle");
     setZoom(false);
     photoBytes(photo, "preview")
       .then((bytes) => {
@@ -107,22 +117,22 @@ export function Viewer({
     try {
       await saveReceivedPhoto(photo.grantId, photo.manifest.photoId, {current: () => authorized(photo, session)});
       if (mounted.current && sameVault(session)) {
-        if (currentPhoto.current === photo) setStatus("Saved to your photos");
+        if (currentPhoto.current === photo) {setSaveState("saved"); setStatus("Saved to your photos");}
         onSaved();
       }
-    } catch (error) {if (authorized(photo, session)) setStatus(readableShareError(error));}
+    } catch (error) {if (authorized(photo, session)) {setSaveState("failed"); setStatus(readableShareError(error));}}
     finally {savingRef.current = false; if (mounted.current) setSaving(false);}
   };
   return (
     <div
       className="viewer"
       role="dialog"
-      aria-modal="true"
+      aria-modal={prepared ? undefined : true}
       aria-label="Photo viewer"
       tabIndex={-1}
       ref={panel}
     >
-      <div className="viewer-top glass">
+      <div className="viewer-top glass" inert={prepared ? true : undefined}>
         <button onClick={onClose} aria-label="Close viewer">
           <Icon kind="close" />
         </button>
@@ -135,6 +145,7 @@ export function Viewer({
       </div>
       <div
         className="view-image"
+        inert={prepared ? true : undefined}
         onTouchStart={(e) => {
           if (e.touches.length === 1)
             touch.current = {
@@ -162,7 +173,7 @@ export function Viewer({
           />
         )}
       </div>
-      <div className="viewer-bottom glass">
+      <div className="viewer-bottom glass" inert={prepared ? true : undefined}>
         <button
           disabled={index === 0}
           onClick={() => setSelected(photos[index - 1].manifest.photoId)}
@@ -173,6 +184,7 @@ export function Viewer({
         <button onClick={() => setZoom(!zoom)}>{zoom ? "Fit" : "Zoom"}</button>
         {onShare && !photo.grantId && <button onClick={() => onShare(photo)}>Share</button>}
         <button
+          ref={originalButton}
           disabled={preparingShare || sharing}
           onClick={() => void prepareShare()}
         >
@@ -180,10 +192,10 @@ export function Viewer({
         </button>
         {photo.grantId && (
           <button
-            disabled={saving}
+            disabled={saving || saveState === "saved"}
             onClick={() => void save()}
           >
-            {saving ? "Saving…" : "Save"}
+            {saving ? "Saving…" : saveState === "saved" ? "Saved" : saveState === "failed" ? "Retry Save" : "Save"}
           </button>
         )}
         <button
@@ -194,7 +206,7 @@ export function Viewer({
           <Icon kind="next" />
         </button>
       </div>
-      {prepared && prepared.photo === photo && sameVault(prepared.session) && <aside className="original-share" aria-label="Share original">
+      {prepared && prepared.photo === photo && sameVault(prepared.session) && <aside className="original-share" ref={originalPanel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Share original">
         <button className="close" aria-label="Close share options" onClick={() => setPrepared(null)}><Icon kind="close" /></button>
         <h2>Original ready</h2><p className="hint">{photo.metadata.filename} · verified, unchanged</p>
         <div className="actions">
@@ -211,7 +223,7 @@ export function Viewer({
         </div>
       </aside>}
       {details && (
-        <aside className="details">
+        <aside className="details" inert={prepared ? true : undefined}>
           <p>{photo.metadata.filename}</p>
           <p>
             {photo.metadata.mediaType} ·{" "}
