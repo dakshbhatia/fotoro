@@ -7,7 +7,21 @@ Find, viewer and account navigation preserves the reviewed selection. Save stays
 manual and uses the existing durable queue. Share uses exact chosen originals or
 accepted Fotoro recipients, according to the source.
 
-Final local checks pass 250 full-native and 86 preview tests, 251 web tests,
+The follow-up clarifies each scope and adds Open on another device. Direct
+`/saved` and `/saved/` entry opens the password or current Saved library; Back
+returns to Photos and normalizes the URL without reloading the local context.
+The public link contains no password. Same-password entry opens the account’s
+Saved originals and does not authorize uploads. Invalid invitations retain the
+existing strict parsing and cancellation path.
+
+PhotoKit capture dates now retain `photos` provenance in browser Find. Import
+and selection timestamps remain excluded from capture queries. A same-digest
+local original can display its current verified Saved capture date transiently;
+the overlay requires the exact File, matching ID/digest and current owned
+snapshot. Local labels, favorites and retained records are untouched. Stale,
+changed, invalid and unsupported date sources are rejected by regressions.
+
+Final local checks pass 250 full-native and 86 preview tests, 256 web tests,
 53 API tests, 19 core tests and 28 release-metadata tests. Each native suite has
 one explicit Vision integration skip because the iOS 27 simulator cannot create
 its inference context. Four isolated HTTP exchange tests pass, including original
@@ -55,16 +69,17 @@ dependency, second search index or second durable queue was introduced. The old
 PhotoPicks production component and its unused CSS were removed; normal account
 entry retains one password path.
 
-The full encrypted Release 0.1.0 (20), including the accessibility correction,
-is built and passes strict signature checks, with production associated domains
-and no local-preview encryption exemption. CoreDevice confirms installation
-and exact version 20. The fresh post-install check reports the device locked, so
-launch was not attempted. The preceding build 19 launched while unlocked. No private app data or Photos were inspected. Apple has processed
-full build 4, whose TestFlight release still requires the owner's accurate
-export-compliance declaration. Preview build 3 remains a separate binary.
+The full encrypted Release 0.1.0 (21) is built and passes strict signature
+checks, with production associated domains and no local-preview encryption
+exemption. Build 20 is the last confirmed physical installation and launched
+successfully after a fresh unlocked check. The build 21 device check currently
+reports the paired connection unavailable, so installation has not been claimed.
+No private app data or Photos were inspected. Apple has processed full build 4,
+whose TestFlight release still requires the owner's accurate export-compliance
+declaration. Preview build 3 remains a separate binary.
 
 The preceding production Worker is
-`d38236c7-1994-4474-b2cc-e2ae5ce1c8d9`. This pass changes consumer clients;
+`c4d9a626-43f5-422b-be96-24dff8d9e5d1`, read back at 100%. This pass changes consumer clients;
 production D1/R2 bindings, five migrations and API contracts stay unchanged.
 Deployment/readback follows the exact-head required CI and merge. Feature and
 release limits are tracked in [product work](product-backlog.md).

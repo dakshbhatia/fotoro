@@ -10,7 +10,7 @@ export function cloudSearchRecords(photos: Photo[]): SearchPhoto[] {
       digest: photo.metadata.originalSha256,
       filename: photo.metadata.filename,
       date: photo.metadata.sourceDate,
-      dateSource: photo.metadata.dateSource === "exif" ? "exif" : "selected",
+      dateSource: photo.metadata.dateSource === "exif" || photo.metadata.dateSource === "photos" ? photo.metadata.dateSource : "selected",
       labels: annotation?.labels,
       caption: annotation?.caption,
       keywords: annotation?.keywords,

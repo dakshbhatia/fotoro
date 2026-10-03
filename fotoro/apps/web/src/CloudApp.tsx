@@ -670,6 +670,7 @@ export default function CloudApp({
               <h2>{query ? "Search results" : received ? "Shared photos" : "Saved photos"}</h2>
               {!received && <button aria-pressed={selecting} onClick={() => setSelecting(value => !value)}>{selecting ? "Done" : "Select"}</button>}
             </div>
+            {!received && <p className="consumer-scope-hint">Photos you chose to Save in Fotoro, available across devices.</p>}
             {!received && (busy || localCount > 0 || summary.pending > 0 || summary.failed > 0 || needsAttention || annotationPending.length > 0) && <section className={"consumer-save-progress state-" + consumerSummary.state} aria-label="Save progress">
               <div><p role="status">{status || syncStateLabel[consumerSummary.state]}</p>{consumerSummary.detail && <p className="hint">{consumerSummary.detail}</p>}</div>
               <div className="actions">
@@ -712,8 +713,9 @@ export default function CloudApp({
                     ? "No matching photos"
                     : received
                       ? "No received photos"
-                      : "Add your first photos"}
+                      : "Your Saved photos will appear here"}
                 </p>
+                {!query && !received && <button onClick={onBack}>Choose photos to Save</button>}
                 {query && (
                   <button onClick={() => setQuery("")}>Clear search</button>
                 )}
@@ -789,6 +791,11 @@ export default function CloudApp({
               {!paused && busy && <button onClick={pause}>Pause</button>}
               <button onClick={closeAccountPanel}>Saved photos</button>
             </div>
+            <details>
+              <summary>Open on another device</summary>
+              <p className="hint">Open <a href="https://fotoro.cloud/saved" target="_blank" rel="noopener">fotoro.cloud/saved</a> and enter the same Fotoro password. In another Fotoro app, choose Saved.</p>
+              <p className="hint">Only photos you chose to Save appear there.</p>
+            </details>
             <details>
               <summary>Settings</summary>
               <button disabled={busy} onClick={() => {void run(refresh);}}>Refresh saved photos</button>

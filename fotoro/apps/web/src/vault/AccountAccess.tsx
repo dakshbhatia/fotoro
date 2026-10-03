@@ -11,7 +11,7 @@ export function AccountAccess({ password, onPassword, generatedPassword, busy, o
   onSave: () => void;
 }) {
   if (generatedPassword) return <form aria-busy={busy} onSubmit={event => {event.preventDefault(); if (!busy) onContinue();}}>
-    <p className="hint">Save your password to open Fotoro on another device.</p>
+    <p className="hint">Keep this password. Use the same Fotoro password on another device to open your Saved photos.</p>
     <label>
       Fotoro password
       <input name="password" type="text" autoComplete="new-password" value={generatedPassword} readOnly onFocus={event => event.currentTarget.select()} enterKeyHint="go" />
@@ -28,6 +28,7 @@ export function AccountAccess({ password, onPassword, generatedPassword, busy, o
       event.preventDefault();
       if (!busy && password.trim()) onSignIn();
     }}>
+      <p className="hint">Use the same Fotoro password you use on your other device to open your Saved photos.</p>
       <label>
         Fotoro password
         <input name="password" type="password" autoComplete="current-password" value={password} onChange={event => onPassword(event.target.value)} autoCapitalize="none" autoCorrect="off" spellCheck={false} enterKeyHint="go" />
@@ -35,5 +36,6 @@ export function AccountAccess({ password, onPassword, generatedPassword, busy, o
       <button className="primary-action" type="submit" disabled={busy || !password.trim()}>Open Fotoro</button>
     </form>
     <button disabled={busy} onClick={onCreate}>New Fotoro</button>
+    <p className="hint">New Fotoro starts a separate Saved library with a new password.</p>
   </>;
 }

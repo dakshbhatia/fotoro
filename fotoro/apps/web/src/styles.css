@@ -810,6 +810,7 @@ main.local-trial, main.cloud-library { position: relative; background: var(--pho
 .consumer-scopes button[aria-pressed="true"], .consumer-scopes button[aria-current="page"] { background: var(--photo-selected); color: #fff; font-weight: 550; }
 .consumer-section { flex: 0 0 auto; min-height: 70px; display: flex; align-items: center; justify-content: space-between; padding: 8px 48px; gap: 12px; }
 .consumer-section h2 { font-size: 28px; font-weight: 600; letter-spacing: -.5px; margin: 0; }
+.consumer-scope-hint { flex: 0 0 auto; margin: 0; padding: 0 48px 12px; color: var(--photo-muted); font-size: 13px; line-height: 1.5; }
 .consumer-section > button, .consumer-section-actions > button { color: var(--photo-accent); background: transparent; border: 0; font-size: 16px; padding: 10px 8px; }
 .consumer-section-actions { display: flex; align-items: center; gap: 4px; }
 .consumer-section > button:hover:not(:disabled), .consumer-section-actions > button:hover:not(:disabled) { background: transparent; }
@@ -860,6 +861,7 @@ main.local-trial, main.cloud-library { position: relative; background: var(--pho
   .consumer-scopes button { min-height: 44px; border-radius: 12px; font-size: 14px; }
   .consumer-section { min-height: 56px; padding: 4px 16px; }
   .consumer-section h2 { font-size: 20px; letter-spacing: -.25px; }
+  .consumer-scope-hint { padding-left: 16px; padding-right: 16px; }
   .consumer-section > button, .consumer-section-actions > button { font-size: 15px; }
   .canvas, .local-trial .canvas { padding: 0 3px calc(105px + env(safe-area-inset-bottom)); }
   .date { font-size: 14px; padding-left: 13px; }

@@ -14,7 +14,7 @@ export interface SearchPhoto {
   digest?: string;
   filename: string;
   date: string;
-  dateSource: "exif" | "selected";
+  dateSource: "exif" | "photos" | "selected";
   labels?: string[];
   caption?: string;
   keywords?: string[];
@@ -67,6 +67,7 @@ const count = (events: Event[] | undefined, now: number) => (events ?? []).reduc
 const photoKey = (meaning: string, id: string) => JSON.stringify([meaning, id]);
 const meaningKey = (scope: string, meaning: string) => JSON.stringify([scope, meaning]);
 const words = (text: string): string[] => text.match(/[\p{L}\p{N}]+/gu) ?? [];
+const hasCaptureDate = (photo: SearchPhoto) => photo.dateSource === "exif" || photo.dateSource === "photos";
 type DatedMeaning = [number | null, number | null, string];
 function datedMeaning(id: string): DatedMeaning | undefined {
   if (!id.startsWith("dated:")) return;
@@ -138,7 +139,7 @@ export class PhotoSearchIndex {
   }
   choosePhoto(meaning: string, id: string, session: string, now = Date.now(), pin = false, scope = "local:all") {
     const dated = datedMeaning(meaning), baseMeaning = dated?.[2] ?? meaning, photo = this.records.get(id), captured = photo && Date.parse(photo.date);
-    if (dated && (!photo || photo.dateSource !== "exif" || !Number.isFinite(captured) || (dated[0] !== null && captured! < dated[0]) || (dated[1] !== null && captured! >= dated[1]))) return;
+    if (dated && (!photo || !hasCaptureDate(photo) || !Number.isFinite(captured) || (dated[0] !== null && captured! < dated[0]) || (dated[1] !== null && captured! >= dated[1]))) return;
     const derived = /^(?:date|text|label):/.test(baseMeaning) ? this.search(baseMeaning.slice(baseMeaning.indexOf(":") + 1), { now, scope, committedMeaning: baseMeaning }).meaning : undefined;
     const supported = (dated && baseMeaning === "date") || this.dictionary.some(term => term.id === baseMeaning && term.sources.has(id)) ||
       (derived?.id === baseMeaning && derived.photoIds.includes(id)) ||
@@ -163,7 +164,7 @@ export class PhotoSearchIndex {
       if (!dates.has(id)) dates.set(id, Date.parse(this.records.get(id)!.date));
       return dates.get(id)!;
     };
-    const eligible = (id: string) => this.records.has(id) && (!options.allowedIds || options.allowedIds.has(id)) && (!dated || (this.records.get(id)!.dateSource === "exif" && Number.isFinite(captured(id)) && (dateQuery.from === undefined || captured(id) >= dateQuery.from) && (dateQuery.until === undefined || captured(id) < dateQuery.until)));
+    const eligible = (id: string) => this.records.has(id) && (!options.allowedIds || options.allowedIds.has(id)) && (!dated || (hasCaptureDate(this.records.get(id)!) && Number.isFinite(captured(id)) && (dateQuery.from === undefined || captured(id) >= dateQuery.from) && (dateQuery.until === undefined || captured(id) < dateQuery.until)));
     const candidates: SearchMeaning[] = [];
     const byId = new Map<string, SearchMeaning>();
     const include = (id: string, term: string, photoId: string, source: SearchEvidence) => {
@@ -227,7 +228,7 @@ export class PhotoSearchIndex {
       return [id, [
         Number(id === pin), tier(meaning.evidence[id]), count(this.history.photos[photoKey(key, id)], now),
         meaning.evidence[id] === "ocr" ? photo.ocr?.confidence ?? 0 : 0,
-        Number(photo.favorite === true), photo.dateSource === "exif" && parsed <= now && Number.isFinite(parsed) ? parsed : 0,
+        Number(photo.favorite === true), hasCaptureDate(photo) && parsed <= now && Number.isFinite(parsed) ? parsed : 0,
       ]] as const;
     }));
     const sorted = [...meaning.photoIds].sort((a, b) => {

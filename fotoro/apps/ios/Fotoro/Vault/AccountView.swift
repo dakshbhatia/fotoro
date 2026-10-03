@@ -137,13 +137,17 @@ struct FotoroPasswordView: View {
     NavigationStack {
       ScrollView {
         VStack(alignment: .leading, spacing: 20) {
-          Text("Use this password to open your Fotoro on any device.").foregroundStyle(.secondary)
+          Text("On another device, open fotoro.cloud/saved or choose Saved in Fotoro. Use this same password to see the photos you explicitly Save.")
+            .foregroundStyle(.secondary)
+          Link("fotoro.cloud/saved", destination: URL(string: "https://fotoro.cloud/saved")!)
+            .accessibilityIdentifier("account.otherDeviceWebsite")
+          Text("Your Fotoro password").font(.headline)
           Text(password.value).font(.system(.callout, design: .monospaced))
             .textSelection(.enabled).privacySensitive().fixedSize(horizontal: false, vertical: true)
           Button("Copy password", systemImage: "doc.on.doc") { UIPasteboard.general.string = password.value }
           ShareLink("Save password", item: password.value)
         }.frame(maxWidth: .infinity, alignment: .leading).padding()
-      }.navigationTitle("Fotoro password").navigationBarTitleDisplayMode(.inline)
+      }.navigationTitle("Open on another device").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
     }
   }

@@ -138,11 +138,11 @@ test("same-period text continuation retains an eligible preview and changed date
   assert.equal(index.search("bea yesterday", {now, previous: first}).photoId, "y");
 });
 
-test("saved photo dates use the same search grammar and exclude import and Photos selection dates", () => {
+test("saved photo dates use the same search grammar for EXIF and PhotoKit captures and exclude import dates", () => {
   const stored = (id: string, dateSource: "exif" | "photos" | "import"): Photo => ({manifest: {photoId: id}, metadata: {filename: "IMG_001.jpg", sourceDate: new Date(date(2026, 9, 12)).toISOString(), dateSource, originalSha256: "digest"}, annotations: {version: 1, photoId: id, originalSha256: "digest", labels: ["Beach"]}} as Photo);
   const index = new PhotoSearchIndex(cloudSearchRecords([stored("verified", "exif"), stored("photos", "photos"), stored("imported", "import")]));
-  assert.deepEqual(index.search("last month", {now}).photoIds, ["verified"]);
-  assert.deepEqual(index.search("beach last month", {now}).photoIds, ["verified"]);
+  assert.deepEqual(index.search("last month", {now}).photoIds, ["photos", "verified"]);
+  assert.deepEqual(index.search("beach last month", {now}).photoIds, ["photos", "verified"]);
   assert.equal(index.search("beach", {now}).photoIds.length, 3);
 });
 
