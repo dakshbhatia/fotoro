@@ -18,6 +18,8 @@ struct PhotoViewer: View {
   @State private var originalExports: [URL] = []
   @State private var preparingShare = false
   @State private var shareTask: Task<Void, Never>?
+  @State private var sharedPhotos: SharedPhotosPresentation?
+  @State private var controlsVisible = true
   @Environment(\.dismiss) private var dismiss
   init(services: AppServices, initialID: String, displayedPhotos: [LocalPhoto]? = nil) {
     self.services = services
@@ -37,7 +39,8 @@ struct PhotoViewer: View {
           }.scaleEffect(zoom.scale)
             .gesture(MagnifyGesture().onChanged { zoom.change($0.magnification) }
               .onEnded { zoom.settle($0.magnification) })
-            .onTapGesture(count: 2) { zoom.toggle() }
+          .onTapGesture(count: 2) { zoom.toggle() }
+            .onTapGesture { controlsVisible.toggle() }
             .tag(photo.id)
         }
       }.tabViewStyle(.page(indexDisplayMode: .never)).background(.black)
@@ -45,15 +48,24 @@ struct PhotoViewer: View {
         .toolbar {
           ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() } }
           ToolbarItem(placement: .bottomBar) {
-            Button("Share", systemImage: "square.and.arrow.up", action: share)
+            Menu("Share", systemImage: "square.and.arrow.up") {
+              Button("Share in Fotoro") {
+                if let current { sharedPhotos = SharedPhotosPresentation(photos: [current]) }
+              }
+              Button("Share original", action: share)
+            }
               .disabled(preparingShare || current == nil)
           }
           ToolbarItem(placement: .bottomBar) {
             Button("Info", systemImage: "info.circle") { details = current }
           }
         }
+        .toolbar(controlsVisible ? .visible : .hidden, for: .navigationBar, .bottomBar)
         .overlay { if preparingShare { ProgressView("Preparing original…").padding().glassEffect() } }
         .sheet(item: $details) { SavedPhotoDetails(services: services, photo: $0) }
+        .sheet(item: $sharedPhotos) { presentation in
+          ExchangeView(services: services, selected: presentation.photos)
+        }
         .sheet(item: $sharedOriginal, onDismiss: cleanupShare) { original in
           OriginalShareSheet(urls: [original.url]) { _ in cleanupShare() }
         }

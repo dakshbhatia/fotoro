@@ -141,6 +141,15 @@ struct LocalPhotoDetails: View {
         if photo.isLivePhoto { Label("Live Photo · still preview", systemImage: "livephoto") }
         if let location = photo.location { Label(location, systemImage: "location") }
         if let search {
+          if let record = try? search.consumerRecord(photo.id), !record.visualLabels.isEmpty {
+            Section("Inferred scenes") {
+              ForEach(record.visualLabels, id: \.identifier) { evidence in
+                Text(evidence.label)
+              }
+              Text("Detected on this iPhone. These are separate from your labels.")
+                .font(.caption).foregroundStyle(.secondary)
+            }
+          }
           Section("Labels") {
             ForEach(Array(labels.enumerated()), id: \.offset) { at, value in
               HStack {

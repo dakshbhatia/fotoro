@@ -34,6 +34,7 @@ def preview_files(paths, target):
 preview_sources=preview_files([
  'Fotoro/FotoroApp.swift',
  'Fotoro/Library/RecentPhotosStore.swift',
+ 'Fotoro/Library/PhotoBrowsing.swift',
  'Fotoro/Library/AutomaticPhotoPicks.swift',
  'Fotoro/Library/PhotoPickAnalyzer.swift',
  'Fotoro/Library/RecentPhotosView.swift',
@@ -41,6 +42,7 @@ preview_sources=preview_files([
  'Fotoro/Search/LocalSearchView.swift',
  'Fotoro/Search/SearchIndex.swift',
  'Fotoro/Search/SearchModels.swift',
+ 'Fotoro/Search/NaturalDateQuery.swift',
  'Fotoro/Search/VisionTextProcessor.swift',
  'Fotoro/Support/FotoroError.swift',
 ], 'FotoroLocalPreview')
@@ -50,8 +52,10 @@ preview_resources=preview_files([
 preview_tests=preview_files([
  'FotoroTests/SearchTests.swift', 'FotoroTests/SearchStoreTests.swift',
  'FotoroTests/SearchPerformanceTests.swift', 'FotoroTests/SearchLifecycleTests.swift',
+ 'FotoroTests/VisualSearchTests.swift', 'FotoroTests/NaturalDateSearchTests.swift',
  'FotoroTests/LocalPreviewIsolationTests.swift',
  'FotoroTests/AutomaticPhotoPicksTests.swift', 'FotoroTests/PhotoPickLifecycleTests.swift',
+ 'FotoroTests/PhotoBrowsingTests.swift',
 ], 'FotoroLocalPreviewTests')
 preview_test_resources=preview_files([
  'FotoroTests/search-cases.json', 'FotoroTests/neutral-a.png', 'FotoroTests/neutral-c.png',

@@ -70,7 +70,12 @@ it("Apple webcredentials association fails closed until explicit app IDs are con
   expect(missing.headers.get("cache-control")).toBe("no-store");
   const configured = await app.fetch(request(), {...env, APPLE_APP_IDS: "ABCDEFGHIJ.cloud.fotoro.Fotoro"} as any);
   expect(configured.status).toBe(200);
-  expect(await configured.json()).toEqual({webcredentials:{apps:["ABCDEFGHIJ.cloud.fotoro.Fotoro"]}});
+  expect(await configured.json()).toEqual({
+    webcredentials: {apps:["ABCDEFGHIJ.cloud.fotoro.Fotoro"]},
+    applinks: {details: [{appIDs:["ABCDEFGHIJ.cloud.fotoro.Fotoro"], components: [
+      {"/":"/", "#":"contact=*"}, {"/":"/", "#":"moment=*"},
+    ]}]},
+  });
   expect(configured.headers.get("content-type")).toContain("application/json");
   expect((await app.fetch(request(), {...env, APPLE_APP_IDS:"bad,ABCDEFGHIJ.*"} as any)).status).toBe(503);
 });

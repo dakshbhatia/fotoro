@@ -23,7 +23,7 @@ await check("Authenticated API", "/v1/vault", async response => {
   if (response.status !== 401 || body.version !== 1 || body.code !== "UNAUTHENTICATED")
     throw new Error("Expected the deployed API to require authentication (401 UNAUTHENTICATED).");
 });
-await check("iPhone passkey association", "/.well-known/apple-app-site-association", async response => {
+await check("iPhone passkey and sharing association", "/.well-known/apple-app-site-association", async response => {
   if (response.status !== 200 || !response.headers.get("content-type")?.includes("application/json"))
     throw new Error("Configure APPLE_APP_IDS and serve the association JSON directly over HTTPS.");
   const value = await response.json();
@@ -31,6 +31,13 @@ await check("iPhone passkey association", "/.well-known/apple-app-site-associati
   if (!Array.isArray(apps) || !apps.length || apps.some(id => !/^[A-Z0-9]{10}\.[A-Za-z0-9][A-Za-z0-9.-]*$/.test(id)))
     throw new Error("Association needs valid application identifiers.");
   if (appId && !apps.includes(appId)) throw new Error("The signed app identifier is absent from webcredentials.apps.");
+  const details = value.applinks?.details;
+  for (const id of appId ? [appId] : apps) {
+    const route = Array.isArray(details) ? details.find(item => Array.isArray(item.appIDs) && item.appIDs.includes(id)) : undefined;
+    if (!route || !Array.isArray(route.components) || ["contact=*", "moment=*"].some(fragment =>
+      !route.components.some(component => component["/"] === "/" && component["#"] === fragment && component.exclude !== true)))
+      throw new Error("The signed app identifier needs contact and moment universal links at the root path.");
+  }
 });
 console.log("Physical iPhone passkey, recovery and background-transfer checks still require the signed app.");
 process.exitCode = failed ? 1 : 0;

@@ -9,11 +9,41 @@ file are verified on the unlocked physical iPhone. The owner's screenshots show
 local Photos and a signed-out Sync screen. Build 12's protected account-state event
 independently reports signed out; real-account authentication remains unverified.
 Build 13 subsequently installed successfully, but the phone disconnected before
-launch/version readback. Signed build 14 is ready; it is not installed yet.
+launch/version readback. Signed encrypted build 15 is ready; it is not installed yet.
 Apple has processed full build 4; its
 TestFlight access awaits an export-compliance declaration. Independent reviews reproduced
 retrieval, permission, cancellation, persistence and navigation defects; fixes
 include permanent regressions and were re-reviewed.
+
+The current consumer slice replaces exchange JSON/device forms with accepted
+contacts, public invitations, encrypted optional contact names and native QR
+display. Native/web selections expose Share in Fotoro; recipients open verified
+photos, save their own copies and add photos back. Native public simulator QA
+opens Saved photos → Shared photos → the rendered contact QR. The localhost web
+fixture flow verifies wrong-account password retry, recipient viewing and explicit
+Save. The 320 px cloud-header overflow found during QA is fixed.
+
+Production Worker `dd17d11a-ea35-4525-94b0-c162ccc64a78` is read back at
+100%. Canonical HTTPS checks pass for protected API authentication and exact
+passkey/contact/moment Apple association. Production D1/R2 and five migrations
+are unchanged; the previous Worker remains available for rollback.
+
+Local checks pass 231 full-native and 77 preview tests, with one explicit Vision
+classifier integration skip in each suite because the iOS 27 simulator cannot
+create its inference context. Actual classification passes on a public synthetic
+macOS fixture; physical classification remains unverified. Date parsing, visual
+provenance, migrations, capture-time grouping and classifier-failure preservation
+have deterministic passing regressions. All seven native sharing-safety tests
+also pass after adding explicit task cancellation alongside lock/account/trust
+changes. Forged save receipts never enter a catalog, and unrelated imports remain
+queued when sharing.
+
+The web startup graph was measured from actual emitted static imports: 1,634,399
+bytes became 326,093 bytes (80.05% smaller); the same gzip method measured
+439,599 → 101,930 bytes (76.81% smaller). Account crypto is loaded on demand; the
+crypto worker remains unchanged. This is a build-size measurement, not a physical
+Safari timing or battery claim. Broader remaining work is tracked in
+[product work](product-backlog.md).
 
 The preceding release tree is merged in
 [PR 2](https://github.com/dakshbhatia/fotoro/pull/2). Both the
@@ -42,11 +72,11 @@ Real-account phone-to-Safari acceptance remains open.
 
 | Check | Evidence |
 | --- | --- |
-| Contracts, crypto and loopback fixtures | 15 tests pass: schema boundaries, bounded annotations, signatures, media binding, preservation, closed diagnostic-method vocabulary and bounded public-fixture readiness retries |
-| Worker/D1/R2 API | 51 tests pass, including nonce-bound password signup, challenge replay/conflicts and unchanged legacy login; upload/storage, authentication/exchange/annotation and diagnostic privacy checks pass |
-| Web | 189 tests pass, including chosen-photo Save through password entry, immutable selection and current-account binding, read-only account/lifecycle refresh, cancellation and queued-save fences |
+| Contracts, crypto and loopback fixtures | 19 tests pass: schema boundaries, canonical public links, signatures, media binding, preservation, closed diagnostic-method vocabulary and bounded public-fixture readiness retries |
+| Worker/D1/R2 API | 53 tests pass, including nonce-bound password signup, canonical association links, recipient authorization, replay/conflicts and unchanged legacy login; upload/storage, authentication/exchange/annotation and diagnostic privacy checks pass |
+| Web | 217 tests pass, including chosen-photo Save through password entry, immutable selection and current-account/trust binding, verified sharing receipts, cancellation, lazy-runtime session fences and startup boundaries |
 | Web production build | TypeScript/Vite pass. Account/crypto loads after Sync photos; the large encrypted-media chunk warning remains |
-| Native | Latest full app 193 tests and local preview 50 tests pass locally with Xcode 27, zero failures or skips. Complete account activation, read-only catalog opening and Save authorization join the account, crypto/journal/background/search regressions |
+| Native | Latest full app 231 tests and local preview 77 tests pass locally with Xcode 27, zero failures and one explicit simulator Vision integration skip per suite. Date/category search, photo grouping, public links and sharing cancellation join account/crypto/journal/background/search regressions |
 | TestFlight metadata | 28 tests pass for team/individual authentication, exact app/build ownership, sparse Apple responses, notes readback and credential-safe errors. A live build 2 update preserved every existing test-note character and verified its build relationship; its processing state is VALID and beta states remain MISSING_EXPORT_COMPLIANCE. Build 3 is VALID / IN_BETA_TESTING with encryption metadata false and verified local-preview test notes |
 | Distribution IPA | Actual build 3 archive and distribution IPA pass the strict preview audit. Xcode Organizer used its existing cloud-managed certificate; the copied IPA matches the unchanged archive/dSYM/link map. Apple validation and exact-IPA upload both exit 0 with success markers |
 | Internal tester access | App Store Connect shows the existing internal group with one tester and one build; iOS 0.1.0 (3) is Testing and the requested sole owner tester is Invited. Association was automatic; no new tester/role/invitation mutation was needed. Inbox delivery and installation remain unverified |
@@ -499,7 +529,7 @@ records; it cannot enumerate an iPhone photo library automatically.
   `VALID / IN_BETA_TESTING`; personal TestFlight installation remains unverified.
   Signed full build 10 is installed and launched directly on the physical iPhone.
   Production HTTPS, API routing and the signed passkey association now pass.
-  Universal-link handling remains unimplemented.
+  Contact and moment universal-link handling is implemented; physical acceptance remains open.
 - Owner password signup/sign-in, protected credential restoration, original
   PhotoKit/iCloud resources and a complete iPhone-to-Safari restore. Existing
   secondary passkey/PRF flows still need physical acceptance. See
@@ -521,13 +551,14 @@ Native cloud imports preserve JPEG/PNG/HEIC originals up to 50 MiB. Copies are
 render locally, but backup skips motion pairs and videos. Browser import accepts
 JPEG/PNG and skips unknown dimensions, including current HEIC metadata, before decode.
 
-Semantic search, inferred face groups, cleanup, video intelligence and nearby
-transfer remain planned. Production auth rejects fixture headers; production web
+Conservative native scene-category search and natural date filters are now
+implemented. Unrestricted semantic embeddings, inferred face groups, cleanup,
+video intelligence and nearby transfer remain planned. Production auth rejects fixture headers; production web
 builds disable fixture mode. Public fixture accounts block private uploads.
 
 ## Local Photos preview validation — October 1, 2026
 
-The approved `FotoroLocalPreview` target compiles nine allowlisted shared sources
+The approved `FotoroLocalPreview` target compiles explicitly allowlisted shared sources
 and links GRDB only. It excludes Fotoro account, encrypted backup, transfer,
 Sodium and saved-account views. The full target retains its packages and signed
 Associated Domains capability. The shared Info.plist uses an explicit build-mode

@@ -5,9 +5,12 @@ import SwiftUI
 struct LibraryView: View {
   @Bindable var services: AppServices
   let saveSelection: [RecentPhotoSource]?
+  @State private var pendingIncoming: FotoroShareLink?
+  @State private var sharedPhotos: SharedPhotosPresentation?
   @State private var saveIntent: ManualPhotoSaveIntent?
   @State private var authenticationTask: Task<Void, Never>?
   @State private var query = ""
+  @State private var favoritesOnly = false
   @State private var searchResults: [LocalPhoto]?
   @State private var selection = SavedPhotoSelection()
   @State private var catalogRefresh = SavedLibraryRefresh()
@@ -20,24 +23,29 @@ struct LibraryView: View {
   @State private var preparingShare = false
   @State private var shareTask: Task<Void, Never>?
   @State private var shareSources: [LocalPhoto] = []
-  init(services: AppServices, saveSelection: [RecentPhotoSource]? = nil) {
+  init(services: AppServices, saveSelection: [RecentPhotoSource]? = nil, incomingLink: FotoroShareLink? = nil) {
     self.services = services
     self.saveSelection = saveSelection
     _saveIntent = State(initialValue: saveSelection.map(ManualPhotoSaveIntent.init))
+    _pendingIncoming = State(initialValue: incomingLink)
   }
   var filtered: [LocalPhoto] {
-    if !query.isEmpty, let searchResults { return searchResults }
-    return services.photos.filter {
-      services.matches($0, query: query)
+    let current = !query.isEmpty && searchResults != nil ? searchResults! : services.photos.filter { services.matches($0, query: query) }
+    return current.filter {
+      !favoritesOnly || services.annotation($0).favorite == true
     }
   }
   var days: [(String, [LocalPhoto])] {
     let formatter = DateFormatter()
     formatter.dateFormat = "yyyy-MM-dd"
     let groups = Dictionary(grouping: filtered) { photo in
-      formatter.string(from: Wire.parseDate(photo.metadata.sourceDate) ?? Date())
+      Wire.parseDate(photo.metadata.sourceDate).map(formatter.string) ?? "Date unavailable"
     }
-    return groups.keys.sorted(by: >).map { ($0, groups[$0]!) }
+    return groups.keys.sorted { lhs, rhs in
+      if lhs == "Date unavailable" { return false }
+      if rhs == "Date unavailable" { return true }
+      return lhs > rhs
+    }.map { ($0, groups[$0]!) }
   }
   var body: some View {
     NavigationStack {
@@ -106,9 +114,15 @@ struct LibraryView: View {
             .toolbar {
               if selection.count > 0 {
                 ToolbarItem(placement: .bottomBar) {
-                  Button("Share \(selection.count)", systemImage: "square.and.arrow.up") {
-                    shareOriginals()
+                  Menu("Share \(selection.count)", systemImage: "square.and.arrow.up") {
+                    Button("Share in Fotoro") { shareInFotoro() }
+                    Button("Share originals") { shareOriginals() }
                   }.disabled(preparingShare || sharingOriginals)
+                }
+              }
+              ToolbarItem(placement: .topBarTrailing) {
+                Menu("Filter", systemImage: "line.3.horizontal.decrease") {
+                  Toggle("Favorites", isOn: $favoritesOnly)
                 }
               }
             }
@@ -119,15 +133,29 @@ struct LibraryView: View {
             saveIntent?.authorize(services.photoAccountAccess)
           }
           startSelectedSave()
+          openIncomingLink()
         }
-        .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+        .toolbar {
+          if services.photoAccountAccess != nil {
+            ToolbarItem(placement: .topBarLeading) {
+              Button("Shared photos", systemImage: "person.2") { sharedPhotos = SharedPhotosPresentation() }
+            }
+          }
+          ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
+        }
         .overlay { if services.busy { ProgressView().padding().glassEffect() } }
         .sheet(item: $viewer, onDismiss: { viewer = nil }) { presentation in
           PhotoViewer(
             services: services, initialID: presentation.initial.id, displayedPhotos: presentation.photos)
         }
+        .sheet(item: $sharedPhotos) { presentation in
+          ExchangeView(services: services, selected: presentation.photos, incoming: presentation.incoming)
+        }
+        .onChange(of: authenticationTask == nil) { openIncomingLink() }
+        .onChange(of: services.photoAccountAccess) { openIncomingLink() }
         .onChange(of: scenePhase) {
           if scenePhase == .background {
+            pendingIncoming = nil; sharedPhotos = nil
             cancelAuthentication()
             services.pauseSync()
           } else if scenePhase == .active {
@@ -141,7 +169,8 @@ struct LibraryView: View {
         }
         .onChange(of: services.vault.isUnlocked) { _, unlocked in
           if !unlocked {
-            if authenticationTask == nil { saveIntent?.cancel() }
+            if authenticationTask == nil { saveIntent?.cancel(); pendingIncoming = nil }
+            sharedPhotos = nil
             viewer = nil
             shareTask?.cancel()
             cleanupShare()
@@ -151,6 +180,8 @@ struct LibraryView: View {
           }
         }
         .onChange(of: services.vault.generation) {
+          sharedPhotos = nil
+          if authenticationTask == nil { pendingIncoming = nil }
           shareTask?.cancel(); cleanupShare(); selection.removeAll(); catalogRefresh.cancel()
         }
         .onChange(of: services.consumerCatalogGeneration) { validateSelection() }
@@ -171,6 +202,17 @@ struct LibraryView: View {
   private func openedAccount() {
     saveIntent?.authorize(services.photoAccountAccess)
     startSelectedSave()
+    openIncomingLink()
+  }
+  private func openIncomingLink() {
+    guard scenePhase == .active, authenticationTask == nil, services.auth.startPassword == nil,
+      services.photoAccountAccess != nil, let incoming = pendingIncoming else { return }
+    pendingIncoming = nil
+    sharedPhotos = SharedPhotosPresentation(incoming: incoming)
+  }
+  private func shareInFotoro() {
+    do { sharedPhotos = SharedPhotosPresentation(photos: try selection.resolve(using: services.consumerSavedPhoto)) }
+    catch { validateSelection(); services.error = error.localizedDescription }
   }
   private func startSelectedSave() {
     guard services.session.isSignedIn, services.auth.startPassword == nil,

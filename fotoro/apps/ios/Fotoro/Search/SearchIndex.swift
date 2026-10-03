@@ -50,7 +50,7 @@ final class SearchIndex: @unchecked Sendable {
     try database.write { db in
       try db.execute(
         sql: """
-          CREATE TABLE IF NOT EXISTS searchRecords(id TEXT PRIMARY KEY, scope TEXT NOT NULL, capture REAL, favorite INTEGER NOT NULL, moment INTEGER NOT NULL, ocrState TEXT NOT NULL, preview INTEGER NOT NULL, burst TEXT, value BLOB NOT NULL);
+          CREATE TABLE IF NOT EXISTS searchRecords(id TEXT PRIMARY KEY, scope TEXT NOT NULL, capture REAL, favorite INTEGER NOT NULL, moment INTEGER NOT NULL, ocrState TEXT NOT NULL, visualState TEXT NOT NULL DEFAULT 'pending', preview INTEGER NOT NULL, burst TEXT, value BLOB NOT NULL);
           CREATE INDEX IF NOT EXISTS searchSourceDate ON searchRecords(scope,capture);
           CREATE TABLE IF NOT EXISTS searchTerms(meaning TEXT NOT NULL, term TEXT NOT NULL, display TEXT NOT NULL, relation TEXT NOT NULL, PRIMARY KEY(meaning,term));
           CREATE INDEX IF NOT EXISTS searchTermPrefix ON searchTerms(term,meaning);
@@ -64,6 +64,9 @@ final class SearchIndex: @unchecked Sendable {
       if !(try db.columns(in: "searchPostings")).contains(where: { $0.name == "display" }) {
         try db.execute(
           sql: "ALTER TABLE searchPostings ADD COLUMN display TEXT NOT NULL DEFAULT ''")
+      }
+      if !(try db.columns(in: "searchRecords")).contains(where: { $0.name == "visualState" }) {
+        try db.execute(sql: "ALTER TABLE searchRecords ADD COLUMN visualState TEXT NOT NULL DEFAULT 'pending'")
       }
     }
     if let root {
@@ -101,6 +104,24 @@ final class SearchIndex: @unchecked Sendable {
       r.ocrStatus = status
       r.previewAvailable = result != nil || status == .failed
       try put(r, db: db)
+      return true
+    }
+  }
+  @discardableResult func applyVisual(
+    _ result: SearchVisualResult?, status: SearchVisualStatus, photoID: String, revision: String,
+    generation: UInt64? = nil
+  ) throws -> Bool {
+    try database.write { db in
+      guard acceptsGeneration(generation), var record = try Row.fetchOne(
+        db, sql: "SELECT value FROM searchRecords WHERE id=?", arguments: [photoID]
+      ).map(decode), record.revision == revision else { return false }
+      guard result == nil || result?.processor == record.visualProcessor else { return false }
+      record.visualLabels = result.map {
+        SearchVisualPolicy.validated($0.labels, processor: $0.processor)
+      } ?? []
+      record.visualStatus = status
+      record.previewAvailable = record.previewAvailable || result != nil || status == .failed
+      try put(record, db: db)
       return true
     }
   }
@@ -153,6 +174,16 @@ final class SearchIndex: @unchecked Sendable {
       ).map(decode)
     }
   }
+  func pendingAnalysisRecords(retryFailed: Bool = false) throws -> [SearchRecord] {
+    try database.read { db in
+      try Row.fetchAll(db, sql: """
+        SELECT value FROM searchRecords
+        WHERE ocrState IN ('pending','unavailable') OR visualState IN ('pending','unavailable')
+          OR (? AND (ocrState='failed' OR visualState='failed'))
+        ORDER BY favorite DESC,capture DESC,id
+        """, arguments: [retryFailed]).map(decode)
+    }
+  }
   func setWorkGeneration(_ generation: UInt64) throws {
     generationLock.lock()
     defer { generationLock.unlock() }
@@ -193,6 +224,11 @@ final class SearchIndex: @unchecked Sendable {
               r.ocrStatus = old.ocrStatus
               r.previewAvailable = old.previewAvailable
             }
+            if old.revision == r.revision, old.visualProcessor == r.visualProcessor {
+              r.visualLabels = old.visualLabels
+              r.visualStatus = old.visualStatus
+              r.previewAvailable = r.previewAvailable || old.previewAvailable
+            }
           }
           try put(r, db: db)
           progress?(offset + 1)
@@ -213,10 +249,10 @@ final class SearchIndex: @unchecked Sendable {
   private func put(_ r: SearchRecord, db: Database) throws {
     try db.execute(
       sql:
-        "INSERT INTO searchRecords(id,scope,capture,favorite,moment,ocrState,preview,burst,value) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET scope=excluded.scope,capture=excluded.capture,favorite=excluded.favorite,moment=excluded.moment,ocrState=excluded.ocrState,preview=excluded.preview,burst=excluded.burst,value=excluded.value",
+        "INSERT INTO searchRecords(id,scope,capture,favorite,moment,ocrState,visualState,preview,burst,value) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET scope=excluded.scope,capture=excluded.capture,favorite=excluded.favorite,moment=excluded.moment,ocrState=excluded.ocrState,visualState=excluded.visualState,preview=excluded.preview,burst=excluded.burst,value=excluded.value",
       arguments: [
         r.id, r.scope, r.capturedAt?.timeIntervalSince1970, r.favorite, r.currentMoment,
-        r.ocrStatus.rawValue, r.previewAvailable, r.burstID, try JSONEncoder().encode(r),
+        r.ocrStatus.rawValue, r.visualStatus.rawValue, r.previewAvailable, r.burstID, try JSONEncoder().encode(r),
       ])
     try db.execute(
       sql: "DELETE FROM searchPostings WHERE photo=?; DELETE FROM searchFTS WHERE id=?",
@@ -250,6 +286,11 @@ final class SearchIndex: @unchecked Sendable {
         arguments: [meaning, r.id, evidence, confidence, display])
     }
     for label in r.labels { try add(label, relation: .label, evidence: 0, supplied: true) }
+    if r.visualStatus == .complete {
+      for label in SearchVisualPolicy.validated(r.visualLabels, processor: r.visualProcessor) {
+        try add(label.label, relation: .visual, evidence: 5, confidence: label.confidence)
+      }
+    }
     for fact in r.facts { try add(fact, relation: .metadata, evidence: 1, supplied: true) }
     if r.favorite { try add("favorite", relation: .metadata, evidence: 1) }
     if let date = r.capturedAt {
@@ -320,14 +361,26 @@ final class SearchIndex: @unchecked Sendable {
       sql += " AND r.capture<=?"
       args += [through.timeIntervalSince1970]
     }
+    if let until = scope.until {
+      sql += " AND r.capture<?"
+      args += [until.timeIntervalSince1970]
+    }
     return (sql, args)
   }
   func search(
     _ query: String, scope: SearchScope = SearchScope(), acceptedMeaningID: String? = nil,
-    previous: SearchResponse? = nil, now: Date = Date(), generation: UInt64 = 0
+    previous: SearchResponse? = nil, now: Date = Date(), generation: UInt64 = 0,
+    calendar: Calendar = .current
   ) throws -> SearchResponse {
-    try database.read { db in
+    let parsed = NaturalDateQuery.parse(query, scope: scope, now: now, calendar: calendar)
+    let scope = parsed.scope
+    let previousQuery = previous.map {
+      NaturalDateQuery.parse($0.query, now: now, calendar: calendar).text
+    } ?? ""
+    return try database.read { db in
       var response = SearchResponse(query: query, generation: generation)
+      response.scope = scope
+      response.datePhrase = parsed.datePhrase
       let (condition, scopeArgs) = filter(scope)
       let coverage = try Row.fetchOne(
         db,
@@ -337,8 +390,10 @@ final class SearchIndex: @unchecked Sendable {
       response.total = coverage["total"]
       response.indexed = coverage["ocrComplete"] ?? 0
       response.availablePreviews = coverage["previews"] ?? 0
-      let q = SearchNormalization.text(query).trimmingCharacters(in: .whitespacesAndNewlines)
-      guard !q.isEmpty else { return response }
+      let q = parsed.text.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !q.isEmpty else {
+        return parsed.datePhrase == nil ? response : try dateOnly(response, scope: scope, now: now, db: db)
+      }
       // Query the full indexed prefix range before LIMIT. Scope and eligibility are applied in SQL.
       var meaningArgs: StatementArguments = [
         q, now.timeIntervalSince1970, scope.key, q, q + "\u{10ffff}",
@@ -392,7 +447,7 @@ final class SearchIndex: @unchecked Sendable {
       }
       let previousID = previous?.leading?.id
       if let previousID, previous?.meaning?.id == meaning.id,
-        q.hasPrefix(SearchNormalization.text(previous?.query ?? "")),
+        previous?.scope == scope, q.hasPrefix(previousQuery),
         let row = try Row.fetchOne(db, sql: base + " AND r.id=?", arguments: args + [previousID]),
         (row["evidence"] as Int) == meaning.evidenceClass
       {
@@ -414,8 +469,7 @@ final class SearchIndex: @unchecked Sendable {
       }
       var stableSorted = sorted
       if pin == nil, let previousID, previous?.meaning?.id == meaning.id,
-        q.count >= SearchNormalization.text(previous?.query ?? "").count,
-        q.hasPrefix(SearchNormalization.text(previous?.query ?? "")),
+        previous?.scope == scope, q.count >= previousQuery.count, q.hasPrefix(previousQuery),
         let at = stableSorted.firstIndex(where: {
           ($0["id"] as String) == previousID && ($0["evidence"] as Int) == meaning.evidenceClass
         })
@@ -453,8 +507,32 @@ final class SearchIndex: @unchecked Sendable {
     case 1: return "Photos metadata"
     case 2: return "Caption or keyword"
     case 3: return "Filename mention"
+    case 5: return "Inferred scene"
     default: return "Text in photo"
     }
+  }
+  private static func dateMeaningID(_ scope: SearchScope) -> String { "date:" + scope.key }
+  private func dateOnly(_ response: SearchResponse, scope: SearchScope, now: Date, db: Database) throws -> SearchResponse {
+    var response = response
+    let (condition, args) = filter(scope)
+    let meaningID = Self.dateMeaningID(scope)
+    let pin = try String.fetchOne(db, sql: "SELECT photo FROM searchPins WHERE meaning=? AND scope=?",
+      arguments: [meaningID, scope.key])
+    let rows = try Row.fetchAll(db, sql: """
+      SELECT r.id,r.preview FROM searchRecords r WHERE \(condition)
+      ORDER BY (r.id=?) DESC,r.moment DESC,r.favorite DESC,
+        CASE WHEN r.capture<=? THEN r.capture END DESC,r.id LIMIT 200
+      """, arguments: args + [pin ?? "", now.timeIntervalSince1970])
+    let meaning = SearchMeaning(id: meaningID, term: response.datePhrase ?? "", display: response.datePhrase ?? "",
+      relation: .metadata, evidenceClass: 1, eligibleCount: response.total)
+    response.meaning = meaning
+    response.meanings = [meaning]
+    response.results = rows.map { row in
+      let id: String = row["id"]
+      return SearchHit(id: id, evidenceClass: 1, reason: (id == pin ? "Your representative · " : "") + "Photos metadata",
+        pinned: id == pin, previewAvailable: row["preview"])
+    }
+    return response
   }
   private static func fullTextMatch(_ query: String) -> String {
     words(query).enumerated().map { offset, word in
@@ -509,6 +587,11 @@ final class SearchIndex: @unchecked Sendable {
     let (condition, scopeArgs) = filter(scope)
     let photoFilter = photo.isEmpty ? "" : " AND r.id=?"
     let photoArgs: StatementArguments = photo.isEmpty ? StatementArguments() : [photo]
+    if meaning.hasPrefix("date:") {
+      guard meaning == Self.dateMeaningID(scope), scope.from != nil || scope.until != nil else { return 0 }
+      return try Int.fetchOne(db, sql: "SELECT count(*) FROM searchRecords r WHERE \(condition)" + photoFilter,
+        arguments: scopeArgs + photoArgs) ?? 0
+    }
     if meaning.hasPrefix("fulltext:") {
       let q = String(meaning.dropFirst("fulltext:".count))
       guard !Self.words(q).isEmpty else { return 0 }

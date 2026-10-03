@@ -2,7 +2,7 @@ import "fake-indexeddb/auto";
 import test from "node:test";
 import assert from "node:assert/strict";
 import accounts from "../../../fixtures/accounts.json";
-import { ready, unb64 } from "@fotoro/crypto";
+import { ready, unb64, signPayload, utf8 } from "@fotoro/crypto";
 import {
   configureVault,
   unlockVault,
@@ -30,16 +30,22 @@ test("ambiguous save retries exact operation and recipient record; expired failu
       },
     ],
   } as any);
-  await unlockVault({ kind: "recovery", secret: unb64(secret.recoverySecret) });
+  const vault = await unlockVault({ kind: "recovery", secret: unb64(secret.recoverySecret) });
+  const changes = (await import("../../../fixtures/changes-v1.json")).default;
+  const manifest = JSON.parse(new TextDecoder().decode(unb64(changes.changes[0].payload.body)));
+  manifest.photoId = crypto.randomUUID();
+  manifest.ownerAccountId = account.accountId;
   const request = {
     version: 1,
     expectedGrantVersion: 1,
     save: {
       version: 1,
       operationId: crypto.randomUUID(),
-      photoId: crypto.randomUUID(),
+      photoId: manifest.photoId,
       sourceGrantId: crypto.randomUUID(),
-      sourcePhotoId: crypto.randomUUID(),
+      sourcePhotoId: changes.changes[0].entityId,
+      manifest,
+      signedPayload: signPayload("photo-manifest", account.accountId, utf8(manifest), vault.signingSecretKey),
     },
   };
   const key =

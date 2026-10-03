@@ -749,3 +749,42 @@ h1 { font-size: 32px; letter-spacing: -1.3px; font-weight: 650; }
   .photo-pick-toggle { background: #202420e8; }
   .photo-pick-toggle input { accent-color: #a4cfad; }
 }
+
+.share-sheet { max-width: 520px; }
+.share-sheet h2 { margin: 8px 28px 20px 0; }
+.share-sheet h3 { font-size: 16px; margin: 12px 0; }
+.share-sheet > label, .share-sheet form > label { display: flex; flex-direction: column; gap: 8px; margin: 18px 0 10px; font-size: 13px; }
+.share-sheet input, .share-sheet select { width: 100%; min-width: 0; min-height: 46px; padding: 11px 12px; }
+.share-sheet .hint { line-height: 1.6; }
+.share-sheet .actions { flex-wrap: wrap; gap: 8px; }
+.share-photo-strip { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 20px; }
+.share-photo-strip span { padding: 8px 10px; font-size: 12px; border-radius: 12px; background: #edefe7; overflow-wrap: anywhere; }
+.identity-confirmation, .invitation-ready { padding: 16px 18px; margin: 18px 0; border: 1px solid #dfe5d9; border-radius: 16px; }
+.contact-identity { font-size: 13px; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.contact-link { padding: 14px 0; margin-top: 14px; border-top: 1px solid #e3e6dd; }
+.share-status { min-height: 20px; font-size: 13px; line-height: 1.6; }
+.share-inbox-heading { display: flex; align-items: center; justify-content: space-between; margin-top: 18px; }
+.share-inbox .grant { padding: 16px 0; }
+.share-inbox .grant p { margin: 4px 0 10px; }
+.share-inbox details { margin-top: 20px; }
+.share-inbox summary { min-height: 44px; padding: 12px 0; font-size: 13px; }
+.share-link-error { margin: 0 32px 18px; }
+@media (prefers-color-scheme: dark) {
+  .share-photo-strip span { background: #2b3028; }
+  .identity-confirmation, .invitation-ready, .contact-link { border-color: #464846; }
+}
+@media (max-width: 700px) {
+  .cloud-library .header-actions { gap: 2px; }
+  .cloud-library .header-actions > button { padding: 9px 8px; }
+  .cloud-library header { gap: 6px; }
+  .cloud-library .brand h1 { font-size: 28px; }
+}
+.share-photo-strip > .share-preview { display: grid; place-items: center; width: 76px; height: 76px; padding: 0; overflow: hidden; }
+.share-preview img { width: 100%; height: 100%; object-fit: cover; }
+.share-preview > span { font-size: 10px; max-width: 100%; }
+.contact-name { display: flex; flex-direction: column; gap: 8px; margin: 16px 0; font-size: 13px; }
+@media (max-width: 375px) {
+  .cloud-library header { height: auto; min-height: 102px; flex-wrap: wrap; row-gap: 10px; }
+  .cloud-library header .brand { flex: 1 0 100%; }
+  .cloud-library .header-actions { width: 100%; justify-content: space-between; }
+}
