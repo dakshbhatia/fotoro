@@ -110,7 +110,10 @@ struct BackupStatus: Codable {
     self.store = store
     selectionIDs = try store.database.read { db in
       try String.fetchOne(db, sql: "SELECT value FROM state WHERE key='backupSelection'").map {
-        Set(try Wire.decode([String].self, Data(b64: $0)))
+        let bytes: Data
+        if let standard = Data(base64Encoded: $0) { bytes = standard }
+        else { bytes = try Data(b64: $0) }
+        return Set(try Wire.decode([String].self, bytes))
       }
     }
     status = try store.database.read { db in

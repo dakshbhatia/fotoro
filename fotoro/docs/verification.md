@@ -1,22 +1,37 @@
-# Verification — October 2, 2026
+# Verification — October 3, 2026
 
 The web app and API are live at [fotoro.cloud](https://fotoro.cloud). The separate
 local Photos preview 0.1.0 (3) is uploaded and in internal TestFlight. Its matching
 development build was installed and launched on the physical iPhone;
-personal Photos access remains uninspected. Full encrypted build 12 is installed,
-its exact version is read back, and its running process and protected diagnostic
-file are verified on the unlocked physical iPhone. The owner's screenshots show
-local Photos and a signed-out Sync screen. Build 12's protected account-state event
-independently reports signed out; real-account authentication remains unverified.
-Build 13 subsequently installed successfully, but the phone disconnected before
-launch/version readback. Signed encrypted build 17 is installed and its exact version is read back.
-The CoreDevice launch succeeds. Build-17 protected diagnostics report
-signed out and a completed on-device picks pass; owner authentication acceptance
-remains pending.
+personal Photos access remains uninspected. Signed encrypted build 18 is installed
+and its exact version is read back. Its strict signature, production associations
+and full-app encryption declaration are verified. iOS blocked launch while the
+phone was locked; unlock/open remains pending. The preceding build's protected
+diagnostics reported signed out and completed picks. Owner authentication
+acceptance remains open.
 Apple has processed full build 4; its
 TestFlight access awaits an export-compliance declaration. Independent reviews reproduced
 retrieval, permission, cancellation, persistence and navigation defects; fixes
 include permanent regressions and were re-reviewed.
+
+Fresh-account acceptance uses public photos and isolated D1/R2, without seeded
+accounts or fixture-mode UI. Browser New Fotoro → password → Open → explicit Save
+→ reload → fresh-browser password restore preserves the original JPEG bytes.
+Native New Fotoro → Open → chosen PNG Save renders the saved photo; a fresh
+browser opens that same account and downloads the unchanged 214,852-byte PNG
+(SHA-256 `9118ddb774b564064c3d9ceae48c2127f08f87cf648353b3f9e27a6c76777d2a`).
+Browser native-account recovery records no API, runtime or console errors and no
+upload requests. The native cold-reopen attempt exposed a padded Base64 selection
+being read as strict Base64url. The fix reads the local encoding and retains legacy
+compatibility; rendered reopening now opens the same account and original.
+
+Remembered-login regressions exercise expired sessions, failed renewal followed by
+explicit retry, duplicate suppression and delayed-response cancellation, lock,
+account and same-origin API endpoint replacement. Initial restoration keeps queued
+photos untouched, disables sync and respects manual lock. Pending chosen Save and
+incoming invitations can finish after an inactive scene returns to active.
+These checks do not establish owner credentials, private Photos or physical
+background-daemon behavior.
 
 The current consumer slice replaces exchange JSON/device forms with accepted
 contacts, public invitations, encrypted optional contact names and native QR
@@ -52,7 +67,7 @@ control removes it, and Clear selection removes the selected-photo actions.
 Info remains navigable at accessibility-medium text size, then the test setting
 is restored to large. Tests use public local-service photos only.
 
-Local checks pass 235 full-native and 81 preview tests, with one explicit Vision
+Local checks pass 244 full-native and 81 preview tests, with one explicit Vision
 classifier integration skip in each suite because the iOS 27 simulator cannot
 create its inference context. Actual classification passes on a public synthetic
 macOS fixture; physical classification remains unverified. Date parsing, visual
@@ -100,13 +115,13 @@ Real-account phone-to-Safari acceptance remains open.
 | Worker/D1/R2 API | 53 tests pass, including nonce-bound password signup, canonical association links, recipient authorization, replay/conflicts and unchanged legacy login; upload/storage, authentication/exchange/annotation and diagnostic privacy checks pass |
 | Web | 244 tests pass, including date-scoped evidence, bounded HEIC intake and original-preserving encrypted staging alongside chosen-photo Save, sharing, cancellation and startup boundaries |
 | Web production build | TypeScript/Vite pass. Account/crypto loads after Sync photos; the large encrypted-media chunk warning remains |
-| Native | Latest full app 235 tests and local preview 81 tests pass locally with Xcode 27, zero failures and one explicit simulator Vision integration skip per suite. All 13 focused natural-date tests also pass on the frozen release source |
+| Native | Latest full app 244 tests and local preview 81 tests pass locally with Xcode 27, zero failures and one explicit simulator Vision integration skip per suite. Coverage includes remembered renewal, chosen-Save cold restoration and all 13 natural-date cases |
 | TestFlight metadata | 28 tests pass for team/individual authentication, exact app/build ownership, sparse Apple responses, notes readback and credential-safe errors. A live build 2 update preserved every existing test-note character and verified its build relationship; its processing state is VALID and beta states remain MISSING_EXPORT_COMPLIANCE. Build 3 is VALID / IN_BETA_TESTING with encryption metadata false and verified local-preview test notes |
 | Distribution IPA | Actual build 3 archive and distribution IPA pass the strict preview audit. Xcode Organizer used its existing cloud-managed certificate; the copied IPA matches the unchanged archive/dSYM/link map. Apple validation and exact-IPA upload both exit 0 with success markers |
 | Internal tester access | App Store Connect shows the existing internal group with one tester and one build; iOS 0.1.0 (3) is Testing and the requested sole owner tester is Invited. Association was automatic; no new tester/role/invitation mutation was needed. Inbox delivery and installation remain unverified |
 | Shared retrieval fixtures | Both platforms find all 20 predeclared supported tasks; five unsupported visual tasks and five absent terms remain empty. These are development fixtures, not held-out user accuracy |
 | Cross-language media | Swift decrypts frozen TypeScript vectors; TypeScript decrypts checked-in Swift ciphertext and rejects altered binding |
-| Real local HTTP exchange | Three isolated tests cover fresh migrations, recovery sessions, bidirectional contribution/save, revocation, restore, byte-preserved HEIC, background ciphertext staging, encrypted labels/OCR in a fresh account session, cross-account denial and idempotent revision conflicts |
+| Real local HTTP exchange | Four isolated tests cover fresh compact-password signup, manual Save and a fresh-session byte-identical restore alongside recovery, contribution/save, revocation, HEIC, background ciphertext, encrypted labels/OCR, cross-account denial and idempotent revision conflicts |
 | Native local lifecycle | All-age permitted enumeration, limited/denied startup, permission purge, ten-day browse, changed revisions, cancellation rollback and refresh stability are exercised |
 | Browser local lifecycle | Session-only default; retained labels/text/previews; lazy preview hydration; unavailable preview preservation; digest reselection; pending/cross-instance clear fences |
 
@@ -591,7 +606,7 @@ records; it cannot enumerate an iPhone photo library automatically.
   `MISSING_EXPORT_COMPLIANCE`. Its actual encryption declaration and France
   distribution answer are open. Local Photos preview build 3 is separately
   `VALID / IN_BETA_TESTING`; personal TestFlight installation remains unverified.
-  Signed full build 10 is installed and launched directly on the physical iPhone.
+  Signed full build 18 is installed directly on the physical iPhone; launch awaits unlock.
   Production HTTPS, API routing and the signed passkey association now pass.
   Contact and moment universal-link handling is implemented; physical acceptance remains open.
 - Owner password signup/sign-in, protected credential restoration, original

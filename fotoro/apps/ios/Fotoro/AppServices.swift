@@ -532,16 +532,28 @@ enum ReviewedPhotosBackupPolicy {
       })
   }
   func resumeSavedAccount(initialRestoration: Bool = false) async {
-    guard session.isSignedIn, !session.fixture else { return }
+    guard !session.fixture, let account = session.accountId else { return }
+    var generation = vault.generation
     do {
-      if !vault.isUnlocked {
-        guard initialRestoration, let account = session.accountId, !UserDefaults.standard.bool(forKey: "fotoro.manualLock." + account) else { return }
+      if !session.isSignedIn {
+        guard initialRestoration, !UserDefaults.standard.bool(forKey: "fotoro.manualLock." + account),
+          auth.hasRememberedPassword, !auth.isOpeningRememberedAccount else { return }
+        generation = try await auth.openRememberedAccount()
+        try Task.checkCancellation()
+        guard session.accountId == account, vault.generation == generation, session.isSignedIn,
+          !UserDefaults.standard.bool(forKey: "fotoro.manualLock." + account) else { throw CancellationError() }
+        try activateAccount()
+      } else if !vault.isUnlocked {
+        guard initialRestoration, !UserDefaults.standard.bool(forKey: "fotoro.manualLock." + account) else { return }
         try await vault.unlock(.localKeychain)
+        generation = vault.generation
         try activateAccount()
       }
       try store.setSyncEnabled(false)
       try reload()
     } catch {
+      guard !Task.isCancelled, !(error is CancellationError), (error as? URLError)?.code != .cancelled,
+        session.accountId == account, vault.generation == generation else { return }
       self.error = "Sign in to open your saved photos."
     }
   }

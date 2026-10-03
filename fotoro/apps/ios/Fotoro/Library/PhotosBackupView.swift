@@ -22,7 +22,7 @@ struct ManualPhotoSaveIntent {
   private var authorization: PhotoAccountAccess?
   init(_ sources: [RecentPhotoSource]) { self.sources = sources }
   mutating func authorize(_ access: PhotoAccountAccess?) {
-    guard pending else { return }
+    guard pending, authorization == nil else { return }
     authorization = access
   }
   mutating func consume(active: Bool, access: PhotoAccountAccess?) -> [RecentPhotoSource]? {

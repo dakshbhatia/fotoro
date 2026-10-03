@@ -37,7 +37,7 @@ Bounded failure fields and stored Worker logs remain enabled. Production D1/R2
 bindings and five migrations are unchanged. Canonical API and exact signed
 association checks pass.
 
-The current source passes 235 full-app, 81 local-preview, 244 web, 53 API,
+The current source passes 244 full-app, 81 local-preview, 244 web, 53 API,
 19 core and 28 release-metadata tests, typechecks and the production web build.
 Each native suite explicitly skips one Vision integration test because the iOS 27
 simulator cannot create its inference context. Seven sharing-safety tests also
@@ -48,17 +48,21 @@ focus, uses 16 px mobile text and supports Enter. Incomplete Save keeps the exac
 chosen sources for explicit Retry; recipient Save uses one durable request across
 concurrent callers. Cancellation reaches media downloads, and rejected upload
 receipts cannot poison later retries.
+Remembered native accounts renew expired sessions through the existing signed
+password proof, respecting manual lock and exact account, vault and API endpoint
+fences. Reopening remains read-only. Fresh signup, explicit Save and a new
+password session restoring unchanged bytes pass against isolated D1/R2.
 Date search now supports relative/calendar/ISO phrases and prefix/suffix compound
 queries on native and web, retaining capture-date provenance. Public Safari QA
 renders a verified HEIC original in the gallery and viewer; unsupported Brave
 intake shows a clear alternative with no runtime errors or upload writes. Browser
 gallery thumbnails use 512 px within the existing decoded-cache budget.
-Development-signed Release 0.1.0 (17) passes strict signature and exact production
+Development-signed Release 0.1.0 (18) passes strict signature and exact production
 association checks without a local-preview encryption exemption. CoreDevice
-verifies installation and exact version 17. Launch succeeds and
-protected build-17 runtime diagnostics report signed out and completed picks. CoreDevice previously
-reported successful build 13 installation; its launch/version readback remains
-open. Owner authentication and private-photo saving remain unverified.
+verifies installation and exact version 18 despite an interrupted install reply.
+iOS rejected launch because the phone was locked; opening build 18 on the phone
+remains pending. The preceding build's protected diagnostics reported signed out
+and completed picks. Owner authentication and private-photo saving remain unverified.
 Build 4's TestFlight compliance gate is unchanged. See
 [verification](verification.md) for the consumer acceptance evidence.
 

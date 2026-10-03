@@ -89,6 +89,148 @@ final class RecoveryTests: XCTestCase {
       XCTAssertFalse(responses.paths.contains { $0.contains("login/") || $0.contains("register/") || $0 == "/v1/vault" })
     }
   }
+  @MainActor func testExpiredRememberedAccountRenewsWithProofAndFreshSessionUsesLocalUnlock() async throws {
+    try await withExpiredRememberedLogin { auth, session, vault, responses in
+      let before = responses.paths
+      XCTAssertFalse(session.isSignedIn)
+      XCTAssertNil(session.bearerToken)
+      XCTAssertTrue(vault.canUnlockLocally)
+      XCTAssertTrue(auth.hasRememberedPassword)
+      XCTAssertFalse(auth.hasSavedPassword)
+      XCTAssertThrowsError(try auth.savedPassword(), "Expiry must not expose the stored password")
+      let storedPassword = try Keychain.read("password-" + XCTUnwrap(session.accountId))
+      let generation = try await auth.openRememberedAccount()
+      XCTAssertEqual(generation, vault.generation)
+      XCTAssertTrue(session.isSignedIn)
+      XCTAssertTrue(vault.isUnlocked)
+      XCTAssertEqual(Array(responses.paths.dropFirst(before.count)), ["/v1/auth/recovery/options", "/v1/auth/recovery/verify"])
+      XCTAssertEqual(try Keychain.read("password-" + XCTUnwrap(session.accountId)), storedPassword)
+      vault.lock()
+      let renewedPaths = responses.paths
+      _ = try await auth.openRememberedAccount()
+      XCTAssertTrue(vault.isUnlocked)
+      XCTAssertEqual(responses.paths, renewedPaths, "A fresh session must open locally without another password proof")
+    }
+  }
+  @MainActor func testRememberedRenewalFailureKeepsPasswordForExplicitRetry() async throws {
+    try await withExpiredRememberedLogin { auth, session, vault, responses in
+      responses.recoveryUnavailable = true
+      do { _ = try await auth.openRememberedAccount(); XCTFail("Unavailable service renewed the account") }
+      catch let error as FotoroError { XCTAssertEqual(error.message, "CONTROLLED_RECOVERY_UNAVAILABLE") }
+      XCTAssertFalse(session.isSignedIn)
+      XCTAssertFalse(vault.isUnlocked)
+      XCTAssertTrue(auth.hasRememberedPassword)
+      XCTAssertFalse(auth.isOpeningRememberedAccount)
+      responses.recoveryUnavailable = false
+      _ = try await auth.openRememberedAccount()
+      XCTAssertTrue(session.isSignedIn)
+      XCTAssertTrue(vault.isUnlocked)
+      XCTAssertEqual(responses.paths.filter { $0 == "/v1/auth/recovery/options" }.count, 2)
+      XCTAssertEqual(responses.paths.filter { $0 == "/v1/auth/recovery/verify" }.count, 1)
+    }
+  }
+  @MainActor func testRememberedRenewalRejectsLateResponsesAfterCancellationLockAccountOrOriginChange() async throws {
+    for path in ["/v1/auth/recovery/options", "/v1/auth/recovery/verify"] {
+      for interruption in ["cancel", "lock", "account", "origin", "server"] {
+        let gate = NativeLoginVaultGate(started: expectation(description: path + " " + interruption))
+        defer { gate.release.signal() }
+        try await withExpiredRememberedLogin(gate: gate, path: path) { auth, session, vault, responses in
+          let persisted = try Keychain.read("session")
+          let opening = Task { try await auth.openRememberedAccount() }
+          await fulfillment(of: [gate.started], timeout: 3)
+          let count = responses.paths.count
+          do { _ = try await auth.openRememberedAccount(); XCTFail("Duplicate renewal was allowed") }
+          catch let error as FotoroError { XCTAssertEqual(error.message, "Your Fotoro is already opening.") }
+          XCTAssertEqual(responses.paths.count, count)
+          switch interruption {
+          case "cancel": opening.cancel()
+          case "lock": vault.lock()
+          case "account": session.accountId = Wire.id()
+          case "server": auth.api.baseURL = URL(string: "https://replacement.invalid")!
+          default: auth.api.baseURL = URL(string: "http://127.0.0.1:8790")!
+          }
+          gate.release.signal()
+          do { _ = try await opening.value; XCTFail("Withdrawn renewal accepted a late response") }
+          catch { XCTAssertTrue(error is CancellationError || (error as? URLError)?.code == .cancelled) }
+          XCTAssertFalse(session.isSignedIn)
+          XCTAssertNil(session.bearerToken)
+          XCTAssertFalse(vault.isUnlocked)
+          XCTAssertFalse(auth.isOpeningRememberedAccount)
+          XCTAssertEqual(try Keychain.read("session"), persisted)
+        }
+      }
+    }
+  }
+  @MainActor func testRememberedPasswordRejectsMissingMalformedDifferentAccountAndFixtureValues() async throws {
+    try await withExpiredRememberedLogin { auth, session, vault, responses in
+      let account = try XCTUnwrap(session.accountId), before = responses.paths
+      let stored = try Keychain.read("password-" + account)
+      let other = try RecoveryCode.format(accountId: Wire.id(), secret: Data(repeating: 1, count: 32))
+      for value in [Data(), Data("malformed".utf8), Data(other.utf8)] {
+        try Keychain.write(value, id: "password-" + account)
+        XCTAssertFalse(auth.hasRememberedPassword)
+        do { _ = try await auth.openRememberedAccount(); XCTFail("Invalid remembered password was used") } catch {}
+        XCTAssertFalse(vault.isUnlocked)
+        XCTAssertEqual(responses.paths, before)
+      }
+      Keychain.remove("password-" + account)
+      XCTAssertFalse(auth.hasRememberedPassword)
+      try Keychain.write(stored, id: "password-" + account)
+      session.fixture = true
+      XCTAssertFalse(auth.hasRememberedPassword)
+      do { _ = try await auth.openRememberedAccount(); XCTFail("Fixture account attempted remembered sign-in") } catch {}
+      XCTAssertFalse(vault.isUnlocked)
+      XCTAssertEqual(responses.paths, before)
+    }
+  }
+  @MainActor func testInitialRestorationRenewsRememberedAccountWithoutDrainingQueuedPhotos() async throws {
+    try await withExpiredRememberedLogin { auth, session, _, responses in
+      let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+      let services = try restoredRememberedServices(api: auth.api, root: root)
+      defer { services.vault.lock(); try? FileManager.default.removeItem(at: root) }
+      let account = try XCTUnwrap(session.accountId), photoID = Wire.id()
+      let rep = RepresentationV1(binding: MediaBinding(photoId: photoID, representationId: Wire.id(), kind: "metadata"), objectId: Wire.id(), header: "", ciphertextBytes: 1, ciphertextSha256: Data("cipher".utf8).digest)
+      let photo = LocalPhoto(photoId: photoID, manifest: PhotoManifestV1(photoId: photoID, ownerAccountId: account, representations: [], metadataRepresentation: rep, ownerWrappedMetadataKey: WrappedKeyV1(nonce: "", ciphertext: "")), metadata: PhotoMetadataV1(filename: "public-test.jpg", mediaType: "image/jpeg", sourceDate: Wire.date(), dateSource: "photos", originalBytes: 3, originalSha256: Data("jpg".utf8).digest, representationKeys: [:]), transferState: "pending")
+      try services.store.put(photo)
+      try services.journal.enqueue(photo, publicSample: true)
+      try services.store.setSyncEnabled(true)
+      var scans = 0
+      services.photosBackupSnapshot = { _ in scans += 1; return [] }
+      let before = responses.paths
+      await services.resumeSavedAccount(initialRestoration: true)
+      XCTAssertTrue(services.session.isSignedIn)
+      XCTAssertNotNil(services.photoAccountAccess)
+      XCTAssertEqual(services.photos.map(\.id), [photoID])
+      XCTAssertEqual(try services.journal.entries().map { $0.photo.id }, [photoID])
+      XCTAssertFalse(try services.store.syncEnabled())
+      XCTAssertEqual(scans, 0)
+      XCTAssertEqual(Array(responses.paths.dropFirst(before.count)), ["/v1/auth/recovery/options", "/v1/auth/recovery/verify"])
+      await services.resumeSavedAccount()
+      XCTAssertEqual(responses.paths.count, before.count + 2)
+    }
+  }
+  @MainActor func testRestorationDoesNotRenewOnForegroundManualLockMissingPasswordOrFixture() async throws {
+    try await withExpiredRememberedLogin { auth, session, _, responses in
+      let account = try XCTUnwrap(session.accountId), before = responses.paths
+      let stored = try Keychain.read("password-" + account)
+      let lockKey = "fotoro.manualLock." + account
+      defer { UserDefaults.standard.removeObject(forKey: lockKey) }
+      for condition in ["foreground", "manualLock", "missingPassword", "fixture"] {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+        let services = try restoredRememberedServices(api: auth.api, root: root)
+        defer { services.vault.lock(); try? FileManager.default.removeItem(at: root) }
+        if condition == "manualLock" { UserDefaults.standard.set(true, forKey: lockKey) }
+        if condition == "missingPassword" { Keychain.remove("password-" + account) }
+        if condition == "fixture" { services.session.fixture = true }
+        await services.resumeSavedAccount(initialRestoration: condition != "foreground")
+        XCTAssertFalse(services.vault.isUnlocked, condition)
+        XCTAssertNil(services.photoAccountAccess, condition)
+        XCTAssertEqual(responses.paths, before, condition)
+        UserDefaults.standard.removeObject(forKey: lockKey)
+        try Keychain.write(stored, id: "password-" + account)
+      }
+    }
+  }
   @MainActor func testWrongPasswordCannotVerifyOrReplaceUnlockedAccountAndNetworkFailureStaysActionable() async throws {
     try await withIsolatedLogin(ceremony: { _ in throw FotoroError("Unexpected passkey ceremony") }) {
       auth, session, vault, responses in
@@ -558,6 +700,35 @@ final class RecoveryTests: XCTestCase {
   private static var loginCredential: CredentialResult {
     CredentialResult(response: Data(#"{"id":"controlled-public-credential","type":"public-key"}"#.utf8),
       credentialId: Data([1]).b64, prf: nil)
+  }
+  @MainActor private func withExpiredRememberedLogin(gate: NativeLoginVaultGate? = nil, path: String? = nil,
+    check: @MainActor (NativeAuth, AccountSession, VaultStore, NativeLoginResponses) async throws -> Void) async throws {
+    try await withIsolatedLogin(startGate: gate, startGatePath: path,
+      ceremony: { _ in throw FotoroError("Unexpected passkey ceremony") }) { auth, session, _, responses in
+      try await auth.prepareStart()
+      try await auth.completeStart(code: XCTUnwrap(auth.startPassword))
+      let expired = SessionV1(version: 1, accountId: try XCTUnwrap(session.accountId), deviceId: Wire.id(),
+        expiresAt: "2000-01-01T00:00:00Z", token: "expired-public-controlled-session")
+      try Keychain.write(Wire.encode(expired), id: "session")
+      let restored = AccountSession()
+      let configuration = URLSessionConfiguration.ephemeral
+      configuration.protocolClasses = [NativeLoginProtocol.self]
+      let api = APIClient(session: restored, baseURL: auth.api.baseURL, networkConfiguration: configuration,
+        diagnostics: NativeDiagnostics(fileURL: nil, emitSystemLog: false))
+      let vault = VaultStore(session: restored, api: api)
+      let remembered = NativeAuth(session: restored, api: api, vault: vault,
+        credentialCeremony: { _ in throw FotoroError("Unexpected passkey ceremony") })
+      defer { vault.lock() }
+      try await check(remembered, restored, vault, responses)
+    }
+  }
+  @MainActor private func restoredRememberedServices(api: APIClient, root: URL) throws -> AppServices {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [NativeLoginProtocol.self]
+    let services = try AppServices(root: root, networkConfiguration: configuration,
+      diagnostics: NativeDiagnostics(fileURL: nil, emitSystemLog: false))
+    services.api.baseURL = api.baseURL
+    return services
   }
   @MainActor private func withIsolatedLogin(optionsFail: Bool = false, enrolled: Bool = false,
     allowedCredentials: [[String: Any]]? = nil,
