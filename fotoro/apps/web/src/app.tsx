@@ -62,7 +62,7 @@ export default function App() {
     requestAnimationFrame(() => {
       const opener = syncOpener.current;
       const target = opener?.isConnected && !opener.closest("[hidden],[inert]")
-        ? opener : document.querySelector<HTMLButtonElement>(".local-trial .sync-pill");
+        ? opener : document.querySelector<HTMLButtonElement>(".local-trial .consumer-scopes .sync-pill");
       target?.focus({preventScroll: true});
     });
   };
@@ -90,6 +90,12 @@ export default function App() {
           onOpenSaved={photoId => {
             photoOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
             setSavedViewer(photoId);
+          }}
+          onShareSaved={photos => {
+            if (!ownedPhotos?.current() || !photos.length || photos.some(photo => !ownedPhotos.photos.includes(photo) || photo.grantId || photo.manifest.ownerAccountId !== ownedPhotos.accountId)) return;
+            cancelSave();
+            syncOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+            setSharePhotos([...photos]); setOpened(true); setCloud(true);
           }}
           onCancelSave={cancelSave}
           onSave={photos => {
@@ -129,7 +135,13 @@ export default function App() {
           </Suspense>
         </div>
       )}
-      {viewingSaved && ownedPhotos && savedViewer && <Suspense fallback={<div className="viewer" role="dialog" aria-modal="true" aria-label="Opening photo"><header className="viewer-top glass"><p className="hint" role="status">Opening photo…</p><button autoFocus onClick={closeSavedPhoto}>Close</button></header></div>}><SavedViewer key={savedViewer} photos={ownedPhotos.photos} initial={savedViewer} onSaved={() => {}} onShare={photo => {
+      {viewingSaved && ownedPhotos && savedViewer && <Suspense fallback={<div className="viewer" role="dialog" aria-modal="true" aria-label="Opening photo"><header className="viewer-top glass"><p className="hint" role="status">Opening photo…</p><button autoFocus onClick={closeSavedPhoto}>Close</button></header></div>}><SavedViewer key={savedViewer} photos={ownedPhotos.photos} initial={savedViewer} onSaved={() => {}} onLabels={ownedPhotos.edit ? (photo, labels) => {
+        if (!ownedPhotos.current() || !ownedPhotos.photos.includes(photo) || photo.grantId || photo.manifest.ownerAccountId !== ownedPhotos.accountId) return;
+        void ownedPhotos.edit?.(photo, {labels}).catch(() => {});
+      } : undefined} onFavorite={ownedPhotos.edit ? (photo, favorite) => {
+        if (!ownedPhotos.current() || !ownedPhotos.photos.includes(photo) || photo.grantId || photo.manifest.ownerAccountId !== ownedPhotos.accountId) return;
+        void ownedPhotos.edit?.(photo, {favorite}).catch(() => {});
+      } : undefined} onShare={photo => {
         if (!ownedPhotos.current() || !ownedPhotos.photos.includes(photo)) return;
         setSavedViewer(null); setSharePhotos([photo]); setOpened(true); setCloud(true);
       }} onClose={closeSavedPhoto} /></Suspense>}

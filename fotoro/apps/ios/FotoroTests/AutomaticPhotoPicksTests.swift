@@ -197,6 +197,34 @@ final class AutomaticPhotoPicksTests: XCTestCase {
     XCTAssertEqual(transparent.luminance, 1, accuracy: 0.000001)
     XCTAssertEqual(transparent.color, [255, 255, 255])
   }
+  func testMeasuredUniformColorsDoNotFillPicksButDetailedControlRemainsEligible() throws {
+    let colors: [[UInt8]] = [[0, 0, 0, 255], [255, 255, 255, 255], [128, 128, 128, 255], [80, 150, 210, 255]]
+    var signals: [String: AutomaticPhotoPickSignals] = [:]
+    var photos: [AutomaticPhotoPickCandidate] = []
+    for (index, color) in colors.enumerated() {
+      let id = "uniform-\(index)"
+      let pixels = Array(repeating: color, count: 64 * 64).flatMap { $0 }
+      let measured = try AutomaticPhotoPickPolicy.analyzePixels(width: 64, height: 64, rgba: pixels)
+      XCTAssertEqual(measured.contrast, 0, accuracy: 0.000001)
+      XCTAssertEqual(measured.sharpness, 0, accuracy: 0.000001)
+      signals[id] = measured
+      photos.append(photo(id))
+    }
+    XCTAssertTrue(AutomaticPhotoPickPolicy.recommend(photos, signals: signals).ids.isEmpty)
+    var pixels: [UInt8] = []
+    for y in 0..<64 {
+      for x in 0..<64 {
+        let value: UInt8 = (x / 4 + y / 4) % 2 == 0 ? 60 : 190
+        pixels.append(contentsOf: [value, value, value, 255])
+      }
+    }
+    signals["detailed"] = try AutomaticPhotoPickPolicy.analyzePixels(width: 64, height: 64, rgba: pixels)
+    photos.append(photo("detailed"))
+    let result = AutomaticPhotoPickPolicy.recommend(photos, signals: signals)
+    XCTAssertEqual(result.ids, ["detailed"])
+    XCTAssertEqual(result.groupCount, 1)
+    XCTAssertEqual(result.unassessed, 0)
+  }
 
   func testPixelMeasurementRejectsMalformedOrUnboundedInputWithoutOverflow() {
     XCTAssertThrowsError(try AutomaticPhotoPickPolicy.analyzePixels(width: 0, height: 1, rgba: []))

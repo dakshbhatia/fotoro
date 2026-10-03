@@ -15,6 +15,81 @@ import XCTest
     let snapshot = PhotoPicksSnapshot(candidates: [missing], recommendations: AutomaticPhotoPickPolicy.recommend([], signals: [:]))
     XCTAssertFalse(snapshot.matches([epoch]))
   }
+  func testBrowsingTenThousandSourcesReadsBoundedPagesAndReachesOlderAndUndatedSources() {
+    let sources = (0..<10_000).map { "source-\($0)" } + ["oldest", "undated"]
+    var reads: [Range<Int>] = []
+    let browse = PhotoBrowseSource(count: sources.count) { range in
+      reads.append(range)
+      return Array(sources[range])
+    }
+    var loaded: [String] = []
+    var offset = 0
+    while offset < browse.count {
+      let range = browse.range(after: offset)
+      loaded.append(contentsOf: browse.photos(in: range))
+      offset = range.upperBound
+      XCTAssertLessThanOrEqual(range.count, RecentPhotosPolicy.browsePageSize)
+    }
+    XCTAssertEqual(reads.first, 0..<200)
+    XCTAssertEqual(loaded, sources)
+    XCTAssertEqual(Set(loaded).count, sources.count)
+    XCTAssertEqual(Array(loaded.suffix(2)), ["oldest", "undated"])
+    XCTAssertTrue(browse.range(after: Int.max).isEmpty)
+    XCTAssertTrue(browse.range(after: -1, limit: 0).isEmpty)
+    XCTAssertTrue(browse.photos(in: -1..<1).isEmpty)
+    XCTAssertEqual(reads.count, 51)
+  }
+  func testBrowseFetchIncludesAllCaptureDatesWhilePicksKeepOnlyBoundedRecentStills() throws {
+    let now = Date(timeIntervalSince1970: 1_780_315_200)
+    let browse = RecentPhotosPolicy.browseFetchOptions()
+    let picks = RecentPhotosPolicy.pickFetchOptions(now: now)
+    let browsePredicate = try XCTUnwrap(browse.predicate)
+    let picksPredicate = try XCTUnwrap(picks.predicate)
+    let image = PHAssetMediaType.image.rawValue
+    for date in [now.addingTimeInterval(-30 * 86400), now.addingTimeInterval(86400)] {
+      let metadata: [String: Any] = ["mediaType": image, "creationDate": date]
+      XCTAssertTrue(browsePredicate.evaluate(with: metadata))
+      XCTAssertFalse(picksPredicate.evaluate(with: metadata))
+    }
+    XCTAssertTrue(browsePredicate.evaluate(with: ["mediaType": image]))
+    XCTAssertTrue(picksPredicate.evaluate(with: ["mediaType": image, "creationDate": now] as [String: Any]))
+    XCTAssertFalse(browsePredicate.evaluate(with: ["mediaType": PHAssetMediaType.video.rawValue]))
+    XCTAssertEqual(browse.fetchLimit, 0, "The source retains all permitted stills without materializing them all")
+    XCTAssertEqual(picks.fetchLimit, RecentPhotosPolicy.maximumPickCandidates)
+    XCTAssertFalse(browse.includeHiddenAssets)
+    XCTAssertTrue(browse.includeAllBurstAssets)
+  }
+  func testPermissionChangeDuringBrowseReadCannotPublishOrStartAnalysis() {
+    var permission = PHAuthorizationStatus.authorized
+    var previews = 0
+    let analyzer = PhotoPickAnalyzer(preview: { _ in previews += 1; return self.signal }, isCurrent: { _ in true })
+    let store = RecentPhotosStore(authorization: { permission }, readBrowseSource: { _ in
+      PhotoBrowseSource(count: 300) { _ in permission = .denied; return [] }
+    }, readRecentPhotos: { _ in [] }, picks: analyzer)
+    store.restoreAccess()
+    XCTAssertEqual(store.status, .denied)
+    XCTAssertTrue(store.photos.isEmpty)
+    XCTAssertTrue(store.recentPhotos.isEmpty)
+    XCTAssertFalse(store.hasMorePhotos)
+    XCTAssertNil(store.picksSnapshot)
+    XCTAssertEqual(previews, 0)
+    store.loadMorePhotos()
+    XCTAssertTrue(store.photos.isEmpty)
+    store.pauseAnalysis()
+  }
+  func testNonFavoriteScreenshotsUseNoPreviewWorkButFavoritesRemainEligible() async throws {
+    var reads: [String] = []
+    let analyzer = PhotoPickAnalyzer(preview: { candidate in reads.append(candidate.id); return self.signal },
+      isCurrent: { _ in true })
+    var ignored = candidate("ignored-screen", screenshot: true)
+    ignored.favorite = false
+    let favorite = candidate("favorite-screen", screenshot: true)
+    let result = try await analyzer.snapshot([ignored, favorite])
+    XCTAssertEqual(reads, [favorite.id])
+    XCTAssertEqual(result.recommendations.ids, [favorite.id])
+    XCTAssertEqual(result.recommendations.unassessed, 0)
+    XCTAssertEqual(analyzer.completed, 2)
+  }
   func testSerialAnalysisCachesByRevisionWithoutOriginalOrUploadWork() async throws {
     var reads: [String] = []
     var active = 0
@@ -67,12 +142,13 @@ import XCTest
         return available ? self.signal : nil
       })
       let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in [photo] }, picks: analyzer)
-      store.restoreAccess()
+      let now = try XCTUnwrap(photo.capturedAt)
+      store.restoreAccess(now: now)
       for _ in 0..<100 where store.picksSnapshot == nil { await Task.yield() }
       XCTAssertEqual(store.picksSnapshot?.recommendations.unassessed, 1)
       XCTAssertTrue(store.pickedPhotos.isEmpty)
       available = true
-      if !explicitSync { store.restoreAccess() }
+      if !explicitSync { store.restoreAccess(now: now) }
       let retried = try await store.completedPicks()
       XCTAssertEqual(retried.recommendations.ids, [photo.id])
       XCTAssertEqual(retried.recommendations.unassessed, 0)

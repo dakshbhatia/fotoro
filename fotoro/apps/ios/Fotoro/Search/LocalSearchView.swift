@@ -7,6 +7,9 @@ struct LocalSearchView: View {
   let search: LocalSearchStore
   let photos: RecentPhotosStore
   var choseMeaning: () -> Void = {}
+  var selectedIDs: Set<String> = []
+  var selecting = false
+  var toggleSelection: ((RecentPhoto) -> Void)? = nil
   var inspect: (RecentPhoto) -> Void
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
@@ -14,14 +17,27 @@ struct LocalSearchView: View {
       if search.matchingPhotos.isEmpty {
         ContentUnavailableView("No photos found", systemImage: "magnifyingglass", description: Text("Try a label, a date or words in a photo."))
       } else {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3) {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 2), spacing: 3) {
           ForEach(search.matchingPhotos) { photo in
-            Button { inspect(photo) } label: {
+            Button {
+              if selecting, let toggleSelection { toggleSelection(photo) }
+              else { inspect(photo) }
+            } label: {
               GeometryReader { geometry in
                 PhotosImage(photo: photo, store: photos, networkAllowed: false).scaledToFill()
                   .frame(width: geometry.size.width, height: geometry.size.height).clipped()
               }.aspectRatio(1, contentMode: .fit)
-            }.buttonStyle(.plain)
+                .overlay(alignment: .bottomTrailing) {
+                  if selectedIDs.contains(photo.id) {
+                    Image(systemName: "checkmark.circle.fill").padding(8)
+                  }
+                }
+            }.buttonStyle(.plain).accessibilityValue(selectedIDs.contains(photo.id) ? "Selected" : "")
+              .contextMenu {
+                if let toggleSelection {
+                  Button(selectedIDs.contains(photo.id) ? "Deselect" : "Select") { toggleSelection(photo) }
+                }
+              }
           }
         }
       }
@@ -59,6 +75,10 @@ struct ConsumerSearchResultsView: View {
   let saved: [String: LocalPhoto]
   let search: LocalSearchStore
   let photos: RecentPhotosStore
+  var selected: Set<ConsumerPhotoReference> = []
+  var selecting = false
+  var toggleDevice: ((RecentPhoto) -> Void)? = nil
+  var toggleSaved: ((LocalPhoto) -> Void)? = nil
   let inspectDevice: (RecentPhoto) -> Void
   let inspectSaved: (LocalPhoto) -> Void
   let choseAlternative: () -> Void
@@ -68,9 +88,11 @@ struct ConsumerSearchResultsView: View {
       if hits.isEmpty {
         ContentUnavailableView("No photos found", systemImage: "magnifyingglass", description: Text("Try a label, a date or words in a photo."))
       } else {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3) {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 2), spacing: 3) {
           ForEach(hits) { hit in
             ConsumerSearchCell(hit: hit, saved: saved, search: search, photos: photos,
+              selected: selected.contains(hit.photo), selecting: selecting,
+              toggleDevice: toggleDevice, toggleSaved: toggleSaved,
               inspectDevice: inspectDevice, inspectSaved: inspectSaved)
           }
         }
@@ -91,31 +113,50 @@ private struct ConsumerSearchCell: View {
   let saved: [String: LocalPhoto]
   let search: LocalSearchStore
   let photos: RecentPhotosStore
+  let selected: Bool
+  let selecting: Bool
+  let toggleDevice: ((RecentPhoto) -> Void)?
+  let toggleSaved: ((LocalPhoto) -> Void)?
   let inspectDevice: (RecentPhoto) -> Void
   let inspectSaved: (LocalPhoto) -> Void
   var body: some View {
     switch hit.photo {
     case .device(let id):
       if let photo = search.assets[id] {
-        Button { inspectDevice(photo) } label: {
+        Button {
+          if selecting, let toggleDevice { toggleDevice(photo) }
+          else { inspectDevice(photo) }
+        } label: {
           GeometryReader { geometry in
             PhotosImage(photo: photo, store: photos, networkAllowed: false).scaledToFill()
               .frame(width: geometry.size.width, height: geometry.size.height).clipped()
-          }.aspectRatio(1, contentMode: .fit)
-        }.buttonStyle(.plain)
+          }.aspectRatio(1, contentMode: .fit).overlay(alignment: .bottomTrailing) { selectionMark }
+        }.buttonStyle(.plain).accessibilityValue(selected ? "Selected" : "")
+          .contextMenu {
+            if let toggleDevice { Button(selected ? "Deselect" : "Select") { toggleDevice(photo) } }
+          }
       }
     case .saved(let id):
       if let photo = saved[id] {
-        Button { inspectSaved(photo) } label: {
+        Button {
+          if selecting, let toggleSaved { toggleSaved(photo) }
+          else { inspectSaved(photo) }
+        } label: {
           GeometryReader { geometry in
             LazyImage(url: photo.thumbnailURL ?? photo.previewURL) { state in
               if let image = state.image { image.resizable().scaledToFill() }
               else { Rectangle().fill(.quaternary).overlay { Image(systemName: "photo") } }
             }.frame(width: geometry.size.width, height: geometry.size.height).clipped()
-          }.aspectRatio(1, contentMode: .fit)
-        }.buttonStyle(.plain).accessibilityLabel(photo.metadata.filename)
+          }.aspectRatio(1, contentMode: .fit).overlay(alignment: .bottomTrailing) { selectionMark }
+        }.buttonStyle(.plain).accessibilityLabel(photo.metadata.filename).accessibilityValue(selected ? "Selected" : "")
+          .contextMenu {
+            if let toggleSaved { Button(selected ? "Deselect" : "Select") { toggleSaved(photo) } }
+          }
       }
     }
+  }
+  @ViewBuilder private var selectionMark: some View {
+    if selected { Image(systemName: "checkmark.circle.fill").padding(8) }
   }
 }
 

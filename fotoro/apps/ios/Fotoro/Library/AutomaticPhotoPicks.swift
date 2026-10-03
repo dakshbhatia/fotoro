@@ -103,9 +103,8 @@ enum AutomaticPhotoPickPolicy {
         unassessed += 1
         continue
       }
-      // Flat white/black images were assessed, but cannot establish a useful suggested photo.
-      guard !(signal.contrast < 0.006 && (signal.luminance < 0.02 || signal.luminance > 0.98))
-      else { continue }
+      // Nearly uniform previews do not establish a useful suggested photo, regardless of color.
+      guard signal.contrast >= 0.006 else { continue }
       let time = photo.capturedAt?.timeIntervalSince1970
       scored.append(
         ScoredPhoto(

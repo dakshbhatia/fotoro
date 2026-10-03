@@ -66,7 +66,7 @@ struct LibraryView: View {
             savingFeedback
             catalogFeedback
             LazyVGrid(
-              columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3
+              columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 2), spacing: 3
             ) {
               ForEach(days, id: \.0) { day in
                 Section {
@@ -208,7 +208,7 @@ struct LibraryView: View {
         } message: {
           Text(services.error ?? "")
         }
-    }
+    }.preferredColorScheme(.dark)
   }
 
   private func openedAccount() {
@@ -250,17 +250,10 @@ struct LibraryView: View {
   }
   @ViewBuilder private var savingFeedback: some View {
     let summary = services.consumerSyncSummary
-    if services.backup.isRunning || services.journal.running {
-      HStack {
-        ProgressView("Saving photos…")
-        Spacer()
-        Button("Pause") { services.pauseSync() }
-      }.padding()
-    } else if summary.action == .continue || summary.action == .retry {
-      Button("Continue saving", systemImage: "icloud.and.arrow.up") {
-        services.run { try await services.continueSync() }
-      }.disabled(services.busy).padding()
-    } else if let saveSelection, saveIntent?.pending == false,
+    ConsumerSaveStatus(services: services).padding(.horizontal)
+    if !services.backup.isRunning, !services.journal.running,
+      summary.action != .continue, summary.action != .retry,
+      let saveSelection, saveIntent?.pending == false,
       saveIntent?.wasConsumed == false || summary.state == .needsAttention {
       Button("Save selected photos", systemImage: "icloud.and.arrow.up") {
         saveIntent = ManualPhotoSaveIntent(saveSelection)
@@ -344,6 +337,7 @@ struct LibraryView: View {
 struct SavedPhotoSelection {
   private var sources: [String: LocalPhoto] = [:]
   var count: Int { sources.count }
+  var ids: Set<String> { Set(sources.keys) }
   func contains(_ id: String) -> Bool { sources[id] != nil }
   mutating func toggle(_ photo: LocalPhoto) {
     if sources.removeValue(forKey: photo.id) == nil { sources[photo.id] = photo }
@@ -369,6 +363,47 @@ struct SavedPhotoSelection {
   }
 }
 
+struct ConsumerSaveStatus: View {
+  @Bindable var services: AppServices
+  private var summary: ConsumerSyncSummary { services.consumerSyncSummary }
+  private var saving: Bool { services.backup.isRunning || services.journal.running }
+  private var title: String {
+    if summary.state == .preparing { return "Preparing photos…" }
+    if saving {
+      if let completed = summary.completedPhotos, let total = summary.totalPhotos {
+        return "\(completed) of \(total) saved"
+      }
+      return "Saving photos…"
+    }
+    if summary.state == .paused { return "Saving paused" }
+    if summary.state == .offline { return "You’re offline. Your chosen photos are kept." }
+    if summary.state == .needsAttention { return "Some photos need attention" }
+    if let completed = summary.completedPhotos, completed > 0 { return "\(completed) saved" }
+    return ""
+  }
+  var body: some View {
+    if !title.isEmpty {
+      VStack(alignment: .leading, spacing: 4) {
+        HStack(spacing: 10) {
+          if saving { ProgressView().controlSize(.small) }
+          Text(title).font(.footnote).foregroundStyle(.secondary).monospacedDigit()
+          Spacer(minLength: 0)
+          if saving {
+            Button("Pause") { services.pauseSync() }.font(.footnote).frame(minHeight: 44)
+          } else if summary.action == .continue || summary.action == .retry {
+            Button(summary.action == .retry ? "Try again" : "Continue") {
+              services.run { try await services.continueSync() }
+            }.font(.footnote).frame(minHeight: 44).disabled(services.busy)
+          }
+        }
+        if summary.state == .needsAttention, let detail = summary.detail {
+          Text(detail).font(.caption).foregroundStyle(.secondary)
+        }
+      }.accessibilityElement(children: .contain)
+    }
+  }
+}
+
 @MainActor @Observable final class SavedLibraryRefresh {
   private(set) var isRefreshing = false
   private(set) var error: String?
@@ -376,6 +411,7 @@ struct SavedPhotoSelection {
   @ObservationIgnored private var operation: UUID?
   @ObservationIgnored private var task: Task<Void, Never>?
   func open(_ services: AppServices) async {
+    if isRefreshing, task?.isCancelled == true { cancel() }
     let binding = SavedLibraryOpenBinding(services)
     guard openedBinding != binding, services.photoAccountAccess != nil else { return }
     if isRefreshing { cancel() }
@@ -400,9 +436,15 @@ struct SavedPhotoSelection {
     }
     task = loading
     await withTaskCancellationHandler { await loading.value } onCancel: { loading.cancel() }
-    if operation == token { isRefreshing = false; task = nil; operation = nil }
+    if operation == token {
+      if Task.isCancelled || loading.isCancelled { openedBinding = nil }
+      isRefreshing = false
+      task = nil
+      operation = nil
+    }
   }
   func cancel() {
+    if isRefreshing { openedBinding = nil }
     task?.cancel()
     task = nil
     operation = nil
@@ -411,7 +453,7 @@ struct SavedPhotoSelection {
   }
 }
 
-private struct SavedLibraryOpenBinding: Equatable {
+struct SavedLibraryOpenBinding: Equatable {
   var account: String?
   var vault: UUID
   var catalog: ObjectIdentifier
@@ -428,7 +470,7 @@ private struct SavedCatalogSearchPresentationID: Equatable {
   var vault: UUID
 }
 
-private struct LibraryPhotoCell: View {
+struct LibraryPhotoCell: View {
   let photo: LocalPhoto
   let isSelected: Bool
   let open: () -> Void

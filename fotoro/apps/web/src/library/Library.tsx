@@ -7,11 +7,13 @@ export function Thumbnail({
   onOpen,
   selected,
   onSelect,
+  selecting = false,
 }: {
   photo: Photo;
   onOpen: () => void;
   selected: boolean;
   onSelect: () => void;
+  selecting?: boolean;
 }) {
   const [url, setUrl] = useState(""),
     [error, setError] = useState("");
@@ -50,14 +52,14 @@ export function Thumbnail({
           <span>{error || "Loading photo…"}</span>
         )}
       </button>
-      <button
+      {(selecting || selected) && <button
         className="select"
         aria-label={"Select " + photo.metadata.filename}
         aria-pressed={selected}
         onClick={onSelect}
       >
         {selected ? "✓" : ""}
-      </button>
+      </button>}
     </div>
   );
 }
@@ -67,22 +69,24 @@ export function Library({
   onSelect,
   onOpen,
   active = true,
+  selecting = false,
 }: {
   photos: Photo[];
   selected: Set<string>;
   onSelect: (id: string) => void;
   onOpen: (id: string) => void;
   active?: boolean;
+  selecting?: boolean;
 }) {
   const parent = useRef<HTMLDivElement>(null),
-    [columns, setColumns] = useState(3),
+    [columns, setColumns] = useState(2),
     [width, setWidth] = useState(800);
   useEffect(() => {
     const observer = new ResizeObserver((entries) => {
       const w = entries[0].contentRect.width;
       if (w <= 0) return;
       setWidth(w);
-      setColumns(w < 700 ? 3 : Math.max(3, Math.floor(w / 250)));
+      setColumns(w < 700 ? 2 : Math.max(3, Math.floor(w / 250)));
     });
     if (parent.current) observer.observe(parent.current);
     return () => observer.disconnect();
@@ -92,7 +96,7 @@ export function Library({
     const days = new Map<string, Photo[]>();
     for (const photo of photos) {
       const date = new Date(photo.metadata.sourceDate);
-      const day = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+      const day = `${photo.metadata.dateSource === "import" ? "import" : "capture"}:${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
       const group = days.get(day);
       if (group) group.push(photo);
       else days.set(day, [photo]);
@@ -106,7 +110,7 @@ export function Library({
           photos: items,
           heading:
             index === 0
-              ? new Date(group[0].metadata.sourceDate).toLocaleDateString(
+              ? (group[0].metadata.dateSource === "import" ? "Imported " : "") + new Date(group[0].metadata.sourceDate).toLocaleDateString(
                   undefined,
                   { month: "long", day: "numeric", year: "numeric" },
                 )
@@ -185,6 +189,7 @@ export function Library({
                   key={photo.manifest.photoId}
                   photo={photo}
                   selected={selected.has(photo.manifest.photoId)}
+                  selecting={selecting}
                   onSelect={() => onSelect(photo.manifest.photoId)}
                   onOpen={() => onOpen(photo.manifest.photoId)}
                 />

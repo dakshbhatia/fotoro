@@ -13,6 +13,7 @@ export interface OwnedPhotoSnapshot {
   photos: Photo[];
   current: () => boolean;
   preview: (photo: Photo) => Promise<Blob>;
+  edit?: (photo: Photo, changes: {labels?: string[]; favorite?: boolean}) => Promise<void>;
 }
 export class ConsumerPreviewResources extends LocalResources {
   private sourceGeneration = 0;

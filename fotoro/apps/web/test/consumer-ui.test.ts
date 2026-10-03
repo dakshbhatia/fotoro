@@ -45,10 +45,10 @@ test("partial sync always reports unstaged selected originals while preserving v
   for (const extra of cases) {
     const summary = deriveConsumerSyncSummary({...facts, localPhotos: 4, ...extra});
     assert.equal(summary.completedPhotos, 3); assert.equal(summary.totalPhotos, undefined);
-    assert.match(summary.detail!, /3 photos saved/); assert.match(summary.detail!, /4 selected to sync/);
-    assert.equal((summary.detail!.match(/selected to sync/g) ?? []).length, 1);
+    assert.match(summary.detail!, /3 photos saved/); assert.match(summary.detail!, /4 selected to Save/);
+    assert.equal((summary.detail!.match(/selected to Save/g) ?? []).length, 1);
   }
-  assert.doesNotMatch(deriveConsumerSyncSummary(facts).detail!, /selected to sync/);
+  assert.doesNotMatch(deriveConsumerSyncSummary(facts).detail!, /selected to Save/);
   assert.equal(deriveConsumerSyncSummary({...facts, unlocked: false, localPhotos: 4}).detail, undefined);
 });
 test("skipped photos and pending or conflicting edits prevent an unconditional completion", async () => {

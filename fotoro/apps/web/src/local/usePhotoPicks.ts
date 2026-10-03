@@ -20,9 +20,9 @@ export function usePhotoPicks(photos: LocalPhoto[], resources: LocalResources, e
   const [analyzer] = useState(() => new PickAnalyzer());
   const [recommendations, setRecommendations] = useState<PhotoRecommendations>();
   const [busy, setBusy] = useState(false), [done, setDone] = useState(0);
-  const [overrides, setOverrides] = useState(new Map<string, boolean>()), [all, setAll] = useState(false);
+  const [selection, setSelection] = useState(new Set<string>());
   const clear = useCallback(() => {
-    analyzer.clear(); setRecommendations(undefined); setOverrides(new Map()); setAll(false); setBusy(false); setDone(0);
+    analyzer.clear(); setRecommendations(undefined); setSelection(new Set()); setBusy(false); setDone(0);
   }, [analyzer]);
   useEffect(() => {
     let alive = true;
@@ -33,10 +33,15 @@ export function usePhotoPicks(photos: LocalPhoto[], resources: LocalResources, e
     return () => {alive = false;};
   }, [photos, resources, analyzer, enabled, clear]);
   useEffect(() => () => analyzer.clear(), [analyzer]);
-  const ids = useMemo(() => new Set(photos.filter(photo =>
-    overrides.get(photo.id) ?? (all || recommendations?.ids.has(photo.id) || false)).map(photo => photo.id)), [photos, overrides, all, recommendations]);
-  const choose = (id: string, checked: boolean) => setOverrides(current => new Map(current).set(id, checked));
-  const suggested = () => {setAll(false); setOverrides(new Map());};
-  const chooseAll = () => {setAll(true); setOverrides(new Map());};
-  return {ids, recommendations, busy, done, clear, choose, suggested, chooseAll};
+  const ids = useMemo(() => new Set(photos.filter(photo => selection.has(photo.id)).map(photo => photo.id)), [photos, selection]);
+  useEffect(() => {setSelection(current => current.size === ids.size ? current : new Set(ids));}, [ids]);
+  const choose = (id: string, checked: boolean) => setSelection(current => {
+    const next = new Set(current);
+    checked ? next.add(id) : next.delete(id);
+    return next;
+  });
+  const suggested = () => setSelection(new Set(recommendations?.ids));
+  const chooseAll = () => setSelection(new Set(photos.map(photo => photo.id)));
+  const clearSelection = () => setSelection(new Set());
+  return {ids, recommendations, busy, done, clear, clearSelection, choose, suggested, chooseAll};
 }

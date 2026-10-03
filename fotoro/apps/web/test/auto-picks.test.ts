@@ -60,6 +60,19 @@ test("pixel measurements distinguish a flat white preview from a detailed image"
   assert.equal(recommendPhotos([photo("flat"),photo("detail")],new Map([["flat",flat],["detail",detailed]])).ids.has("detail"),true);
 });
 
+test("uniform colored previews are excluded from Picks while every original remains available", () => {
+  const colors: [number, number, number][] = [[0,0,0], [255,255,255], [128,128,128], [255,0,0], [0,255,0], [0,0,255]];
+  const photos = colors.map((_, index) => photo(String(index)));
+  const signals = new Map(photos.map((value, index) => {
+    const data = new Uint8ClampedArray(16 * 16 * 4);
+    for (let offset = 0; offset < data.length; offset += 4) data.set([...colors[index],255],offset);
+    return [value.id, analyzePixels({width:16,height:16,data})];
+  }));
+  assert.equal(recommendPhotos(photos,signals).ids.size,0);
+  assert.equal(photos.length,6);
+  assert.equal(recommendPhotos([photo("detail")],new Map([["detail",signal(1n)]])).ids.size,1);
+});
+
 test("analysis reuses the same source and fences a late result after Clear", async () => {
   const analyzer = new PickAnalyzer();
   const a = {...photo("a"),file:new File(["a"],"a.png")};

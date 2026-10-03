@@ -66,7 +66,7 @@ export function recommendPhotos(photos:LocalPhoto[], signals:ReadonlyMap<string,
   const unique = [...new Map(photos.map(photo => [photo.id, photo])).values()];
   const candidates = unique.flatMap((photo, order) => {
     const signal = signals.get(photo.id);
-    if (!signal || !valid(signal) || (signal.contrast < .006 && (signal.luminance < .02 || signal.luminance > .98))) return [];
+    if (!signal || !valid(signal) || signal.contrast < .006) return [];
     return [{photo, signal, order, time: captured(photo), score: score(photo, signal)}];
   }).sort((a, b) => ((a.time ?? Infinity) - (b.time ?? Infinity)) || a.order - b.order);
   type Candidate = typeof candidates[number];

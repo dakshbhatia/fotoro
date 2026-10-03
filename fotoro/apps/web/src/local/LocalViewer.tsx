@@ -4,11 +4,13 @@ import { type LocalPhoto, LocalResources } from "./resources";
 import type { LocalOcrPhoto } from "./useLocalOcr";
 import {canShareOriginal, downloadOriginal, OriginalShareAttempt} from "../library/system-share";
 import {useDialogFocus} from "../library/dialog-focus";
-export function LocalViewer({photos, initial, resources, onClose, onLabels, onUse, onConfirm, onPin, meaning, onReselect}: {
+export function LocalViewer({photos, initial, resources, onClose, onLabels, onFavorite, onUse, onConfirm, onPin, meaning, onReselect, onSave, isSaved}: {
   photos: LocalPhoto[]; initial: string; resources: LocalResources; onClose: () => void;
   onLabels?: (id: string, labels: string[]) => void;
+  onFavorite?: (id: string, favorite: boolean) => void;
   onUse?: (id: string) => void; onConfirm?: (id: string) => void; onPin?: (id: string) => void;
   meaning?: string; onReselect?: () => void;
+  onSave?: (photo: LocalPhoto) => void; isSaved?: (photo: LocalPhoto) => boolean;
 }) {
   const [selected, setSelected] = useState(initial), [loaded, setLoaded] = useState({id: "", url: ""}),
     [details, setDetails] = useState(false), [zoom, setZoom] = useState(false), [status, setStatus] = useState(""), [label, setLabel] = useState(""),
@@ -43,6 +45,7 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onUs
     downloadOriginal(photo.file); onUse?.(photo.id);
   };
   const canShare = !!photo.file && canShareOriginal(photo.file);
+  const saved = isSaved?.(photo) ?? false;
   return <div className="viewer" ref={panel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Photo viewer">
     <div className="viewer-top glass">
       <button onClick={onClose} aria-label="Close viewer"><Icon kind="close" /></button>
@@ -64,6 +67,9 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onUs
     <div className="viewer-bottom glass">
       <button aria-label="Previous photo" disabled={index === 0} onClick={() => setSelected(photos[index - 1].id)}><Icon kind="previous" /></button>
       <button onClick={() => setZoom(!zoom)}>{zoom ? "Fit" : "Zoom"}</button>
+      {onSave && <button disabled={!photo.file || sharing || saved} onClick={() => {
+        if (photo.file && !isSaved?.(photo) && alive.current && currentPhoto.current === photo) onSave(photo);
+      }}>{saved ? "Saved" : "Save"}</button>}
       {canShare ? <button disabled={sharing} onClick={async () => {
         if (!photo.file || shareAttempt.pending) return;
         const current = () => alive.current && currentPhoto.current === photo;
@@ -78,6 +84,9 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onUs
       <p>{photo.filename}</p><p>{photo.width} × {photo.height}{(photo.originalSize ?? photo.file?.size) ? ` · ${((photo.originalSize ?? photo.file!.size) / 1024 / 1024).toFixed(1)} MB` : ""}</p>
       <p>{new Date(photo.date).toLocaleString()}</p><p>{photo.dateSource === "exif" ? "Date from the photo" : "Capture date unavailable · date selected"}</p>
       <p>{photo.file ? "Original file unchanged" : "Retained preview · original not selected"}</p>
+      {onFavorite && <button aria-pressed={!!photo.favorite} onClick={() => {
+        if (alive.current && currentPhoto.current === photo) onFavorite(photo.id, !photo.favorite);
+      }}>{photo.favorite ? "Unfavorite" : "Favorite"}</button>}
       {canShare && <button onClick={download} disabled={sharing}>Download original</button>}
       <h3>Labels</h3>
       <div className="local-labels">{(photo.labels ?? []).map((value, i) => <button key={i} aria-label={"Remove label " + value} onClick={() => onLabels?.(photo.id, photo.labels!.filter((_, position) => position !== i))}>{value} ×</button>)}</div>

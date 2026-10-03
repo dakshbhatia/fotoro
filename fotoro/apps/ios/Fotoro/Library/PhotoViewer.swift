@@ -11,6 +11,8 @@ struct PhotoViewer: View {
   @Bindable var services: AppServices
   let initialID: String
   var displayedPhotos: [LocalPhoto]? = nil
+  let receivedGrant: GrantV1?
+  let receivedCards: [String: AccountCardV1]?
   @State private var selected = ""
   @State private var zoom = PhotoViewerZoom()
   @State private var details: LocalPhoto?
@@ -20,21 +22,27 @@ struct PhotoViewer: View {
   @State private var shareTask: Task<Void, Never>?
   @State private var sharedPhotos: SharedPhotosPresentation?
   @State private var controlsVisible = true
+  @State private var saveTask: Task<Void, Never>?
+  @State private var savedReceivedIDs: Set<String> = []
+  @State private var feedback: String?
+  @Environment(\.scenePhase) private var scenePhase
   @Environment(\.dismiss) private var dismiss
-  init(services: AppServices, initialID: String, displayedPhotos: [LocalPhoto]? = nil) {
+  init(services: AppServices, initialID: String, displayedPhotos: [LocalPhoto]? = nil, receivedGrant: GrantV1? = nil) {
     self.services = services
     self.initialID = initialID
     self.displayedPhotos = displayedPhotos
+    self.receivedGrant = receivedGrant
+    self.receivedCards = receivedGrant == nil ? nil : services.session.pinnedCards
     _selected = State(initialValue: initialID)
   }
-  private var photos: [LocalPhoto] { displayedPhotos ?? services.photos }
+  private var photos: [LocalPhoto] { displayedPhotos ?? (receivedGrant == nil ? services.photos : services.received) }
   private var current: LocalPhoto? { photos.first { $0.id == (selected.isEmpty ? initialID : selected) } }
   var body: some View {
     NavigationStack {
       TabView(selection: $selected) {
         ForEach(photos) { photo in
           Group {
-            if shouldLoad(photo) { SavedPhotoPage(services: services, photo: photo) }
+            if shouldLoad(photo) { SavedPhotoPage(services: services, photo: photo, receivedGrant: receivedGrant, receivedCards: receivedCards) }
             else { Color.black }
           }.scaleEffect(zoom.scale)
             .gesture(MagnifyGesture().onChanged { zoom.change($0.magnification) }
@@ -44,9 +52,18 @@ struct PhotoViewer: View {
             .tag(photo.id)
         }
       }.tabViewStyle(.page(indexDisplayMode: .never)).background(.black)
-        .onChange(of: selected) { zoom.reset() }
+        .onChange(of: selected) { zoom.reset(); feedback = nil }
         .toolbar {
           ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() } }
+          ToolbarItem(placement: .bottomBar) {
+            Button("Info", systemImage: "info.circle") { details = current }
+          }
+          if receivedGrant != nil {
+            ToolbarItem(placement: .bottomBar) {
+              Button(current.map { savedReceivedIDs.contains($0.id) } == true ? "Saved" : "Save", systemImage: "icloud.and.arrow.up", action: saveReceived)
+                .disabled(services.busy || current == nil || current.map { savedReceivedIDs.contains($0.id) } == true)
+            }
+          } else {
           ToolbarItem(placement: .bottomBar) {
             Menu("Share", systemImage: "square.and.arrow.up") {
               Button("Share in Fotoro") {
@@ -56,21 +73,35 @@ struct PhotoViewer: View {
             }
               .disabled(preparingShare || current == nil)
           }
-          ToolbarItem(placement: .bottomBar) {
-            Button("Info", systemImage: "info.circle") { details = current }
           }
         }
         .toolbar(controlsVisible ? .visible : .hidden, for: .navigationBar, .bottomBar)
         .overlay { if preparingShare { ProgressView("Preparing original…").padding().glassEffect() } }
-        .sheet(item: $details) { SavedPhotoDetails(services: services, photo: $0) }
+        .sheet(item: $details) { photo in
+          if receivedGrant != nil { ReceivedPhotoDetails(photo: photo) }
+          else { SavedPhotoDetails(services: services, photo: photo) }
+        }
         .sheet(item: $sharedPhotos) { presentation in
           ExchangeView(services: services, selected: presentation.photos)
         }
         .sheet(item: $sharedOriginal, onDismiss: cleanupShare) { original in
           OriginalShareSheet(urls: [original.url]) { _ in cleanupShare() }
         }
-        .onChange(of: services.vault.generation) { shareTask?.cancel(); cleanupShare(); dismiss() }
-        .onDisappear { shareTask?.cancel(); cleanupShare() }
+        .overlay(alignment: .bottom) {
+          if let feedback { Text(feedback).font(.footnote).padding().background(.regularMaterial, in: .capsule).padding(.bottom, 60) }
+        }
+        .onChange(of: services.vault.generation) { shareTask?.cancel(); saveTask?.cancel(); cleanupShare(); dismiss() }
+        .onChange(of: services.selectedGrant) {
+          if let receivedGrant, services.selectedGrant != receivedGrant { saveTask?.cancel(); dismiss() }
+        }
+        .onChange(of: services.session.pinnedCards) {
+          if let receivedCards, services.session.pinnedCards != receivedCards { saveTask?.cancel(); dismiss() }
+        }
+        .onChange(of: services.consumerCatalogGeneration) {
+          if receivedGrant == nil, !SavedPhotosPresentationPolicy.isCurrent(photos, lookup: services.consumerSavedPhoto) { dismiss() }
+        }
+        .onChange(of: scenePhase) { if scenePhase == .background { shareTask?.cancel(); saveTask?.cancel(); cleanupShare() } }
+        .onDisappear { shareTask?.cancel(); saveTask?.cancel(); cleanupShare() }
         .alert("Fotoro", isPresented: Binding(get: { services.error != nil }, set: { if !$0 { services.error = nil } })) {
           Button("OK") { services.error = nil }
         } message: { Text(services.error ?? "") }
@@ -108,6 +139,17 @@ struct PhotoViewer: View {
       } catch is CancellationError {} catch { services.error = error.localizedDescription }
     }
   }
+  private func saveReceived() {
+    guard let photo = current, let receivedGrant, services.selectedGrant == receivedGrant, saveTask == nil else { return }
+    saveTask = services.run(phase: .share) {
+      defer { saveTask = nil }
+      try await services.save(photo)
+      try Task.checkCancellation()
+      guard services.selectedGrant == receivedGrant else { throw CancellationError() }
+      savedReceivedIDs.insert(photo.id)
+      feedback = "Saved in your Fotoro."
+    }
+  }
   private func cleanupShare() {
     ConsumerShareExports.remove(originalExports)
     originalExports = []
@@ -134,6 +176,8 @@ private struct ConsumerSharedOriginal: Identifiable {
 private struct SavedPhotoPage: View {
   @Bindable var services: AppServices
   let photo: LocalPhoto
+  let receivedGrant: GrantV1?
+  let receivedCards: [String: AccountCardV1]?
   @State private var loaded: LocalPhoto?
   @State private var failed = false
   var body: some View {
@@ -146,11 +190,36 @@ private struct SavedPhotoPage: View {
     }.accessibilityLabel(photo.metadata.filename)
       .task(id: photo.id) {
         do {
+          if let receivedGrant {
+            guard services.selectedGrant == receivedGrant, services.session.pinnedCards == receivedCards else { throw CancellationError() }
+          }
           try await services.ensurePreview(photo)
           try Task.checkCancellation()
-          loaded = try services.consumerSavedPhoto(photo.id)
+          if let receivedGrant {
+            guard services.selectedGrant == receivedGrant, services.session.pinnedCards == receivedCards,
+              let current = services.received.first(where: { $0.id == photo.id && $0.metadata == photo.metadata && $0.manifest == photo.manifest })
+            else { throw CancellationError() }
+            loaded = current
+          } else { loaded = try services.consumerSavedPhoto(photo.id) }
         } catch is CancellationError {} catch { failed = true }
       }
+  }
+}
+
+private struct ReceivedPhotoDetails: View {
+  let photo: LocalPhoto
+  @Environment(\.dismiss) private var dismiss
+  var body: some View {
+    NavigationStack {
+      List {
+        Text(photo.metadata.filename)
+        if let date = Wire.parseDate(photo.metadata.sourceDate) {
+          Text(date.formatted(date: .complete, time: .shortened)).foregroundStyle(.secondary)
+        }
+        Text("Save to keep your own copy in Fotoro.").font(.footnote).foregroundStyle(.secondary)
+      }.navigationTitle("Info").navigationBarTitleDisplayMode(.inline)
+        .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+    }.presentationDetents([.medium, .large])
   }
 }
 

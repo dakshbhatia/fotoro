@@ -56,6 +56,8 @@ struct RecentPhotosPresentationValidation {
 }
 
 enum RecentPhotosPolicy {
+  static let browsePageSize = 200
+  static let maximumPickCandidates = 500
   static func cutoff(now: Date, calendar: Calendar = .current) -> Date {
     calendar.date(byAdding: .day, value: -10, to: now)!
   }
@@ -68,6 +70,43 @@ enum RecentPhotosPolicy {
   }
   static func canRead(_ status: PHAuthorizationStatus) -> Bool {
     status == .authorized || status == .limited
+  }
+  static func browseFetchOptions() -> PHFetchOptions {
+    let options = PHFetchOptions()
+    options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
+    options.includeHiddenAssets = false
+    options.includeAllBurstAssets = true
+    options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+    return options
+  }
+  static func pickFetchOptions(now: Date) -> PHFetchOptions {
+    let options = browseFetchOptions()
+    options.predicate = NSPredicate(
+      format: "mediaType == %d AND creationDate >= %@ AND creationDate <= %@",
+      PHAssetMediaType.image.rawValue, cutoff(now: now) as NSDate, now as NSDate)
+    options.fetchLimit = maximumPickCandidates
+    return options
+  }
+}
+
+@MainActor struct PhotoBrowseSource<Photo> {
+  let count: Int
+  private let read: (Range<Int>) -> [Photo]
+  init(count: Int, read: @escaping (Range<Int>) -> [Photo]) {
+    self.count = max(0, count)
+    self.read = read
+  }
+  init(_ photos: [Photo]) {
+    count = photos.count
+    read = { Array(photos[$0]) }
+  }
+  func range(after offset: Int, limit: Int = RecentPhotosPolicy.browsePageSize) -> Range<Int> {
+    let lower = min(count, max(0, offset))
+    return lower..<(lower + min(count - lower, max(0, limit)))
+  }
+  func photos(in range: Range<Int>) -> [Photo] {
+    guard !range.isEmpty, range.lowerBound >= 0, range.upperBound <= count else { return [] }
+    return read(range)
   }
 }
 
@@ -93,15 +132,17 @@ struct PhotoViewerZoom {
 
 @MainActor @Observable final class RecentPhotosStore: NSObject, PHPhotoLibraryChangeObserver {
   private(set) var photos: [RecentPhoto] = []
+  private(set) var recentPhotos: [RecentPhoto] = []
+  private(set) var hasMorePhotos = false
   private(set) var status = PHAuthorizationStatus.notDetermined
   private(set) var opened = false
   var error: String?
   var loading = false
   let picks: PhotoPickAnalyzer
   private(set) var picksSnapshot: PhotoPicksSnapshot?
-  var pickedPhotos: [RecentPhoto] { photos.filter { picksSnapshot?.recommendations.ids.contains($0.id) == true } }
+  var pickedPhotos: [RecentPhoto] { recentPhotos.filter { picksSnapshot?.recommendations.ids.contains($0.id) == true } }
   var pickCandidates: [AutomaticPhotoPickCandidate] {
-    photos.map { AutomaticPhotoPickCandidate(id: $0.id, sourceRevision: $0.sourceRevision, capturedAt: $0.capturedAt,
+    recentPhotos.map { AutomaticPhotoPickCandidate(id: $0.id, sourceRevision: $0.sourceRevision, capturedAt: $0.capturedAt,
       width: $0.asset.pixelWidth, height: $0.asset.pixelHeight, favorite: $0.isFavorite, isScreenshot: $0.isScreenshot) }
   }
   @ObservationIgnored private var analysisTask: Task<Void, Never>?
@@ -112,19 +153,29 @@ struct PhotoViewerZoom {
   let images = PHCachingImageManager()
   @ObservationIgnored private let authorization: () -> PHAuthorizationStatus
   @ObservationIgnored private let requestAccess: () async -> PHAuthorizationStatus
-  @ObservationIgnored private let readPhotos: @MainActor (Date) -> [RecentPhoto]
+  @ObservationIgnored private let readPhotos: (@MainActor (Date) -> [RecentPhoto])?
+  @ObservationIgnored private let readBrowseSource: @MainActor (Date) -> PhotoBrowseSource<RecentPhoto>
+  @ObservationIgnored private let readRecentPhotos: @MainActor (Date) -> [RecentPhoto]
+  @ObservationIgnored private var browseSource: PhotoBrowseSource<RecentPhoto>?
+  @ObservationIgnored private var browseOffset = 0
+  @ObservationIgnored private let validatesBrowsingSources: Bool
   @ObservationIgnored private let sourceRevisions: @MainActor ([String]) -> [String: String]
   init(
     authorization: @escaping () -> PHAuthorizationStatus = { PHPhotoLibrary.authorizationStatus(for: .readWrite) },
     requestAccess: @escaping () async -> PHAuthorizationStatus = { await PHPhotoLibrary.requestAuthorization(for: .readWrite) },
-    readPhotos: @escaping @MainActor (Date) -> [RecentPhoto] = RecentPhotosStore.fetchRecentPhotos,
-    sourceRevisions: @escaping @MainActor ([String]) -> [String: String] = RecentPhotosStore.currentSourceRevisions,
+    readPhotos: (@MainActor (Date) -> [RecentPhoto])? = nil,
+    readBrowseSource: @escaping @MainActor (Date) -> PhotoBrowseSource<RecentPhoto> = RecentPhotosStore.fetchBrowseSource,
+    readRecentPhotos: @escaping @MainActor (Date) -> [RecentPhoto] = RecentPhotosStore.fetchRecentPhotos,
+    sourceRevisions: (@MainActor ([String]) -> [String: String])? = nil,
     picks: PhotoPickAnalyzer? = nil
   ) {
     self.authorization = authorization
     self.requestAccess = requestAccess
     self.readPhotos = readPhotos
-    self.sourceRevisions = sourceRevisions
+    self.readBrowseSource = readBrowseSource
+    self.readRecentPhotos = readRecentPhotos
+    self.sourceRevisions = sourceRevisions ?? RecentPhotosStore.currentSourceRevisions
+    validatesBrowsingSources = readPhotos == nil || sourceRevisions != nil
     self.picks = picks ?? PhotoPickAnalyzer()
     super.init()
   }
@@ -217,6 +268,10 @@ struct PhotoViewerZoom {
       pauseAnalysis()
       picksSnapshot = nil
       photos = []
+      recentPhotos = []
+      browseSource = nil
+      browseOffset = 0
+      hasMorePhotos = false
       return
     }
     refresh()
@@ -229,22 +284,64 @@ struct PhotoViewerZoom {
       pauseAnalysis()
       picksSnapshot = nil
       photos = []
+      recentPhotos = []
+      browseSource = nil
+      browseOffset = 0
+      hasMorePhotos = false
       return
     }
     if !observing { PHPhotoLibrary.shared().register(self); observing = true }
-    photos = readPhotos(now)
+    let loaded = max(RecentPhotosPolicy.browsePageSize, browseOffset)
+    let supplied = readPhotos?(now)
+    let source = supplied.map(PhotoBrowseSource.init) ?? readBrowseSource(now)
+    let recent = supplied ?? readRecentPhotos(now)
+    let nextOffset = min(source.count, loaded)
+    let first = source.photos(in: 0..<nextOffset)
+    let candidates = Array(recent.filter { RecentPhotosPolicy.includes($0.capturedAt, now: now) }
+      .prefix(RecentPhotosPolicy.maximumPickCandidates))
+    let ids = Array(Set((first + candidates).map(\.id)))
+    let revisions = !validatesBrowsingSources || ids.isEmpty ? [:] : sourceRevisions(ids)
+    guard authorization() == status, RecentPhotosPolicy.canRead(status) else {
+      status = authorization()
+      pauseAnalysis(); picksSnapshot = nil
+      photos = []; recentPhotos = []; browseSource = nil; browseOffset = 0; hasMorePhotos = false
+      return
+    }
+    browseSource = source
+    browseOffset = nextOffset
+    photos = first.filter { !validatesBrowsingSources || revisions[$0.id] == $0.sourceRevision }
+    hasMorePhotos = browseOffset < source.count
+    recentPhotos = candidates.filter { !validatesBrowsingSources || revisions[$0.id] == $0.sourceRevision }
     if let snapshot = picksSnapshot, snapshot.recommendations.unassessed == 0,
       snapshot.matches(pickCandidates) { return }
     cancelAnalysis()
     picksSnapshot = nil
     beginAnalysis()
   }
+  func loadMorePhotos() {
+    guard opened, hasMorePhotos, let source = browseSource else { return }
+    guard authorization() == status, RecentPhotosPolicy.canRead(status) else { refresh(); return }
+    let range = source.range(after: browseOffset)
+    let next = source.photos(in: range)
+    guard authorization() == status, RecentPhotosPolicy.canRead(status) else { refresh(); return }
+    let revisions = !validatesBrowsingSources || next.isEmpty ? [:] : sourceRevisions(next.map(\.id))
+    guard authorization() == status, RecentPhotosPolicy.canRead(status) else { refresh(); return }
+    let existing = Set(photos.map(\.id))
+    photos.append(contentsOf: next.filter {
+      !existing.contains($0.id) && (!validatesBrowsingSources || revisions[$0.id] == $0.sourceRevision)
+    })
+    browseOffset = range.upperBound
+    hasMorePhotos = browseOffset < source.count
+  }
+  private static func fetchBrowseSource(now: Date) -> PhotoBrowseSource<RecentPhoto> {
+    let options = RecentPhotosPolicy.browseFetchOptions()
+    let result = PHAsset.fetchAssets(with: options)
+    return PhotoBrowseSource(count: result.count) { range in
+      range.map { RecentPhoto(asset: result.object(at: $0)) }
+    }
+  }
   private static func fetchRecentPhotos(now: Date) -> [RecentPhoto] {
-    let options = PHFetchOptions()
-    options.predicate = NSPredicate(
-      format: "mediaType == %d AND creationDate >= %@ AND creationDate <= %@",
-      PHAssetMediaType.image.rawValue, RecentPhotosPolicy.cutoff(now: now) as NSDate, now as NSDate)
-    options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+    let options = RecentPhotosPolicy.pickFetchOptions(now: now)
     let result = PHAsset.fetchAssets(with: options)
     var values: [RecentPhoto] = []
     result.enumerateObjects { asset, _, _ in values.append(RecentPhoto(asset: asset)) }

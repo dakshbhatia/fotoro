@@ -1,10 +1,12 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { type LocalPhoto, LocalResources } from "./resources";
+import {captureGroup} from "./capture-groups";
 interface PickSelection {
   ids: ReadonlySet<string>;
   reasons?: ReadonlyMap<string, string[]>;
   disabled: boolean;
+  editing: boolean;
   onChange: (id: string, checked: boolean) => void;
 }
 function Tile({
@@ -41,8 +43,10 @@ function Tile({
       <button
         className="photo"
         id={"local-photo-" + photo.id}
-        aria-label={"Open " + photo.filename}
-        onClick={onOpen}
+        aria-label={(selection?.editing ? "Select " : "Open ") + photo.filename}
+        aria-pressed={selection?.editing ? selection.ids.has(photo.id) : undefined}
+        disabled={selection?.editing && selection.disabled}
+        onClick={() => selection?.editing ? selection.onChange(photo.id, !selection.ids.has(photo.id)) : onOpen()}
       >
         {url ? (
           <img src={url} alt={photo.filename} />
@@ -52,12 +56,11 @@ function Tile({
           <span className="loading-photo" aria-label="Preparing photo" />
         )}
       </button>
-      {selection && <>
+      {selection && (selection.editing || selection.ids.has(photo.id)) && <>
         <label className="photo-pick-toggle">
-          <input type="checkbox" aria-label={"Select " + photo.filename + " for sync"} checked={selection.ids.has(photo.id)} disabled={selection.disabled}
+          <input type="checkbox" aria-label={"Select " + photo.filename} checked={selection.ids.has(photo.id)} disabled={selection.disabled}
             onChange={event => selection.onChange(photo.id, event.target.checked)} />
         </label>
-        {selection.ids.has(photo.id) && <span className="photo-pick-reason">{selection.reasons?.get(photo.id)?.join(" · ") ?? "Your choice"}</span>}
       </>}
     </div>
   );
@@ -79,14 +82,14 @@ export function LocalLibrary({
 }) {
   const parent = useRef<HTMLDivElement>(null),
     [width, setWidth] = useState(800),
-    [columns, setColumns] = useState(3);
+    [columns, setColumns] = useState(2);
   const anchor = useRef<{ id: string; offset: number } | undefined>(undefined);
   useEffect(() => {
     const observer = new ResizeObserver((entries) => {
       const w = entries[0].contentRect.width;
       if (w <= 0) return;
       setWidth(w);
-      setColumns(w < 700 ? 3 : Math.max(3, Math.floor(w / 250)));
+      setColumns(w < 700 ? 2 : Math.min(5, Math.max(4, Math.floor(w / 250))));
     });
     if (parent.current) observer.observe(parent.current);
     return () => observer.disconnect();
@@ -94,8 +97,7 @@ export function LocalLibrary({
   const rows = useMemo(() => {
     const days = new Map<string, LocalPhoto[]>();
     for (const photo of photos) {
-      const d = new Date(photo.date),
-        day = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+      const day = captureGroup(photo).key;
       const group = days.get(day);
       group ? group.push(photo) : days.set(day, [photo]);
     }
@@ -109,11 +111,7 @@ export function LocalLibrary({
           photos: items,
           heading:
             i === 0
-              ? new Date(group[0].date).toLocaleDateString(undefined, {
-                  month: "long",
-                  day: "numeric",
-                  year: "numeric",
-                })
+              ? captureGroup(group[0]).heading
               : undefined,
         });
       }

@@ -7,6 +7,13 @@ struct SharedPhotosPresentation: Identifiable {
   var incoming: FotoroShareLink? = nil
 }
 
+private struct ReceivedViewerPresentation: Identifiable {
+  let photo: LocalPhoto
+  let photos: [LocalPhoto]
+  let grant: GrantV1
+  var id: String { photo.id }
+}
+
 struct ExchangeView: View {
   @Bindable var services: AppServices
   let selected: [LocalPhoto]
@@ -18,7 +25,8 @@ struct ExchangeView: View {
   @State private var invitationURL: URL?
   @State private var feedback: String?
   @State private var operation: Task<Void, Never>?
-  @State private var openedPhoto: LocalPhoto?
+  @State private var openedPhoto: ReceivedViewerPresentation?
+  @State private var recipient: AccountCardV1?
   @State private var shareCode: ShareCodePresentation?
   private enum FocusField: Hashable { case link, name }
   @FocusState private var focusedField: FocusField?
@@ -72,17 +80,36 @@ struct ExchangeView: View {
           }
         }
         if !selected.isEmpty {
-          Section("Share \(selected.count) \(selected.count == 1 ? "photo" : "photos")") {
-            Toggle("Access for 15 minutes", isOn: $temporary)
-            if contacts.isEmpty { Text("Add a contact below to share these photos.").foregroundStyle(.secondary) }
+          Section("\(selected.count) \(selected.count == 1 ? "photo" : "photos")") {
+            ScrollView(.horizontal, showsIndicators: false) {
+              HStack(spacing: 3) {
+                ForEach(selected.prefix(12)) { photo in
+                  LazyImage(url: photo.thumbnailURL ?? photo.previewURL) { state in
+                    if let image = state.image { image.resizable().scaledToFill() }
+                    else { Rectangle().fill(.quaternary) }
+                  }.frame(width: 88, height: 88).clipped().accessibilityLabel(photo.metadata.filename)
+                }
+              }
+            }
+            if contacts.isEmpty { Text("Add a person below to share these photos.").foregroundStyle(.secondary) }
             ForEach(contacts, id: \.accountId) { card in
-              Button("Share with \(services.contactName(card.accountId))", systemImage: "person.crop.circle") {
+              Button { recipient = card; invitationURL = nil } label: {
+                HStack {
+                  Label(services.contactName(card.accountId), systemImage: "person.crop.circle")
+                  Spacer()
+                  if recipient == card { Image(systemName: "checkmark.circle.fill") }
+                }
+              }.disabled(services.busy).accessibilityValue(recipient == card ? "Selected" : "")
+            }
+            DisclosureGroup("Options") { Toggle("Access for 15 minutes", isOn: $temporary).disabled(services.busy) }
+            if let recipient, invitationURL == nil {
+              Button("Share with \(services.contactName(recipient.accountId))", systemImage: "square.and.arrow.up") {
                 perform {
-                  let grant = try await services.share(selected, recipient: card, temporary: temporary)
+                  let grant = try await services.share(selected, recipient: recipient, temporary: temporary)
                   invitationURL = try FotoroShareLinks.momentURL(grantId: grant.grantId,
                     senderCard: services.session.requireCard(grant.ownerAccountId), origin: services.api.origin)
                   try await services.refreshSharedMoments()
-                  feedback = "Photos shared. Send the invitation to \(services.contactName(card.accountId))."
+                  feedback = "Ready to send to \(services.contactName(recipient.accountId))."
                 }
               }.disabled(services.busy)
             }
@@ -91,12 +118,25 @@ struct ExchangeView: View {
               Button("Show invitation code") { shareCode = ShareCodePresentation(url: invitationURL, title: "Photo invitation") }
             }
           }
+          if let grant = services.selectedGrant, grant.role == "contributor", available(grant) {
+            Section("Add to a shared moment") {
+              Text("Photos from \(services.contactName(grant.ownerAccountId))").foregroundStyle(.secondary)
+              Button("Add selected photos", systemImage: "plus") {
+                perform { try await services.contribute(selected); feedback = "Photos added." }
+              }.disabled(services.busy)
+            }
+          }
         }
+        if selected.isEmpty {
         if services.selectedGrant != nil {
           Section("Opened photos") {
             ForEach(services.received) { photo in
               VStack(alignment: .leading, spacing: 12) {
-                Button { openedPhoto = photo } label: {
+                Button {
+                  if let grant = services.selectedGrant {
+                    openedPhoto = ReceivedViewerPresentation(photo: photo, photos: services.received, grant: grant)
+                  }
+                } label: {
                   LazyImage(url: photo.thumbnailURL) { state in
                     if let image = state.image { image.resizable().scaledToFit() }
                     else { Rectangle().fill(.quaternary).overlay { ProgressView() } }
@@ -107,11 +147,7 @@ struct ExchangeView: View {
                 }.disabled(services.busy)
               }.padding(.vertical, 4)
             }
-            if !selected.isEmpty, services.selectedGrant?.role == "contributor" {
-              Button("Add selected photos", systemImage: "plus") {
-                perform { try await services.contribute(selected); feedback = "Photos added." }
-              }.disabled(services.busy)
-            }
+
           }
         }
         Section("Shared with you") {
@@ -146,8 +182,9 @@ struct ExchangeView: View {
             }
           }
         }
-        Section("Contacts") {
-          if let account, let card = try? services.session.requireCard(account),
+        }
+        Section(selected.isEmpty ? "People" : "Add a person") {
+          if selected.isEmpty, let account, let card = try? services.session.requireCard(account),
             let url = try? FotoroShareLinks.contactURL(card, origin: services.api.origin) {
             ShareLink("Share my contact link", item: url).accessibilityIdentifier("sharing.contact")
             Button("Show my contact code") { shareCode = ShareCodePresentation(url: url, title: "My contact link") }
@@ -158,7 +195,9 @@ struct ExchangeView: View {
             .disabled(services.busy)
           Button("Open link", action: openLink)
             .disabled(link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || services.busy)
-          ForEach(contacts, id: \.accountId) { card in Text(services.contactName(card.accountId)) }
+          if selected.isEmpty {
+            ForEach(contacts, id: \.accountId) { card in Text(services.contactName(card.accountId)) }
+          }
         }
       }.scrollDismissesKeyboard(.interactively)
         .navigationTitle(selected.isEmpty ? "Shared photos" : "Share photos")
@@ -169,21 +208,9 @@ struct ExchangeView: View {
           if let card = candidateCard, contacts.contains(where: { $0.accountId == card.accountId }) { name = services.contactName(card.accountId) }
           perform { try await services.refreshSharedMoments() }
         }
-        .sheet(item: $openedPhoto) { photo in
-          NavigationStack {
-            LazyImage(url: photo.previewURL ?? photo.thumbnailURL) { state in
-              if let image = state.image { image.resizable().scaledToFit() }
-              else { ProgressView() }
-            }.background(.black).navigationTitle("Shared photo").navigationBarTitleDisplayMode(.inline)
-              .toolbar {
-                ToolbarItem(placement: .topBarTrailing) { Button("Done") { openedPhoto = nil } }
-                ToolbarItem(placement: .bottomBar) {
-                  Button("Save to my photos", systemImage: "icloud.and.arrow.up") {
-                    perform { try await services.save(photo); feedback = "Saved in your Fotoro."; openedPhoto = nil }
-                  }.disabled(services.busy)
-                }
-              }
-          }.preferredColorScheme(.dark)
+        .sheet(item: $openedPhoto) { presentation in
+          PhotoViewer(services: services, initialID: presentation.photo.id,
+            displayedPhotos: presentation.photos, receivedGrant: presentation.grant)
         }
         .sheet(item: $shareCode) { ShareCodeView(presentation: $0) }
         .onChange(of: scenePhase) { if scenePhase == .background { operation?.cancel() } }

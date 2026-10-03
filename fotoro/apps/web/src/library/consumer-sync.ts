@@ -27,7 +27,7 @@ export function deriveConsumerSyncSummary(facts: ConsumerSyncFacts): ConsumerSyn
     facts.skippedPhotos ? `${facts.skippedPhotos} skipped` : "",
     facts.pendingEdits ? `${facts.pendingEdits} photo edits waiting` : "",
     facts.conflictingEdits ? `${facts.conflictingEdits} photo edits to review` : "",
-    facts.localPhotos ? `${facts.localPhotos} selected to sync` : "",
+    facts.localPhotos ? `${facts.localPhotos} selected to Save` : "",
   ].filter(Boolean).join(" · ");
   const base = {completedPhotos: facts.committedPhotos, skippedPhotos: facts.skippedPhotos, lastCheckedAt: facts.lastCheckedAt ?? undefined, detail: details};
   if (facts.paused) return {...base, state: "paused", action: "continue"};

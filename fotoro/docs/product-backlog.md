@@ -1,9 +1,92 @@
-# Fotoro product work
+# Fotoro finish plan
 
-The consumer flow is browse → find → Save → Share. One Fotoro password opens the
-same encrypted library. Browsing, sign-in, reopening, and sharing must never send
-unrelated originals. A sharing invitation names its authorized recipient; the
-public link alone grants no photo access.
+Fotoro opens to photos worth looking at. Find reaches the photo the user means.
+The viewer makes it easy to enjoy the original. Choosing Save keeps that photo
+available on another device; choosing Share sends a deliberate set to a person.
+Account handling supports that journey. Automatic uploads remain off.
+
+The foundation and core journey are now composed into one consumer experience.
+Photos, persistent selection, contextual manual Save, other-device originals and
+chosen sharing and explicit favorite/label corrections pass public acceptance
+checks. Physical performance and Apple distribution retain their verification gates.
+This plan is the active queue; the inventory below
+records capabilities and remaining limits without turning each into a separate
+parallel feature project.
+
+## Build order
+
+| Order | Deliverable | Reuse and simplify | Done when |
+| --- | --- | --- | --- |
+| 1 | Photo-first home | Keep PhotoKit browsing, picks and saved catalog. Put picks, all photos, capture-time groups and Saved within one clear browsing structure. Account controls belong in Settings or the first Save. | Photos are reachable immediately after permission, without waiting for intelligence or account setup. |
+| 2 | Selection that stays put | Keep reviewed source/revision snapshots and existing selection models. Use the same count, Clear, Save and Share behavior in grids and search results. | Changing scope, opening a viewer and completing sign-in preserve the exact chosen sources; withdrawn sources are removed visibly. |
+| 3 | One viewer experience | Give local, saved and received photos consistent paging, zoom, close, Info and Share behavior while retaining their different access rules. | The user returns to the same photo and scroll position; controls and originals remain usable during refresh. |
+| 4 | One Find experience | Keep the protected local index, verified cloud records, dates, labels and OCR. Use one query interaction with clear results and alternative meanings. | Supported queries find the right eligible photo without duplicate local/cloud results, stale matches or a blocking analysis screen. |
+| 5 | Picks and moments worth opening | Tune existing quality, burst and capture-time policies against a fixed public corpus and owner-selected examples. Keep All Photos reachable. | Picks favor useful variety and suppress junk; each moment uses real capture evidence and keeps every original accessible. |
+| 6 | Quiet identity | Keep the existing password protocol, protected remembered password and renewal. Remove competing consumer setup paths and technical credential terminology. | First Save offers one password entry or New Fotoro; returning users continue their action without retyping a remembered password. |
+| 7 | Obvious manual Save | Keep one durable queue and explicit authorization. Present the chosen count, progress, Saved, Pause and one appropriate Continue/Retry action in context. | Backgrounding, offline recovery, re-sign-in and repeated taps cannot lose selection, create duplicate copies or save unrelated photos. |
+| 8 | Dependable other-device library | Keep signed catalog verification, encrypted previews and unchanged originals. Make Saved understandable on native and web. | A fresh device opens the same account, sees the chosen photos and retrieves identical JPEG/PNG/HEIC originals. |
+| 9 | Share a chosen moment | Keep accepted contacts, selected grants, canonical invitations and recipient-owned Save. Present one recipient picker and the selected set. | A two-person journey sends the intended set, opens it and saves an independent copy without resuming unrelated uploads. |
+| 10 | Simple receiving and adding back | Keep explicit identity acceptance, access-ended states and contribution checks. Show the sender, photos and one next action. | A valid invitation survives sign-in and returning to the app; the recipient can view, Save and add selected owned photos back. |
+| 11 | Useful corrections | Keep favorites, user-authored labels and the signed encrypted annotation outbox. Put corrections in photo details. | An explicit save of changes reaches the other device; concurrent edits preserve unrelated fields and require a choice for real conflicts. |
+| 12 | Calm incomplete states | Consolidate duplicate banners, overlays and alerts into feature-owned states. Keep detailed diagnostics behind the consumer surface. | Loading, offline, limited Photos access, lock, paused Save and ended sharing each show one accurate state and one useful action. |
+| 13 | Measured smoothness | Keep native image caching, virtualized browser rows and bounded serial intelligence work. Profile actual supported phones and Safari. | Photos appear before analysis completes; scrolling, warm Find and viewer gestures pass recorded frame, memory and latency budgets on the chosen device baseline. |
+| 14 | Complete release journey | Use existing contract, cryptographic, lifecycle and integration checks. Add missing interaction regressions rather than tests that merely repeat the code. | Fresh and returning users complete browse → Find → view → Save → other-device restore → Share, including one interruption/retry, with VoiceOver and larger text checks. |
+| 15 | Ship the full app | Keep the same verified native/web/API source. Complete the actual Apple declaration and verify physical installation/links. | The full encrypted build is installable through the intended release channel and the published product matches the verified journey. |
+
+Steps 1–5 establish the interaction contract. Steps 6–11 complete its account,
+Save, restore and sharing paths. Steps 12–15 close quality and release gates.
+After the navigation and source contracts are stable, Find/picks, Save/restore
+and sharing can proceed independently with explicit file ownership. They join
+through the complete journey; separate green components are insufficient.
+
+## Keep the foundations simple
+
+- PhotoKit is the source of truth for permitted iPhone originals. The signed
+  account catalog is the source of truth for saved photos. Intelligence is a
+  rebuildable index, bound to source revision and permission.
+- Reuse the current account, catalog, transfer queue and sharing protocols.
+  Presentation can be shared across local/saved/received sources; authorization
+  and ownership boundaries remain explicit.
+- Only an explicit Save/Continue creates or resumes upload work. Opening an
+  account, refreshing, browsing and returning to the app remain read-only.
+- UI state belongs to its feature. Use existing services for durable work;
+  avoid parallel status flags, a second queue, a second search index or a new
+  global state framework.
+- Read and write each persisted format through the same owner. Keep legacy
+  decoding and migrations where existing accounts or durable jobs require them.
+- Keep SwiftUI, React/Vite and the current Cloudflare service. Add a dependency
+  only for a measured missing capability; this release needs no platform rewrite.
+- Work in `fotoro/`. The upstream reference tree is separate from the shipped
+  product and should not become another active implementation.
+
+## Remove the noise as the replacement lands
+
+- Retire obsolete consumer Sync/setup routes, duplicate account prompts and
+  technical protocol vocabulary from the normal photo journey.
+- Merge repeated viewer chrome, selection actions and error presentation where
+  the behavior is the same. Keep different privacy rules in source adapters.
+- Remove superseded production components and abandoned paths after checking
+  references and release artifacts. Keep development fixtures outside release
+  surfaces and preserve supported data compatibility.
+- Use this plan as the product queue and `verification.md` as the evidence record.
+  Update their current summaries instead of adding another status document.
+
+## Next capabilities after the core journey closes
+
+| Capability | Complete scope before exposing it |
+| --- | --- |
+| Visual meaning search | Choose and measure one local image-representation approach. Bind results to current permitted sources, combine them with date/text evidence and evaluate retrieval on a fixed corpus. |
+| Correctable People | On-device grouping, explicit naming, merge/split corrections and permission/deletion fences; never infer a named identity from a text mention. |
+| Similar-photo review | Show a group, recommend a representative and let the user choose. Preserve every original until explicit deletion exists. |
+| Live Photos and video | Treat complete media resources as one saved item; implement preparation, preview/playback, interrupted transfer and complete original restore together. |
+| Trash and storage cleanup | Recoverable signed deletion, undo, multi-device convergence, quota/collection behavior and restore proof before offering phone-storage removal. |
+
+Share extension, saved URLs, nearby handoff, stories and optional cloud AI stay in
+the reference inventory. They become active only with a specific complete user
+journey, bounded implementation and an owner. Cloud AI also requires explicit
+opt-in and a spending limit.
+
+## Reference inventory
 
 “Implemented” below describes checked source and public local-service behavior.
 Personal iPhone/Safari acceptance, physical performance, and Apple release gates
@@ -13,7 +96,7 @@ are separate checks. “Partial” identifies a concrete remaining capability.
 | --- | --- | --- |
 | 1 | One-password sign-in | Implemented on native/web; wrong-password, interrupted enrollment and retry regressions pass. Owner acceptance remains open. |
 | 2 | Remember the current user | Protected session/password persistence, account reference and expired-session renewal are implemented. Initial restoration respects manual lock; explicit Open retries a failed renewal. |
-| 3 | Install the current full build | Signed encrypted build 18 is installed and its exact version is read back. iOS blocked launch while the phone was locked; unlock/open and owner authentication acceptance remain open. |
+| 3 | Install the current full build | Signed encrypted build 20 passes strict signature and production association checks; CoreDevice confirms installation and exact version. Post-install launch awaits unlock; preceding build 19 launched. Owner authentication acceptance remains open. |
 | 4 | Save chosen photos through sign-in | Immutable reviewed sources and one-shot authenticated Save are implemented. Fresh native signup → selected PNG Save and fresh-browser password restore pass against isolated D1/R2. |
 | 5 | Restore identical originals in Safari | Isolated D1/R2 tests verify JPEG/PNG/HEIC bytes in a fresh session. A native-created account restores its selected PNG byte for byte in a fresh browser. Personal phone-to-Safari acceptance remains open. |
 | 6 | Manual Save progress and Pause/Continue | Implemented. Continue uses the durable queue; it does not scan for new photos. |
@@ -23,10 +106,10 @@ are separate checks. “Partial” identifies a concrete remaining capability.
 | 10 | Full TestFlight release | Full build 4 awaits Apple's export-compliance declaration. Preview build 3 is a separate binary. |
 | 11 | Sharp thumbnails | System-sized native thumbnails and late degraded-image rejection are implemented; browser gallery thumbnails use 512 px with bounded decoded caches. |
 | 12 | Large-library responsiveness | 10,000 synthetic indexed records are tested; browser saved rows are virtualized. Physical frame/memory/battery measurements remain open. |
-| 13 | Swipe/zoom/quiet viewer controls | Local and saved native viewers support paging, zoom and tap-to-hide controls; browser viewer supports zoom and paging. |
+| 13 | Swipe/zoom/quiet viewer controls | Local, saved and received native viewers support paging, zoom and Info; browser viewer supports zoom and paging. |
 | 14 | Preserve navigation context | Query, source snapshots and reviewed selection survive account navigation. Physical long-scroll acceptance remains open. |
-| 15 | Simple filters | Native recent photos: favorites/screenshots/location facts; saved library: favorites. Date search is implemented. Named-place inference is not implemented. |
-| 16 | Photo moments | Native day or bounded two-hour capture groups are implemented. No invented outing titles. |
+| 15 | Simple filters | Native Photos: favorites/screenshots/location facts; saved library: favorites. Date search is implemented. Named-place inference is not implemented. |
+| 16 | Photo moments | Native capture-time groups and browser evidence-backed day groups are implemented. Unknown capture time is explicit; no invented outing titles. |
 | 17 | Contextual Share | Saved selection and viewer Share in Fotoro are implemented on native/web. System original sharing remains available. |
 | 18 | Public invitations and QR | Strict canonical contact/moment links and native QR display are implemented. Native camera scanner and physical universal-link acceptance remain open. |
 | 19 | Recipient viewing and own copies | Verified previews/originals and independent recipient-owned Save are implemented. |
@@ -59,7 +142,5 @@ are separate checks. “Partial” identifies a concrete remaining capability.
 | 46 | Accessibility | Focused native/web password entry, native keyboard submit and Clear selection, and 44 px web search choices are verified. Public native Info is checked at accessibility-medium; full VoiceOver/Dynamic Type acceptance remains open. |
 | 47 | Real-device acceptance | Public local two-person exchanges and synthetic 10,000-item tests pass. Personal iPhone/Safari and older-phone performance remain open. |
 
-The next substantial capability work is broader media intake/restore, explicit
-similar-photo review, correctable people groups, and recoverable deletion/storage
-operations. Each needs a complete tested path through both encryption and the
-consumer surface before it can be called finished.
+The active build order is above. Reference capabilities become finished only
+after their complete consumer, persistence and authorization paths are verified.
