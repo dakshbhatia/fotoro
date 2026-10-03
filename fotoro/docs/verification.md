@@ -28,6 +28,16 @@ Production Worker `dd17d11a-ea35-4525-94b0-c162ccc64a78` is read back at
 passkey/contact/moment Apple association. Production D1/R2 and five migrations
 are unchanged; the previous Worker remains available for rollback.
 
+Fresh production browser QA uses an isolated Playwright/Brave context because
+the Browser plugin is unavailable and the bundled Chromium executable is absent.
+At 390×844 and 320×844, a public neutral PNG's Save opens exactly one password
+field, Back to photos preserves its selection, and Saved photos opens read-only.
+The document width equals the viewport; no framework overlay, console error,
+warning or `/v1/*` mutation is observed. Inspected screenshots confirm readable
+type, clear action hierarchy, input contrast, responsive header placement and
+unclipped controls. A native filter check also corrected the visible pick count
+to match its filtered result, including zero matches.
+
 Local checks pass 231 full-native and 77 preview tests, with one explicit Vision
 classifier integration skip in each suite because the iOS 27 simulator cannot
 create its inference context. Actual classification passes on a public synthetic

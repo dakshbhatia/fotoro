@@ -462,7 +462,7 @@ struct RecentPhotosView: View {
         if allPhotos {
           Text("\(homePhotos.count) \(homePhotos.count == 1 ? "photo" : "photos")").foregroundStyle(.secondary)
         } else if store.picksSnapshot != nil {
-          Text("\(store.pickedPhotos.count) \(store.pickedPhotos.count == 1 ? "pick" : "picks")").foregroundStyle(.secondary)
+          Text("\(homePhotos.count) \(homePhotos.count == 1 ? "pick" : "picks")").foregroundStyle(.secondary)
         }
       }.font(.subheadline)
       Menu {
