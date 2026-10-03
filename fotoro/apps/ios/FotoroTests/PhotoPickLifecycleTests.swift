@@ -1,4 +1,5 @@
 import Photos
+import UIKit
 import XCTest
 @testable import Fotoro
 
@@ -181,6 +182,155 @@ import XCTest
       catch { XCTAssertTrue(error is CancellationError) }
       XCTAssertFalse(analyzer.analyzing)
     }
+  }
+
+  func testFindReviewRecomputesQualityWithinMatchesAndLeavesRecentPicksAlone() async throws {
+    var sources = (0..<20).map { candidate("photo-\($0)") }
+    for index in sources.indices { sources[index].capturedAt = nil }
+    sources[19].favorite = true
+    for index in 0..<19 { sources[index].favorite = false }
+    var recentReads = 0
+    let recent = PhotoPickAnalyzer(preview: { _ in recentReads += 1; return self.signal }, isCurrent: { _ in true })
+    let recentResult = try await recent.snapshot(sources)
+    XCTAssertTrue(recentResult.recommendations.ids.contains("photo-19"))
+    let matches = Array(sources[5..<8])
+    let review = FindBestShotsReview()
+    review.start(matches, matchCount: matches.count, preview: { _ in self.signal }, isCurrent: { _ in true })
+    await review.completedReview()
+    XCTAssertEqual(review.snapshot?.recommendations.ids, ["photo-5"])
+    XCTAssertEqual(review.snapshot?.recommendations.groupCount, 3)
+    XCTAssertEqual(review.snapshot?.recommendations.reasons["photo-5"], ["Clarity and exposure"])
+    XCTAssertEqual(review.snapshot?.candidates.map(\.id), matches.map(\.id))
+    XCTAssertEqual(AutomaticPhotoPickPolicy.processor, "quality-picks-v1")
+    let unchanged = try await recent.snapshot(sources)
+    XCTAssertEqual(unchanged.recommendations.ids, recentResult.recommendations.ids)
+    XCTAssertEqual(recentReads, 20, "A Find review must not prune or replace the home Picks cache")
+  }
+
+  func testFindReviewUsesSimilarityOnlyInsideTheMoment() async throws {
+    let date = Date(timeIntervalSince1970: 1_780_315_200)
+    var soft = candidate("soft")
+    var clear = candidate("clear")
+    soft.capturedAt = date; clear.capturedAt = date.addingTimeInterval(20)
+    soft.favorite = false; clear.favorite = false
+    let review = FindBestShotsReview()
+    review.start([soft, clear], matchCount: 2, preview: { source in
+      var value = self.signal
+      value.sharpness = source.id == "soft" ? 0.01 : 0.4
+      return value
+    }, isCurrent: { _ in true })
+    await review.completedReview()
+    XCTAssertEqual(review.snapshot?.recommendations.ids, ["clear"])
+    XCTAssertEqual(review.snapshot?.recommendations.duplicateCount, 1)
+    XCTAssertEqual(review.snapshot?.recommendations.reasons["clear"],
+      ["Clarity and exposure", "Representative of 2 similar photos"])
+  }
+
+  func testFindReviewBoundsWorkAndUnavailableSavedPreviewsDoNotBecomeSuggestions() async {
+    var reads: [String] = []
+    let review = FindBestShotsReview()
+    let matches = (0..<250).map { candidate("saved:\($0)") }
+    review.start(matches, matchCount: matches.count, preview: { source in
+      reads.append(source.id)
+      return nil
+    }, isCurrent: { _ in true })
+    await review.completedReview()
+    XCTAssertEqual(reads, matches.prefix(200).map(\.id))
+    XCTAssertEqual(review.matchCount, 250)
+    XCTAssertEqual(review.snapshot?.recommendations.unassessed, 200)
+    XCTAssertTrue(review.snapshot?.recommendations.ids.isEmpty == true)
+    review.showAll()
+    XCTAssertNil(review.snapshot)
+    XCTAssertFalse(review.showing)
+  }
+
+  func testFindReviewRevokesLateResultsForChangedSearchOrSourceAuthorization() async {
+    for changedSearch in [false, true] {
+      var searchCurrent = true
+      var sourceCurrent = true
+      let gate = PickPreviewGate()
+      let review = FindBestShotsReview()
+      review.start([candidate("a")], matchCount: 1, preview: { _ in
+        await gate.wait(); return self.signal
+      }, isCurrent: { _ in sourceCurrent }, valid: { searchCurrent })
+      while !gate.entered { await Task.yield() }
+      if changedSearch { searchCurrent = false } else { sourceCurrent = false }
+      gate.open()
+      await review.completedReview()
+      XCTAssertNil(review.snapshot)
+      XCTAssertFalse(review.showing)
+      XCTAssertFalse(review.reviewing)
+      XCTAssertNil(review.error)
+    }
+  }
+
+  func testAllMatchesCancelsReviewAndLateResultCannotClearSuccessor() async {
+    let gate = PickPreviewGate()
+    let review = FindBestShotsReview()
+    review.start([candidate("old")], matchCount: 1, preview: { _ in
+      await gate.wait(); return self.signal
+    }, isCurrent: { _ in true })
+    while !gate.entered { await Task.yield() }
+    review.showAll()
+    review.start([candidate("new")], matchCount: 1, preview: { _ in self.signal }, isCurrent: { _ in true })
+    await review.completedReview()
+    gate.open()
+    for _ in 0..<10 { await Task.yield() }
+    XCTAssertEqual(review.snapshot?.recommendations.ids, ["new"])
+    XCTAssertTrue(review.showing)
+    XCTAssertFalse(review.reviewing)
+  }
+
+  func testLatePreparationCannotReplaceACompletedSuccessor() async {
+    for cancelled in [false, true] {
+      let review = FindBestShotsReview()
+      let gate = PickPreviewGate()
+      var requestCurrent = true
+      let preparation = Task {
+        await gate.wait()
+        review.start([candidate("old")], matchCount: 1, preview: { _ in self.signal },
+          isCurrent: { _ in true }, valid: { requestCurrent })
+      }
+      while !gate.entered { await Task.yield() }
+      if cancelled { preparation.cancel() } else { requestCurrent = false }
+      review.start([candidate("new")], matchCount: 1, preview: { _ in self.signal }, isCurrent: { _ in true })
+      await review.completedReview()
+      gate.open()
+      await preparation.value
+      XCTAssertEqual(review.snapshot?.recommendations.ids, ["new"])
+      XCTAssertTrue(review.showing)
+      XCTAssertFalse(review.reviewing)
+    }
+  }
+
+  func testSavedPreviewReviewRejectsOutsidePathsAndReplacedCachedBytes() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let media = root.appendingPathComponent("Media")
+    try FileManager.default.createDirectory(at: media, withIntermediateDirectories: true)
+    let fixture = try XCTUnwrap(Bundle(for: type(of: self)).url(forResource: "neutral-a", withExtension: "png"))
+    let url = media.appendingPathComponent("cached-preview.png")
+    let image = try XCTUnwrap(UIImage(contentsOfFile: fixture.path))
+    let preview = UIGraphicsImageRenderer(size: CGSize(width: 64, height: 64)).image { _ in
+      image.draw(in: CGRect(x: 0, y: 0, width: 64, height: 64))
+    }
+    try XCTUnwrap(preview.jpegData(compressionQuality: 0.8)).write(to: url)
+    let source = try XCTUnwrap(FindBestShotsCachedPreview(url: url, root: root))
+    XCTAssertTrue(source.isCurrent)
+    let measured = try await source.signals()
+    XCTAssertNotNil(measured)
+    XCTAssertNil(FindBestShotsCachedPreview(url: fixture, root: root))
+    let link = media.appendingPathComponent("linked-preview.jpg")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: url)
+    XCTAssertNil(FindBestShotsCachedPreview(url: link, root: root))
+    let alias = root.appendingPathComponent("root-alias")
+    try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: root)
+    XCTAssertNotNil(FindBestShotsCachedPreview(url: alias.appendingPathComponent("Media/cached-preview.png"), root: alias))
+    try FileManager.default.removeItem(at: url)
+    try Data([0]).write(to: url)
+    XCTAssertFalse(source.isCurrent)
+    do { _ = try await source.signals(); XCTFail("A replaced preview must revoke its source snapshot") }
+    catch { XCTAssertTrue(error is CancellationError) }
   }
 }
 

@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 import Observation
 import Photos
 import UIKit
@@ -102,7 +103,7 @@ struct PhotoPicksSnapshot: Sendable {
         && asset.isFavorite == value.favorite && asset.mediaSubtypes.contains(.photoScreenshot) == value.isScreenshot
     }
   }
-  private static func preview(_ candidate: AutomaticPhotoPickCandidate) async throws -> AutomaticPhotoPickSignals? {
+  static func preview(_ candidate: AutomaticPhotoPickCandidate) async throws -> AutomaticPhotoPickSignals? {
     try Task.checkCancellation()
     guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [candidate.id], options: nil).firstObject,
       RecentPhoto.sourceRevision(asset) == candidate.sourceRevision else { throw CancellationError() }
@@ -134,15 +135,136 @@ struct PhotoPicksSnapshot: Sendable {
       image.draw(in: CGRect(x: 0, y: 0, width: 64, height: 64))
     }
     guard let cgImage = upright.cgImage else { return nil }
+    return try measure(cgImage)
+  }
+  nonisolated static func measure(_ cgImage: CGImage) throws -> AutomaticPhotoPickSignals? {
     var pixels = [UInt8](repeating: 0, count: 64 * 64 * 4)
     let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
       guard let context = CGContext(data: buffer.baseAddress, width: 64, height: 64, bitsPerComponent: 8, bytesPerRow: 64 * 4,
         space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
+      context.setFillColor(UIColor.white.cgColor)
+      context.fill(CGRect(x: 0, y: 0, width: 64, height: 64))
       context.draw(cgImage, in: CGRect(x: 0, y: 0, width: 64, height: 64))
       return true
     }
     guard drawn else { return nil }
     return try AutomaticPhotoPickPolicy.analyzePixels(width: 64, height: 64, rgba: pixels)
+  }
+}
+
+@MainActor @Observable final class FindBestShotsReview {
+  static let maximumCandidates = 200
+  private(set) var snapshot: PhotoPicksSnapshot?
+  private(set) var reviewing = false
+  private(set) var showing = false
+  private(set) var matchCount = 0
+  private(set) var error: String?
+  private(set) var analyzer: PhotoPickAnalyzer?
+  @ObservationIgnored private var generation = UUID()
+  @ObservationIgnored private var task: Task<Void, Never>?
+
+  func showAll() {
+    generation = UUID()
+    task?.cancel(); task = nil
+    analyzer?.invalidate(); analyzer = nil
+    snapshot = nil; reviewing = false; showing = false; error = nil
+  }
+
+  func start(_ candidates: [AutomaticPhotoPickCandidate], matchCount: Int,
+    preview: @escaping PhotoPickAnalyzer.Preview = PhotoPickAnalyzer.preview,
+    isCurrent: @escaping @MainActor ([AutomaticPhotoPickCandidate]) -> Bool = PhotoPickAnalyzer.isCurrent,
+    valid: @escaping @MainActor () -> Bool = { true }) {
+    guard !Task.isCancelled, valid() else { return }
+    showAll()
+    let token = UUID()
+    generation = token
+    var seen: Set<String> = []
+    var bounded: [AutomaticPhotoPickCandidate] = []
+    for candidate in candidates where seen.insert(candidate.id).inserted {
+      bounded.append(candidate)
+      if bounded.count == Self.maximumCandidates { break }
+    }
+    self.matchCount = max(matchCount, bounded.count)
+    let analyzer = PhotoPickAnalyzer(preview: preview, isCurrent: isCurrent)
+    self.analyzer = analyzer
+    showing = true; reviewing = true
+    task = Task { [weak self] in
+      guard let self else { return }
+      defer { if generation == token { reviewing = false; task = nil } }
+      do {
+        let result = try await analyzer.snapshot(bounded, valid: { [weak self] in
+          self?.generation == token && valid()
+        })
+        try Task.checkCancellation()
+        guard generation == token, valid(), isCurrent(bounded), result.matches(bounded) else {
+          throw CancellationError()
+        }
+        snapshot = result
+      } catch is CancellationError {
+        if generation == token { showAll() }
+      } catch {
+        if generation == token { self.error = error.localizedDescription }
+      }
+    }
+  }
+
+  func completedReview() async { await task?.value }
+}
+
+struct FindBestShotsCachedPreview: Sendable {
+  let url: URL
+  let width: Int
+  let height: Int
+  let revision: String
+  private static let maximumBytes = 2 * 1024 * 1024
+
+  init?(url: URL, root: URL) {
+    guard url.isFileURL,
+      url.deletingLastPathComponent().resolvingSymlinksInPath() == root.appendingPathComponent("Media").resolvingSymlinksInPath(),
+      url.resolvingSymlinksInPath().deletingLastPathComponent() == root.appendingPathComponent("Media").resolvingSymlinksInPath(),
+      let revision = Self.fileRevision(url),
+      let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+      let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+      let width = props[kCGImagePropertyPixelWidth] as? Int,
+      let height = props[kCGImagePropertyPixelHeight] as? Int,
+      width > 0, height > 0, width <= 1600, height <= 1600,
+      Self.fileRevision(url) == revision else { return nil }
+    self.url = url
+    let orientation = props[kCGImagePropertyOrientation] as? Int ?? 1
+    self.width = (5...8).contains(orientation) ? height : width
+    self.height = (5...8).contains(orientation) ? width : height
+    self.revision = revision
+  }
+
+  var isCurrent: Bool { Self.fileRevision(url) == revision }
+  func signals() async throws -> AutomaticPhotoPickSignals? {
+    let worker = Task.detached(priority: .userInitiated) { () throws -> AutomaticPhotoPickSignals? in
+      try Task.checkCancellation()
+      guard isCurrent else { throw CancellationError() }
+      let bytes = try Data(contentsOf: url, options: .mappedIfSafe)
+      guard bytes.count <= Self.maximumBytes, isCurrent else { throw CancellationError() }
+      guard let source = CGImageSourceCreateWithData(bytes as CFData, nil),
+        let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+          kCGImageSourceCreateThumbnailFromImageAlways: true,
+          kCGImageSourceCreateThumbnailWithTransform: true,
+          kCGImageSourceThumbnailMaxPixelSize: 64,
+          kCGImageSourceShouldCacheImmediately: true,
+        ] as CFDictionary) else { return nil }
+      try Task.checkCancellation()
+      let signals = try PhotoPickAnalyzer.measure(image)
+      guard isCurrent else { throw CancellationError() }
+      return signals
+    }
+    return try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
+  }
+  private static func fileRevision(_ url: URL) -> String? {
+    guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+      (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == false,
+      attrs[.type] as? FileAttributeType == .typeRegular,
+      let size = attrs[.size] as? NSNumber, size.intValue > 0, size.intValue <= maximumBytes,
+      let modified = attrs[.modificationDate] as? Date,
+      let number = attrs[.systemFileNumber] as? NSNumber else { return nil }
+    return "\(number)|\(size)|\(modified.timeIntervalSince1970)"
   }
 }
 

@@ -8,28 +8,29 @@ export function Thumbnail({
   selected,
   onSelect,
   selecting = false,
+  reasons,
 }: {
   photo: Photo;
   onOpen: () => void;
   selected: boolean;
   onSelect: () => void;
   selecting?: boolean;
+  reasons?: string[];
 }) {
-  const [url, setUrl] = useState(""),
+  const [loaded, setLoaded] = useState<{photo?: Photo; url: string}>({url: ""}),
     [error, setError] = useState("");
   useEffect(() => {
     let alive = true;
+    setLoaded({url: ""}); setError("");
     photoBytes(photo, "thumbnail")
       .then((bytes) => {
         if (alive)
-          setUrl(
-            mediaURL(
-              photo.manifest.photoId + ":thumbnail",
+          setLoaded({photo, url: mediaURL(
+              photo.manifest.ownerAccountId + ":" + photo.manifest.photoId + ":" + photo.metadata.originalSha256 + ":" + (photo.manifest.representations.find(value => value.binding.kind === "thumbnail")?.binding.representationId ?? "original") + ":thumbnail",
               bytes,
               "image/jpeg",
               256 * 256 * 4,
-            ),
-          );
+            )});
       })
       .catch((e) => {
         if (alive) setError(e.message);
@@ -45,12 +46,14 @@ export function Thumbnail({
         id={"photo-" + photo.manifest.photoId}
         onClick={onOpen}
         aria-label={"Open " + photo.metadata.filename}
+        aria-description={reasons?.join(". ")}
       >
-        {url ? (
-          <img src={url} alt={photo.metadata.filename} />
+        {loaded.photo === photo && loaded.url ? (
+          <img src={loaded.url} alt={photo.metadata.filename} />
         ) : (
           <span>{error || "Loading photo…"}</span>
         )}
+        {reasons?.length ? <span className="find-photo-reason">{reasons.join(" · ")}</span> : null}
       </button>
       {(selecting || selected) && <button
         className="select"
@@ -70,6 +73,7 @@ export function Library({
   onOpen,
   active = true,
   selecting = false,
+  reasons,
 }: {
   photos: Photo[];
   selected: Set<string>;
@@ -77,6 +81,7 @@ export function Library({
   onOpen: (id: string) => void;
   active?: boolean;
   selecting?: boolean;
+  reasons?: ReadonlyMap<string, string[]>;
 }) {
   const parent = useRef<HTMLDivElement>(null),
     [columns, setColumns] = useState(2),
@@ -190,6 +195,7 @@ export function Library({
                   photo={photo}
                   selected={selected.has(photo.manifest.photoId)}
                   selecting={selecting}
+                  reasons={reasons?.get(photo.manifest.photoId)}
                   onSelect={() => onSelect(photo.manifest.photoId)}
                   onOpen={() => onOpen(photo.manifest.photoId)}
                 />

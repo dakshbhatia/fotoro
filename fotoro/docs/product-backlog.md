@@ -76,8 +76,14 @@ through the complete journey; separate green components are insufficient.
 
 ## Next capabilities after the core journey closes
 
-The next intelligence loop is Find a moment → review the strongest shots →
-choose Save or Share. Current Picks uses clarity, exposure, favorites and
+Find a moment → Best shots → review → choose Save or Share is now implemented.
+Best shots recomputes suggestions within the current matches, shows measured
+reasons and keeps All matches available without changing selection. Native
+review uses the first 200 matches and cached device/Saved previews; unavailable
+previews and incomplete coverage are explicit. Browser review uses the existing
+bounded local and owned Saved match sets. Seven fixed synthetic composition
+checks run in CI; human preference and physical performance remain open.
+Current Picks uses clarity, exposure, favorites and
 similarity rules; native recent Picks covers the last 10 days while browser
 Picks covers photos opened there. Current Find uses verified dates, supplied
 labels, text and bounded native visual categories. Broader visual meaning and
@@ -106,7 +112,7 @@ are separate checks. “Partial” identifies a concrete remaining capability.
 | --- | --- | --- |
 | 1 | One-password sign-in | Implemented on native/web; wrong-password, interrupted enrollment and retry regressions pass. Owner acceptance remains open. |
 | 2 | Remember the current user | Protected session/password persistence, account reference and expired-session renewal are implemented. Initial restoration respects manual lock; explicit Open retries a failed renewal. |
-| 3 | Install the current full build | Signed encrypted build 21 passes strict signature and production association checks. Build 20 is installed and launched successfully; build 21 awaits the unavailable device connection. Owner authentication acceptance remains open. |
+| 3 | Install the current full build | Signed encrypted build 22 passes strict signature and production association checks. Build 21 is verified installed and launched after a fresh unlocked check during the owner's phone window; build 22 remains ready for installation. Owner authentication acceptance remains open. |
 | 4 | Save chosen photos through sign-in | Immutable reviewed sources and one-shot authenticated Save are implemented. Fresh native signup → selected PNG Save and fresh-browser password restore pass against isolated D1/R2. |
 | 5 | Restore identical originals in Safari | Isolated D1/R2 tests verify JPEG/PNG/HEIC bytes in a fresh session. A native-created account restores its selected PNG byte for byte in a fresh browser. Personal phone-to-Safari acceptance remains open. |
 | 6 | Manual Save progress and Pause/Continue | Implemented. Continue uses the durable queue; it does not scan for new photos. |
@@ -129,8 +135,8 @@ are separate checks. “Partial” identifies a concrete remaining capability.
 | 23 | Visual search | Partial: conservative local Vision categories with separate inferred evidence. Physical classification and unrestricted embeddings remain open. |
 | 24 | Natural language with evidence | Native/web relative/calendar/ISO date phrases and prefix/suffix compound queries use existing evidence and verified capture dates. Arbitrary person/place understanding remains open. |
 | 25 | Correctable people groups | Not implemented. Requires on-device grouping, explicit naming/corrections and deletion/permission fences. |
-| 26 | Better automatic picks | Bounded local clarity/exposure/favorite/burst policies are implemented and tested. Physical ranking acceptance remains open. |
-| 27 | Similar-photo review | Partial: similar bursts choose a representative in picks. An explicit review surface remains open. |
+| 26 | Better automatic picks | Bounded local clarity/exposure/favorite/burst policies and Find-scoped Best shots are implemented and tested. Physical ranking acceptance remains open. |
+| 27 | Similar-photo review | Partial: Best shots explains suggested burst representatives and returns to All matches. Side-by-side comparison and broader visual similarity remain open. |
 | 28 | Editable memories/stories | Not implemented. Must preserve original photos and user-authored captions. |
 | 29 | Document OCR | Rotated English OCR is implemented/tested. Multilanguage support remains open. |
 | 30 | Incremental intelligence | Source/revision cache, serial bounded previews and lifecycle cancellation are implemented. Physical energy/memory acceptance remains open. |

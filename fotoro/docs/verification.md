@@ -7,6 +7,17 @@ Find, viewer and account navigation preserves the reviewed selection. Save stays
 manual and uses the existing durable queue. Share uses exact chosen originals or
 accepted Fotoro recipients, according to the source.
 
+Find now includes Best shots / All matches for explicit review within a matching
+moment. The versioned quality policy uses clarity, exposure, favorites and
+verified similar bursts; reasons appear with suggestions. Native reviews the
+first 200 matches using device and already cached owned Saved previews, without
+downloading originals or changing the catalog. Browser reviews current local
+and owned Saved matches through protected preview adapters. Missing previews
+remain reviewable through All matches. Query, source, account, lock and lifecycle
+changes cancel obsolete work. Suggestions never modify selection or create a
+Save intent. Seven synthetic Find-to-shortlist cases run in CI; they do not
+establish held-out visual accuracy or human best-shot preference.
+
 The follow-up clarifies each scope and adds Open on another device. Direct
 `/saved` and `/saved/` entry opens the password or current Saved library; Back
 returns to Photos and normalizes the URL without reloading the local context.
@@ -21,7 +32,7 @@ the overlay requires the exact File, matching ID/digest and current owned
 snapshot. Local labels, favorites and retained records are untouched. Stale,
 changed, invalid and unsupported date sources are rejected by regressions.
 
-Final local checks pass 250 full-native and 86 preview tests, 256 web tests,
+Final local checks pass 257 full-native and 93 preview tests, 265 web tests,
 53 API tests, 19 core tests and 28 release-metadata tests. Each native suite has
 one explicit Vision integration skip because the iOS 27 simulator cannot create
 its inference context. Four isolated HTTP exchange tests pass, including original
@@ -56,6 +67,12 @@ fallback fix the tray. Both native suites pass after the correction, and the
 simulator content-size setting is restored to large. The Find typing tool
 reported success without changing the field; native typed-query interaction is
 not established by that tool run. Existing deterministic Find tests pass.
+Best shots acceptance covers local and owned Saved Find at 320, 390 and 1440 px,
+including All matches, query withdrawal, unchanged selection, zero review writes
+and fresh-device retrieval of the unchanged 214,852-byte public PNG. Independent
+review caught and repaired a cancelled native preparation erasing its successor;
+the regression covers cancellation and obsolete-request revocation. The browser
+preview identity cache is checked separately for bounded source retention.
 Physical Safari, owner credentials/private Photos and physical performance remain
 unverified.
 
@@ -69,17 +86,17 @@ dependency, second search index or second durable queue was introduced. The old
 PhotoPicks production component and its unused CSS were removed; normal account
 entry retains one password path.
 
-The full encrypted Release 0.1.0 (21) is built and passes strict signature
+The full encrypted Release 0.1.0 (22) is built and passes strict signature
 checks, with production associated domains and no local-preview encryption
-exemption. Build 20 is the last confirmed physical installation and launched
-successfully after a fresh unlocked check. The build 21 device check currently
-reports the paired connection unavailable, so installation has not been claimed.
+exemption. Build 21 is verified installed and launched successfully after a fresh
+unlocked check during the owner's five-minute phone window. Build 22 remains
+ready for installation; the new source verification does not rely on the phone.
 No private app data or Photos were inspected. Apple has processed full build 4,
 whose TestFlight release still requires the owner's accurate export-compliance
 declaration. Preview build 3 remains a separate binary.
 
 The preceding production Worker is
-`c4d9a626-43f5-422b-be96-24dff8d9e5d1`, read back at 100%. This pass changes consumer clients;
+`a92aa209-1a6c-4fd6-a6ff-da2bb830a52c`, read back at 100%. This pass changes consumer clients;
 production D1/R2 bindings, five migrations and API contracts stay unchanged.
 Deployment/readback follows the exact-head required CI and merge. Feature and
 release limits are tracked in [product work](product-backlog.md).

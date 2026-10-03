@@ -21,27 +21,28 @@ function evidence(photo: LocalOcrPhoto, meaning: SearchMeaning) {
   }
   return (source === "fact" ? "Source fact · " : "Text mention · ") + meaning.term;
 }
-export function LocalSearch({photos, result, resources, committed, pinned, canCorrect = true, coverage, onAccept, onNavigate, onOpen, onConfirm, onPin, onFailure, selection}: {
+export function LocalSearch({photos, result, resources, committed, pinned, canCorrect = true, coverage, onAccept, onNavigate, onOpen, onConfirm, onPin, onFailure, selection, reasons, emptyMessage, emptyHint}: {
   photos: LocalPhoto[]; result: SearchResult; resources: LocalResources; committed?: string; pinned?: string;
   canCorrect?: boolean;
   coverage: string; onAccept: (meaning: SearchMeaning) => void; onNavigate: (id: string) => void;
   onOpen: (id: string) => void; onConfirm: (id: string) => void; onPin: (id: string) => void;
   onFailure: (id: string, error: string) => void;
   selection?: {ids: ReadonlySet<string>; eligible: (id: string) => boolean; disabled: boolean; onChange: (id: string, checked: boolean) => void};
+  reasons?: ReadonlyMap<string, string[]>; emptyMessage?: string; emptyHint?: string;
 }) {
   const photo = photos.find(p => p.id === result.photoId) as LocalOcrPhoto | undefined,
     index = result.photoIds.indexOf(result.photoId ?? ""), meaning = result.meaning;
-  const [loaded, setLoaded] = useState({id: "", url: ""}), [error, setError] = useState(""), [details, setDetails] = useState(false);
+  const [loaded, setLoaded] = useState<{photo?: LocalPhoto; url: string}>({url: ""}), [error, setError] = useState(""), [details, setDetails] = useState(false);
   const swiped = useRef(false);
   const touch = useRef<{x: number; y: number} | undefined>(undefined);
   useEffect(() => {
     let current = true;
-    setLoaded({id: "", url: ""}); setError("");
+    setLoaded({url: ""}); setError("");
     if (!photo) return;
-    resources.load(photo, "preview").then(value => {if (current) setLoaded({id: photo.id, url: value.url});})
+    resources.load(photo, "preview").then(value => {if (current) setLoaded({photo, url: value.url});})
       .catch(reason => {if (current) {setError(reason.message); onFailure(photo.id, reason.message);}});
     return () => {current = false;};
-  }, [photo?.id, photo?.file, photo?.previewLoader, resources]);
+  }, [photo, resources]);
   const move = (step: number) => {
     const id = result.photoIds[index + step];
     if (id) onNavigate(id);
@@ -59,19 +60,20 @@ export function LocalSearch({photos, result, resources, committed, pinned, canCo
           }
           touch.current = undefined;
         }}>
-        {loaded.id === photo.id && loaded.url ? <img src={loaded.url} alt={photo.filename} /> : <span>{error || "Preparing preview…"}</span>}
+        {loaded.photo === photo && loaded.url ? <img src={loaded.url} alt={photo.filename} /> : <span>{error || "Preparing preview…"}</span>}
       </button>
       <div className="local-search-controls">
         <button aria-label="Previous matching photo" disabled={index <= 0} onClick={() => move(-1)}><Icon kind="previous" /></button>
         <span>{index + 1} / {result.photoIds.length}</span>
         <button aria-label="Next matching photo" disabled={index >= result.photoIds.length - 1} onClick={() => move(1)}><Icon kind="next" /></button>
       </div>
+      {reasons?.get(photo.id)?.length ? <p className="find-shot-reason">{reasons.get(photo.id)!.join(" · ")}</p> : null}
       {result.meanings.some(value => value.id !== meaning.id && value.photoIds.some(id => !meaning.photoIds.includes(id))) && <div className="local-alternatives" aria-label="Other matches"><span>Also try</span>{result.meanings.filter(value => value.id !== meaning.id && value.photoIds.some(id => !meaning.photoIds.includes(id))).slice(0, 3).map(value => <button key={value.id} onClick={() => onAccept(value)}>{value.term}</button>)}</div>}
       {details && <aside className="search-info" aria-label="About this match">
         <p className="hint">{coverage}</p><p className="local-evidence">{evidence(photo, meaning)}</p>
         <button aria-pressed={committed === meaning.id} onClick={() => onAccept(meaning)}>Search this {meaning.kind === "label" ? "label" : meaning.kind === "date" ? "date" : "text"}</button>
         {canCorrect && <details><summary>Adjust future matches</summary><p className="hint">These choices stay on this device.</p><div className="actions"><button onClick={() => onConfirm(photo.id)}>This is the photo</button><button aria-pressed={pinned === photo.id} onClick={() => onPin(photo.id)}>{pinned === photo.id ? "Preferred photo" : "Prefer this photo"}</button></div></details>}
       </aside>}
-    </> : <div className="empty"><p>No matching photos</p><p className="hint">Try a label, a date or words in the photo.</p>{details && <p className="hint">{coverage}. Text is searchable after it has been read on this device.</p>}</div>}
+    </> : <div className="empty"><p>{emptyMessage ?? "No matching photos"}</p><p className="hint">{emptyHint ?? "Try a label, a date or words in the photo."}</p>{details && <p className="hint">{coverage}. Text is searchable after it has been read on this device.</p>}</div>}
   </section>;
 }

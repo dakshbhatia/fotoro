@@ -24,20 +24,20 @@ A Worker preview with a different RP creates different passkey credentials. Do n
 
 ## Current state
 
-The preceding production Worker `c4d9a626-43f5-422b-be96-24dff8d9e5d1`, tagged
-`consumer-experience-20261003`, is read back at 100% in deployment
-`f7c6871a-0549-45de-8c0b-a7a9bc9a3e56`. Saved photos opens read-only;
+The preceding production Worker `a92aa209-1a6c-4fd6-a6ff-da2bb830a52c`, tagged
+`experience-clarity-20261003`, is read back at 100% in deployment
+`4888118e-2a7f-422c-9b31-c0872fca0ba8`. Saved photos opens read-only;
 chosen Save continues through one password entry. Sharing uses accepted
 contacts and public invitations, with explicit recipient Save and selected-photo
 contributions. Public contact/moment links are included in the exact signed
 Apple association alongside passkeys. The preceding Worker
-`d38236c7-1994-4474-b2cc-e2ae5ce1c8d9` remains available for rollback.
+`c4d9a626-43f5-422b-be96-24dff8d9e5d1` remains available for rollback.
 Uploads and annotation writes still require an explicit Save or Continue.
 Bounded failure fields and stored Worker logs remain enabled. Production D1/R2
 bindings and five migrations are unchanged. Canonical API and exact signed
 association checks pass.
 
-The current source passes 250 full-app, 86 local-preview, 256 web, 53 API,
+The current source passes 257 full-app, 93 local-preview, 265 web, 53 API,
 19 core and 28 release-metadata tests, typechecks and the production web build.
 Each native suite explicitly skips one Vision integration test because the iOS 27
 simulator cannot create its inference context. Seven sharing-safety tests also
@@ -62,10 +62,15 @@ hints and same-password cross-device instructions. Browser Find preserves native
 PhotoKit capture provenance; imported timestamps stay excluded. Current verified
 capture evidence can appear beside a matching local File without entering local
 retention. There are no protocol, binding, migration or dependency changes.
-Development-signed Release 0.1.0 (21) passes strict signature and exact production
+Best shots now applies the existing versioned quality policy within current Find
+matches. All matches and reviewed selections stay available; suggestions make
+no upload or annotation requests. Seven fixed synthetic composition checks run
+in CI, and public local/Saved review passes at 320, 390 and 1440 px. Broader visual
+semantics and physical ranking/performance remain separate qualification gates.
+Development-signed Release 0.1.0 (22) passes strict signature and exact production
 association checks without a local-preview encryption exemption. CoreDevice
-previously verified installation and successful unlocked launch of build 20.
-The paired connection is currently unavailable for build 21 installation.
+verified installation and successful unlocked launch of build 21 during the
+owner's five-minute phone window. Build 22 remains ready for installation.
 Owner authentication and private-photo saving remain unverified.
 Build 4's TestFlight compliance gate is unchanged. See
 [verification](verification.md) for the consumer acceptance evidence.

@@ -1,10 +1,13 @@
 import type {LocalPhoto} from "./resources";
+export const PICK_PROCESSOR = "quality-picks-v1";
 export interface PhotoSignals {
   hash: bigint;
   luminance: number;
   contrast: number;
   sharpness: number;
   color: [number, number, number];
+  width?: number;
+  height?: number;
 }
 export interface PhotoRecommendations {
   ids: Set<string>;
@@ -52,7 +55,8 @@ function captured(photo: LocalPhoto) {
   return Number.isFinite(time) ? time : undefined;
 }
 function similar(a: LocalPhoto, b: LocalPhoto, x: PhotoSignals, y: PhotoSignals) {
-  if (!a.width || !a.height || !b.width || !b.height || Math.abs((a.width / a.height) / (b.width / b.height) - 1) > .01) return false;
+  const aw = a.width ?? x.width, ah = a.height ?? x.height, bw = b.width ?? y.width, bh = b.height ?? y.height;
+  if (!aw || !ah || !bw || !bh || Math.abs((aw / ah) / (bw / bh) - 1) > .01) return false;
   if (Math.abs(x.luminance - y.luminance) > .03 || Math.abs(x.contrast - y.contrast) > .04 || x.color.some((value, i) => Math.abs(value - y.color[i]) > 8)) return false;
   let bits = x.hash ^ y.hash, distance = 0;
   while (bits) {if (++distance > 2) return false; bits &= bits - 1n;}
@@ -112,7 +116,7 @@ export function recommendPhotos(photos:LocalPhoto[], signals:ReadonlyMap<string,
 }
 export class PickAnalyzer {
   private version = 0;
-  private cache = new Map<string, {source: unknown; promise: Promise<PhotoSignals | undefined>}>();
+  private cache = new Map<string, {source: unknown; digest?: string; width?: number; height?: number; promise: Promise<PhotoSignals | undefined>}>();
   async run(photos:LocalPhoto[], load:(photo:LocalPhoto)=>Promise<PhotoSignals>, progress?:(done:number,total:number)=>void):Promise<PhotoRecommendations|undefined> {
     const version = ++this.version, unique = [...new Map(photos.map(photo => [photo.id, photo])).values()];
     const ids = new Set(unique.map(photo => photo.id));
@@ -123,8 +127,8 @@ export class PickAnalyzer {
       const photo = unique[i], source = photo.file ?? photo.preview ?? photo.previewLoader;
       if (source && photo.previewAvailable !== false) {
         let entry = this.cache.get(photo.id);
-        if (!entry || entry.source !== source) {
-          entry = {source, promise: load(photo).catch(() => undefined)}; this.cache.set(photo.id, entry);
+        if (!entry || entry.source !== source || entry.digest !== photo.digest || entry.width !== photo.width || entry.height !== photo.height) {
+          entry = {source, digest: photo.digest, width: photo.width, height: photo.height, promise: load(photo).catch(() => undefined)}; this.cache.set(photo.id, entry);
         }
         const signal = await entry.promise;
         if (version !== this.version) return;

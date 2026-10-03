@@ -811,6 +811,12 @@ main.local-trial, main.cloud-library { position: relative; background: var(--pho
 .consumer-section { flex: 0 0 auto; min-height: 70px; display: flex; align-items: center; justify-content: space-between; padding: 8px 48px; gap: 12px; }
 .consumer-section h2 { font-size: 28px; font-weight: 600; letter-spacing: -.5px; margin: 0; }
 .consumer-scope-hint { flex: 0 0 auto; margin: 0; padding: 0 48px 12px; color: var(--photo-muted); font-size: 13px; line-height: 1.5; }
+.find-best-shots { flex: 0 0 auto; display: flex; align-items: center; gap: 12px; padding: 0 48px 8px; }
+.find-best-shots button { flex: 0 0 auto; min-height: 44px; font-size: 13px; }
+.find-best-shots button[aria-pressed="true"] { border-color: var(--photo-accent); }
+.find-best-shots p, .find-shot-reason { margin: 0; color: var(--photo-muted); font-size: 13px; line-height: 1.5; }
+.find-shot-reason { padding: 0 0 10px; }
+.find-photo-reason { position: absolute; bottom: 0; left: 0; right: 0; padding: 18px 8px 8px; font-size: 12px; line-height: 1.4; text-align: left; color: #fff; background: linear-gradient(transparent,#000c); }
 .consumer-section > button, .consumer-section-actions > button { color: var(--photo-accent); background: transparent; border: 0; font-size: 16px; padding: 10px 8px; }
 .consumer-section-actions { display: flex; align-items: center; gap: 4px; }
 .consumer-section > button:hover:not(:disabled), .consumer-section-actions > button:hover:not(:disabled) { background: transparent; }
@@ -862,6 +868,7 @@ main.local-trial, main.cloud-library { position: relative; background: var(--pho
   .consumer-section { min-height: 56px; padding: 4px 16px; }
   .consumer-section h2 { font-size: 20px; letter-spacing: -.25px; }
   .consumer-scope-hint { padding-left: 16px; padding-right: 16px; }
+  .find-best-shots { padding-left: 16px; padding-right: 16px; }
   .consumer-section > button, .consumer-section-actions > button { font-size: 15px; }
   .canvas, .local-trial .canvas { padding: 0 3px calc(105px + env(safe-area-inset-bottom)); }
   .date { font-size: 14px; padding-left: 13px; }

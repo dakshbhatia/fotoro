@@ -6,32 +6,44 @@ import SwiftUI
 struct LocalSearchView: View {
   let search: LocalSearchStore
   let photos: RecentPhotosStore
+  var review: PhotoPicksSnapshot? = nil
   var choseMeaning: () -> Void = {}
   var selectedIDs: Set<String> = []
   var selecting = false
   var toggleSelection: ((RecentPhoto) -> Void)? = nil
   var inspect: (RecentPhoto) -> Void
+  private var matches: [RecentPhoto] {
+    guard let review else { return search.matchingPhotos }
+    return search.matchingPhotos.filter { review.recommendations.ids.contains("device:" + $0.id) }
+  }
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
       SearchAlternatives(search: search, selected: choseMeaning)
-      if search.matchingPhotos.isEmpty {
-        ContentUnavailableView("No photos found", systemImage: "magnifyingglass", description: Text("Try a label, a date or words in a photo."))
+      if matches.isEmpty {
+        ContentUnavailableView(review == nil ? "No photos found" : "No suggestions", systemImage: "magnifyingglass",
+          description: Text(review == nil ? "Try a label, a date or words in a photo." : "Use All matches to review every photo."))
       } else {
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 2), spacing: 3) {
-          ForEach(search.matchingPhotos) { photo in
+          ForEach(matches) { photo in
             Button {
               if selecting, let toggleSelection { toggleSelection(photo) }
               else { inspect(photo) }
             } label: {
-              GeometryReader { geometry in
-                PhotosImage(photo: photo, store: photos, networkAllowed: false).scaledToFill()
-                  .frame(width: geometry.size.width, height: geometry.size.height).clipped()
-              }.aspectRatio(1, contentMode: .fit)
-                .overlay(alignment: .bottomTrailing) {
-                  if selectedIDs.contains(photo.id) {
-                    Image(systemName: "checkmark.circle.fill").padding(8)
+              VStack(alignment: .leading, spacing: 0) {
+                GeometryReader { geometry in
+                  PhotosImage(photo: photo, store: photos, networkAllowed: false).scaledToFill()
+                    .frame(width: geometry.size.width, height: geometry.size.height).clipped()
+                }.aspectRatio(1, contentMode: .fit)
+                  .overlay(alignment: .bottomTrailing) {
+                    if selectedIDs.contains(photo.id) {
+                      Image(systemName: "checkmark.circle.fill").padding(8)
+                    }
                   }
+                if let reasons = review?.recommendations.reasons["device:" + photo.id] {
+                  Text(reasons.prefix(2).joined(separator: " · "))
+                    .font(.caption).foregroundStyle(.secondary).padding(8)
                 }
+              }
             }.buttonStyle(.plain).accessibilityValue(selectedIDs.contains(photo.id) ? "Selected" : "")
               .contextMenu {
                 if let toggleSelection {
@@ -75,6 +87,7 @@ struct ConsumerSearchResultsView: View {
   let saved: [String: LocalPhoto]
   let search: LocalSearchStore
   let photos: RecentPhotosStore
+  var review: PhotoPicksSnapshot? = nil
   var selected: Set<ConsumerPhotoReference> = []
   var selecting = false
   var toggleDevice: ((RecentPhoto) -> Void)? = nil
@@ -82,15 +95,21 @@ struct ConsumerSearchResultsView: View {
   let inspectDevice: (RecentPhoto) -> Void
   let inspectSaved: (LocalPhoto) -> Void
   let choseAlternative: () -> Void
+  private var matches: [ConsumerSearchHit] {
+    guard let review else { return hits }
+    return hits.filter { review.recommendations.ids.contains($0.id) }
+  }
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
       SearchAlternatives(search: search, selected: choseAlternative)
-      if hits.isEmpty {
-        ContentUnavailableView("No photos found", systemImage: "magnifyingglass", description: Text("Try a label, a date or words in a photo."))
+      if matches.isEmpty {
+        ContentUnavailableView(review == nil ? "No photos found" : "No suggestions", systemImage: "magnifyingglass",
+          description: Text(review == nil ? "Try a label, a date or words in a photo." : "Use All matches to review every photo."))
       } else {
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 2), spacing: 3) {
-          ForEach(hits) { hit in
+          ForEach(matches) { hit in
             ConsumerSearchCell(hit: hit, saved: saved, search: search, photos: photos,
+              reasons: review?.recommendations.reasons[hit.id] ?? [],
               selected: selected.contains(hit.photo), selecting: selecting,
               toggleDevice: toggleDevice, toggleSaved: toggleSaved,
               inspectDevice: inspectDevice, inspectSaved: inspectSaved)
@@ -113,6 +132,7 @@ private struct ConsumerSearchCell: View {
   let saved: [String: LocalPhoto]
   let search: LocalSearchStore
   let photos: RecentPhotosStore
+  let reasons: [String]
   let selected: Bool
   let selecting: Bool
   let toggleDevice: ((RecentPhoto) -> Void)?
@@ -127,11 +147,14 @@ private struct ConsumerSearchCell: View {
           if selecting, let toggleDevice { toggleDevice(photo) }
           else { inspectDevice(photo) }
         } label: {
-          GeometryReader { geometry in
-            PhotosImage(photo: photo, store: photos, networkAllowed: false).scaledToFill()
-              .frame(width: geometry.size.width, height: geometry.size.height).clipped()
-          }.aspectRatio(1, contentMode: .fit).overlay(alignment: .bottomTrailing) { selectionMark }
-        }.buttonStyle(.plain).accessibilityValue(selected ? "Selected" : "")
+          VStack(alignment: .leading, spacing: 0) {
+            GeometryReader { geometry in
+              PhotosImage(photo: photo, store: photos, networkAllowed: false).scaledToFill()
+                .frame(width: geometry.size.width, height: geometry.size.height).clipped()
+            }.aspectRatio(1, contentMode: .fit).overlay(alignment: .bottomTrailing) { selectionMark }
+            reason
+          }
+        }.buttonStyle(.plain).accessibilityValue(selectionValue)
           .contextMenu {
             if let toggleDevice { Button(selected ? "Deselect" : "Select") { toggleDevice(photo) } }
           }
@@ -142,13 +165,16 @@ private struct ConsumerSearchCell: View {
           if selecting, let toggleSaved { toggleSaved(photo) }
           else { inspectSaved(photo) }
         } label: {
-          GeometryReader { geometry in
-            LazyImage(url: photo.thumbnailURL ?? photo.previewURL) { state in
-              if let image = state.image { image.resizable().scaledToFill() }
-              else { Rectangle().fill(.quaternary).overlay { Image(systemName: "photo") } }
-            }.frame(width: geometry.size.width, height: geometry.size.height).clipped()
-          }.aspectRatio(1, contentMode: .fit).overlay(alignment: .bottomTrailing) { selectionMark }
-        }.buttonStyle(.plain).accessibilityLabel(photo.metadata.filename).accessibilityValue(selected ? "Selected" : "")
+          VStack(alignment: .leading, spacing: 0) {
+            GeometryReader { geometry in
+              LazyImage(url: photo.thumbnailURL ?? photo.previewURL) { state in
+                if let image = state.image { image.resizable().scaledToFill() }
+                else { Rectangle().fill(.quaternary).overlay { Image(systemName: "photo") } }
+              }.frame(width: geometry.size.width, height: geometry.size.height).clipped()
+            }.aspectRatio(1, contentMode: .fit).overlay(alignment: .bottomTrailing) { selectionMark }
+            reason
+          }
+        }.buttonStyle(.plain).accessibilityLabel(photo.metadata.filename).accessibilityValue(selectionValue)
           .contextMenu {
             if let toggleSaved { Button(selected ? "Deselect" : "Select") { toggleSaved(photo) } }
           }
@@ -157,6 +183,15 @@ private struct ConsumerSearchCell: View {
   }
   @ViewBuilder private var selectionMark: some View {
     if selected { Image(systemName: "checkmark.circle.fill").padding(8) }
+  }
+  @ViewBuilder private var reason: some View {
+    if !reasons.isEmpty {
+      Text(reasons.prefix(2).joined(separator: " · "))
+        .font(.caption).foregroundStyle(.secondary).padding(8)
+    }
+  }
+  private var selectionValue: String {
+    (selected ? ["Selected"] + reasons : reasons).joined(separator: " · ")
   }
 }
 
