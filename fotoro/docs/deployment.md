@@ -40,6 +40,16 @@ seamless-home source keeps these API bindings and migrations. Its visual
 readers are ready, but outgoing scene metadata is disabled so installed strict
 v1 readers can still refresh Saved. Scene publication requires qualification
 of installed native readers before activation.
+
+The seamless-home Worker `7f78c6a7-70fc-4dea-886d-e9b0774e25e0`, tagged
+`seamless-home-20261004`, is prepared from the current source. Deploy only after
+its exact-head checks and merge; its rollback target is
+`103856a0-471a-4702-891d-91278059de0d`. Full build 26 archives and passes the
+source, identity, production-domain, dSYM and retained-crypto audit. Its export
+is pending restoration of the existing Xcode developer account: the account
+list is empty and the cached profile uses Cloud Managed Apple Distribution.
+Build 25 remains the verified TestFlight build until the exact build 26 IPA
+is distribution-signed, Apple-validated, uploaded and read back.
 All published JS/CSS and entry HTML match the reviewed build byte for byte.
 Public production checks verify responsive browsing and a fresh-browser
 same-password restore of an unchanged original. The native follow-up makes

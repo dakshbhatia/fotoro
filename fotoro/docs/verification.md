@@ -28,10 +28,23 @@ account/source fences. Adjusted Photos renditions are excluded from automatic
 analysis publication because the saved bytes are the unadjusted original.
 Manual Save changes retains its existing explicit behavior.
 
-Core and API checks pass, including 68 API tests. Four isolated D1/R2 integration
-checks restore identical JPEG, PNG and HEIC bytes in a fresh session. Final web,
-compiled native, distribution and deployment receipts are being completed for
-this source; build 25 remains the latest verified internal TestFlight build.
+Verification passes 20 core, 68 API, 290 web and 28 release-metadata tests,
+typechecks and the production web build. Four isolated D1/R2 checks restore
+identical JPEG, PNG and HEIC bytes in a fresh session. Full native verification
+passes 290 of 291 tests; local preview passes 97 of 98. Each suite has one known
+iOS 27 Vision inference-context skip and no failures. The emitted startup graph
+is 353,826 bytes across three chunks, inside its 500 KiB budget.
+
+Full build 26 archives with all 57 source inputs frozen, production associated
+domains, matching dSYM and full static encryption verified. Distribution export
+is pending: Xcode now has an empty developer-account list, while the existing
+App Store profile requires Cloud Managed Apple Distribution. Restoring the same
+Xcode account is required; cached profiles cannot replace that cloud private key.
+Build 25 remains the latest verified internal TestFlight build.
+
+The seamless-home Worker version 7f78c6a7-70fc-4dea-886d-e9b0774e25e0 is prepared
+from this source. Activation follows exact-head CI and merge; rollback is the
+preceding live version 103856a0-471a-4702-891d-91278059de0d.
 
 The preceding PR 27 checkpoint is merged at
 72207e4612e2f2e9ac8f07497d75143fbe2db80b and main CI 37213350159 passes.
@@ -43,7 +56,8 @@ installation, personal phone-to-Safari acceptance and device performance remain
 unverified; build 21 is the last verified physical installation.
 
 ## Previous release evidence
-The current source adds one explicit Turn on sync choice on iPhone. Consent is
+
+The preceding source adds one explicit Turn on sync choice on iPhone. Consent is
 persisted per account and API origin; Pause survives reopening. The existing
 serial backup and encrypted journal cover permitted supported still photos of
 any age. New preparation requires the app open and unlocked; iOS can finish
