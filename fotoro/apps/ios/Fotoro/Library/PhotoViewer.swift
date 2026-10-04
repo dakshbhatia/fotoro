@@ -196,29 +196,69 @@ private struct SavedPhotoPage: View {
   let receivedCards: [String: AccountCardV1]?
   @State private var loaded: LocalPhoto?
   @State private var failed = false
+  @State private var retry = 0
+  private var request: SavedPreviewReadIdentity {
+    SavedPreviewReadIdentity(photo: photo, account: services.session.accountId,
+      vault: services.vault.generation, catalog: ObjectIdentifier(services.store),
+      grant: receivedGrant, cards: receivedCards, retry: retry)
+  }
+  private var displayed: LocalPhoto {
+    guard let loaded, loaded.metadata == photo.metadata, loaded.manifest == photo.manifest else { return photo }
+    return loaded
+  }
   var body: some View {
-    LazyImage(url: (loaded ?? photo).previewURL ?? (loaded ?? photo).originalURL ?? photo.thumbnailURL) { state in
-      if let image = state.image { image.resizable().scaledToFit() }
-      else if failed || state.error != nil {
-        Label("Preview unavailable", systemImage: "icloud.slash").foregroundStyle(.white)
+    LazyImage(url: displayed.previewURL ?? displayed.originalURL ?? photo.thumbnailURL) { state in
+      ZStack(alignment: .bottom) {
+        if let image = state.image { image.resizable().scaledToFit() }
+        else if !failed && state.error == nil { ProgressView().tint(.white) }
+        if failed || state.error != nil {
+          VStack(spacing: 8) {
+            Label("Preview unavailable", systemImage: "icloud.slash")
+            Button("Try again") { retry += 1 }
+              .accessibilityIdentifier("viewer.preview.retry")
+          }.padding().background(.regularMaterial, in: .rect(cornerRadius: 16)).padding()
+        }
       }
-      else { ProgressView().tint(.white) }
-    }.accessibilityLabel(photo.metadata.filename)
-      .task(id: photo.id) {
+    }.id(retry).accessibilityLabel(photo.metadata.filename)
+      .task(id: request) {
+        let identity = request
+        failed = false
+        loaded = nil
         do {
           if let receivedGrant {
             guard services.isReceivedGrantCurrent(receivedGrant), services.session.pinnedCards == receivedCards else { throw CancellationError() }
           }
           try await services.ensurePreview(photo)
           try Task.checkCancellation()
+          guard request == identity else { throw CancellationError() }
           if let receivedGrant {
             guard services.isReceivedGrantCurrent(receivedGrant), services.session.pinnedCards == receivedCards,
               let current = services.received.first(where: { $0.id == photo.id && $0.metadata == photo.metadata && $0.manifest == photo.manifest })
             else { throw CancellationError() }
             loaded = current
           } else { loaded = try services.consumerSavedPhoto(photo.id) }
-        } catch is CancellationError {} catch { failed = true }
+        } catch is CancellationError {} catch {
+          if !Task.isCancelled, request == identity { failed = true }
+        }
       }
+  }
+}
+
+private struct SavedPreviewReadIdentity: Equatable {
+  var photoID: String
+  var metadata: PhotoMetadataV1
+  var manifest: PhotoManifestV1
+  var account: String?
+  var vault: UUID
+  var catalog: ObjectIdentifier
+  var grant: GrantV1?
+  var cards: [String: AccountCardV1]?
+  var retry: Int
+  init(photo: LocalPhoto, account: String?, vault: UUID, catalog: ObjectIdentifier,
+    grant: GrantV1?, cards: [String: AccountCardV1]?, retry: Int) {
+    photoID = photo.id; metadata = photo.metadata; manifest = photo.manifest
+    self.account = account; self.vault = vault; self.catalog = catalog
+    self.grant = grant; self.cards = cards; self.retry = retry
   }
 }
 

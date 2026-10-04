@@ -521,6 +521,135 @@ private final class AuthTimeoutProtocol: URLProtocol, @unchecked Sendable {
 }
 
 extension ConsumerCoreTests {
+  @MainActor func testSavedCatalogSearchHidesPreviousQueryBeforeStartingAndRejectsLateCompletion() async throws {
+    try await withSavedLibrary { services, _ in
+      var first = try self.samplePhoto(), second = try self.samplePhoto(), third = try self.samplePhoto()
+      first.manifest.ownerAccountId = services.session.accountId!
+      second.manifest.ownerAccountId = services.session.accountId!
+      third.manifest.ownerAccountId = services.session.accountId!
+      first.metadata.filename = "first.jpg"; second.metadata.filename = "second.jpg"; third.metadata.filename = "third.jpg"
+      try services.store.put(first); try services.store.put(second); try services.store.put(third); try services.reload()
+      let search = SavedCatalogSearch(), gate = SavedCatalogSearchGate()
+      var current = self.savedSearchID("first", services: services)
+      await search.search(current, current: { current }) { try await services.searchCatalog("first") }
+      XCTAssertEqual(search.results(for: current)?.map(\.id), [first.id])
+      current = self.savedSearchID("second", services: services)
+      XCTAssertNil(search.results(for: current), "Changing the field must hide the prior query before its task starts")
+      XCTAssertTrue(search.isPending(current))
+      let secondID = current
+      let older = Task { await search.search(secondID, current: { current }) { try await gate.read("second") } }
+      try await self.waitForSavedSearch(gate, request: "second")
+      current = self.savedSearchID("third", services: services)
+      let thirdID = current
+      let latest = Task { await search.search(thirdID, current: { current }) { try await gate.read("third") } }
+      try await self.waitForSavedSearch(gate, request: "third")
+      await gate.finish("second", photos: [second])
+      await older.value
+      XCTAssertNil(search.results(for: current))
+      XCTAssertTrue(search.isPending(current), "The cancelled query cannot finish the newer query's progress")
+      await gate.finish("third", photos: [third])
+      await latest.value
+      XCTAssertEqual(search.results(for: current)?.map(\.id), [third.id])
+      XCTAssertFalse(search.isPending(current))
+      XCTAssertNil(search.failure(for: current))
+    }
+  }
+  @MainActor func testSavedCatalogSearchFailureCanRetryWhileKeepingOnlyCurrentCompletedMatches() async throws {
+    try await withSavedLibrary { services, _ in
+      var photo = try self.samplePhoto()
+      photo.manifest.ownerAccountId = services.session.accountId!
+      try services.store.put(photo); try services.reload()
+      let search = SavedCatalogSearch(), gate = SavedCatalogSearchGate()
+      var current = self.savedSearchID("receipt", services: services)
+      await search.search(current, current: { current }) { try await services.searchCatalog("receipt") }
+      await search.search(current, current: { current }) { throw FotoroError("CONTROLLED_SEARCH_UNAVAILABLE") }
+      XCTAssertEqual(search.results(for: current)?.map(\.id), [photo.id])
+      XCTAssertFalse(search.isPending(current))
+      XCTAssertEqual(search.failure(for: current), "CONTROLLED_SEARCH_UNAVAILABLE")
+      let retryID = current
+      let retry = Task { await search.search(retryID, current: { current }) { try await gate.read("retry") } }
+      try await self.waitForSavedSearch(gate, request: "retry")
+      XCTAssertTrue(search.isPending(current))
+      XCTAssertNil(search.failure(for: current))
+      XCTAssertEqual(search.results(for: current)?.map(\.id), [photo.id], "A same-binding retry keeps the useful completed answer")
+      await gate.finish("retry", photos: [])
+      await retry.value
+      XCTAssertTrue(search.hasCompleted(current))
+      XCTAssertEqual(search.results(for: current)?.count, 0, "A finished empty answer differs from pending or failed work")
+      XCTAssertFalse(search.isPending(current))
+      current = self.savedSearchID("other", services: services)
+      await search.search(current, current: { current }) { throw FotoroError("CONTROLLED_SEARCH_UNAVAILABLE") }
+      XCTAssertNil(search.results(for: current))
+      XCTAssertFalse(search.hasCompleted(current))
+      XCTAssertFalse(search.isPending(current))
+      XCTAssertEqual(search.failure(for: current), "CONTROLLED_SEARCH_UNAVAILABLE")
+    }
+  }
+  @MainActor func testSavedCatalogSearchCatalogAndAccountBindingsFenceResultsAndLateErrors() async throws {
+    try await withSavedLibrary { services, _ in
+      var photo = try self.samplePhoto()
+      photo.manifest.ownerAccountId = services.session.accountId!
+      try services.store.put(photo); try services.reload()
+      let search = SavedCatalogSearch(), gate = SavedCatalogSearchGate()
+      var current = self.savedSearchID("receipt", services: services)
+      await search.search(current, current: { current }) { try await services.searchCatalog("receipt") }
+      let previous = current
+      let outdated = Task { await search.search(previous, current: { current }) { try await gate.read("outdated") } }
+      try await self.waitForSavedSearch(gate, request: "outdated")
+      photo.metadata.filename = "other.jpg"
+      try services.store.put(photo); try services.reload()
+      current = self.savedSearchID("receipt", services: services)
+      XCTAssertNotEqual(current.catalog, previous.catalog)
+      XCTAssertNil(search.results(for: current), "Same query does not make older catalog matches current")
+      await gate.fail("outdated")
+      await outdated.value
+      XCTAssertNil(search.failure(for: current), "A previous catalog's failure cannot replace the new query state")
+      await search.search(current, current: { current }) { try await services.searchCatalog("receipt") }
+      XCTAssertEqual(search.results(for: current)?.count, 0)
+
+      let completed = current
+      try services.activateAccount()
+      current = self.savedSearchID("receipt", services: services)
+      XCTAssertEqual(current.binding.account, completed.binding.account)
+      XCTAssertEqual(current.binding.vault, completed.binding.vault)
+      XCTAssertNotEqual(current.binding.catalog, completed.binding.catalog)
+      XCTAssertNil(search.results(for: current), "Replacing a store in the same account starts a new presentation binding")
+      var changedAccount = completed
+      changedAccount.binding.account = Wire.id()
+      XCTAssertNil(search.results(for: changedAccount))
+      services.vault.lock()
+      current = self.savedSearchID("receipt", services: services)
+      XCTAssertNotEqual(current.binding.vault, completed.binding.vault)
+      XCTAssertNil(search.results(for: current))
+    }
+  }
+  @MainActor func testSavedCatalogSearchCancellationCannotPublishOrSurfaceFailure() async throws {
+    try await withSavedLibrary { services, _ in
+      let search = SavedCatalogSearch(), gate = SavedCatalogSearchGate()
+      let current = self.savedSearchID("receipt", services: services)
+      let reading = Task { await search.search(current, current: { current }) { try await gate.read("cancelled") } }
+      try await self.waitForSavedSearch(gate, request: "cancelled")
+      reading.cancel()
+      search.cancel(clearResults: true)
+      await gate.fail("cancelled")
+      await reading.value
+      XCTAssertNil(search.results(for: current))
+      XCTAssertFalse(search.hasCompleted(current))
+      XCTAssertNil(search.failure(for: current))
+    }
+  }
+  @MainActor private func savedSearchID(_ query: String, services: AppServices) -> SavedCatalogSearchPresentationID {
+    SavedCatalogSearchPresentationID(query: query, catalog: services.consumerCatalogGeneration,
+      binding: SavedLibraryOpenBinding(services))
+  }
+  @MainActor private func waitForSavedSearch(_ gate: SavedCatalogSearchGate, request: String) async throws {
+    for _ in 0..<200 {
+      if await gate.started(request) { return }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    XCTFail("Saved search did not reach its controlled read: \(request)")
+    throw CancellationError()
+  }
   @MainActor func testExplicitSavedLibraryOpenFetchesCatalogWithoutSendingQueuedOriginalsOrLocalDrafts() async throws {
     let gate = SavedLibraryRequestGate(started: expectation(description: "Explicit catalog read started"))
     defer { gate.release.signal() }
@@ -786,6 +915,20 @@ extension ConsumerCoreTests {
     try services.activateAccount()
     try await check(services, server)
   }
+}
+
+private actor SavedCatalogSearchGate {
+  private var requests: Set<String> = []
+  private var waiting: [String: CheckedContinuation<[LocalPhoto], Error>] = [:]
+  func read(_ request: String) async throws -> [LocalPhoto] {
+    try await withCheckedThrowingContinuation { continuation in
+      waiting[request] = continuation
+      requests.insert(request)
+    }
+  }
+  func started(_ request: String) -> Bool { requests.contains(request) }
+  func finish(_ request: String, photos: [LocalPhoto]) { waiting.removeValue(forKey: request)?.resume(returning: photos) }
+  func fail(_ request: String) { waiting.removeValue(forKey: request)?.resume(throwing: FotoroError("CONTROLLED_SEARCH_UNAVAILABLE")) }
 }
 
 private final class SavedLibraryRequestGate: @unchecked Sendable {

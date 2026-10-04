@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from "react";
 import { photoBytes, type Photo } from "./catalog";
-import { mediaURL } from "../vault/vault";
 import { Icon } from "./icons";
 import { saveReceivedPhoto } from "../exchange/share-service";
 import {readableShareError} from "../exchange/sharing";
@@ -9,6 +8,7 @@ import {sameVault} from "../vault/scope";
 import {canShareOriginal, downloadOriginal, OriginalShareAttempt} from "./system-share";
 import {useDialogFocus} from "./dialog-focus";
 import {photoChangeState, type ConsumerPhotoChanges} from "./consumer-changes";
+import {failedViewerPreview, readViewerPreview, viewerPreviewSource, type ViewerPreview} from "./viewer-preview";
 export function viewerPhotoIndex(photos: Photo[], selected: string) {
   return Math.max(0, photos.findIndex(photo => photo.manifest.photoId === selected));
 }
@@ -32,7 +32,8 @@ export function Viewer({
   changes?: ConsumerPhotoChanges;
 }) {
   const [selected, setSelected] = useState(initial),
-    [url, setUrl] = useState(""),
+    [preview, setPreview] = useState<ViewerPreview>(),
+    [previewAttempt, setPreviewAttempt] = useState(0),
     [zoom, setZoom] = useState(false),
     [details, setDetails] = useState(false),
     [status, setStatus] = useState(""),
@@ -48,6 +49,9 @@ export function Viewer({
   const touch = useRef<{ x: number; y: number } | undefined>(undefined);
   const panel = useRef<HTMLDivElement>(null), originalPanel = useRef<HTMLElement>(null), originalButton = useRef<HTMLButtonElement>(null), hadOriginalOptions = useRef(false);
   const index = viewerPhotoIndex(photos, selected), photo = photos[index];
+  const previewSource = photo ? viewerPreviewSource(photo) : "";
+  const currentPreviewSource = useRef(previewSource);
+  currentPreviewSource.current = previewSource;
   const currentPhoto = useRef(photo), mounted = useRef(false), shareGeneration = useRef(0), savingRef = useRef(false);
   const savingChangesRef = useRef(false);
   currentPhoto.current = photo;
@@ -79,33 +83,33 @@ export function Viewer({
   }, [photo]);
   useEffect(() => {
     if (!photo) return;
-    let alive = true;
     setLabel("");
-    setUrl("");
     setStatus("");
     setEditError("");
     setSaveState("idle");
     setZoom(false);
-    photoBytes(photo, "preview")
-      .then((bytes) => {
-        if (alive)
-          setUrl(
-            mediaURL(
-              photo.manifest.photoId + ":preview",
-              bytes,
-              "image/jpeg",
-              1600 * 1600 * 4,
-            ),
-          );
-      })
-      .catch((e) => {
-        if (alive) setStatus(e.message);
-      });
+  }, [photo?.manifest.photoId]);
+  useEffect(() => {
+    if (!photo) return;
+    let session: UnlockedVault;
+    try {session = requireVault();} catch {return;}
+    const controller = new AbortController(), source = previewSource;
+    let alive = true;
+    const current = () => alive && mounted.current && currentPreviewSource.current === source && sameVault(session);
+    setPreview({source, state: "loading"});
+    void readViewerPreview(photo, controller.signal, current).then(url => {
+      if (url && current()) setPreview({source, state: "ready", url});
+    }).catch(() => {
+      if (!controller.signal.aborted && current()) setPreview({source, state: "failed"});
+    });
     return () => {
       alive = false;
+      controller.abort();
     };
-  }, [photo?.manifest.photoId]);
+  }, [previewSource, previewAttempt]);
   if (!photo) return null;
+  const previewState = preview?.source === previewSource ? preview.state : "loading";
+  const previewURL = previewState === "ready" ? preview?.url : undefined;
   const correction = photoChangeState(photo.grantId ? undefined : changes, photo.manifest.photoId, photo.metadata.originalSha256, photo.manifest.ownerAccountId);
   const applyChange = async (action: () => void | Promise<unknown>) => {
     const source = photo;
@@ -152,15 +156,16 @@ export function Viewer({
         <button onClick={onClose} aria-label="Close viewer">
           <Icon kind="close" />
         </button>
-        <span>
+        {photos.length > 1 && <span>
           {index + 1} / {photos.length}
-        </span>
+        </span>}
         <button onClick={() => setDetails(!details)} aria-label="Photo details" aria-expanded={details}>
           <Icon kind="info" />
         </button>
       </div>
       <div
         className="view-image"
+        aria-busy={previewState === "loading"}
         inert={prepared ? true : undefined}
         onTouchStart={(e) => {
           if (e.touches.length === 1)
@@ -181,22 +186,29 @@ export function Viewer({
         }}
         onDoubleClick={() => setZoom(!zoom)}
       >
-        {url && (
+        {previewURL ? (
           <img
             className={zoom ? "zoomed" : ""}
-            src={url}
+            src={previewURL}
             alt={photo.metadata.filename}
+            onError={() => {
+              if (mounted.current && currentPreviewSource.current === previewSource)
+                setPreview(previous => failedViewerPreview(previous, previewSource, previewURL));
+            }}
           />
-        )}
+        ) : previewState === "failed" ? <div>
+          <p role="status">Photo preview unavailable.</p>
+          <button onClick={() => {setPreview({source: previewSource, state: "loading"}); setPreviewAttempt(attempt => attempt + 1);}}>Retry</button>
+        </div> : <p role="status">Opening photo…</p>}
       </div>
       <div className="viewer-bottom glass" inert={prepared ? true : undefined}>
-        <button
+        {photos.length > 1 && <button
           disabled={index === 0}
           onClick={() => setSelected(photos[index - 1].manifest.photoId)}
           aria-label="Previous photo"
         >
           <Icon kind="previous" />
-        </button>
+        </button>}
         <button onClick={() => setZoom(!zoom)}>{zoom ? "Fit" : "Zoom"}</button>
         {onShare && !photo.grantId && <button onClick={() => onShare(photo)}>Share in Fotoro</button>}
         <button
@@ -214,13 +226,13 @@ export function Viewer({
             {saving ? "Saving…" : saveState === "saved" ? "Saved" : saveState === "failed" ? "Retry Save" : "Save"}
           </button>
         )}
-        <button
+        {photos.length > 1 && <button
           disabled={index === photos.length - 1}
           onClick={() => setSelected(photos[index + 1].manifest.photoId)}
           aria-label="Next photo"
         >
           <Icon kind="next" />
-        </button>
+        </button>}
       </div>
       {prepared && prepared.photo === photo && sameVault(prepared.session) && <aside className="original-share" ref={originalPanel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Share original">
         <button className="close" aria-label="Close share options" onClick={() => setPrepared(null)}><Icon kind="close" /></button>
