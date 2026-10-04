@@ -206,6 +206,25 @@ final class RecentPhotosTests: XCTestCase {
     XCTAssertTrue(current.selectedIDs.isEmpty)
     XCTAssertFalse(current.shareIsCurrent)
   }
+  @MainActor func testPhotosValidationWithdrawsOnlySharesWithDeviceSources() {
+    var permission = PHAuthorizationStatus.denied
+    let source = RecentPhotoSource(id: "photo", revision: "original")
+    var revision = source.revision
+    var lookups = 0
+    let store = RecentPhotosStore(authorization: { permission }, sourceRevisions: { _ in
+      lookups += 1
+      return [source.id: revision]
+    })
+    let savedOnly = store.validatePresentation(viewer: [], selection: [], share: [])
+    XCTAssertFalse(savedOnly.withdrawsDeviceShare([]), "Photos permission does not own a Saved-only share")
+    let deviceShare = store.validatePresentation(viewer: [], selection: [], share: [source])
+    XCTAssertTrue(deviceShare.withdrawsDeviceShare([source]), "A device or mixed share still requires Photos access")
+    XCTAssertEqual(lookups, 0)
+    permission = .limited
+    XCTAssertFalse(store.validatePresentation(viewer: [], selection: [], share: [source]).withdrawsDeviceShare([source]))
+    revision = "edited"
+    XCTAssertTrue(store.validatePresentation(viewer: [], selection: [], share: [source]).withdrawsDeviceShare([source]))
+  }
   func testSavedViewerPreservesCacheRefreshButWithdrawsChangedMissingAndUnavailableSources() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
     defer { try? FileManager.default.removeItem(at: root) }

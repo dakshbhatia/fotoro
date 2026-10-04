@@ -51,9 +51,10 @@ English text using Vision on one bounded local preview at a time. Local Vision
 classification adds conservative scene categories with separate “Inferred scene”
 evidence. Date searches include today, yesterday, last week and explicit date
 ranges, with calendar/timezone boundaries. Scene classification failures preserve
-text search. Visual similarity also uses Apple's pinned MobileCLIP S0 CoreML model
-on bounded device and saved previews. Its public model files download once, about
-103 MiB; queries, photo pixels and vectors stay on the device. Dates, labels and
+text search. Visual similarity uses a pinned MIT-licensed TinyCLIP ViT-39M/16
+Text-19M Core ML conversion on bounded device and saved previews. Its public model
+packages download once, about 112.9 MiB before compilation; queries, photo pixels
+and vectors stay on the device. Dates, labels and
 recognized text continue working while the model prepares. Explicitly chosen
 search meanings are preserved. This does not establish named person identity. Indexing does
 not download iCloud originals. Local search lives in a protected database excluded
@@ -90,10 +91,17 @@ previews require reselecting the original before upload. This selector is curren
 implemented in both the browser and native app. Both support a reviewed subset;
 native selection can also save older permitted search results from their viewer.
 
-Browser visual similarity runs MobileCLIP S0 in a lazy worker, with quantized text
-and full-precision image inference. Pinned public model files total about 86.4 MiB,
-plus the browser runtime. Model downloads are cached; private photo pixels and
+Browser visual similarity runs MIT-licensed TinyCLIP ViT-8M/16 Text-3M with a
+quantized ONNX graph in a lazy worker. Pinned model and tokenizer files total
+26.6 MiB, plus 12.0 MiB of runtime files on Safari or 21.8 MiB on other browsers.
+These cold downloads are separate from local browsing startup: the current build's
+static JavaScript graph is 364,013 bytes across three chunks, within the 500 KiB
+guard. Model downloads are cached; private photo pixels and
 queries are never uploaded. Vectors are session-only and cleared when access locks.
+Native and browser vectors use separate model identities and are never compared
+across processors. The native Core ML conversion is a community artifact with
+pinned source hashes; its conversion has not been independently reproduced.
+See [model provenance and licenses](docs/foundation.md).
 The real-model smoke check verifies one public scene against contrasting queries;
 held-out retrieval accuracy and device latency still need measurement.
 

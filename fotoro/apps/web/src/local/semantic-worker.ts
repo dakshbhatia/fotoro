@@ -1,4 +1,4 @@
-import {AutoTokenizer, AutoProcessor, CLIPTextModelWithProjection, CLIPVisionModelWithProjection, RawImage, env} from "@huggingface/transformers";
+import {AutoTokenizer, AutoProcessor, CLIPModel, RawImage, Tensor, env} from "@huggingface/transformers";
 import {SEMANTIC_MODEL, SEMANTIC_REVISION, semanticAssetFetch, semanticAssetCache, semanticWasmRuntime, retryableSemanticModels, zeroSemanticPadding} from "./semantic-config";
 env.allowLocalModels = false;
 // Transformers 4 tokenizer discovery omits its caller's revision. Fence every Hub path here.
@@ -21,14 +21,19 @@ const prepare = retryableSemanticModels(async () => {
     const options = {revision: SEMANTIC_REVISION, device: "wasm" as const};
     const parts = await Promise.allSettled([
       AutoTokenizer.from_pretrained(SEMANTIC_MODEL, options), AutoProcessor.from_pretrained(SEMANTIC_MODEL, options),
-      CLIPTextModelWithProjection.from_pretrained(SEMANTIC_MODEL, {...options, dtype: "q8"}),
-      CLIPVisionModelWithProjection.from_pretrained(SEMANTIC_MODEL, {...options, dtype: "fp32"})] as const);
+      CLIPModel.from_pretrained(SEMANTIC_MODEL, {...options, dtype: "q8"})] as const);
     if (parts.some(part => part.status === "rejected")) {
       await Promise.allSettled(parts.map(part => part.status === "fulfilled" && "dispose" in part.value ? part.value.dispose() : Promise.resolve()));
       throw new Error("Visual search is unavailable.");
     }
     const value = <T>(part: PromiseSettledResult<T>) => {if (part.status !== "fulfilled") throw new Error("Visual search is unavailable."); return part.value;};
-    return {tokenizer: value(parts[0]), processor: value(parts[1]), text: value(parts[2]), image: value(parts[3])};
+    const tokenizer = value(parts[0]);
+    const neutralText = tokenizer("", {padding: "max_length", max_length: 77, truncation: true});
+    zeroSemanticPadding(neutralText);
+    // The official conversion has one graph. Each encoder's embedding is independent of
+    // the other modality; neutral inputs let us reuse it for private cached vectors.
+    return {tokenizer, processor: value(parts[1]), model: value(parts[2]), neutralText,
+      neutralImage: {pixel_values: new Tensor("float32", new Float32Array(3 * 224 * 224), [1, 3, 224, 224])}};
 });
 let queue = Promise.resolve();
 let cancelledThrough = 0;
@@ -45,11 +50,11 @@ self.onmessage = event => {
         if (typeof message.text !== "string") throw new Error("Invalid query");
         const inputs = model.tokenizer(message.text.slice(0, 2048), {padding: "max_length", max_length: 77, truncation: true});
         zeroSemanticPadding(inputs);
-        const output = await model.text(inputs); values = output.text_embeds.data;
+        const output = await model.model({...inputs, ...model.neutralImage}); values = output.text_embeds.data;
       } else {
         const image = await RawImage.fromBlob(message.blob);
         const inputs = await model.processor(image);
-        const output = await model.image(inputs); values = output.image_embeds.data;
+        const output = await model.model({...model.neutralText, ...inputs}); values = output.image_embeds.data;
       }
       const vector = Float32Array.from(values);
       if (message.id <= cancelledThrough) return;

@@ -203,17 +203,17 @@ enum ReviewedPhotosBackupPolicy {
       savedVisualTask = Task { [weak self] in
         guard let self else { return }
         defer { if savedVisualWork == work { savedVisualTask = nil } }
-        func current() -> Bool {
+        @MainActor func current() -> Bool {
           !Task.isCancelled && savedVisualWork == work && vault.isUnlocked && vault.generation == generation
             && store === catalog && session.accountId == account && photoSyncForeground
         }
-        func notifyProgress() {
+        @MainActor func notifyProgress() {
           let snapshotWasCurrent = savedVisualCatalogGeneration == consumerCatalogGeneration
           consumerCatalogGeneration &+= 1
           if snapshotWasCurrent { savedVisualCatalogGeneration = consumerCatalogGeneration }
         }
         do {
-          try await MobileCLIPProcessor.shared.prepare()
+          try await PhotoSemanticProcessor.shared.prepare()
           guard current() else { return }
           let pending = try await Task.detached { try index.pendingSemanticRecords() }.value
           var completed = 0
@@ -227,7 +227,7 @@ enum ReviewedPhotosBackupPolicy {
                 let url = updated.previewURL,
                 let preview = try await Self.semanticPreview(url) else { continue }
               guard current() else { return }
-              let vector = try await MobileCLIPProcessor.shared.image(preview)
+              let vector = try await PhotoSemanticProcessor.shared.image(preview)
               guard current() else { return }
               _ = try await Task.detached {
                 try index.applySemantic(vector, photoID: record.id, revision: record.revision, generation: fence)
@@ -242,7 +242,7 @@ enum ReviewedPhotosBackupPolicy {
         } catch {}
       }
     }
-    guard let vector = try? await MobileCLIPProcessor.shared.textIfReady(phrase) else { return [] }
+    guard let vector = try? await PhotoSemanticProcessor.shared.textIfReady(phrase) else { return [] }
     let response = try await Task.detached(priority: .userInitiated) {
       let base = try index.search(query, scope: SearchScope(source: "saved"))
       return try index.addingSemantic(vector, to: base)
@@ -256,7 +256,7 @@ enum ReviewedPhotosBackupPolicy {
     savedVisualWork = UUID(); savedVisualTask?.cancel(); savedVisualTask = nil
     savedVisualFence &+= 1
     try? savedVisualIndex?.setWorkGeneration(savedVisualFence)
-    Task { await MobileCLIPProcessor.shared.clearQueryCache() }
+    Task { await PhotoSemanticProcessor.shared.clearQueryCache() }
   }
   private nonisolated static func semanticPreview(_ url: URL) async throws -> SearchPreview? {
     let worker = Task.detached(priority: .utility) { () throws -> SearchPreview? in

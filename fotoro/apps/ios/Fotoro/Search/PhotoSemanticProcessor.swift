@@ -4,7 +4,7 @@ import CryptoKit
 import Foundation
 
 enum SemanticVector {
-  static let processor = "mobileclip-s0-coreml-3e0a7bfb-crop256-v1"
+  static let processor = "tinyclip-39m-coreml-81f9caba-crop224-v1"
   static let dimensions = 512
   static func normalized(_ values: [Float]) -> [Float]? {
     guard values.count == dimensions, values.allSatisfy(\.isFinite) else { return nil }
@@ -38,11 +38,11 @@ enum SemanticVector {
 
 // Model files are public; photo pixels, queries and embeddings never leave this actor/device.
 // The pinned packages download once. A failed install leaves ordinary search available.
-actor MobileCLIPProcessor {
-  static let shared = MobileCLIPProcessor()
+actor PhotoSemanticProcessor {
+  static let shared = PhotoSemanticProcessor()
   private var imageModel: MLModel?
   private var textModel: MLModel?
-  private var tokenizer: MobileCLIPTokenizer?
+  private var tokenizer: CLIPTokenizer?
   private let context = CIContext(options: [.cacheIntermediates: false])
   private var installation: Task<URL, Error>?
   private var lastFailure: Date?
@@ -74,7 +74,7 @@ actor MobileCLIPProcessor {
       #endif
       imageModel = try MLModel(contentsOf: root.appendingPathComponent("image.mlmodelc"), configuration: config)
       textModel = try MLModel(contentsOf: root.appendingPathComponent("text.mlmodelc"), configuration: config)
-      tokenizer = try MobileCLIPTokenizer()
+      tokenizer = try CLIPTokenizer()
       installation = nil
     } catch {
       imageModel = nil; textModel = nil; tokenizer = nil
@@ -91,9 +91,9 @@ actor MobileCLIPProcessor {
     guard edge > 0 else { throw FotoroError("Photo preview is unavailable.") }
     let cropped = image.cropped(to: CGRect(x: extent.midX - edge / 2, y: extent.midY - edge / 2, width: edge, height: edge))
     let upright = cropped.transformed(by: CGAffineTransform(translationX: -cropped.extent.minX, y: -cropped.extent.minY))
-      .transformed(by: CGAffineTransform(scaleX: 256 / edge, y: 256 / edge))
+      .transformed(by: CGAffineTransform(scaleX: 224 / edge, y: 224 / edge))
     var buffer: CVPixelBuffer?
-    guard CVPixelBufferCreate(kCFAllocatorDefault, 256, 256, kCVPixelFormatType_32ARGB,
+    guard CVPixelBufferCreate(kCFAllocatorDefault, 224, 224, kCVPixelFormatType_32ARGB,
       [kCVPixelBufferCGImageCompatibilityKey: true, kCVPixelBufferCGBitmapContextCompatibilityKey: true] as CFDictionary, &buffer) == kCVReturnSuccess,
       let buffer else { throw FotoroError("Photo preview is unavailable.") }
     context.render(upright, to: buffer)
@@ -107,28 +107,30 @@ actor MobileCLIPProcessor {
     let tokens = try tokenizer.encode(text)
     let array = try MLMultiArray(shape: [1, 77], dataType: .int32)
     for (index, token) in tokens.enumerated() { array[index] = NSNumber(value: token) }
-    let input = try MLDictionaryFeatureProvider(dictionary: ["text": MLFeatureValue(multiArray: array)])
+    let input = try MLDictionaryFeatureProvider(dictionary: ["tokens": MLFeatureValue(multiArray: array)])
     let result = try vector(textModel.prediction(from: input))
     if textCache.count >= 16 { textCache.removeAll(keepingCapacity: true) }
     textCache[text] = result
     return result
   }
   private func vector(_ output: MLFeatureProvider) throws -> [Float] {
-    guard let array = output.featureValue(for: "final_emb_1")?.multiArrayValue,
+    guard let array = output.featureValue(for: "embedding")?.multiArrayValue,
       let values = SemanticVector.normalized((0..<array.count).map { array[$0].floatValue })
     else { throw FotoroError("Visual search output is invalid.") }
     try Task.checkCancellation()
     return values
   }
   private struct Asset: Sendable { let path: String; let bytes: Int; let digest: String }
-  private static let revision = "3e0a7bfb9fe83da8a3efaa3fd8f7df24214bb947"
+  // MIT TinyCLIP39M community Core ML conversion; source and conversion are pinned.
+  // See TinyCLIP-LICENSE.txt. Packages include RGB 1/255 + CLIP normalization.
+  private static let revision = "81f9cabad48edb0b78ac83e8ffb8039c9fda6cd1"
   private static let assets: [Asset] = [
-    Asset(path: "mobileclip_s0_image.mlpackage/Manifest.json", bytes: 617, digest: "fe07dde983dae92c1799132816ce55f9ff8487f2681b530abf7222025aa27fa4"),
-    Asset(path: "mobileclip_s0_image.mlpackage/Data/com.apple.CoreML/model.mlmodel", bytes: 153260, digest: "2c1afa132c41c6535817cc67894bd7484bc2cbd084ed5e2f12b24f611af17591"),
-    Asset(path: "mobileclip_s0_image.mlpackage/Data/com.apple.CoreML/weights/weight.bin", bytes: 22717696, digest: "87d8f63997bbd2f38ba7defeaaa2c571928bdece56aa9629542198b3ce906ed6"),
-    Asset(path: "mobileclip_s0_text.mlpackage/Manifest.json", bytes: 617, digest: "a7cb0864a627468a953afd107262097ad74a0fcf82e49df7e00b9c86385bb7db"),
-    Asset(path: "mobileclip_s0_text.mlpackage/Data/com.apple.CoreML/model.mlmodel", bytes: 57953, digest: "81eba836ff4dbc8ae021d70006288b533ba7eed3c2973d245b0d5ea047305bfd"),
-    Asset(path: "mobileclip_s0_text.mlpackage/Data/com.apple.CoreML/weights/weight.bin", bytes: 84871616, digest: "34723e51445b2630106e94e1fdbebed80e7676b404fb839f4eb9bec97bdcad68"),
+    Asset(path: "Image.mlpackage/Manifest.json", bytes: 617, digest: "500c1f477c4b51db7fb952981ec50b567ef1ecebf627c7755a56e214550e36f4"),
+    Asset(path: "Image.mlpackage/Data/com.apple.CoreML/model.mlmodel", bytes: 149414, digest: "5044b753a14d5878c39364c375fbc63d4639653293a09142eb0bee50318ae001"),
+    Asset(path: "Image.mlpackage/Data/com.apple.CoreML/weights/weight.bin", bytes: 29071936, digest: "62eebad13f401ccf016a1f1b6d8e4094a535d0dba232967df8418644383c9423"),
+    Asset(path: "Text.mlpackage/Manifest.json", bytes: 617, digest: "172335d9832c92741f2476bea67d91868b96ea92d0df6583231fec5bc3634d31"),
+    Asset(path: "Text.mlpackage/Data/com.apple.CoreML/model.mlmodel", bytes: 72169, digest: "95f55e40fbbf2b20fc018ee662db23bf33439e9ab466c19e0ca8699e52ad1060"),
+    Asset(path: "Text.mlpackage/Data/com.apple.CoreML/weights/weight.bin", bytes: 89047168, digest: "71b0b55b4cc5e1898b69266ade691095016db65d3c01a17a26b0532b81aa3e50"),
   ]
   private nonisolated static func install(in directory: URL) async throws -> URL {
     let root = directory.appendingPathComponent(revision, isDirectory: true)
@@ -147,7 +149,7 @@ actor MobileCLIPProcessor {
       try Task.checkCancellation()
       let target = root.appendingPathComponent(asset.path)
       if valid(target, asset: asset) { continue }
-      let source = URL(string: "https://huggingface.co/apple/coreml-mobileclip/resolve/\(revision)/\(asset.path)")!
+      let source = URL(string: "https://huggingface.co/nufrnd/lvc-tinyclip-coreml/resolve/\(revision)/\(asset.path)")!
       let (download, response) = try await session.download(from: source)
       defer { try? FileManager.default.removeItem(at: download) }
       guard (response as? HTTPURLResponse)?.statusCode == 200, valid(download, asset: asset) else {
@@ -160,7 +162,8 @@ actor MobileCLIPProcessor {
     }
     for kind in ["image", "text"] {
       try Task.checkCancellation()
-      let compiled = try MLModel.compileModel(at: root.appendingPathComponent("mobileclip_s0_\(kind).mlpackage"))
+      let package = kind == "image" ? "Image.mlpackage" : "Text.mlpackage"
+      let compiled = try MLModel.compileModel(at: root.appendingPathComponent(package))
       let target = root.appendingPathComponent("\(kind).mlmodelc")
       try? FileManager.default.removeItem(at: target)
       try FileManager.default.moveItem(at: compiled, to: target)

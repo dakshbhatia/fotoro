@@ -37,7 +37,7 @@ final class SemanticSearchTests: XCTestCase {
     catch is CancellationError {} catch { XCTFail("Unexpected cancellation error: \(error)") }
   }
   func testTokenizerMatchesCLIPAndBoundsLongUnicodeQueries() throws {
-    let tokenizer = try MobileCLIPTokenizer()
+    let tokenizer = try CLIPTokenizer()
     XCTAssertEqual(Array(try tokenizer.encode("a photo of a dog").prefix(7)), [49406, 320, 1125, 539, 320, 1929, 49407])
     let long = try tokenizer.encode(String(repeating: "birthday 🎂 café dog ", count: 1000))
     XCTAssertEqual(long.count, 77)
@@ -83,7 +83,7 @@ final class SemanticSearchTests: XCTestCase {
     XCTAssertNil(SemanticVector.values(Data(repeating: 0, count: 8)))
   }
   func testPinnedCoreMLModelRecognizesPublicFireworksFixture() async throws {
-    let processor = MobileCLIPProcessor.shared
+    let processor = PhotoSemanticProcessor.shared
     try await processor.prepare()
     let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "semantic-fireworks", withExtension: "jpg"))
     let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil))

@@ -32,6 +32,7 @@ jobs:
       - run: npm install --global pnpm@10.17.1
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
+      - run: pnpm test:search:visual
       - run: pnpm test:exchange:isolated
 
   ios:

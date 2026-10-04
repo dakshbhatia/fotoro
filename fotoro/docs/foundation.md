@@ -8,7 +8,7 @@ in place.
 | Need                                                                  | Current foundation                                                                                                                                |
 | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | iPhone navigation, contextual controls and sheets                     | SwiftUI system components and native Liquid Glass on iOS 26+                                                                                      |
-| Photos permission, asset metadata, HEIC/still previews and thumbnails | PhotoKit, `PHAsset`, `PHCachingImageManager` and Apple's decoder                                                                                  |
+| Photos permission, asset metadata, still/video/Live Photo previews and originals | PhotoKit, `PHAsset`, `PHAssetResourceManager`, Apple's decoder and AVFoundation                                                                  |
 | Original-file sharing                                                 | `PHAssetResourceManager` and `UIActivityViewController`; browser Web Share or download                                                            |
 | Browser grid and previews                                             | React, the existing virtualized layout and a bounded sequential image cache                                                                       |
 | Encrypted saving and exchange                                         | The existing Fotoro protocol, libsodium, GRDB, Hono, D1 and private R2; one-password accounts, chosen Save and account-scoped opt-in photo sync       |
@@ -24,14 +24,15 @@ the photo grid stays plain. We use system components before custom effects.
 The local browser and encrypted catalog remain separate stores. Opening account
 setup keeps the selected photos and uploads nothing; an explicit save starts the
 batch. Local OCR, metadata search and preview-based picks are implemented.
-Semantic visual search, named face recognition, trips and automatic cleanup
-remain outside this build.
+Visual similarity uses local TinyCLIP inference. Named face recognition, trips
+and automatic cleanup remain outside this build.
 
 ## Intelligence wiring — October 2026
 
 Find resolves eligible photos through the existing index. Best shots applies the
-versioned `quality-picks-v1` policy to that matching subset before grouping or
-computing a quota. Suggestions carry measured reasons and never become a Save
+versioned `moment-highlights-v2` policy to that matching subset before grouping
+capture-time moments and choosing diverse representatives. Suggestions carry
+measured reasons and never become a Save
 intent or replace a user's selection. Preview work is serial and cancellable;
 query, source revision, permission and account changes invalidate the result.
 The fixed `picks-v1.json` checks compose retrieval with shortlisting in CI.
@@ -44,13 +45,38 @@ it does not supply text embeddings or identify named people. Store any qualified
 representation in the existing revision-bound intelligence index, with request
 revision and processor version in its identity. Do not add a second index.
 
-For broader text/image retrieval, Google's published
-[SigLIP 2 model card](https://huggingface.co/google/siglip2-base-patch16-224)
-lists Apache-2.0 and image-text retrieval, making it a candidate for evaluation.
-It is not bundled: qualify a pinned converted artifact, tokenizer/preprocessing,
-size, memory, cold/warm latency and negative-query behavior on actual iPhone and
-Safari before selecting it. Apple's published
-[MobileCLIP2 model license](https://raw.githubusercontent.com/apple-aiml-research/ml-mobileclip/main/LICENSE_MODELS)
-excludes product development from its research grant, so those weights are not
-selected for this app. Cloud inference still requires explicit opt-in and a
-spending bound; ordinary browsing and local intelligence upload nothing.
+Text/image retrieval uses TinyCLIP. The [Microsoft MIT license](https://github.com/microsoft/Cream/blob/main/TinyCLIP/LICENSE)
+permits modification and redistribution, including commercial use, with its
+copyright and permission notice retained. The model publishers also mark the
+checkpoints and conversions MIT. The Apple/Hugging Face MIT software attribution
+for the reused CLIP tokenizer is retained separately; it does not grant rights to
+Apple's research-only model weights. Those weights are not used.
+
+The browser uses [TinyCLIP ViT-8M/16 Text-3M ONNX](https://huggingface.co/onnx-community/TinyCLIP-ViT-8M-16-Text-3M-YFCC15M-ONNX/tree/9463a9c508a344c837ffefe9d724f3827bf2dc79),
+revision `9463a9c508a344c837ffefe9d724f3827bf2dc79`, with one quantized graph.
+Pinned model/config/tokenizer files total 27,925,629 bytes. The separately loaded
+runtime adds 12,552,676 bytes on Safari or 22,867,301 bytes on other browsers.
+These are uncompressed asset sizes, excluding worker JavaScript and HTTP headers.
+The current local-browser static startup graph is 364,013 JavaScript bytes across
+three chunks; account crypto and semantic inference remain deferred. The startup
+test enforces a 500 KiB ceiling when build output is available.
+
+Native uses the [community TinyCLIP ViT-39M/16 Text-19M Core ML conversion](https://huggingface.co/nufrnd/lvc-tinyclip-coreml/tree/81f9cabad48edb0b78ac83e8ffb8039c9fda6cd1),
+revision `81f9cabad48edb0b78ac83e8ffb8039c9fda6cd1`. Its six package files total
+118,341,921 bytes, excluding bundled tokenizer resources and compiled model files.
+The publisher's [provenance record](https://huggingface.co/nufrnd/lvc-tinyclip-coreml/blob/81f9cabad48edb0b78ac83e8ffb8039c9fda6cd1/provenance.json)
+pins the author checkpoint `07a4b0bc751cb64fecd2b661c048c1dd98d69444`, conversion
+versions and source hashes. All four recorded source hashes match the pinned
+upstream artifacts, but the named conversion script was not publicly located;
+we have not independently reproduced the conversion. The package's MIT notice
+is retained. This is a community conversion, not an official Microsoft Core ML
+release.
+
+Both paths produce local 512-value vectors. Processor and source-revision fences
+keep old or different-model vectors out of rankings; native and browser vectors
+are not interchangeable or synced. Model file downloads contain no private photo
+pixels, queries or embeddings. Date, label and recognized-text search remains
+available if inference cannot prepare. A single public-image smoke test does not
+qualify held-out retrieval accuracy, memory, latency or thermal behavior on iPhone
+and Safari. Cloud inference still requires explicit opt-in and a spending bound;
+ordinary browsing and local intelligence upload nothing.

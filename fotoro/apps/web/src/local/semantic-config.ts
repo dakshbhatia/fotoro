@@ -1,18 +1,19 @@
-export const SEMANTIC_MODEL = "Xenova/mobileclip_s0";
-export const SEMANTIC_REVISION = "20c6e4f26ad3f7f7e9cde13c4f9bb54852dd42c6";
+// Official TinyCLIP weights and this ONNX conversion are MIT licensed.
+// Attribution and license are shipped at /third-party/TinyCLIP-LICENSE.txt.
+export const SEMANTIC_MODEL = "onnx-community/TinyCLIP-ViT-8M-16-Text-3M-YFCC15M-ONNX";
+export const SEMANTIC_REVISION = "9463a9c508a344c837ffefe9d724f3827bf2dc79";
 export const SEMANTIC_DIMENSIONS = 512;
-export const SEMANTIC_THRESHOLD = .20;
+export const SEMANTIC_THRESHOLD = .25;
 export const SEMANTIC_RUNTIME = "1.25.0-dev.20260327-722743c0e2";
 const modelRoot = `https://huggingface.co/${SEMANTIC_MODEL}/resolve/${SEMANTIC_REVISION}/`;
 const wasmRoot = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${SEMANTIC_RUNTIME}/dist/`;
 // SHA-256 and sizes come from this immutable Hub revision and the installed runtime package.
 const modelAssets = {
-  "config.json": [240, "9653c701b559b191c969929f640615ea386afb9d16deb08ba1520078bf4be23a"],
-  "preprocessor_config.json": [382, "b031f09fbd69e22a605b6cc7433993249ee893b7fc1b79321f669cd015493dd4"],
-  "tokenizer_config.json": [763, "a7d9d24f248071b792e4a3b56ab0539c2f40eec8da56d6fd91fb3a50058acebd"],
-  "tokenizer.json": [2224081, "72ed5c96db5729294468543e4bc75fce14ca63f58e37300290189ba1c1e52b85"],
-  "onnx/text_model_quantized.onnx": [42799238, "b8557b10e5c23a0126c6d2e6eba48d240484979007917d128953b31618a04211"],
-  "onnx/vision_model.onnx": [45543630, "17d3c037b1d488c10c50e09f6009ea5a198caef4e0e8f4ea5617b7cb2d067ac0"],
+  "config.json": [850, "0ca46b868f12305e959a1cfa2b8085e7bffd521f68769ec3bf2999986b55bec3"],
+  "preprocessor_config.json": [468, "5df7e578c37e907a431daf47fd592fc49fa50d23ed4c41285a0a34a58a9d2e06"],
+  "tokenizer_config.json": [726, "f97b07bf147d9e4dbdb5f98941d35fc0b9412263a183483f73893adf756ede3e"],
+  "tokenizer.json": [3642073, "6d9109cc838977f3ca94a379eec36aecc7c807e1785cd729660ca2fc0171fb35"],
+  "onnx/model_quantized.onnx": [24281512, "10921310ddef06557ec1598d1260470a0a4db53f70ffe0deb60b946dcad6d27a"],
 } as const;
 const wasmAssets = {
   "ort-wasm-simd-threaded.asyncify.mjs": [47396, "c7646f325a5e0e69861cde52218993a15b10046fec85bb6a8c4917474fe9af79"],

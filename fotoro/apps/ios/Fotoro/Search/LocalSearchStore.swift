@@ -43,7 +43,7 @@ struct SearchAnalysisProgress: Equatable, Sendable {
       return lexical
     #else
     let phrase = NaturalDateQuery.parse(value).text.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard accepted == nil, phrase.count >= 3, let vector = try? await MobileCLIPProcessor.shared.textIfReady(phrase) else { return lexical }
+    guard accepted == nil, phrase.count >= 3, let vector = try? await PhotoSemanticProcessor.shared.textIfReady(phrase) else { return lexical }
     try Task.checkCancellation()
     return try await Task.detached(priority: .userInitiated) { try index.addingSemantic(vector, to: lexical) }.value
     #endif
@@ -192,7 +192,7 @@ struct SearchAnalysisProgress: Equatable, Sendable {
       try onSnapshotReady?()
       // Ordinary metadata/OCR search stays available while the public model prepares.
       #if !FOTORO_LOCAL_PREVIEW
-        let semanticPreparation = Task { try? await MobileCLIPProcessor.shared.prepare() }
+        let semanticPreparation = Task { try? await PhotoSemanticProcessor.shared.prepare() }
       #endif
       // Snapshot the retry list once: another Vision failure waits for an explicit/foreground refresh.
       let pending = try await Task.detached { try localIndex.pendingAnalysisRecords(retryFailed: retryFailedOCR) }.value
@@ -263,7 +263,7 @@ struct SearchAnalysisProgress: Equatable, Sendable {
       await semanticPreparation.value
       try Task.checkCancellation()
       guard token == work.generation else { return }
-      if await MobileCLIPProcessor.shared.ready {
+      if await PhotoSemanticProcessor.shared.ready {
         let remaining = try await Task.detached { try localIndex.pendingSemanticRecords() }.value
         for record in remaining {
           try Task.checkCancellation()
@@ -272,7 +272,7 @@ struct SearchAnalysisProgress: Equatable, Sendable {
           guard let preview = await loadPreview(photo.asset) else { continue }
           try Task.checkCancellation()
           guard token == work.generation, assets[record.id]?.sourceRevision == record.revision else { break }
-          if let vector = try? await MobileCLIPProcessor.shared.image(preview) {
+          if let vector = try? await PhotoSemanticProcessor.shared.image(preview) {
             _ = try await Task.detached {
               try localIndex.applySemantic(vector, photoID: record.id, revision: record.revision, generation: token)
             }.value

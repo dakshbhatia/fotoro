@@ -1,9 +1,9 @@
 // CLIP byte-pair encoding adapted from Apple's MobileCLIP sample and
-// Hugging Face swift-coreml-transformers (MIT). See MobileCLIP-LICENSE.txt.
+// Hugging Face swift-coreml-transformers (MIT). See Apple-CLIP-Tokenizer-LICENSE.txt.
 // Copyright © 2024 Apple Inc.; © 2019–2023 Hugging Face.
 import Foundation
 
-struct MobileCLIPTokenizer {
+struct CLIPTokenizer {
   private struct Pair: Hashable { let a: String; let b: String }
   private let ranks: [Pair: Int]
   private let vocabulary: [String: Int]

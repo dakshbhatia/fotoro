@@ -1327,7 +1327,7 @@ struct RecentPhotosView: View {
     if previousCount > selectedPhotos.count {
       store.error = "Some selected photos changed or are no longer available."
     }
-    if !validation.shareIsCurrent {
+    if validation.withdrawsDeviceShare(shareSources + pending) {
       pendingShare = nil
       shareTask?.cancel()
       cleanupShare()
@@ -1564,6 +1564,12 @@ struct RecentPhotosView: View {
     }
   }
 #endif
+}
+
+extension RecentPhotosPresentationValidation {
+  func withdrawsDeviceShare(_ sources: [RecentPhotoSource]) -> Bool {
+    !sources.isEmpty && !shareIsCurrent
+  }
 }
 
 #if !FOTORO_LOCAL_PREVIEW

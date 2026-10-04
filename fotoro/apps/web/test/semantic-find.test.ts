@@ -136,11 +136,12 @@ test("asset fetch permits only verified public GETs and rejects tampered bytes, 
   assert.equal(metadata.status, 206); assert.equal(metadata.headers.get("Content-Range"), `bytes 0-0/${bytes.length}`); assert.equal(calls, 1);
   await assert.rejects(fetch(url, {method: "POST", body: "private photo"}), /only loads public/);
   await assert.rejects(fetch(url.replace(SEMANTIC_REVISION, "main")), /unavailable/);
+  await assert.rejects(fetch("https://huggingface.co/Xenova/mobileclip_s0/resolve/20c6e4f26ad3f7f7e9cde13c4f9bb54852dd42c6/onnx/text_model_quantized.onnx"), /unavailable/);
   assert.equal((await fetch(url.replace("config.json", "optional_processor.json"))).status, 404); assert.equal(calls, 1);
   await assert.rejects(verifySemanticAsset(url, new Response(new Uint8Array(bytes.length)), assets), /invalid/);
   await assert.rejects(verifySemanticAsset(url, new Response(new Uint8Array(bytes.length + 1)), assets), /invalid/);
-  assert.ok(SEMANTIC_ASSETS.has(`https://huggingface.co/${SEMANTIC_MODEL}/resolve/${SEMANTIC_REVISION}/onnx/vision_model.onnx`));
-  assert.equal(SEMANTIC_ASSETS.has(`https://huggingface.co/${SEMANTIC_MODEL}/resolve/${SEMANTIC_REVISION}/onnx/vision_model_quantized.onnx`), false);
+  assert.ok(SEMANTIC_ASSETS.has(`https://huggingface.co/${SEMANTIC_MODEL}/resolve/${SEMANTIC_REVISION}/onnx/model_quantized.onnx`));
+  assert.equal(SEMANTIC_ASSETS.has(`https://huggingface.co/${SEMANTIC_MODEL}/resolve/${SEMANTIC_REVISION}/onnx/model.onnx`), false);
 });
 test("public model cache verifies reads as well as writes and removes corrupted cached weights for network recovery", async () => {
   const data = new TextEncoder().encode("verified"), hash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", data)), value => value.toString(16).padStart(2, "0")).join("");
