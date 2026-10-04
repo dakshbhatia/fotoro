@@ -300,9 +300,9 @@ import XCTest
     await review.completedReview()
     XCTAssertEqual(review.snapshot?.recommendations.ids, ["photo-5"])
     XCTAssertEqual(review.snapshot?.recommendations.groupCount, 3)
-    XCTAssertEqual(review.snapshot?.recommendations.reasons["photo-5"], ["Clarity and exposure"])
+    XCTAssertEqual(review.snapshot?.recommendations.reasons["photo-5"], ["Moment highlight"])
     XCTAssertEqual(review.snapshot?.candidates.map(\.id), matches.map(\.id))
-    XCTAssertEqual(AutomaticPhotoPickPolicy.processor, "quality-picks-v1")
+    XCTAssertEqual(AutomaticPhotoPickPolicy.processor, "moment-highlights-v2")
     let unchanged = try await recent.snapshot(sources)
     XCTAssertEqual(unchanged.recommendations.ids, recentResult.recommendations.ids)
     XCTAssertEqual(recentReads, 20, "A Find review must not prune or replace the home Picks cache")
@@ -324,7 +324,7 @@ import XCTest
     XCTAssertEqual(review.snapshot?.recommendations.ids, ["clear"])
     XCTAssertEqual(review.snapshot?.recommendations.duplicateCount, 1)
     XCTAssertEqual(review.snapshot?.recommendations.reasons["clear"],
-      ["Clarity and exposure", "Representative of 2 similar photos"])
+      ["Moment highlight", "Representative of 2 similar photos"])
   }
 
   func testFindReviewBoundsWorkAndUnavailableSavedPreviewsDoNotBecomeSuggestions() async {

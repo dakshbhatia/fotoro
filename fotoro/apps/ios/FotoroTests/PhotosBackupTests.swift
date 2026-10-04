@@ -1079,16 +1079,34 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     services.automaticPhotosAuthorization = { .denied }
     XCTAssertThrowsError(try services.enableAutomaticPhotoSync())
     XCTAssertFalse(try services.store.automaticPhotoSyncPreference().enabled)
+    XCTAssertTrue(PausedUploadProtocol.server.requests.isEmpty, "Denied Photos consent cannot reconcile or upload")
     services.automaticPhotosAuthorization = { .authorized }
     try services.enableAutomaticPhotoSync()
     await services.waitForAutomaticPhotoSync()
+    let permittedRequests = PausedUploadProtocol.server.requests
+    XCTAssertFalse(permittedRequests.isEmpty, "An admitted account must reconcile verified saved originals before staging")
+    XCTAssertTrue(permittedRequests.allSatisfy {
+      $0.method == "GET" && $0.host == "pause-sync.test"
+        && ["/v1/changes", "/v1/grants"].contains($0.path)
+    }, "An empty Photos snapshot can read its consented account catalog without sending photos or annotations")
+    let account = try XCTUnwrap(services.session.accountId)
+    services.session.accountId = Wire.id()
+    services.kickAutomaticPhotoSync()
+    await services.waitForAutomaticPhotoSync()
+    XCTAssertEqual(services.automaticPhotoSync.phase, .locked)
+    XCTAssertEqual(PausedUploadProtocol.server.requests.count, permittedRequests.count,
+      "Changing accounts without activation cannot reuse another account's consent")
+    services.session.accountId = account
     services.api.baseURL = URL(string: "https://other.test")!
     services.kickAutomaticPhotoSync()
     await services.waitForAutomaticPhotoSync()
     XCTAssertEqual(services.automaticPhotoSync.phase, .off)
+    XCTAssertEqual(PausedUploadProtocol.server.requests.count, permittedRequests.count,
+      "A different origin cannot reuse the original sync consent")
     services.session.fixture = true
     XCTAssertThrowsError(try services.enableAutomaticPhotoSync())
-    XCTAssertTrue(PausedUploadProtocol.server.requests.isEmpty)
+    XCTAssertEqual(PausedUploadProtocol.server.requests.count, permittedRequests.count,
+      "Public fixture mode cannot start private Photos reconciliation or uploads")
   }
 
   @MainActor func testOptedAccountColdRestorationStartsOnlyWhenForegroundPermitted() async throws {
@@ -1195,6 +1213,7 @@ private final class PausedUploadServer: @unchecked Sendable {
   struct Request {
     var method: String
     var path: String
+    var host: String
   }
   private let lock = NSLock()
   private var recorded: [Request] = []
@@ -1227,7 +1246,7 @@ private final class PausedUploadServer: @unchecked Sendable {
     lock.lock()
     defer { lock.unlock() }
     let path = request.url!.path
-    recorded.append(Request(method: request.httpMethod ?? "GET", path: path))
+    recorded.append(Request(method: request.httpMethod ?? "GET", path: path, host: request.url?.host ?? ""))
     switch path {
     case "/v1/changes":
       if catalogFailures > 0 { catalogFailures -= 1; throw URLError(.notConnectedToInternet) }
@@ -1274,7 +1293,9 @@ private final class PausedUploadServer: @unchecked Sendable {
 
 private final class PausedUploadProtocol: URLProtocol, @unchecked Sendable {
   static let server = PausedUploadServer()
-  override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "pause-sync.test" }
+  override class func canInit(with request: URLRequest) -> Bool {
+    request.url?.host == "pause-sync.test" || request.url?.host == "other.test"
+  }
   override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
   override func startLoading() {
     do {
