@@ -4,6 +4,32 @@ import XCTest
 @testable import Fotoro
 
 final class RecentPhotosTests: XCTestCase {
+  @MainActor func testUnavailableSavedPreviewCanRetryWithoutUploadingOrReplacingTheOriginal() async throws {
+    let services = try await previewServices()
+    defer { services.vault.lock(); Keychain.remove(services.session.accountId!); try? FileManager.default.removeItem(at: services.storageRoot) }
+    let (photo, cipher, plain) = try previewPhoto(owner: services.session.accountId!)
+    try services.store.put(photo)
+    let objectID = photo.manifest.representations[0].objectId
+    defer { PreviewDownloadProtocol.registry.remove(objectID) }
+    let unavailable = PreviewDownloadGate(bytes: cipher, started: expectation(description: "Unavailable preview"), error: URLError(.notConnectedToInternet))
+    unavailable.release.signal()
+    PreviewDownloadProtocol.registry.set(unavailable, id: objectID)
+    do { try await services.ensurePreview(photo); XCTFail("The first preview should report unavailable") }
+    catch { XCTAssertEqual((error as? URLError)?.code, .notConnectedToInternet) }
+    XCTAssertNil(try services.consumerSavedPhoto(photo.id)?.previewURL)
+
+    let available = PreviewDownloadGate(bytes: cipher, started: expectation(description: "Retried preview"))
+    available.release.signal()
+    PreviewDownloadProtocol.registry.set(available, id: objectID)
+    try await services.ensurePreview(photo)
+    let current = try XCTUnwrap(services.consumerSavedPhoto(photo.id))
+    XCTAssertEqual(try Data(contentsOf: XCTUnwrap(current.previewURL)), plain)
+    XCTAssertEqual(current.metadata, photo.metadata)
+    XCTAssertEqual(current.manifest, photo.manifest)
+    XCTAssertEqual(current.originalURL, photo.originalURL)
+    XCTAssertTrue(try services.journal.entries().isEmpty)
+    await fulfillment(of: [unavailable.started, available.started], timeout: 1)
+  }
   @MainActor func testPendingPreviewDoesNotRestoreDeletedOrChangedPhotoAndPreservesFreshCache() async throws {
     for mutation in PreviewCatalogMutation.allCases {
       let services = try await previewServices()
@@ -557,8 +583,11 @@ private enum PreviewCatalogMutation: CaseIterable { case deleted, metadata, mani
 private final class PreviewDownloadGate: @unchecked Sendable {
   let bytes: Data
   let started: XCTestExpectation
+  let error: URLError?
   let release = DispatchSemaphore(value: 0)
-  init(bytes: Data, started: XCTestExpectation) { self.bytes = bytes; self.started = started }
+  init(bytes: Data, started: XCTestExpectation, error: URLError? = nil) {
+    self.bytes = bytes; self.started = started; self.error = error
+  }
 }
 
 private final class PreviewDownloadRegistry: @unchecked Sendable {
@@ -581,6 +610,10 @@ private final class PreviewDownloadProtocol: URLProtocol, @unchecked Sendable {
     gate.started.fulfill()
     guard gate.release.wait(timeout: .now() + 10) == .success else {
       client?.urlProtocol(self, didFailWithError: URLError(.timedOut))
+      return
+    }
+    if let error = gate.error {
+      client?.urlProtocol(self, didFailWithError: error)
       return
     }
     client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/octet-stream"])!, cacheStoragePolicy: .notAllowed)

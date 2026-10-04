@@ -18,30 +18,28 @@ they never replace the full Photos library. Saved is the other-device library,
 not a second selection to manage.
 
 The core still-photo journey is implemented and has public-fixture acceptance
-evidence. Web/API are live at the PR 28 checkpoint, with Open Saved photos as
-the primary browser entry. Full build 26 makes Turn on sync visible on the iPhone
-home; its verified archive awaits restoration of the Xcode developer account
-before distribution signing and TestFlight upload. The subsequent UI cleanup is
-designated build 27 and removes duplicate browsing controls; build 26 stays
-frozen. Completed on-device text analysis follows opted-in sync through
-the existing encrypted annotation journal; supplied edits still need Save.
-Scene readers and search are prepared, but scene publication stays off until
-installed readers are qualified: older builds reject the new optional field.
-No categories are hidden in user labels, facts or OCR.
-Full build 25 is uploaded and Apple reports `VALID`,
-and `IN_BETA_TESTING` in the existing Fotoro Internal group. The owner excludes
-France from the first release; Apple documentation does not require an uploaded
-declaration for this published, non-proprietary cryptography outside France.
-Build 21 is
-the last verified physical installation; build 25 has not been installed on the
-phone. Personal-library acceptance and physical performance remain open.
+evidence. Web/API are live at the merged PR 30 checkpoint. The compact photo
+home, opted-in sync, current-query progress and retry recovery are implemented.
+Build 28 is archived with its encryption, source inputs and production domains
+verified; distribution remains blocked by the empty Xcode developer-account
+list. Later consumer recovery changes must qualify their exact committed source
+before rollout. Build 25 remains the latest verified internal TestFlight build
+(`VALID`, `IN_BETA_TESTING` in Fotoro Internal).
+
+Completed on-device text analysis follows opted-in sync through the encrypted
+annotation journal; supplied edits still need Save. Scene readers are prepared,
+but scene publication stays off until installed readers are qualified: older
+builds reject the optional field. No categories are hidden in user labels, facts
+or OCR. France remains excluded from the first release. Build 21 is the last
+verified physical installation; personal-library acceptance and physical
+performance remain open.
 
 ## Active queue
 
 | Priority | Work | Complete when |
 | --- | --- | --- |
-| 1 | Finish first sync | A visible Turn on sync choice saves permitted supported still photos, resumes unfinished derived text metadata on return, and preserves manual drafts. A fresh browser opens the same Saved library with the same password. Older filtered Photos, received access and original restoration retain their regression coverage. |
-| 2 | Deliver the full app | Restore the existing Xcode account and publish the latest verified full build to the existing internal group. Build 27 contains the UI cleanup; the frozen build 26 archive is retained, and build 25 remains available meanwhile. Install with fresh phone authorization, then qualify one phone-to-Safari and two-person journey. Keep France excluded from first App Store availability. |
+| 1 | Deliver the current full app | Restore the existing Xcode developer account and publish the latest qualified archive to Fotoro Internal. Keep build 25 available until the replacement is installable, then install with fresh phone authorization. |
+| 2 | Qualify the mom journey on real devices | Install, allow Photos, opt in once, interrupt and resume sync, open the same Saved library in Safari, find and share chosen photos, and restore identical originals. Account entry must preserve the chosen action; pause and source permissions must remain respected. |
 | 3 | Make Find and Picks smarter | Qualify installed scene readers before enabling signed scene publication; keep old Saved refresh usable. Evaluate one local visual representation against held-out queries and useful-shot examples. Add correctable People only with naming, merge/split and source-permission fences. Browsing must stay usable while indexing. |
 | 4 | Complete media backup | Save and restore the complete Live Photo pair and videos, including playback and an interrupted transfer. Larger-media recovery follows the same queue. |
 | 5 | Add safe cleanup | Recoverable trash, undo and cross-device convergence come before deletion or freeing phone storage. Verify a full original restore before offering storage removal. |

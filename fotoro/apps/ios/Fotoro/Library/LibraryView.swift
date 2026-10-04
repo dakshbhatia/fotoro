@@ -11,7 +11,8 @@ struct LibraryView: View {
   @State private var authenticationTask: Task<Void, Never>?
   @State private var query = ""
   @State private var favoritesOnly = false
-  @State private var searchResults: [LocalPhoto]?
+  @State private var catalogSearch = SavedCatalogSearch()
+  @State private var searchAttempt: UInt64 = 0
   @State private var selection = SavedPhotoSelection()
   @State private var catalogRefresh = SavedLibraryRefresh()
   @State private var viewer: SavedPhotoViewerPresentation?
@@ -29,8 +30,13 @@ struct LibraryView: View {
     _saveIntent = State(initialValue: saveSelection.map(ManualPhotoSaveIntent.init))
     _pendingIncoming = State(initialValue: incomingLink)
   }
+  private var searchID: SavedCatalogSearchPresentationID {
+    SavedCatalogSearchPresentationID(query: query, catalog: services.consumerCatalogGeneration,
+      binding: SavedLibraryOpenBinding(services))
+  }
+  private var hasQuery: Bool { !SearchNormalization.text(query).isEmpty }
   var filtered: [LocalPhoto] {
-    let current = !query.isEmpty && searchResults != nil ? searchResults! : services.photos.filter { services.matches($0, query: query) }
+    let current = hasQuery ? (catalogSearch.results(for: searchID) ?? []) : services.photos
     return current.filter {
       !favoritesOnly || services.annotation($0).favorite == true
     }
@@ -65,6 +71,7 @@ struct LibraryView: View {
           ScrollView {
             savingFeedback
             catalogFeedback
+            searchFeedback
             LazyVGrid(
               columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 2), spacing: 3
             ) {
@@ -84,10 +91,11 @@ struct LibraryView: View {
                 }
               }
             }.scrollTargetLayout()
-            if filtered.isEmpty && !catalogRefresh.isRefreshing {
+            if filtered.isEmpty && !catalogRefresh.isRefreshing,
+              !hasQuery || (catalogSearch.hasCompleted(searchID) && catalogSearch.failure(for: searchID) == nil) {
               ContentUnavailableView(
-                "No photos", systemImage: "photo",
-                description: Text(query.isEmpty ? savedLibraryEmptyMessage(sync: services.automaticPhotoSync,
+                hasQuery ? "No photos found" : "No photos", systemImage: "photo",
+                description: Text(!hasQuery ? savedLibraryEmptyMessage(sync: services.automaticPhotoSync,
                   favoritesOnly: favoritesOnly) : "Try a label, filename or words in a photo."))
             }
             ForEach(services.notices, id: \.self) { Text($0).font(.caption).padding() }
@@ -100,20 +108,22 @@ struct LibraryView: View {
               await catalogRefresh.open(services, recheck: true)
             }
             .searchable(text: $query, prompt: "Search")
-            .task(id: SavedCatalogSearchPresentationID(query: query,
-              catalog: services.consumerCatalogGeneration, vault: services.vault.generation)) {
-              guard !query.isEmpty else { searchResults = nil; return }
-              let searchedQuery = query
-              let generation = services.consumerCatalogGeneration
-              do {
-                let results = try await services.searchCatalog(searchedQuery)
-                guard !Task.isCancelled, searchedQuery == query,
-                  generation == services.consumerCatalogGeneration else { return }
-                searchResults = results
-              } catch is CancellationError {} catch {
-                guard !Task.isCancelled, searchedQuery == query,
-                  generation == services.consumerCatalogGeneration else { return }
-                services.error = error.localizedDescription
+            .task(id: SavedCatalogSearchRequestID(presentation: searchID,
+              isActive: scenePhase == .active, attempt: searchAttempt)) {
+              guard !Task.isCancelled else { return }
+              guard scenePhase == .active, hasQuery, services.photoAccountAccess != nil else {
+                catalogSearch.cancel(clearResults: true)
+                return
+              }
+              let searched = searchID
+              await catalogSearch.search(searched, current: { searchID }) {
+                let found = try await services.searchCatalog(searched.query)
+                // Search may span catalog pages. Recheck each returned saved source before presentation.
+                return try found.compactMap { photo in
+                  guard let current = try services.consumerSavedPhoto(photo.id),
+                    current.metadata == photo.metadata, current.manifest == photo.manifest else { return nil }
+                  return current
+                }
               }
             }
             .toolbar {
@@ -168,6 +178,7 @@ struct LibraryView: View {
         }
         .onChange(of: scenePhase) {
           if scenePhase == .background {
+            catalogSearch.cancel(clearResults: true)
             pendingIncoming = nil; sharedPhotos = nil
             cancelAuthentication()
             services.setPhotoSyncForeground(false)
@@ -190,11 +201,12 @@ struct LibraryView: View {
             shareTask?.cancel()
             cleanupShare()
             selection.removeAll()
-            searchResults = nil
+            catalogSearch.cancel(clearResults: true)
             catalogRefresh.cancel()
           }
         }
         .onChange(of: services.vault.generation) {
+          catalogSearch.cancel(clearResults: true)
           if !services.vault.isUnlocked {
             sharedPhotos = nil
             if authenticationTask == nil { pendingIncoming = nil }
@@ -202,10 +214,14 @@ struct LibraryView: View {
           shareTask?.cancel(); cleanupShare(); selection.removeAll(); catalogRefresh.cancel()
         }
         .onChange(of: services.session.accountId) {
+          catalogSearch.cancel(clearResults: true)
           if authenticationTask == nil { pendingIncoming = nil; sharedPhotos = nil }
         }
         .onChange(of: services.consumerCatalogGeneration) { validateSelection() }
-        .onDisappear { cancelAuthentication(); shareTask?.cancel(); cleanupShare(); catalogRefresh.cancel() }
+        .onDisappear {
+          cancelAuthentication(); shareTask?.cancel(); cleanupShare(); catalogRefresh.cancel()
+          catalogSearch.cancel(clearResults: true)
+        }
         .alert(
           "Fotoro",
           isPresented: Binding(
@@ -282,6 +298,19 @@ struct LibraryView: View {
           Task { await catalogRefresh.refresh(services) }
         }
       }.frame(maxWidth: .infinity, alignment: .leading).padding()
+    }
+  }
+  @ViewBuilder private var searchFeedback: some View {
+    if hasQuery, !catalogRefresh.isRefreshing {
+      if catalogSearch.isPending(searchID) {
+        ProgressView("Searching saved photos…").padding()
+      } else if let error = catalogSearch.failure(for: searchID) {
+        VStack(alignment: .leading, spacing: 8) {
+          Text(error).font(.footnote).foregroundStyle(.secondary)
+          Button("Try again", systemImage: "arrow.clockwise") { searchAttempt &+= 1 }
+            .accessibilityIdentifier("saved.search.retry")
+        }.frame(maxWidth: .infinity, alignment: .leading).padding()
+      }
     }
   }
   private func validateSelection() {
@@ -517,10 +546,67 @@ func savedLibraryEmptyMessage(sync: AutomaticPhotoSyncStatus, favoritesOnly: Boo
   return "Save photos in Fotoro, or pull down to check photos saved on another device."
 }
 
-private struct SavedCatalogSearchPresentationID: Equatable {
+struct SavedCatalogSearchPresentationID: Equatable {
   var query: String
   var catalog: UInt64
-  var vault: UUID
+  var binding: SavedLibraryOpenBinding
+}
+
+private struct SavedCatalogSearchRequestID: Equatable {
+  var presentation: SavedCatalogSearchPresentationID
+  var isActive: Bool
+  var attempt: UInt64
+}
+
+@MainActor @Observable final class SavedCatalogSearch {
+  private var requestedID: SavedCatalogSearchPresentationID?
+  private var completedID: SavedCatalogSearchPresentationID?
+  private var photos: [LocalPhoto] = []
+  private var searching = false
+  private var error: String?
+  @ObservationIgnored private var operation: UUID?
+  @ObservationIgnored private var task: Task<[LocalPhoto], Error>?
+  func results(for id: SavedCatalogSearchPresentationID) -> [LocalPhoto]? {
+    completedID == id ? photos : nil
+  }
+  func hasCompleted(_ id: SavedCatalogSearchPresentationID) -> Bool { completedID == id }
+  func isPending(_ id: SavedCatalogSearchPresentationID) -> Bool { requestedID != id || searching }
+  func failure(for id: SavedCatalogSearchPresentationID) -> String? { requestedID == id ? error : nil }
+  func search(_ id: SavedCatalogSearchPresentationID,
+    current: () -> SavedCatalogSearchPresentationID,
+    read: @escaping @MainActor () async throws -> [LocalPhoto]) async {
+    guard !Task.isCancelled, current() == id else { return }
+    cancel()
+    if completedID != id { completedID = nil; photos = [] }
+    requestedID = id
+    searching = true
+    let token = UUID()
+    operation = token
+    let loading = Task { try await read() }
+    task = loading
+    defer {
+      if operation == token { searching = false; operation = nil; task = nil }
+    }
+    do {
+      let result = try await withTaskCancellationHandler { try await loading.value }
+        onCancel: { loading.cancel() }
+      guard !Task.isCancelled, !loading.isCancelled, operation == token, current() == id else { return }
+      photos = result
+      completedID = id
+    } catch is CancellationError {} catch {
+      guard !Task.isCancelled, !loading.isCancelled, operation == token, current() == id else { return }
+      self.error = error.localizedDescription
+    }
+  }
+  func cancel(clearResults: Bool = false) {
+    task?.cancel()
+    task = nil
+    operation = nil
+    requestedID = nil
+    searching = false
+    error = nil
+    if clearResults { completedID = nil; photos = [] }
+  }
 }
 
 struct LibraryPhotoCell: View {

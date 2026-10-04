@@ -5,14 +5,15 @@ import {createElement} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
 import accounts from "../../../fixtures/accounts.json";
 import type {AccountCardV1, GrantDetailV1, GrantV1, MediaBinding, PhotoManifestV1, RepresentationV1, SaveRequestV1, WrappedKeyV1} from "@fotoro/contracts";
-import {createContactLink, parseShareLink} from "@fotoro/contracts/share-links";
+import {createContactLink, createMomentLink, parseShareLink} from "@fotoro/contracts/share-links";
 import {b64, encryptMedia, ready, sealShareKey, signPayload, sodium, unb64, utf8, wrapKey, unwrapKey} from "@fotoro/crypto";
 import {configureVault, unlockVault, lockVault, vaultGeneration} from "../src/vault/vault";
 import {clearAccount, get, put, all} from "../src/exchange/cache";
 import {collect, source, type Photo} from "../src/library/catalog";
 import {contribute, contacts, contactNames, saveContactName, pinCard, receive, saveReceivedPhoto, sharePhotos, trustedCard} from "../src/exchange/share-service";
 import {grantState, IncomingShareIntent, readableShareError, ShareSelection} from "../src/exchange/sharing";
-import {Exchange} from "../src/exchange/Exchange";
+import {Exchange, loadExchangeContext} from "../src/exchange/Exchange";
+type ExchangeUpdate = Parameters<Parameters<typeof loadExchangeContext>[2]>[0];
 const response = (value: unknown) => new Response(JSON.stringify(value));
 async function open(index: number) {
   await ready;
@@ -79,6 +80,110 @@ test("contact acceptance persists encrypted identities and a changed key needs a
   await assert.rejects(pinCard(sender, {current: () => false}), /Share cancelled/);
   const replacement: AccountCardV1 = {...sender, boxPublicKey: accounts.accounts[1].boxPublicKey};
   await pinCard(replacement); assert.deepEqual(await trustedCard(sender.accountId), replacement);
+}));
+test("incoming sender opens without an optional inbox request and waits for saved name and changed identity checks", async () => scoped(async () => {
+  const session = await open(1), sender = accounts.accounts[0];
+  await pinCard(sender); await saveContactName(sender.accountId, "Alice");
+  const changed = {...sender, signingPublicKey: accounts.accounts[1].signingPublicKey};
+  const incoming = new IncomingShareIntent(parseShareLink(createMomentLink(crypto.randomUUID(), changed)), session);
+  const markup = renderToStaticMarkup(createElement(Exchange, {selection: [], incoming, onClose() {}, onReceived() {assert.fail("Opening must require explicit acceptance");}, onRefresh() {}}));
+  assert.match(markup, /Accept this sender/);
+  assert.match(markup, /<button class="primary-action" disabled="">Accept sender and open photos<\/button>/);
+  assert.doesNotMatch(markup, /Try again/);
+  const requests: string[] = [], updates: ExchangeUpdate[] = [];
+  globalThis.fetch = (async path => {requests.push(String(path)); throw new TypeError("offline");}) as typeof fetch;
+  const pending = loadExchangeContext(session, {current: () => incoming.current(session)}, update => updates.push(update), changed);
+  assert.deepEqual(updates, [{candidate: changed, candidateChecked: false}]);
+  await pending;
+  assert.equal(updates.some(update => update.identityChanged === true), true);
+  assert.equal(updates.find(update => update.candidateName !== undefined)?.candidateName, "Alice");
+  assert.equal(updates.at(-1)?.candidateChecked, true);
+  assert.deepEqual(requests, []);
+  assert.deepEqual(await trustedCard(sender.accountId), sender);
+}));
+test("an unreadable local name or pin never enables sender acceptance, while a missing pin still needs explicit acceptance", async () => scoped(async () => {
+  const session = await open(1), sender = accounts.accounts[0];
+  await pinCard(sender);
+  const changed = {...sender, signingPublicKey: accounts.accounts[1].signingPublicKey};
+  const nameKey = session.accountId + ":contact-name:" + sender.accountId;
+  await put("settings", nameKey, wrapKey(utf8({version: 1, accountId: sender.accountId, name: 17}), session.vaultKey));
+  const updates: ExchangeUpdate[] = [];
+  await assert.rejects(loadExchangeContext(session, {}, update => updates.push(update), changed), /CONTACT_BINDING_MISMATCH/);
+  // A failed name lookup cannot end the operation before the independent identity check settles.
+  assert.equal(updates.some(update => update.identityChanged === true), true);
+  assert.equal(updates.some(update => update.candidateChecked === true), false);
+  await clearAccount(session.accountId);
+  await put("settings", session.accountId + ":pin:" + sender.accountId, wrapKey(utf8({invalid: true}), session.vaultKey));
+  const badPin: ExchangeUpdate[] = [];
+  await assert.rejects(loadExchangeContext(session, {}, update => badPin.push(update), sender));
+  assert.equal(badPin.some(update => update.candidateChecked === true), false);
+  await clearAccount(session.accountId);
+  const unknown: ExchangeUpdate[] = [];
+  await loadExchangeContext(session, {}, update => unknown.push(update), sender);
+  assert.equal(unknown.at(-1)?.candidateChecked, true);
+  assert.equal(await get("settings", session.accountId + ":pin:" + sender.accountId), undefined);
+}));
+test("optional contact inbox failure cannot hide its candidate or erase the completed changed-key warning", async () => scoped(async () => {
+  const session = await open(1), sender = accounts.accounts[0];
+  await pinCard(sender); await saveContactName(sender.accountId, "Alice");
+  const changed = {...sender, signingPublicKey: accounts.accounts[1].signingPublicKey}, state: ExchangeUpdate = {};
+  const publish = (update: ExchangeUpdate) => Object.assign(state, update);
+  globalThis.fetch = (async () => {throw new TypeError("offline");}) as typeof fetch;
+  const inbox = loadExchangeContext(session, {}, publish);
+  const candidate = loadExchangeContext(session, {}, publish, changed);
+  assert.equal(state.candidateChecked, false); assert.deepEqual(state.candidate, changed);
+  await Promise.all([inbox, candidate]);
+  assert.equal(state.inboxFailed, true); assert.equal(state.identityChanged, true);
+  assert.equal(state.candidateChecked, true); assert.equal(state.candidateName, "Alice");
+  assert.deepEqual(state.candidate, changed); assert.deepEqual(await trustedCard(sender.accountId), sender);
+}));
+test("a failed Shared inbox keeps local contacts and names, then a successful retry clears only the load failure", async () => scoped(async () => {
+  const {grant} = await fixture(), session = await open(1), sender = accounts.accounts[0];
+  await pinCard(sender); await saveContactName(sender.accountId, "Alice");
+  const state: ExchangeUpdate = {}, requests: string[] = [];
+  let offline = true;
+  globalThis.fetch = (async (path, init) => {
+    requests.push(String(path)); assert.equal(init?.method, "GET");
+    if (offline) throw new TypeError("offline");
+    return response({version: 1, grants: [grant]});
+  }) as typeof fetch;
+  const publish = (update: ExchangeUpdate) => Object.assign(state, update);
+  await loadExchangeContext(session, {}, publish);
+  assert.equal(state.inboxFailed, true);
+  assert.deepEqual(state.people, [sender]); assert.equal(state.names?.get(sender.accountId), "Alice");
+  assert.equal(state.grants, undefined);
+  offline = false; await loadExchangeContext(session, {}, publish);
+  assert.equal(state.inboxFailed, false); assert.deepEqual(state.grants, [grant]);
+  assert.deepEqual(requests, ["/v1/grants", "/v1/grants"]);
+  assert.deepEqual(await trustedCard(sender.accountId), sender);
+}));
+test("closing, switching accounts, or cancelling an incoming link prevents late identity checks from enabling acceptance", async () => {
+  for (const cancellation of ["close", "account", "intent"]) await scoped(async () => {
+    const session = await open(1), sender = accounts.accounts[0], controller = new AbortController();
+    await pinCard(sender); await saveContactName(sender.accountId, "Alice");
+    const incoming = new IncomingShareIntent(parseShareLink(createMomentLink(crypto.randomUUID(), sender)), session);
+    const updates: ExchangeUpdate[] = [];
+    const pending = loadExchangeContext(session, {signal: controller.signal, current: () => incoming.current(session)}, update => updates.push(update), sender);
+    const rejected = assert.rejects(pending, cancellation === "account" ? /VAULT_LOCKED/ : {name: "AbortError"});
+    if (cancellation === "close") controller.abort();
+    else if (cancellation === "intent") incoming.cancel();
+    else {lockVault(); await open(0);}
+    await rejected;
+    assert.deepEqual(updates, [{candidate: sender, candidateChecked: false}]);
+  });
+});
+test("a delayed inbox response cannot publish to a different account after local contacts loaded", async () => scoped(async () => {
+  const session = await open(1), updates: ExchangeUpdate[] = [];
+  let release!: (value: Response) => void, localLoaded!: () => void;
+  const localReady = new Promise<void>(resolve => {localLoaded = resolve;});
+  globalThis.fetch = (async () => new Promise<Response>(resolve => {release = resolve;})) as typeof fetch;
+  const pending = loadExchangeContext(session, {}, update => {updates.push(update); if (update.people) localLoaded();});
+  await localReady;
+  lockVault(); await open(0);
+  const before = updates.length;
+  release(response({version: 1, grants: []})); await pending;
+  assert.equal(updates.length, before);
+  assert.equal(updates.some(update => update.grants !== undefined || update.inboxFailed !== undefined), false);
 }));
 test("delayed invitation reservation stops before signing or sending after account switch", async () => scoped(async () => {
   const {photo, grant} = await fixture(); await pinCard(accounts.accounts[1]);

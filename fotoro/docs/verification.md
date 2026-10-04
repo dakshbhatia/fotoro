@@ -1,5 +1,37 @@
 # Verification — October 4, 2026
 
+The recovery pass gives failed Saved previews a retry on iPhone and web. Web
+retry retains the selected photo and edits; source, account and access changes
+cancel obsolete reads. Single-photo viewers omit the count and inactive paging
+buttons. Native Saved search binds answers to query, catalog and unlocked
+account, keeps current matches during a retry, and exposes a failed read rather
+than reporting an empty result.
+
+Incoming moments resolve the sender independently of the inbox, with trusted
+identity and local-name checks completed before acceptance. A failed inbox read
+keeps contacts available and offers Try again. Explicit sender acceptance and
+Save remain required; no protocol or backend changes.
+
+Local verification passes 20 core, 68 API, 308 web and 28 release-metadata checks,
+typechecks and the production build. Four isolated original-restore checks pass.
+Full native verification passes 305 of 306 tests; native preview passes 102 of
+103. Both have one known Vision inference-context skip and no failures. Exact
+committed-head CI must qualify both complete schemes before rollout.
+
+Codex in-app browser verification uses two disposable loopback accounts and a
+public photo with real encrypted local D1/R2 objects. An incoming moment opens
+during an inbox failure. A forced preview failure recovers with Retry, and Save
+adds the recipient's own copy to Saved. At 390×844 the loaded image has no
+horizontal overflow or inactive paging arrows. No unexpected JavaScript errors
+occur. Production rollout still requires exact-head checks and asset readback.
+
+Build 29 archives with all 57 native inputs, matching dSYM, production domains
+and full static encryption verified. Xcode's empty
+developer-account list blocks distribution export; build 25 remains the latest
+verified internal TestFlight build. No physical iPhone update is claimed.
+
+## Previous consumer-core pass
+
 The consumer-core pass prevents previous-query results from appearing as the
 current answer. Unfinished search shows progress, completed matches remain
 usable during the same-query analysis, and real empty results appear only when
