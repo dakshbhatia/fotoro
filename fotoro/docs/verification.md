@@ -8,8 +8,8 @@ already scheduled ciphertext uploads. Videos and Live Photo pairs remain
 unsupported. Turning off sync cancels pending view consent and automatic work.
 Denied Photos access has an explicit system Settings action.
 
-Final native verification covers 271 full-app tests, with the known iOS 27
-Vision-context integration skip. New regressions cover
+Final native verification covers 280 full-app tests: 279 pass, with the known
+iOS 27 Vision-context integration skip and no failures. New regressions cover
 default-off consent, scope withdrawal, all-age intake, unchanged no-HTTP scans,
 persistent Pause, foreground-only restoration, quota early-stop and queued
 original edits after permission returns. The edited-original regression was
@@ -23,12 +23,35 @@ foreground and explicit refresh coalesce; regression checks preserve paused
 originals, local annotation drafts and locked-account boundaries. The home Saved
 grid displays the existing sync progress and Pause/Resume controls, with
 sync-aware empty states.
+The local-preview suite also passes: 96 of 97 tests, with the same Vision skip.
 
-Web verification passes 272 tests and a 349,058-byte, three-chunk startup budget.
+Filtered native Photos now continues through sparse or empty 200-source metadata
+pages to reach older favorites, screenshots and location matches. It stops on
+filter cancellation, background and permission withdrawal; returning resumes
+the remaining pages. Public Simulator regressions verify older Favorites without
+preview analysis. Empty states wait until the permitted source coverage ends.
+
+Native and browser received-photo views recheck access through coalesced reads.
+Verified revoked, missing, expired or changed invitations withdraw photo/details
+presentation; network failures retain it. Compatible newer grants retain the
+opened content. Independently owned copies and durable Save requests survive
+withdrawal; a native owned Save receipt already in flight can finish.
+
+Browser HEIC intake resolves primary-associated DateTimeOriginal metadata from
+declared file/idat extents: a 256 KiB header and at most 64 KiB across 32 EXIF
+extents. Malformed, absent, ambiguous or unrelated metadata retains the fallback.
+Synthetic metadata and a public HEIC grid with authored EXIF test grouping,
+date search and unchanged encrypted originals. This parser verification does
+not establish broader browser HEIC decoding or a personal Safari import.
+
+Web verification passes 283 tests and a 349,058-byte, three-chunk startup budget.
 Rendered public-image acceptance passes at 320, 390 and 1440 px: same-password
 restoration, unchanged originals, remembered-account entry requiring the
 password, unified Find Saved-viewer corrections with explicit Save changes, and
-two-person receiving with an injected 503 retry. There are no runtime errors or
+two-person receiving with an injected 503 retry. A failed inbox read retains the
+open viewer; an actual owner End access followed by foreground refresh withdraws
+it, while the recipient's saved PNG downloads byte for byte. Those refreshes do
+not upload. There are no runtime errors or
 unexpected API failures. Browser uploads remain deliberate; paused uploads do
 not block read refresh. Annotation-only Save never restarts queued originals.
 
@@ -38,10 +61,13 @@ attempts remain charged. Production auth/enrollment throttles return 429 with
 Retry-After. Migration 0006 preserves legacy Worker SQL behavior, including its
 PUT affected-row checks, before service cutover. Reserved and final copies can
 both remain in R2; object collection and complete restore qualification remain
-open. Development-signed Release archive build 24 is prepared and passes strict
-signature, build identity and exact production associated-domain checks
-separately from TestFlight distribution. The previous owner's phone window is not
-reused for installation.
+open. Full Release build 24 is App Store distribution-signed and passes strict
+signature, build identity, exact production associated-domain and matching-dSYM
+checks. Its exact IPA passed Apple validation and upload; the API reports VALID
+/ MISSING_EXPORT_COMPLIANCE with encryption use unset. What to Test notes are
+saved and verified. The prepared factual declaration still awaits the owner's
+France availability answer. TestFlight access and new physical installation are
+not established; the previous owner's phone window is not reused.
 
 PR 25 is merged and its main CI run passes. Production migration 0006 has no
 pending successors. The new Worker is read back at 100%; all published entry
@@ -751,8 +777,9 @@ bytes, queries or recognized text. A recognition quality gate and rotation retri
 are engineering rules, not calibrated accuracy or intent confidence. Physical
 Safari performance and a larger OCR quality corpus remain unverified.
 
-Native search includes all permitted non-hidden still photos, while browsing stays
-at ten days. Native OCR uses network-disabled local previews, so iCloud-only assets
+Native browsing and search include all permitted non-hidden still photos;
+browsing pages 200 metadata records at a time. Picks alone use a bounded recent
+window. Native OCR uses network-disabled local previews, so iCloud-only assets
 can have incomplete text coverage. Local labels/history are excluded from device
 backup. Labels and supported OCR for photos explicitly synced to an account now
 travel as encrypted annotations. History and pinned choices stay device-local.
@@ -761,11 +788,12 @@ records; it cannot enumerate an iPhone photo library automatically.
 
 ## Remaining release gates
 
-- Full encrypted TestFlight access: build 4 is `VALID` but remains
+- Full encrypted TestFlight access: build 24 is uploaded and `VALID` but remains
   `MISSING_EXPORT_COMPLIANCE`. Its actual encryption declaration and France
   distribution answer are open. Local Photos preview build 3 is separately
   `VALID / IN_BETA_TESTING`; personal TestFlight installation remains unverified.
-  Signed full build 18 is installed directly on the physical iPhone; launch awaits unlock.
+  Full build 21 is the last verified physical installation and successful launch;
+  build 24 has no physical installation claim.
   Production HTTPS, API routing and the signed passkey association now pass.
   Contact and moment universal-link handling is implemented; physical acceptance remains open.
 - Owner password signup/sign-in, protected credential restoration, original

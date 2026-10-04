@@ -206,7 +206,21 @@ struct ExchangeView: View {
         .task {
           candidate = incoming
           if let card = candidateCard, contacts.contains(where: { $0.accountId == card.accountId }) { name = services.contactName(card.accountId) }
-          perform { try await services.refreshSharedMoments() }
+        }
+        .task(id: scenePhase) {
+          guard scenePhase == .active else { services.cancelSharedMomentRefresh(); return }
+          do { try await services.refreshSharedMoments() }
+          catch is CancellationError {} catch {
+            guard !Task.isCancelled, scenePhase == .active else { return }
+            services.error = error.localizedDescription
+          }
+        }
+        .task(id: services.selectedGrant?.expiresAt) {
+          guard let expiry = services.selectedGrant?.expiresAt.flatMap(Wire.parseDate) else { return }
+          let remaining = expiry.timeIntervalSinceNow
+          if remaining > 0 { try? await Task.sleep(for: .seconds(remaining)) }
+          guard !Task.isCancelled else { return }
+          services.withdrawExpiredReceivedMoment()
         }
         .sheet(item: $openedPhoto) { presentation in
           PhotoViewer(services: services, initialID: presentation.photo.id,
@@ -215,7 +229,10 @@ struct ExchangeView: View {
         .sheet(item: $shareCode) { ShareCodeView(presentation: $0) }
         .onChange(of: scenePhase) { if scenePhase == .background { operation?.cancel() } }
         .onChange(of: services.photoAccountAccess) { operation?.cancel(); dismiss() }
-        .onDisappear { operation?.cancel() }
+        .onChange(of: services.selectedGrant) { previous, current in
+          if previous != nil && current == nil { feedback = "These shared photos are no longer available. Copies you saved stay in your Fotoro." }
+        }
+        .onDisappear { operation?.cancel(); services.cancelSharedMomentRefresh() }
         .alert("Fotoro", isPresented: Binding(get: { services.error != nil }, set: { if !$0 { services.error = nil } })) {
           Button("OK") { services.error = nil }
         } message: { Text(services.error ?? "") }

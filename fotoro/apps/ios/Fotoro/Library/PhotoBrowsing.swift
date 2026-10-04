@@ -1,6 +1,6 @@
 import Foundation
 
-enum PhotoBrowseFilter: String, CaseIterable, Identifiable {
+enum PhotoBrowseFilter: String, CaseIterable, Identifiable, Hashable {
   case all, favorites, screenshots, withLocation
   var id: String { rawValue }
   func includes(_ facts: RecentPhotoFacts) -> Bool {

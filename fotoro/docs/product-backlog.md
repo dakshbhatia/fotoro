@@ -1,24 +1,45 @@
-# Fotoro finish plan
+# Fotoro product and roadmap
 
 Fotoro is for enjoying your photos, finding the shot you mean, and sharing a
 chosen moment. Photos shows this device’s library. Picks suggests highlights;
 Saved holds originals kept in Fotoro across devices, through chosen Save or
-opted-in automatic photo sync. Find
-reaches the photo the user means.
+opted-in automatic photo sync. Find reaches the photo the user means.
 The viewer makes it easy to enjoy the original. Choosing Save keeps that photo
 available on another device; choosing Share sends a deliberate set to a person.
 Account handling supports that journey. Automatic photo sync starts after one
 explicit Turn on sync choice and remembers Pause. Browser uploads stay explicit.
 
-The foundation and core journey are now composed into one consumer experience.
-Photos, persistent selection, contextual manual Save, other-device originals and
-chosen sharing and explicit favorite/label corrections pass public acceptance
-checks. Physical performance and Apple distribution retain their verification gates.
-This plan is the active queue; the inventory below
-records capabilities and remaining limits without turning each into a separate
-parallel feature project.
+The product is one loop: install, allow Photos, scroll and find a photo, turn on
+sync once, then open the same Fotoro on another device or share chosen photos.
+One password opens the saved library on iPhone and web. Picks are suggestions;
+they never replace the full Photos library. Saved is the other-device library,
+not a second selection to manage.
 
-## Build order
+The core still-photo journey is implemented and has public-fixture acceptance
+evidence. Web/API are live. Full build 24 is uploaded and Apple reports `VALID`,
+but `MISSING_EXPORT_COMPLIANCE` still prevents TestFlight access. The remaining
+owner input is France availability for the encryption declaration. Build 21 is
+the last verified physical installation; build 24 has not been installed on the
+phone. Personal-library acceptance and physical performance remain open.
+
+## Active queue
+
+| Priority | Work | Complete when |
+| --- | --- | --- |
+| 1 | Finish the existing journey — implemented and verified on public fixtures | Older filtered Photos remain reachable; shared photos withdraw when verified access ends; browser HEIC dates use real capture metadata where available. Regression checks preserve selection, originals and independently saved copies. Physical qualification belongs to priority 2. |
+| 2 | Deliver the full app | Submit the accurate Apple declaration after the France answer, verify TestFlight access, then run one fresh phone-to-Safari and two-person journey with owner authorization. |
+| 3 | Make Find and Picks smarter | Evaluate one local visual representation against held-out queries and useful-shot examples. Add correctable People only with naming, merge/split and source-permission fences. Browsing must stay usable while indexing. |
+| 4 | Complete media backup | Save and restore the complete Live Photo pair and videos, including playback and an interrupted transfer. Larger-media recovery follows the same queue. |
+| 5 | Add safe cleanup | Recoverable trash, undo and cross-device convergence come before deletion or freeing phone storage. Verify a full original restore before offering storage removal. |
+
+Automatic preparation runs while the iPhone app is open and unlocked; iOS can
+finish ciphertext uploads already scheduled. Browser uploads remain explicit.
+The current 50 MiB still-photo limit and skipped video/Live Photo motion are
+visible limitations. Broader semantic search, People and cleanup are roadmap
+work, not current product claims. This file owns the queue; the inventory below
+records the detailed scope.
+
+## Core journey acceptance
 
 | Order | Deliverable | Reuse and simplify | Done when |
 | --- | --- | --- | --- |
@@ -38,11 +59,8 @@ parallel feature project.
 | 14 | Complete release journey | Use existing contract, cryptographic, lifecycle and integration checks. Add missing interaction regressions rather than tests that merely repeat the code. | Fresh and returning users complete browse → Find → view → Save → other-device restore → Share, including one interruption/retry, with VoiceOver and larger text checks. |
 | 15 | Ship the full app | Keep the same verified native/web/API source. Complete the actual Apple declaration and verify physical installation/links. | The full encrypted build is installable through the intended release channel and the published product matches the verified journey. |
 
-Steps 1–5 establish the interaction contract. Steps 6–11 complete its account,
-Save, restore and sharing paths. Steps 12–15 close quality and release gates.
-After the navigation and source contracts are stable, Find/picks, Save/restore
-and sharing can proceed independently with explicit file ownership. They join
-through the complete journey; separate green components are insufficient.
+These are acceptance criteria for the existing journey. The active queue above
+sets the order of new work; separate green components do not prove that journey.
 
 ## Keep the foundations simple
 
@@ -115,26 +133,26 @@ are separate checks. “Partial” identifies a concrete remaining capability.
 | --- | --- | --- |
 | 1 | One-password sign-in | Implemented on native/web; wrong-password, interrupted enrollment and retry regressions pass. Failed remembered sign-in offers another password without deleting pending work. Owner acceptance remains open. |
 | 2 | Remember the current user | Protected session/password persistence, account reference and expired-session renewal are implemented. Initial restoration respects manual lock; explicit Open retries a failed renewal. |
-| 3 | Install the current full build | Signed encrypted archive build 24 passes strict signature and production association checks. Build 21 is verified installed and launched during the owner's phone window; build 24 is prepared, with no new phone installation or TestFlight upload claim. Owner authentication acceptance remains open. |
+| 3 | Install the current full build | Full build 24 passes App Store distribution-signature, identity, production association and matching-dSYM checks. Its exact validated IPA uploaded and Apple reports VALID. TestFlight compliance and physical installation remain open; build 21 is the last verified installed/launched build. |
 | 4 | Save chosen photos through sign-in | Immutable reviewed sources and one-shot authenticated Save are implemented. Fresh native signup → selected PNG Save and fresh-browser password restore pass against isolated D1/R2. |
 | 5 | Restore identical originals in Safari | Isolated D1/R2 tests verify JPEG/PNG/HEIC bytes in a fresh session. Production saves and restores a public PNG byte for byte in a fresh browser. Native Saved rechecks on return and supports pull-to-refresh, preserving paused uploads and local edits. Personal phone-to-Safari acceptance remains open. |
 | 6 | Manual Save progress and Pause/Continue | Implemented. Continue uses the durable queue; it does not scan for new photos. |
 | 7 | Offline/background/relaunch recovery | Fixed cold launch after a chosen Save: persisted selection now reads its own encoding. Regression and rendered Simulator reopening pass without scanning or uploading. Physical daemon/relaunch acceptance remains open. |
 | 8 | Retry without losing selection | Implemented for authentication, manual Save and sharing; incomplete work preserves exact sources for explicit Retry, and concurrent recipient Saves reuse one durable request. |
 | 9 | Green release checks | Core/API/web/native checks are required on each exact PR head. |
-| 10 | Full TestFlight release | Full build 4 awaits Apple's export-compliance declaration. Preview build 3 is a separate binary. |
+| 10 | Full TestFlight release | Full build 24 is VALID / MISSING_EXPORT_COMPLIANCE. The prepared factual declaration awaits the owner's France availability answer. Preview build 3 is a separate binary. |
 | 11 | Sharp thumbnails | System-sized native thumbnails and late degraded-image rejection are implemented; browser gallery thumbnails use 512 px with bounded decoded caches. |
 | 12 | Large-library responsiveness | 10,000 synthetic indexed records are tested; browser saved rows are virtualized. Physical frame/memory/battery measurements remain open. |
 | 13 | Swipe/zoom/quiet viewer controls | Local, saved and received native viewers support paging, zoom and Info; browser viewer supports zoom and paging. |
 | 14 | Preserve navigation context | Query, source snapshots and reviewed selection survive account navigation. Physical long-scroll acceptance remains open. |
-| 15 | Simple filters | Native Photos: favorites/screenshots/location facts; saved library: favorites. Date search is implemented. Named-place inference is not implemented. |
+| 15 | Simple filters | Native Photos: favorites/screenshots/location facts, including older matches beyond sparse metadata pages; paging stops in background and on permission/filter changes. Saved library: favorites. Date search is implemented. Named-place inference is not implemented. |
 | 16 | Photo moments | Native capture-time groups and browser evidence-backed day groups are implemented. Unknown capture time is explicit; no invented outing titles. |
 | 17 | Contextual Share | Saved selection and viewer Share in Fotoro are implemented on native/web. System original sharing remains available. |
 | 18 | Public invitations and QR | Strict canonical contact/moment links and native QR display are implemented. Native camera scanner and physical universal-link acceptance remain open. |
 | 19 | Recipient viewing and own copies | Verified previews/originals and independent recipient-owned Save are implemented. |
 | 20 | Add photos back | Selected owned saved photos can contribute to a shared moment. |
 | 21 | Reuse people | Explicitly accepted contact keys and encrypted optional local names are implemented. Contact synchronization across devices remains open. |
-| 22 | Honest sharing states | Expiry, access ended and source/retry errors are implemented. Consumer opened/saved receipt counters remain open. |
+| 22 | Honest sharing states | Foreground/focus/reconnect reads withdraw received content when verified access ends; known expiry also withdraws locally. Network failures retain access, and independent copies/durable Save requests remain. Consumer opened/saved receipt counters remain open. |
 | 23 | Visual search | Partial: conservative local Vision categories with separate inferred evidence. Physical classification and unrestricted embeddings remain open. |
 | 24 | Natural language with evidence | Native/web relative/calendar/ISO date phrases and prefix/suffix compound queries use existing evidence and verified capture dates. Arbitrary person/place understanding remains open. |
 | 25 | Correctable people groups | Not implemented. Requires on-device grouping, explicit naming/corrections and deletion/permission fences. |
@@ -147,7 +165,7 @@ are separate checks. “Partial” identifies a concrete remaining capability.
 | 32 | Optional cloud AI | Not implemented. Requires explicit opt-in, bounded spending and encrypted persisted results. |
 | 33 | iPhone Share extension | Not implemented. Requires an isolated intake target and protected app-group handoff. |
 | 34 | Saved webpages/URLs | Not implemented. |
-| 35 | Browser HEIC import | Safari intake for verified HEVC stills/simple grids is implemented with bounded decoding and byte-preserved encrypted originals. Unsupported browsers/layouts show a clear alternative; HEIC capture-time extraction remains open. |
+| 35 | Browser HEIC import | Safari intake for verified HEVC stills/simple grids is implemented with bounded decoding and byte-preserved encrypted originals. Primary-associated EXIF capture-date extraction is bounded and tested through grouping/search/Save; absent or invalid metadata retains the fallback. Unsupported browsers/layouts show a clear alternative. Personal Safari acceptance remains open. |
 | 36 | Complete Live Photo restore | Not implemented. Local still preview works; motion-pair backup is skipped visibly. |
 | 37 | Video save/playback/restore | Not implemented. Video backup is skipped visibly. |
 | 38 | Larger media recovery | Current originals are bounded to 50 MiB and queued durably. Larger-file multipart/streaming recovery remains open. |
@@ -161,5 +179,5 @@ are separate checks. “Partial” identifies a concrete remaining capability.
 | 46 | Accessibility | Focused native/web password entry, native keyboard submit and Clear selection, and 44 px web search choices are verified. Public native Info is checked at accessibility-medium; full VoiceOver/Dynamic Type acceptance remains open. |
 | 47 | Real-device acceptance | Public local two-person exchanges and synthetic 10,000-item tests pass. Personal iPhone/Safari and older-phone performance remain open. |
 
-The active build order is above. Reference capabilities become finished only
+The active queue is above. Reference capabilities become finished only
 after their complete consumer, persistence and authorization paths are verified.

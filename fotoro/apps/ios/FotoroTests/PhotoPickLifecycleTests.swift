@@ -78,6 +78,102 @@ import XCTest
     XCTAssertTrue(store.photos.isEmpty)
     store.pauseAnalysis()
   }
+  func testFilteredContinuationUsesBoundedMetadataPagesAndStopsWhenCancelledOrPermissionChanges() async {
+    for withdrawPermission in [false, true] {
+      var permission = PHAuthorizationStatus.authorized
+      var reads: [Range<Int>] = []
+      let store = RecentPhotosStore(authorization: { permission }, readBrowseSource: { _ in
+        PhotoBrowseSource(count: 1001) { range in
+          reads.append(range)
+          if withdrawPermission && reads.count == 2 { permission = .denied }
+          return []
+        }
+      }, readRecentPhotos: { _ in [] })
+      defer { store.pauseAnalysis() }
+      store.restoreAccess()
+      XCTAssertEqual(reads, [0..<200])
+      let continuation = Task { await store.loadMorePhotos(matching: .favorites) }
+      if !withdrawPermission { continuation.cancel() }
+      await continuation.value
+      XCTAssertEqual(reads, withdrawPermission ? [0..<200, 200..<400] : [0..<200])
+      XCTAssertEqual(store.status, withdrawPermission ? .denied : .authorized)
+      XCTAssertTrue(store.photos.isEmpty)
+      if withdrawPermission { XCTAssertFalse(store.hasMorePhotos) }
+    }
+  }
+  func testFilteredContinuationFindsAnOlderFavoriteBeyondEmptyPagesWithoutAnalyzingPreviews() async throws {
+    #if targetEnvironment(simulator)
+      let permission = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+      guard RecentPhotosPolicy.canRead(permission) else {
+        throw XCTSkip("Permit the public Simulator Photos library to verify older favorite paging.")
+      }
+      let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "neutral-a", withExtension: "png"))
+      let image = try XCTUnwrap(UIImage(contentsOfFile: fixture.path))
+      var plainID = "", favoriteID = ""
+      let olderDate = Date(timeIntervalSince1970: 1_577_880_000)
+      try await PHPhotoLibrary.shared().performChanges {
+        let plain = PHAssetChangeRequest.creationRequestForAsset(from: image)
+        plain.creationDate = Date()
+        plainID = plain.placeholderForCreatedAsset?.localIdentifier ?? ""
+        let favorite = PHAssetChangeRequest.creationRequestForAsset(from: image)
+        favorite.creationDate = olderDate
+        favorite.isFavorite = true
+        favoriteID = favorite.placeholderForCreatedAsset?.localIdentifier ?? ""
+      }
+      let plain = RecentPhoto(asset: try XCTUnwrap(PHAsset.fetchAssets(withLocalIdentifiers: [plainID], options: nil).firstObject))
+      let favorite = RecentPhoto(asset: try XCTUnwrap(PHAsset.fetchAssets(withLocalIdentifiers: [favoriteID], options: nil).firstObject))
+      XCTAssertTrue(favorite.isFavorite)
+      XCTAssertFalse(RecentPhotosPolicy.includes(favorite.capturedAt, now: Date()))
+      var reads: [Range<Int>] = []
+      var previews = 0
+      let analyzer = PhotoPickAnalyzer(preview: { _ in previews += 1; return self.signal }, isCurrent: { _ in true })
+      let store = RecentPhotosStore(authorization: { permission }, readBrowseSource: { _ in
+        PhotoBrowseSource(count: 1001) { range in
+          reads.append(range)
+          // Intervening pages contain no remaining permitted sources. Their
+          // source offsets still advance, independently of visible cell count.
+          if range.lowerBound == 0 { return [plain] }
+          if range.lowerBound == 400 { return [favorite] }
+          return []
+        }
+      }, readRecentPhotos: { _ in [] }, sourceRevisions: { _ in
+        [plain.id: plain.sourceRevision, favorite.id: favorite.sourceRevision]
+      }, picks: analyzer)
+      defer { store.pauseAnalysis() }
+      store.restoreAccess()
+      XCTAssertTrue(store.photos.filter(\.isFavorite).isEmpty)
+      XCTAssertTrue(store.hasMorePhotos)
+      await store.loadMorePhotos(matching: .favorites)
+      XCTAssertEqual(reads, [0..<200, 200..<400, 400..<600])
+      XCTAssertEqual(store.photos.filter(\.isFavorite).map(\.id), [favorite.id])
+      XCTAssertTrue(store.hasMorePhotos, "Finding a match does not eagerly materialize the remaining library")
+      XCTAssertEqual(previews, 0, "Browsing filters must use metadata without pick analysis or image downloads")
+    #else
+      throw XCTSkip("Public favorite fixture injection is Simulator-only.")
+    #endif
+  }
+  func testFilteredContinuationStopsMetadataPagingWhenPhotosLeavesForegroundAndResumesOnReturn() async {
+    var active = true
+    var reads: [Range<Int>] = []
+    let store = RecentPhotosStore(authorization: { .authorized }, readBrowseSource: { _ in
+      PhotoBrowseSource(count: 601) { range in
+        reads.append(range)
+        if range.lowerBound == 200 { active = false }
+        return []
+      }
+    }, readRecentPhotos: { _ in [] })
+    defer { store.pauseAnalysis() }
+    store.restoreAccess()
+    await store.loadMorePhotos(matching: .favorites, whileActive: { active })
+    XCTAssertEqual(reads, [0..<200, 200..<400])
+    XCTAssertTrue(store.hasMorePhotos)
+    await store.loadMorePhotos(matching: .favorites, whileActive: { active })
+    XCTAssertEqual(reads, [0..<200, 200..<400], "Inactive Photos cannot begin another metadata page")
+    active = true
+    await store.loadMorePhotos(matching: .favorites, whileActive: { active })
+    XCTAssertEqual(reads, [0..<200, 200..<400, 400..<600, 600..<601])
+    XCTAssertFalse(store.hasMorePhotos)
+  }
   func testNonFavoriteScreenshotsUseNoPreviewWorkButFavoritesRemainEligible() async throws {
     var reads: [String] = []
     let analyzer = PhotoPickAnalyzer(preview: { candidate in reads.append(candidate.id); return self.signal },

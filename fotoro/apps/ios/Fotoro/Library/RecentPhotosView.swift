@@ -638,12 +638,9 @@ struct RecentPhotosView: View {
         } else {
           galleryHeader
           gallery
-          if allPhotos, store.hasMorePhotos {
-            Button("More photos") { store.loadMorePhotos() }.padding()
-          }
-          if store.photos.isEmpty {
+          if store.photos.isEmpty && !(allPhotos && store.hasMorePhotos) {
             ContentUnavailableView("No photos", systemImage: "photo", description: Text("Choose photos Fotoro may access in Settings."))
-          } else if browseFilter != .all, homePhotos.isEmpty {
+          } else if browseFilter != .all, homePhotos.isEmpty, !(allPhotos && store.hasMorePhotos) {
             ContentUnavailableView("No matching photos", systemImage: "line.3.horizontal.decrease",
               description: Text("Change the filter to see more photos."))
           } else if !allPhotos, store.picksSnapshot != nil, homePhotos.isEmpty {
@@ -902,6 +899,16 @@ struct RecentPhotosView: View {
           }
         }
       }
+      if allPhotos, store.hasMorePhotos {
+        Section {} footer: {
+          ProgressView(browseFilter == .all ? "Loading photos…" : "Looking for matching photos…")
+            .font(.footnote).padding().frame(maxWidth: .infinity)
+            .task(id: PhotoBrowseContinuation(page: store.browsePage, filter: browseFilter, isActive: scenePhase == .active)) {
+              guard scenePhase == .active else { return }
+              await store.loadMorePhotos(matching: browseFilter, whileActive: { scenePhase == .active })
+            }
+        }
+      }
     }.scrollTargetLayout()
   }
   private var homeHeader: some View {
@@ -1001,7 +1008,7 @@ struct RecentPhotosView: View {
     share(selectedPhotos.values.map(\.photo).sorted { ($0.capturedAt ?? .distantPast) > ($1.capturedAt ?? .distantPast) })
   }
   private func loadMoreDevicePhotos(after id: String) {
-    guard allPhotos, store.hasMorePhotos,
+    guard allPhotos, browseFilter == .all, store.hasMorePhotos,
       let index = store.photos.firstIndex(where: { $0.id == id }), index >= max(0, store.photos.count - 20) else { return }
     store.loadMorePhotos()
   }

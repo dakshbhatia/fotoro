@@ -36,7 +36,17 @@ Public production checks verify responsive browsing and a fresh-browser
 same-password restore of an unchanged original. The native follow-up makes
 remembered sign-in recoverable, displays sync progress in Saved, and rechecks
 the catalog on return or pull-to-refresh. Apple distribution and physical-device
-acceptance remain separate from Worker deployment. See [verification](verification.md).
+acceptance remain separate from Worker deployment. Full Release 0.1.0 (24)
+from merged PR 26 is now App Store distribution-signed. Its exact IPA passed
+strict signature, app identity, associated domains, full-encryption and matching
+dSYM checks, Apple validation and upload. App Store Connect reports `VALID` and
+`MISSING_EXPORT_COMPLIANCE`; `usesNonExemptEncryption` remains unset. Existing
+`Fotoro Internal` receives all builds, but this does not establish installable
+access before compliance clears. What to Test notes are saved and read back.
+The owner has restored the Xcode account; distribution signing is resolved.
+France availability remains the missing owner input for the prepared encryption
+declaration. No declaration or exemption override has been submitted, and no
+new physical installation is claimed. See [verification](verification.md).
 
 ## Previous release checkpoints
 

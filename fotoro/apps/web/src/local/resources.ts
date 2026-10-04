@@ -1,4 +1,4 @@
-import { captureDate } from "../library/exif";
+import { captureDateFromFile } from "../library/exif";
 import {photoFormat, displayPhotoDimensions, safePhotoDimensions, boundedPhotoBitmap, photoPreview, PHOTO_HEADER_BYTES} from "../media/photo-source";
 export {imageDimensions} from "../media/photo-source";
 import type { SearchOcr, SearchPhoto } from "./search";
@@ -46,7 +46,6 @@ export async function localPhoto(file: File): Promise<LocalPhoto & { file: File 
     ![137, 80, 78, 71, 13, 10, 26, 10].every((n, i) => bytes[i] === n)
   )
     throw new Error("This PNG could not be read. It was skipped.");
-  const captured = captureDate(bytes);
   const dimensions = displayPhotoDimensions(bytes, format, file.size);
   if (!dimensions)
     throw new Error(
@@ -55,6 +54,7 @@ export async function localPhoto(file: File): Promise<LocalPhoto & { file: File 
         : "This photo’s dimensions could not be read safely. It was skipped.",
     );
   safePhotoDimensions(dimensions);
+  const captured = await captureDateFromFile(file, bytes);
   if (format === "heic") {
     try {const bitmap = await boundedPhotoBitmap(file, dimensions, 256); bitmap.close();}
     catch {throw new Error("HEIC is not supported by this browser. Try Safari 17 or later, or choose a JPEG or PNG copy.");}

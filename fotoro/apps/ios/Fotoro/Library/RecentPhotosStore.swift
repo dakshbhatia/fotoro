@@ -49,6 +49,12 @@ struct RecentPhotoSource: Hashable {
   init(_ photo: RecentPhoto) { id = photo.id; revision = photo.sourceRevision }
 }
 
+struct PhotoBrowseContinuation: Hashable {
+  let page: UUID
+  let filter: PhotoBrowseFilter
+  let isActive: Bool
+}
+
 struct RecentPhotosPresentationValidation {
   let viewerIsCurrent: Bool
   let selectedIDs: Set<String>
@@ -134,6 +140,7 @@ struct PhotoViewerZoom {
   private(set) var photos: [RecentPhoto] = []
   private(set) var recentPhotos: [RecentPhoto] = []
   private(set) var hasMorePhotos = false
+  private(set) var browsePage = UUID()
   private(set) var status = PHAuthorizationStatus.notDetermined
   private(set) var opened = false
   var error: String?
@@ -158,6 +165,7 @@ struct PhotoViewerZoom {
   @ObservationIgnored private let readRecentPhotos: @MainActor (Date) -> [RecentPhoto]
   @ObservationIgnored private var browseSource: PhotoBrowseSource<RecentPhoto>?
   @ObservationIgnored private var browseOffset = 0
+  @ObservationIgnored private var browseGeneration = UUID()
   @ObservationIgnored private let validatesBrowsingSources: Bool
   @ObservationIgnored private let sourceRevisions: @MainActor ([String]) -> [String: String]
   init(
@@ -278,6 +286,8 @@ struct PhotoViewerZoom {
   }
   func refresh(now: Date = Date()) {
     guard opened else { return }
+    browseGeneration = UUID()
+    browsePage = UUID()
     status = authorization()
     images.stopCachingImagesForAllAssets()
     guard RecentPhotosPolicy.canRead(status) else {
@@ -332,6 +342,24 @@ struct PhotoViewerZoom {
     })
     browseOffset = range.upperBound
     hasMorePhotos = browseOffset < source.count
+    browsePage = UUID()
+  }
+  func loadMorePhotos(matching filter: PhotoBrowseFilter, whileActive: @MainActor () -> Bool = { true }) async {
+    let generation = browseGeneration
+    while hasMorePhotos {
+      // Sparse filters may need several metadata pages. Yield between them so
+      // changing filters, leaving Photos, or permission withdrawal can stop work.
+      await Task.yield()
+      guard !Task.isCancelled, whileActive(), generation == browseGeneration else { return }
+      let offset = browseOffset
+      let count = photos.count
+      loadMorePhotos()
+      guard generation == browseGeneration, browseOffset > offset else { return }
+      if photos.dropFirst(count).contains(where: { photo in
+        filter.includes(RecentPhotoFacts(capturedAt: photo.capturedAt, favorite: photo.isFavorite,
+          screenshot: photo.isScreenshot, livePhoto: photo.isLivePhoto, location: photo.location))
+      }) { return }
+    }
   }
   private static func fetchBrowseSource(now: Date) -> PhotoBrowseSource<RecentPhoto> {
     let options = RecentPhotosPolicy.browseFetchOptions()
