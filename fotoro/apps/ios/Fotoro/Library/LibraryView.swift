@@ -7,6 +7,10 @@ struct IncomingInvitationPasswordRetry {
   let origin: String
   private(set) var pending = true
   private var authorization: PhotoAccountAccess?
+  init(link: FotoroShareLink, origin: String) {
+    self.link = link
+    self.origin = origin
+  }
   var awaitingPassword: Bool { pending && authorization == nil }
   var presented: Bool { !pending && authorization != nil }
   mutating func authorize(_ access: PhotoAccountAccess?, origin: String) {
