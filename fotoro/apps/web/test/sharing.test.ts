@@ -264,7 +264,7 @@ test("a delayed receive cannot decrypt photos or mark them viewed after cancella
   globalThis.fetch = (async path => {calls.push(String(path)); started(); return new Promise<Response>(resolve => {release = resolve;});}) as typeof fetch;
   const pending = receive(detail.grant.grantId), rejected = assert.rejects(pending, /VAULT_LOCKED/);
   await began; lockVault(); await open(0); release(response(detail)); await rejected;
-  assert.deepEqual(calls, ["/v1/grants/" + detail.grant.grantId]);
+  assert.deepEqual(calls, ["/v1/grants/" + detail.grant.grantId + "?media=1"]);
 }));
 test("closing sharing aborts its metadata download without caching or marking it viewed", async () => scoped(async () => {
   const {detail, photo} = await fixture(); await open(1); await pinCard(accounts.accounts[0]);
@@ -397,7 +397,7 @@ test("trusted people outside grant participants cannot supply its photo manifest
     envelopes: [sealShareKey(photo.metadataKey, accounts.accounts[1], {version: 1, grantId: detail.grant.grantId, photoId: manifest.photoId, senderAccountId: outsider.accountId, recipientAccountId: accounts.accounts[1].accountId}, signing.privateKey)]};
   globalThis.fetch = (async path => {calls.push(String(path)); return response(forged);}) as typeof fetch;
   await assert.rejects(receive(detail.grant.grantId), /MANIFEST_PARTICIPANT_MISMATCH/);
-  assert.deepEqual(calls, ["/v1/grants/" + detail.grant.grantId]);
+  assert.deepEqual(calls, ["/v1/grants/" + detail.grant.grantId + "?media=1"]);
 }));
 
 test("contribution retry checks renewed trust after its cache read and preserves identical durable data", async () => scoped(async () => {

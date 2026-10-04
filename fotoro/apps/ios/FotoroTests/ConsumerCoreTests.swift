@@ -1,7 +1,237 @@
 import XCTest
+import GRDB
+import Photos
 @testable import Fotoro
 
 final class ConsumerCoreTests: XCTestCase {
+  @MainActor func testMixedOriginalShareKeepsEverySelectedSourceAndSeparateResourceNames() async throws {
+    let deviceDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()).appendingPathComponent(Wire.id())
+    let savedDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("fotoro-share-" + Wire.id())
+    defer {
+      RecentShareExports.remove([deviceDirectory.appendingPathComponent("IMG_1.HEIC")])
+      ConsumerShareExports.remove([savedDirectory.appendingPathComponent("IMG_2.JPG")])
+    }
+    try FileManager.default.createDirectory(at: deviceDirectory, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: savedDirectory, withIntermediateDirectories: true)
+    let deviceURLs = ["IMG_1.HEIC", "IMG_1.MOV"].map { deviceDirectory.appendingPathComponent($0) }
+    let savedURLs = ["IMG_2.JPG", "IMG_2.MOV"].map { savedDirectory.appendingPathComponent($0) }
+    for (index, url) in (deviceURLs + savedURLs).enumerated() { try Data([UInt8(index)]).write(to: url) }
+    let saved = try samplePhoto()
+    var selection = SavedPhotoSelection()
+    selection.toggle(saved)
+    let selected = try selection.resolve(using: { $0 == saved.id ? saved : nil })
+    let device = [RecentPhotoSource(id: "selected-before-search", revision: "current")]
+    let batch = try await PhotoOriginalShareBatch.prepare(device: device, saved: selected,
+      valid: { XCTAssertTrue(SavedPhotoSelection.isCurrent(selected, lookup: { $0 == saved.id ? saved : nil })) },
+      exportDevice: { XCTAssertEqual($0, device); return deviceURLs },
+      exportSaved: { XCTAssertEqual($0.id, saved.id); return savedURLs[0] },
+      expandSaved: { _, _ in savedURLs }, removeDevice: RecentShareExports.remove, removeSaved: ConsumerShareExports.remove)
+    XCTAssertEqual(batch.photoCount, 2, "Two selected photos may contain four exact original resources")
+    XCTAssertEqual(batch.urls.map(\.lastPathComponent), ["IMG_1.HEIC", "IMG_1.MOV", "IMG_2.JPG", "IMG_2.MOV"])
+    for (index, url) in batch.urls.enumerated() { XCTAssertEqual(try Data(contentsOf: url), Data([UInt8(index)])) }
+    XCTAssertEqual(batch.device, deviceURLs)
+    XCTAssertEqual(batch.saved, savedURLs)
+  }
+  @MainActor func testMixedShareRejectsLateDownloadAfterCancellationOrAccountLockAndRemovesBothExportShapes() async throws {
+    for interruption in ["cancel", "lock", "source", "permission"] {
+      try await withSavedLibrary { services, _ in
+        var saved = try self.samplePhoto()
+        saved.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+        try services.store.put(saved)
+        let immutableSaved = saved
+        var permission = PHAuthorizationStatus.limited
+        let deviceSources = [RecentPhotoSource(id: "device", revision: "current")]
+        let photos = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in [] },
+          sourceRevisions: { _ in ["device": "current"] })
+        let deviceDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()).appendingPathComponent(Wire.id())
+        let savedDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("fotoro-share-" + Wire.id())
+        try FileManager.default.createDirectory(at: deviceDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: savedDirectory, withIntermediateDirectories: true)
+        let deviceURL = deviceDirectory.appendingPathComponent("device.jpg"), savedURL = savedDirectory.appendingPathComponent("saved.jpg")
+        try Data("original-device".utf8).write(to: deviceURL)
+        try Data("original-saved".utf8).write(to: savedURL)
+        defer { RecentShareExports.remove([deviceURL]); ConsumerShareExports.remove([savedURL]) }
+        let gate = SavedShareDownloadGate()
+        let started = expectation(description: "Saved original download " + interruption)
+        let operation = Task {
+          try await PhotoOriginalShareBatch.prepare(device: deviceSources, saved: [immutableSaved],
+            valid: {
+              guard services.photoAccountAccess != nil,
+                SavedPhotoSelection.isCurrent([immutableSaved], lookup: services.consumerSavedPhoto),
+                photos.validatePresentation(viewer: [], selection: [], share: deviceSources).shareIsCurrent
+              else { throw CancellationError() }
+            }, exportDevice: { _ in [deviceURL] }, exportSaved: { _ in
+              started.fulfill()
+              return await gate.read()
+            }, expandSaved: { url, _ in [url] }, removeDevice: RecentShareExports.remove, removeSaved: ConsumerShareExports.remove)
+        }
+        await fulfillment(of: [started], timeout: 3)
+        switch interruption {
+        case "cancel": operation.cancel()
+        case "lock": services.vault.lock()
+        case "permission": permission = .denied
+        default:
+          saved.metadata.originalSha256 = Data("changed-original".utf8).digest
+          try services.store.put(saved)
+        }
+        await gate.finish(savedURL)
+        do { _ = try await operation.value; XCTFail("A withdrawn batch must not present any originals") }
+        catch is CancellationError {} catch { XCTFail("Unexpected share withdrawal error: \(error)") }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: deviceDirectory.deletingLastPathComponent().path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: savedDirectory.path))
+      }
+    }
+  }
+  @MainActor func testMixedShareExpansionFailureCleansPartialLivePairWithoutDeletingOtherTemporaryFiles() async throws {
+    let saved = try samplePhoto()
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("fotoro-share-" + Wire.id())
+    let other = FileManager.default.temporaryDirectory.appendingPathComponent("unrelated-" + Wire.id())
+    let original = directory.appendingPathComponent("live.fotoro-live")
+    defer { ConsumerShareExports.remove([original]); try? FileManager.default.removeItem(at: other) }
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    try Data("complete-archive".utf8).write(to: original)
+    try Data("keep".utf8).write(to: other)
+    do {
+      _ = try await PhotoOriginalShareBatch.prepare(device: [], saved: [saved], valid: {},
+        exportDevice: { _ in XCTFail("Saved-only batches need no Photos permission"); return [] },
+        exportSaved: { _ in original }, expandSaved: { _, _ in
+          try Data("partial-still".utf8).write(to: directory.appendingPathComponent("still.jpg"))
+          throw FotoroError("CONTROLLED_MISSING_MOTION")
+        }, removeDevice: RecentShareExports.remove, removeSaved: ConsumerShareExports.remove)
+      XCTFail("A partial Live Photo must not be shared")
+    } catch {}
+    XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    RecentShareExports.remove([other, FileManager.default.temporaryDirectory.appendingPathComponent("unowned.jpg")])
+    XCTAssertEqual(try Data(contentsOf: other), Data("keep".utf8), "Device cleanup cannot traverse a saved export or the temporary root")
+    for name in ["", ".", "..", "../IMG.JPG", "folder/IMG.JPG", "folder\\IMG.JPG", "IMG\n.JPG"] {
+      XCTAssertFalse(RecentOriginalFilename.isSafe(name))
+    }
+    XCTAssertTrue(RecentOriginalFilename.isSafe("IMG_1234.HEIC"))
+  }
+  func testUnifiedTimelineOrdersBothLibrariesAndNeverDeduplicatesBySimilarMetadata() throws {
+    var saved = try samplePhoto()
+    let date = Date(timeIntervalSince1970: 1_800_000_000)
+    let facts = RecentPhotoFacts(capturedAt: date, favorite: false, screenshot: false, livePhoto: false, location: nil)
+    let device = PhotoBrowseItem(source: RecentPhotoSource(id: saved.id, revision: "current"), facts: facts)
+    let earlier = PhotoBrowseItem(source: RecentPhotoSource(id: "earlier", revision: "1"),
+      facts: RecentPhotoFacts(capturedAt: date.addingTimeInterval(-86400), favorite: false, screenshot: false, livePhoto: false, location: nil))
+    saved.metadata.sourceDate = Wire.date(date)
+    let result = PhotoTimelinePolicy.groups(device: [earlier, device], saved: [.init(photo: saved, facts: facts)],
+      sources: [], account: saved.manifest.ownerAccountId)
+    XCTAssertEqual(result.flatMap(\.sources).map(\.id), ["device:" + saved.id, "saved:" + saved.id, "device:earlier"])
+    XCTAssertEqual(result.flatMap(\.sources).count, 3, "Same ID, capture date, name or digest cannot prove a cross-library copy")
+    let reversed = PhotoTimelinePolicy.groups(device: [device, earlier], saved: [.init(photo: saved, facts: facts)],
+      sources: [], account: saved.manifest.ownerAccountId)
+    XCTAssertEqual(result.flatMap(\.sources), reversed.flatMap(\.sources))
+  }
+  func testUnifiedTimelineDedupeWithdrawsWithRevisionOrPhotosPermission() throws {
+    let saved = try samplePhoto(), account = saved.manifest.ownerAccountId
+    let facts = RecentPhotoFacts(capturedAt: Date(), favorite: false, screenshot: false, livePhoto: false, location: nil)
+    let source = BackupSource(id: "permitted-device", photoId: saved.id, phase: .committed,
+      sourceRevision: "original", originalSha256: saved.metadata.originalSha256)
+    let device = PhotoBrowseItem(source: RecentPhotoSource(id: source.id, revision: "original"), facts: facts)
+    func ids(_ device: [PhotoBrowseItem], _ source: BackupSource, _ account: String?) -> [String] {
+      PhotoTimelinePolicy.groups(device: device, saved: [.init(photo: saved, facts: facts)],
+        sources: [source], account: account).flatMap(\.sources).map(\.id)
+    }
+    XCTAssertEqual(ids([device], source, account), ["device:permitted-device"])
+    let edited = PhotoBrowseItem(source: RecentPhotoSource(id: source.id, revision: "edited"), facts: facts)
+    XCTAssertEqual(Set(ids([edited], source, account)), ["device:permitted-device", "saved:" + saved.id])
+    XCTAssertEqual(ids([], source, account), ["saved:" + saved.id], "Revoking device Photos access still leaves the unlocked owned copy")
+    XCTAssertEqual(ids([], source, nil), [], "Locking Fotoro withdraws saved copies")
+    XCTAssertEqual(ids([], source, Wire.id()), [], "Other account originals never join this timeline")
+    var unverified = source; unverified.originalSha256 = Data("different".utf8).digest
+    XCTAssertEqual(ids([device], unverified, account).count, 2)
+    unverified = source; unverified.phase = .pending
+    XCTAssertEqual(ids([device], unverified, account).count, 2)
+  }
+  func testUnifiedTimelineKeepsSavedFavoriteWhenItsDeviceCopyIsFilteredOut() throws {
+    let saved = try samplePhoto()
+    var favorite = RecentPhotoFacts(capturedAt: Date(), favorite: true, screenshot: false, livePhoto: false, location: nil)
+    let source = BackupSource(id: "device", photoId: saved.id, phase: .committed,
+      sourceRevision: "current", originalSha256: saved.metadata.originalSha256)
+    favorite.favorite = false
+    let device = PhotoBrowseItem(source: RecentPhotoSource(id: "device", revision: "current"), facts: favorite)
+    favorite.favorite = true
+    let filtered = PhotoTimelinePolicy.groups(device: [device], saved: [.init(photo: saved, facts: favorite)],
+      sources: [source], account: saved.manifest.ownerAccountId, filter: .favorites)
+    XCTAssertEqual(filtered.flatMap(\.sources).map(\.id), ["saved:" + saved.id])
+  }
+  func testLegacyCatalogBuildsDigestIndexAndRescansMediaOnlyOnce() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let original = try samplePhoto()
+    let legacy = try DatabaseQueue(path: root.appendingPathComponent("catalog.sqlite").path)
+    try legacy.write { db in
+      try db.execute(sql: "CREATE TABLE photos(id TEXT PRIMARY KEY, sourceDate TEXT NOT NULL, value BLOB NOT NULL); CREATE TABLE state(key TEXT PRIMARY KEY, value TEXT)")
+      try db.execute(sql: "INSERT INTO photos(id,sourceDate,value) VALUES(?,?,?)",
+        arguments: [original.id, original.metadata.sourceDate, try Wire.encode(original)])
+      try db.execute(sql: "INSERT INTO state(key,value) VALUES('cursor','legacy-passed-hidden-media')")
+    }
+    let store = try LibraryStore(root: root)
+    XCTAssertNil(try store.cursor(), "An older reader may have advanced past hidden media")
+    XCTAssertEqual(try store.ownedOriginal(digest: original.metadata.originalSha256,
+      accountId: original.manifest.ownerAccountId)?.id, original.id)
+    let plan = try store.database.read { db in
+      try Row.fetchAll(db, sql: "EXPLAIN QUERY PLAN " + LibraryStore.ownedOriginalQuery,
+        arguments: [original.manifest.ownerAccountId, original.metadata.originalSha256])
+        .map { $0["detail"] as String }
+    }
+    XCTAssertTrue(plan.contains { $0.contains("photos_owned_original") }, "Digest reuse must avoid decoding the whole library")
+    try store.apply(ChangePageV1(version: 1, changes: [], nextCursor: "media-aware", hasMore: false))
+    let reopened = try LibraryStore(root: root)
+    XCTAssertEqual(try reopened.cursor(), "media-aware", "Reader capability migration must not repeatedly rescan")
+    XCTAssertEqual(try reopened.ownedOriginal(digest: original.metadata.originalSha256,
+      accountId: original.manifest.ownerAccountId)?.id, original.id)
+  }
+  func testIndexedDigestReuseTracksMutationsAndPrefersSavedOriginals() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try LibraryStore(root: root)
+    var pending = try samplePhoto(), saved = try samplePhoto(), received = try samplePhoto()
+    pending.transferState = "pending"
+    received.transferState = "received"
+    let account = saved.manifest.ownerAccountId, digest = saved.metadata.originalSha256
+    try store.put(pending); try store.put(received); try store.put(saved)
+    XCTAssertEqual(try store.ownedOriginal(digest: digest, accountId: account)?.id, saved.id)
+    XCTAssertNil(try store.ownedOriginal(digest: digest, accountId: Wire.id()))
+    saved.metadata.originalSha256 = Data("changed-original".utf8).digest
+    try store.put(saved)
+    XCTAssertEqual(try store.ownedOriginal(digest: digest, accountId: account)?.id, pending.id)
+    pending.manifest.ownerAccountId = Wire.id()
+    try store.put(pending)
+    XCTAssertNil(try store.ownedOriginal(digest: digest, accountId: account), "Received and other-account rows cannot satisfy owned reuse")
+    XCTAssertEqual(try store.ownedOriginal(digest: saved.metadata.originalSha256, accountId: account)?.id, saved.id)
+    try store.apply(ChangePageV1(version: 1,
+      changes: [ChangeV1(cursor: "1", entity: "photo", entityId: saved.id, deleted: true, payload: nil)],
+      nextCursor: "1", hasMore: false))
+    XCTAssertNil(try store.ownedOriginal(digest: saved.metadata.originalSha256, accountId: account))
+    try store.removeAll()
+    XCTAssertNil(try store.ownedOriginal(digest: digest, accountId: pending.manifest.ownerAccountId))
+  }
+  func testVerifiedCatalogRescanPreservesOnlyUnchangedCachedOriginals() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try LibraryStore(root: root)
+    var original = try samplePhoto()
+    original.originalURL = try store.write(Data("jpg".utf8), name: "original.jpg")
+    original.previewURL = try store.write(Data("preview".utf8), name: "preview.jpg")
+    try store.put(original)
+    var downloaded = original
+    downloaded.originalURL = nil; downloaded.previewURL = nil
+    let change = ChangeV1(cursor: "1", entity: "photo", entityId: original.id, deleted: false, payload: nil)
+    let page = ChangePageV1(version: 1, changes: [change], nextCursor: "1", hasMore: false)
+    try store.apply(page, verified: [original.id: downloaded])
+    let retained = try XCTUnwrap(store.backupPhoto(original.id))
+    XCTAssertEqual(retained.originalURL, original.originalURL)
+    XCTAssertEqual(retained.previewURL, original.previewURL)
+    XCTAssertEqual(try Data(contentsOf: XCTUnwrap(retained.originalURL)), Data("jpg".utf8))
+    downloaded.metadata.originalSha256 = Data("new-original".utf8).digest
+    try store.apply(page, verified: [original.id: downloaded])
+    XCTAssertNil(try store.backupPhoto(original.id)?.originalURL, "A different original cannot inherit earlier cache files")
+    XCTAssertNil(try store.backupPhoto(original.id)?.previewURL)
+  }
   func testEmptySavedGuidanceUsesTheActualSyncPhase() {
     let expected: [(AutomaticPhotoSyncStatus.Phase, String)] = [
       (.paused, "Sync is paused. Resume to add your photos."),
@@ -888,14 +1118,108 @@ extension ConsumerCoreTests {
       XCTAssertEqual(selection.count, 0)
     }
   }
+  @MainActor func testAutomaticSyncReconcilesRemoteOriginalBeforeStagingANewDeviceAsset() async throws {
+    let bytes = try Data(contentsOf: Bundle.main.url(forResource: "singapore", withExtension: "jpg")!)
+    try await withSavedLibrary(original: bytes) { services, server in
+      services.session.fixture = false
+      services.session.bearerToken = "controlled-private-session"
+      services.automaticPhotosAuthorization = { .limited }
+      let reads = ReconciliationSourceReads()
+      services.photosBackupSnapshot = { cutoff in
+        XCTAssertEqual(cutoff, .distantPast)
+        return [BackupCandidate(id: "this-devices-asset", sourceRevision: "original")]
+      }
+      services.importer = PhotoImport(store: services.store, sourceReader: { _ in
+        await reads.record()
+        return (bytes, "public-sample.jpg", false)
+      }, sourceRevision: { _ in "original" })
+      XCTAssertTrue(try services.store.photos().isEmpty)
+      try services.enableAutomaticPhotoSync()
+      await services.waitForAutomaticPhotoSync()
+      let readCount = await reads.count
+      XCTAssertEqual(readCount, 1, "A new device compares its unchanged original with the verified remote digest")
+      let checkpoint = try services.store.backupSource("this-devices-asset")
+      XCTAssertEqual(checkpoint.photoId, server.photoID)
+      XCTAssertEqual(checkpoint.phase, .committed)
+      XCTAssertEqual(try services.store.photos().map(\.id), [server.photoID])
+      XCTAssertTrue(try services.journal.entries().isEmpty)
+      XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" }, "An existing owned original needs no reserve, upload, commit or publish")
+      XCTAssertEqual(server.requests.first?.path, "/v1/changes")
+      XCTAssertTrue(server.requests.filter { $0.path == "/v1/changes" }.allSatisfy { $0.mediaAware })
+      XCTAssertEqual(services.automaticPhotoSync.phase, .ready)
+    }
+  }
+  @MainActor func testAutomaticReconciliationRejectsLegacyServerBeforeReadingAnyOriginal() async throws {
+    try await withSavedLibrary(mediaVersion: nil) { services, server in
+      services.session.fixture = false
+      services.session.bearerToken = "controlled-private-session"
+      services.automaticPhotosAuthorization = { .authorized }
+      var scans = 0
+      services.photosBackupSnapshot = { _ in scans += 1; return [] }
+      try services.enableAutomaticPhotoSync()
+      await services.waitForAutomaticPhotoSync()
+      XCTAssertEqual(scans, 0, "An old server ignoring media=1 must not admit any staging")
+      XCTAssertTrue(try services.store.photos().isEmpty)
+      XCTAssertNil(try services.store.cursor())
+      XCTAssertTrue(try services.store.backupSources().isEmpty)
+      XCTAssertTrue(try services.journal.entries().isEmpty)
+      XCTAssertEqual(server.requests.map(\.path), ["/v1/changes"])
+      XCTAssertEqual(services.automaticPhotoSync.phase, .needsAttention)
+    }
+  }
+  @MainActor func testAutomaticReconciliationCannotStageAfterItsAccessOrIntentIsWithdrawn() async throws {
+    for interruption in ["lock", "pause", "account", "origin", "permission", "background", "disable"] {
+      let gate = SavedLibraryRequestGate(started: expectation(description: "Automatic catalog preflight " + interruption))
+      defer { gate.release.signal() }
+      try await withSavedLibrary(gate: gate) { services, server in
+        services.session.fixture = false
+        services.session.bearerToken = "controlled-private-session"
+        services.automaticPhotosAuthorization = { .authorized }
+        var scans = 0
+        services.photosBackupSnapshot = { _ in
+          scans += 1
+          return [BackupCandidate(id: "not-staged", sourceRevision: "original")]
+        }
+        let reads = ReconciliationSourceReads()
+        services.importer = PhotoImport(store: services.store, sourceReader: { _ in
+          await reads.record()
+          return (Data("jpg".utf8), "public-sample.jpg", false)
+        }, sourceRevision: { _ in "original" })
+        try services.enableAutomaticPhotoSync()
+        await fulfillment(of: [gate.started], timeout: 3)
+        switch interruption {
+        case "lock": services.vault.lock()
+        case "pause": services.pauseAutomaticPhotoSync()
+        case "account": services.session.accountId = Wire.id()
+        case "origin": services.api.baseURL = URL(string: "https://different-service.test")!
+        case "permission":
+          services.automaticPhotosAuthorization = { .denied }
+          services.kickAutomaticPhotoSync()
+        case "background": services.setPhotoSyncForeground(false)
+        default: try services.disableAutomaticPhotoSync()
+        }
+        gate.release.signal()
+        await services.waitForAutomaticPhotoSync()
+        let readCount = await reads.count
+        XCTAssertEqual(scans, 0, interruption)
+        XCTAssertEqual(readCount, 0, interruption)
+        XCTAssertTrue(try services.store.photos().isEmpty, interruption)
+        XCTAssertTrue(try services.store.backupSources().isEmpty, interruption)
+        XCTAssertTrue(try services.journal.entries().isEmpty, interruption)
+        XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" }, interruption)
+      }
+    }
+  }
   @MainActor private func withSavedLibrary(gate: SavedLibraryRequestGate? = nil, failFirst: Bool = false,
+    original: Data? = nil, mediaVersion: Int? = 1,
     check: @MainActor (AppServices, SavedLibraryServer) async throws -> Void) async throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
     let previousCards = UserDefaults.standard.object(forKey: "fotoro.pinnedCards")
     let accounts = try fixture(FixtureAccounts.self, "accounts")
     var card = accounts.accounts[0]; card.accountId = Wire.id()
     let secret = accounts.testSecrets[0]
-    let server = try SavedLibraryServer(card: card, secret: secret, gate: gate, failFirst: failFirst)
+    let server = try SavedLibraryServer(card: card, secret: secret, gate: gate, failFirst: failFirst,
+      original: original ?? Data("jpg".utf8), mediaVersion: mediaVersion)
     SavedLibraryProtocol.server = server
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [SavedLibraryProtocol.self]
@@ -931,13 +1255,31 @@ private actor SavedCatalogSearchGate {
   func fail(_ request: String) { waiting.removeValue(forKey: request)?.resume(throwing: FotoroError("CONTROLLED_SEARCH_UNAVAILABLE")) }
 }
 
+private actor ReconciliationSourceReads {
+  private(set) var count = 0
+  func record() { count += 1 }
+}
+
+private actor SavedShareDownloadGate {
+  private var pending: CheckedContinuation<URL, Never>?
+  private var completed: URL?
+  func read() async -> URL {
+    if let completed { self.completed = nil; return completed }
+    return await withCheckedContinuation { pending = $0 }
+  }
+  func finish(_ url: URL) {
+    if let pending { pending.resume(returning: url); self.pending = nil }
+    else { completed = url }
+  }
+}
+
 private final class SavedLibraryRequestGate: @unchecked Sendable {
   let started: XCTestExpectation
   let release = DispatchSemaphore(value: 0)
   init(started: XCTestExpectation) { self.started = started }
 }
 private final class SavedLibraryServer: @unchecked Sendable {
-  struct Request { var method: String; var path: String }
+  struct Request { var method: String; var path: String; var mediaAware: Bool }
   let photoID = Wire.id(), objectID = Wire.id()
   private let lock = NSLock()
   private var recorded: [Request] = []
@@ -945,12 +1287,13 @@ private final class SavedLibraryServer: @unchecked Sendable {
   private var failFirst: Bool
   private let page: Data
   private let metadata: Data
-  init(card: AccountCardV1, secret: FixtureSecrets, gate: SavedLibraryRequestGate?, failFirst: Bool) throws {
+  init(card: AccountCardV1, secret: FixtureSecrets, gate: SavedLibraryRequestGate?, failFirst: Bool,
+    original: Data, mediaVersion: Int?) throws {
     self.gate = gate; self.failFirst = failFirst
     let crypto = CryptoAdapter(), key = crypto.randomKey()
     let binding = MediaBinding(photoId: photoID, representationId: Wire.id(), kind: "metadata")
     let value = PhotoMetadataV1(filename: "remote-receipt.jpg", mediaType: "image/jpeg", sourceDate: Wire.date(),
-      dateSource: "photos", originalBytes: 3, originalSha256: Data("jpg".utf8).digest, representationKeys: [:])
+      dateSource: "photos", originalBytes: original.count, originalSha256: original.digest, representationKeys: [:])
     metadata = try crypto.encrypt(Wire.encode(value), key: key, binding: binding)
     let rep = RepresentationV1(binding: binding, objectId: objectID, header: metadata.prefix(24).b64,
       ciphertextBytes: metadata.count, ciphertextSha256: metadata.digest)
@@ -958,14 +1301,16 @@ private final class SavedLibraryServer: @unchecked Sendable {
       metadataRepresentation: rep, ownerWrappedMetadataKey: try crypto.wrap(key, key: Data(b64: secret.vaultKey)))
     let signed = try crypto.sign(manifest, kind: "photo-manifest", accountId: card.accountId,
       secret: Data(b64: secret.signingSecretKey))
-    page = try Wire.encode(ChangePageV1(version: 1,
+    page = try Wire.encode(ChangePageV1(version: 1, mediaVersion: mediaVersion,
       changes: [ChangeV1(cursor: "1", entity: "photo", entityId: photoID, deleted: false, payload: signed)],
       nextCursor: "1", hasMore: false))
   }
   var requests: [Request] { lock.lock(); defer { lock.unlock() }; return recorded }
   func response(_ request: URLRequest) throws -> (Int, Data) {
     guard request.httpMethod == "GET", let path = request.url?.path else { throw FotoroError("Catalog reading sent a write") }
-    lock.lock(); recorded.append(Request(method: "GET", path: path)); let first = recorded.count == 1
+    let mediaAware = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?
+      .contains { $0.name == "media" && $0.value == "1" } == true
+    lock.lock(); recorded.append(Request(method: "GET", path: path, mediaAware: mediaAware)); let first = recorded.count == 1
     let fail = failFirst && path == "/v1/changes"; if fail { failFirst = false }; lock.unlock()
     if first, let gate { gate.started.fulfill(); _ = gate.release.wait(timeout: .now() + 5) }
     if fail { return (503, Data(#"{"code":"CONTROLLED_CATALOG_UNAVAILABLE","retryable":true}"#.utf8)) }

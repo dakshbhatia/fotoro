@@ -40,3 +40,5 @@ export function PhotoAnnotationsReplyV1(value:unknown):boolean;
 export function StartOptionsRequestV1(value:unknown):boolean;
 export function StartOptionsV1(value:unknown):boolean;
 export function StartVerifyRequestV1(value:unknown):boolean;
+export function LivePhotoResourceV1(value:unknown):boolean;
+export function LivePhotoArchiveHeaderV1(value:unknown):boolean;

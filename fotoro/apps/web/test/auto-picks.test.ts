@@ -6,14 +6,22 @@ import type {LocalPhoto} from "../src/local/resources";
 const photo = (id: string, date?: string): LocalPhoto => ({id, filename: id + ".png", date: date ?? "2026-10-02", dateSource: date ? "exif" : "selected", captureVerified: date ? true : undefined, width: 1200, height: 800});
 const signal = (hash: bigint, sharpness = .12): PhotoSignals => ({hash, sharpness, luminance: .5, contrast: .15, color: [120, 120, 120]});
 
-test("recommendations target ten percent of unique groups and leave source photos intact", () => {
+test("recommendations keep distinct strong highlights without filling a fixed quota", () => {
   const photos = Array.from({length: 20}, (_, i) => photo(String(i)));
   const signals = new Map(photos.map((p, i) => [p.id, signal(BigInt(i), i === 5 ? .5 : i === 12 ? .4 : .01)]));
+  signals.set("12", {...signals.get("12")!, color: [230, 20, 50]});
   const result = recommendPhotos(photos, signals);
   assert.deepEqual([...result.ids], ["5", "12"]);
   assert.equal(result.groupCount, 20); assert.equal(photos.length, 20);
   assert.equal(recommendPhotos([photos[0]], signals).ids.size, 1);
   assert.equal(recommendPhotos([], signals).ids.size, 0);
+});
+
+test("each capture moment keeps its highlight instead of a global percentage", () => {
+  const photos = Array.from({length: 10}, (_, index) => photo(String(index), new Date(Date.UTC(2026, 9, 1) + index * 3 * 3600000).toISOString()));
+  const result = recommendPhotos(photos, new Map(photos.map(p => [p.id, signal(0n)])));
+  assert.equal(result.ids.size, 10);
+  assert.equal(photos.length, 10);
 });
 
 test("a burst keeps its clearer representative without chaining across capture times", () => {
@@ -89,7 +97,7 @@ test("analysis reuses the same source and fences a late result after Clear", asy
 test("explicit favorites stay eligible even when a different photo is sharper", () => {
   const photos=Array.from({length:20},(_,i)=>({...photo(String(i)),favorite:i===19}));
   const result=recommendPhotos(photos,new Map(photos.map(p=>[p.id,signal(0n,p.favorite ? .01 : .3)])));
-  assert.deepEqual([...result.ids],["19","0"]);
+  assert.deepEqual([...result.ids],["19"]);
 });
 
 test("a dense capture burst has bounded comparison work instead of an all-pairs scan", () => {
@@ -97,7 +105,7 @@ test("a dense capture burst has bounded comparison work instead of an all-pairs 
   const photos=Array.from({length:1500},(_,i)=>photo(String(i),"2026-10-01T12:00:00Z"));
   const signals=new Map(photos.map((p,i)=>[p.id,{...signal(0n),get hash(){reads++;return BigInt(i)*0x9e3779b97f4a7c15n&((1n<<64n)-1n);}}]));
   const result=recommendPhotos(photos,signals);
-  assert.ok(result.groupCount>=1200); assert.ok(result.ids.size>=120);
+  assert.ok(result.groupCount>=1200); assert.equal(result.ids.size,6);
   assert.ok(reads<160000,`${reads} descriptor reads exceed the bounded budget`);
 });
 
@@ -117,10 +125,10 @@ test("cancelling a metadata review retains completed measurements and applies th
   const photos = Array.from({length: 20}, (_, i) => ({...photo(String(i)), file: new File([String(i)], i + ".png")}));
   let reads = 0;
   const load = async () => {reads++; return signal(0n);};
-  assert.deepEqual([...(await analyzer.run(photos, load))!.ids], ["0", "1"]);
+  assert.deepEqual([...(await analyzer.run(photos, load))!.ids], ["0"]);
   analyzer.cancel();
   const updated = photos.map(value => ({...value, favorite: value.id === "19", labels: ["trip"], caption: "updated"}));
-  assert.deepEqual([...(await analyzer.run(updated, load))!.ids], ["19", "0"]);
+  assert.deepEqual([...(await analyzer.run(updated, load))!.ids], ["19"]);
   assert.equal(reads, 20);
   analyzer.clear();
   await analyzer.run(updated, load);

@@ -28,6 +28,13 @@ struct AccountView: View {
   @State private var enteringPassword = false
   @State private var apiURL = ""
   @FocusState private var passwordFocused: Bool
+  init(services: AppServices, enterPassword: Bool = false, onSignedIn: @escaping () -> Void = {},
+    onAuthenticationTask: @escaping (Task<Void, Never>?) -> Void = { _ in }) {
+    self.services = services
+    self.onSignedIn = onSignedIn
+    self.onAuthenticationTask = onAuthenticationTask
+    _enteringPassword = State(initialValue: enterPassword)
+  }
   private var canOpenRememberedAccount: Bool {
     services.auth.hasRememberedPassword || services.session.isSignedIn && services.vault.canUnlockLocally
   }

@@ -1,4 +1,6 @@
 import NukeUI
+import AVKit
+import Photos
 import SwiftUI
 
 struct SavedPhotoViewerPresentation: Identifiable {
@@ -80,6 +82,7 @@ struct PhotoViewer: View {
                 if let current { sharedPhotos = SharedPhotosPresentation(photos: [current]) }
               }
               Button("Share original", action: share)
+              Button("Save to Photos", action: restoreOriginal)
             }
               .disabled(preparingShare || current == nil)
           }
@@ -95,7 +98,7 @@ struct PhotoViewer: View {
           ExchangeView(services: services, selected: presentation.photos)
         }
         .sheet(item: $sharedOriginal, onDismiss: cleanupShare) { original in
-          OriginalShareSheet(urls: [original.url]) { _ in cleanupShare() }
+          OriginalShareSheet(urls: original.urls) { _ in cleanupShare() }
         }
         .overlay(alignment: .bottom) {
           if let feedback { Text(feedback).font(.footnote).padding().background(.regularMaterial, in: .capsule).padding(.bottom, 60) }
@@ -146,9 +149,38 @@ struct PhotoViewer: View {
           services.session.accountId == account, services.store === catalog,
           let current = try services.consumerSavedPhoto(photo.id),
           current.metadata == photo.metadata, current.manifest == photo.manifest else { throw CancellationError() }
-        originalExports = [url]
-        sharedOriginal = ConsumerSharedOriginal(url: url)
+        let urls = try CameraMedia.exportOriginals(try Data(contentsOf: url), metadata: photo.metadata, directory: url.deletingLastPathComponent())
+        originalExports = urls
+        sharedOriginal = ConsumerSharedOriginal(urls: urls)
         pendingExport = nil
+      } catch is CancellationError {} catch { services.error = error.localizedDescription }
+    }
+  }
+  private func restoreOriginal() {
+    guard let photo = current, receivedGrant == nil, !preparingShare else { return }
+    let account = services.session.accountId, generation = services.vault.generation, catalog = services.store
+    preparingShare = true
+    shareTask = Task {
+      var exported: [URL] = []
+      defer { ConsumerShareExports.remove(exported); preparingShare = false; shareTask = nil }
+      @MainActor func check() throws {
+        try Task.checkCancellation()
+        guard services.vault.isUnlocked, services.vault.generation == generation,
+          services.session.accountId == account, services.store === catalog,
+          let current = try services.consumerSavedPhoto(photo.id),
+          current.metadata == photo.metadata, current.manifest == photo.manifest else { throw CancellationError() }
+      }
+      do {
+        let url = try await services.consumerShareOriginal(photo)
+        exported = [url]
+        try check()
+        exported = try CameraMedia.exportOriginals(try Data(contentsOf: url), metadata: photo.metadata, directory: url.deletingLastPathComponent())
+        let permission = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        try check()
+        guard permission == .authorized || permission == .limited else { throw FotoroError("Allow adding originals to Photos in Settings and retry") }
+        try await CameraMedia.restoreToPhotos(exported, mediaType: photo.metadata.mediaType)
+        try check()
+        feedback = "Original saved to Photos."
       } catch is CancellationError {} catch { services.error = error.localizedDescription }
     }
   }
@@ -186,7 +218,7 @@ enum ConsumerShareExports {
 
 private struct ConsumerSharedOriginal: Identifiable {
   let id = UUID()
-  var url: URL
+  var urls: [URL]
 }
 
 private struct SavedPhotoPage: View {
@@ -197,6 +229,13 @@ private struct SavedPhotoPage: View {
   @State private var loaded: LocalPhoto?
   @State private var failed = false
   @State private var retry = 0
+  @State private var player: AVPlayer?
+  @State private var playing = false
+  @State private var motionTask: Task<Void, Never>?
+  @State private var motionGeneration = UUID()
+  @State private var motionExports: [URL] = []
+  @State private var motionFailure: String?
+  @Environment(\.scenePhase) private var scenePhase
   private var request: SavedPreviewReadIdentity {
     SavedPreviewReadIdentity(photo: photo, account: services.session.accountId,
       vault: services.vault.generation, catalog: ObjectIdentifier(services.store),
@@ -207,6 +246,9 @@ private struct SavedPhotoPage: View {
     return loaded
   }
   var body: some View {
+    Group {
+    if let player { VideoPlayer(player: player).accessibilityLabel(photo.metadata.filename) }
+    else {
     LazyImage(url: displayed.previewURL ?? displayed.originalURL ?? photo.thumbnailURL) { state in
       ZStack(alignment: .bottom) {
         if let image = state.image { image.resizable().scaledToFit() }
@@ -220,6 +262,19 @@ private struct SavedPhotoPage: View {
         }
       }
     }.id(retry).accessibilityLabel(photo.metadata.filename)
+    }
+    }.overlay(alignment: .bottom) {
+      if CameraMedia.isMotion(photo.metadata.mediaType), player == nil {
+        VStack {
+          if let motionFailure { Text(motionFailure).font(.footnote).multilineTextAlignment(.center) }
+          Button(playing ? "Opening original…" : photo.metadata.mediaType == CameraMedia.liveType ? "Play Live Photo" : "Play video", systemImage: "play.fill", action: play)
+            .disabled(playing).padding().background(.regularMaterial, in: .capsule)
+        }.padding(.bottom, 70)
+      }
+    }
+      .onChange(of: request) { cleanupMotion() }
+      .onChange(of: scenePhase) { if scenePhase != .active { cleanupMotion() } }
+      .onDisappear { cleanupMotion() }
       .task(id: request) {
         let identity = request
         failed = false
@@ -242,6 +297,40 @@ private struct SavedPhotoPage: View {
         }
       }
   }
+  private func play() {
+    guard !playing, CameraMedia.isMotion(photo.metadata.mediaType) else { return }
+    let identity = request, token = UUID()
+    motionGeneration = token
+    playing = true; motionFailure = nil
+    motionTask = Task { @MainActor in
+      var pending: [URL] = []
+      defer { ConsumerShareExports.remove(pending); if request == identity, motionGeneration == token { playing = false; motionTask = nil } }
+      do {
+        let original = try await services.consumerMediaOriginal(photo, grant: receivedGrant)
+        pending = [original]
+        try Task.checkCancellation()
+        guard request == identity, motionGeneration == token, scenePhase == .active else { throw CancellationError() }
+        let urls = try CameraMedia.exportOriginals(try Data(contentsOf: original), metadata: photo.metadata, directory: original.deletingLastPathComponent())
+        pending = urls
+        try Task.checkCancellation()
+        guard request == identity, motionGeneration == token,
+          receivedGrant.map(services.isReceivedGrantCurrent) ?? true,
+          receivedGrant == nil || services.session.pinnedCards == receivedCards else { throw CancellationError() }
+        let movie = photo.metadata.mediaType == CameraMedia.liveType ? urls[1] : urls[0]
+        motionExports = urls; pending = []
+        let next = AVPlayer(url: movie)
+        player = next; next.play()
+      } catch is CancellationError {} catch {
+        if !Task.isCancelled, request == identity, motionGeneration == token { motionFailure = "The original cannot play here. You can still export its unchanged resources." }
+      }
+    }
+  }
+  private func cleanupMotion() {
+    motionGeneration = UUID(); motionTask?.cancel(); motionTask = nil; playing = false
+    player?.pause(); player = nil
+    ConsumerShareExports.remove(motionExports); motionExports = []
+  }
+
 }
 
 private struct SavedPreviewReadIdentity: Equatable {

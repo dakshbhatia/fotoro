@@ -48,6 +48,7 @@ export interface SearchResult {
   meaning?: SearchMeaning;
   photoIds: string[];
   photoId?: string;
+  searching?: boolean;
 }
 interface IndexedMeaning {
   id: string;

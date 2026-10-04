@@ -1,3 +1,4 @@
+import {acceptedPhotoManifestKind, MEDIA_MANIFEST_KIND} from "@fotoro/contracts/camera-media";
 import type { PhotoManifestV1, SignedPayloadV1 } from "@fotoro/contracts";
 import {
   type Env,
@@ -26,11 +27,13 @@ export async function checkObjects(env: Env, actor: Actor, m: PhotoManifestV1) {
   }
 }
 export async function addPhoto(env: Env, actor: Actor, s: SignedPayloadV1) {
+  let kind: string;
+  try { kind = acceptedPhotoManifestKind(s.kind); } catch { fail("INVALID_WIRE"); }
   const m = await signedBody<PhotoManifestV1>(
     env,
     actor,
     s,
-    "photo-manifest",
+    kind!,
     "PhotoManifestV1",
   );
   if (
@@ -57,6 +60,7 @@ export async function changes(
   actor: Actor,
   cursor: string | null,
   limit: number,
+  media = false,
 ) {
   let seq = 0;
   if (cursor) {
@@ -76,15 +80,16 @@ export async function changes(
   if (!Number.isInteger(limit) || limit < 1 || limit > 100)
     fail("INVALID_WIRE");
   const rows = await env.DB.prepare(
-    "SELECT * FROM changes WHERE account_id=? AND seq>? ORDER BY seq LIMIT ?",
+    "SELECT * FROM changes WHERE account_id=? AND seq>? AND (?=1 OR (COALESCE(json_extract(payload,'$.kind'),'')<>? AND NOT EXISTS(SELECT 1 FROM photos p WHERE p.id=changes.entity_id AND json_extract(p.signed,'$.kind')=?))) ORDER BY seq LIMIT ?",
   )
-    .bind(actor.accountId, seq, limit + 1)
+    .bind(actor.accountId, seq, media ? 1 : 0, MEDIA_MANIFEST_KIND, MEDIA_MANIFEST_KIND, limit + 1)
     .all<any>();
   const encode = (s: number) =>
     b64(new TextEncoder().encode(json({ account: actor.accountId, seq: s })));
   const page = rows.results.slice(0, limit);
   return {
     version: 1,
+    ...(media ? {mediaVersion: 1} : {}),
     changes: page.map((r) => ({
       cursor: encode(r.seq),
       entity: r.entity,

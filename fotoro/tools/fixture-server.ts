@@ -234,6 +234,7 @@ export function createFixtureServer(
         const page = list.slice(0, limit);
         return send(res, 200, {
           version: 1,
+          ...(url.searchParams.get("media") === "1" ? {mediaVersion: 1} : {}),
           changes: page,
           nextCursor: page.at(-1)?.cursor ?? url.searchParams.get("cursor"),
           hasMore: list.length > limit,

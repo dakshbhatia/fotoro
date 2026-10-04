@@ -29,6 +29,7 @@ struct RecentPhoto: Identifiable {
   var isFavorite: Bool { asset.isFavorite }
   var isScreenshot: Bool { asset.mediaSubtypes.contains(.photoScreenshot) }
   var isLivePhoto: Bool { asset.mediaSubtypes.contains(.photoLive) }
+  var isVideo: Bool { asset.mediaType == .video }
   var location: String? {
     asset.location.map {
       String(format: "%.4f, %.4f", $0.coordinate.latitude, $0.coordinate.longitude)
@@ -79,7 +80,12 @@ enum RecentPhotosPolicy {
   }
   static func browseFetchOptions() -> PHFetchOptions {
     let options = PHFetchOptions()
+    #if FOTORO_LOCAL_PREVIEW
     options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
+    #else
+    options.predicate = NSPredicate(format: "mediaType == %d OR mediaType == %d",
+      PHAssetMediaType.image.rawValue, PHAssetMediaType.video.rawValue)
+    #endif
     options.includeHiddenAssets = false
     options.includeAllBurstAssets = true
     options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
@@ -262,7 +268,12 @@ struct PhotoViewerZoom {
   private static func currentSourceRevisions(_ ids: [String]) -> [String: String] {
     var result: [String: String] = [:]
     PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil).enumerateObjects { asset, _, _ in
-      if !asset.isHidden, asset.mediaType == .image { result[asset.localIdentifier] = RecentPhoto.sourceRevision(asset) }
+      #if FOTORO_LOCAL_PREVIEW
+      let supported = asset.mediaType == .image
+      #else
+      let supported = CameraMedia.supportedAsset(asset)
+      #endif
+      if !asset.isHidden, supported { result[asset.localIdentifier] = RecentPhoto.sourceRevision(asset) }
     }
     return result
   }
@@ -386,13 +397,14 @@ struct PhotoViewerZoom {
     }
   }
   func shareOriginals(_ photos: [RecentPhoto]) async throws -> [URL] {
-    func checkAccess(_ photo: RecentPhoto) throws {
+    func checkAccess(_ photo: RecentPhoto) throws -> PHAsset {
       guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
         let current = PHAsset.fetchAssets(withLocalIdentifiers: [photo.id], options: nil).firstObject,
-        !current.isHidden, current.mediaType == .image,
+        !current.isHidden, [.image, .video].contains(current.mediaType),
         RecentPhoto.sourceRevision(current) == photo.sourceRevision else {
         throw FotoroError("This photo is no longer available. Choose it again from Photos.")
       }
+      return current
     }
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(
@@ -402,36 +414,64 @@ struct PhotoViewerZoom {
       var urls: [URL] = []
       for photo in photos {
         try Task.checkCancellation()
-        try checkAccess(photo)
-        guard
-          let resource = PHAssetResource.assetResources(for: photo.asset).first(where: {
-            $0.type == .photo
-          })
+        let current = try checkAccess(photo)
+        #if FOTORO_LOCAL_PREVIEW
+        guard let resource = PHAssetResource.assetResources(for: current).first(where: { $0.type == .photo })
         else { throw FotoroError("The still original is unavailable in Photos.") }
+        let resources = [resource]
+        #else
+        let resources = try CameraMedia.originalResources(for: current, requireSupportedType: false)
+        #endif
+        guard Set(resources.map(\.originalFilename)).count == resources.count,
+          resources.allSatisfy({ RecentOriginalFilename.isSafe($0.originalFilename) }) else {
+          throw FotoroError("The original filenames are unavailable. Choose another photo.")
+        }
         let folder = directory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(
           at: folder, withIntermediateDirectories: true,
           attributes: [.protectionKey: FileProtectionType.complete])
-        let url = folder.appendingPathComponent(resource.originalFilename)
-        let options = PHAssetResourceRequestOptions()
-        options.isNetworkAccessAllowed = true
-        try await withCheckedThrowingContinuation {
-          (continuation: CheckedContinuation<Void, Error>) in
-          PHAssetResourceManager.default().writeData(for: resource, toFile: url, options: options) {
-            error in
-            if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+        for resource in resources {
+          try Task.checkCancellation()
+          _ = try checkAccess(photo)
+          let url = folder.appendingPathComponent(resource.originalFilename)
+          let options = PHAssetResourceRequestOptions()
+          options.isNetworkAccessAllowed = true
+          try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
+            PHAssetResourceManager.default().writeData(for: resource, toFile: url, options: options) {
+              error in
+              if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
           }
+          try Task.checkCancellation()
+          _ = try checkAccess(photo)
+          try FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.complete], ofItemAtPath: url.path)
+          urls.append(url)
         }
-        try Task.checkCancellation()
-        try checkAccess(photo)
-        try FileManager.default.setAttributes(
-          [.protectionKey: FileProtectionType.complete], ofItemAtPath: url.path)
-        urls.append(url)
       }
       return urls
     } catch {
       try? FileManager.default.removeItem(at: directory)
       throw error
+    }
+  }
+}
+
+enum RecentOriginalFilename {
+  static func isSafe(_ name: String) -> Bool {
+    !["", ".", ".."].contains(name) && !name.contains("/") && !name.contains("\\")
+      && name.rangeOfCharacter(from: .controlCharacters) == nil
+  }
+}
+
+enum RecentShareExports {
+  static func remove(_ urls: [URL]) {
+    let temporary = FileManager.default.temporaryDirectory.standardizedFileURL
+    for directory in Set(urls.map { $0.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL }) {
+      guard UUID(uuidString: directory.lastPathComponent) != nil,
+        directory.deletingLastPathComponent().path == temporary.path else { continue }
+      try? FileManager.default.removeItem(at: directory)
     }
   }
 }

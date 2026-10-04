@@ -15,6 +15,9 @@ struct AutomaticPhotoPickSignals: Sendable {
   var contrast: Double
   var sharpness: Double
   var color: [Double]
+  var aesthetics: Double? = nil
+  var faceQuality: Double? = nil
+  var utility = false
 }
 struct AutomaticPhotoPickRecommendations: Sendable {
   var ids: Set<String> = []
@@ -24,7 +27,7 @@ struct AutomaticPhotoPickRecommendations: Sendable {
   var unassessed = 0
 }
 enum AutomaticPhotoPickPolicy {
-  static let processor = "quality-picks-v1"
+  static let processor = "moment-highlights-v2"
   enum MeasurementError: Error { case unavailable }
   static func analyzePixels(width: Int, height: Int, rgba: [UInt8]) throws
     -> AutomaticPhotoPickSignals
@@ -105,14 +108,16 @@ enum AutomaticPhotoPickPolicy {
         continue
       }
       // Nearly uniform previews do not establish a useful suggested photo, regardless of color.
-      guard signal.contrast >= 0.006 else { continue }
+      guard signal.contrast >= 0.006, !signal.utility || photo.favorite else { continue }
       let time = photo.capturedAt?.timeIntervalSince1970
       scored.append(
         ScoredPhoto(
           photo: photo, signal: signal, order: order, time: time?.isFinite == true ? time : nil,
           score: (photo.favorite ? 2 : 0) + 0.45 * min(1, signal.sharpness * 6)
             + 0.2 * max(0, 1 - abs(signal.luminance - 0.5) * 2)
-            + 0.15 * min(1, signal.contrast * 4)))
+            + 0.15 * min(1, signal.contrast * 4)
+            + 0.25 * (signal.aesthetics.map { ($0 + 1) / 2 } ?? 0)
+            + 0.25 * (signal.faceQuality ?? 0)))
     }
     scored.sort { ($0.time ?? .infinity, $0.order) < ($1.time ?? .infinity, $1.order) }
     var groups: [Group] = []
@@ -143,38 +148,48 @@ enum AutomaticPhotoPickPolicy {
         }
       }
     }
-    var buckets: [CaptureDay: [Int]] = [:]
+    // Two-hour capture windows match the existing Moments browser. Unknown dates
+    // stay one unlabelled bucket; they never acquire an invented capture time.
+    var moments: [[Int]] = []
+    var start: Double?
+    var day: Double?
+    var unknown: [Int] = []
     for (index, group) in groups.enumerated() {
-      // Unix-day buckets mirror the browser's UTC capture dates; nil dates stay separate.
-      let day = group.representative.time.map { CaptureDay.known(floor($0 / 86400)) } ?? .unknown
-      buckets[day, default: []].append(index)
+      guard let time = group.representative.time else { unknown.append(index); continue }
+      let captureDay = floor(time / 86400)
+      if let start, day == captureDay, time - start <= PhotoBrowsing.maximumMomentSpan {
+        moments[moments.count - 1].append(index)
+      } else { moments.append([index]); start = time; day = captureDay }
     }
+    if !unknown.isEmpty { moments.append(unknown) }
     func better(_ a: Int, _ b: Int) -> Bool {
-      let left = groups[a].representative
-      let right = groups[b].representative
+      let left = groups[a].representative, right = groups[b].representative
       return left.score == right.score ? left.order < right.order : left.score > right.score
     }
-    let queues = buckets.values.map { $0.sorted(by: better) }.sorted { better($0[0], $1[0]) }
-    let target = groups.count / 10 + (groups.count % 10 == 0 ? 0 : 1)
     var ids: Set<String> = []
     var reasons: [String: [String]] = [:]
-    var round = 0
-    while ids.count < target {
-      var added = false
-      for queue in queues where round < queue.count && ids.count < target {
-        let group = groups[queue[round]]
-        let photo = group.representative.photo
-        ids.insert(photo.id)
-        var reason = [photo.favorite ? "Favorite" : "Clarity and exposure"]
-        if group.count > 1 { reason.append("Representative of \(group.count) similar photos") }
-        if queues.count > 1, group.representative.time != nil {
-          reason.append("Variety across capture dates")
-        }
-        reasons[photo.id] = reason
-        added = true
+    for moment in moments {
+      let ranked = moment.sorted(by: better)
+      // Small moments get a representative; larger ones have room for varied
+      // views. Favorites survive the shortlist independently of this budget.
+      let budget = min(6, max(1, Int(ceil(sqrt(Double(moment.count)) / 2))))
+      let bestQuality = ranked.map { groups[$0].representative }.map { $0.score - ($0.photo.favorite ? 2 : 0) }.max() ?? 0
+      var chosen: [Int] = []
+      for index in ranked {
+        let candidate = groups[index].representative
+        let favorite = candidate.photo.favorite
+        guard favorite || chosen.count < budget && candidate.score >= bestQuality * 0.65 else { continue }
+        if !favorite, chosen.contains(where: { similar(groups[$0].representative, candidate) }) { continue }
+        chosen.append(index)
       }
-      if !added { break }
-      round += 1
+      for index in chosen {
+        let group = groups[index], photo = group.representative.photo
+        ids.insert(photo.id)
+        var reason = [photo.favorite ? "Favorite" : "Moment highlight"]
+        if group.count > 1 { reason.append("Representative of \(group.count) similar photos") }
+        if moments.count > 1, group.representative.time != nil { reason.append("Variety across moments") }
+        reasons[photo.id] = reason
+      }
     }
     return AutomaticPhotoPickRecommendations(
       ids: ids, reasons: reasons, groupCount: groups.count,
@@ -192,9 +207,10 @@ enum AutomaticPhotoPickPolicy {
     var representative: ScoredPhoto
     var count: Int
   }
-  private enum CaptureDay: Hashable { case known(Double), unknown }
   private static func valid(_ signal: AutomaticPhotoPickSignals) -> Bool {
-    [signal.luminance, signal.contrast, signal.sharpness].allSatisfy {
+    (signal.aesthetics == nil || signal.aesthetics!.isFinite && (-1...1).contains(signal.aesthetics!))
+      && (signal.faceQuality == nil || signal.faceQuality!.isFinite && (0...1).contains(signal.faceQuality!))
+      && [signal.luminance, signal.contrast, signal.sharpness].allSatisfy {
       $0.isFinite && $0 >= 0 && $0 <= 1
     } && signal.color.count == 3
       && signal.color.allSatisfy {

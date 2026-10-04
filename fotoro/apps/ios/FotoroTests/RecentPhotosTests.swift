@@ -655,7 +655,7 @@ private final class AccountCompletionProtocol: URLProtocol, @unchecked Sendable 
     let body: String
     switch (request.httpMethod, path) {
     case ("GET", "/v1/changes"):
-      body = "{\"version\":1,\"changes\":[],\"nextCursor\":\"Y2F0YWxvZy1yZWFkeQ\",\"hasMore\":false}"
+      body = "{\"version\":1,\"mediaVersion\":1,\"changes\":[],\"nextCursor\":\"Y2F0YWxvZy1yZWFkeQ\",\"hasMore\":false}"
     case ("GET", "/v1/grants"):
       body = "{\"version\":1,\"grants\":[]}"
     default:

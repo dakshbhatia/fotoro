@@ -123,7 +123,7 @@ export async function http(
     env as any,
   );
 }
-export async function photo(index: number) {
+export async function photo(index: number, kind = "photo-manifest") {
   const id = crypto.randomUUID(),
     reps = [];
   for (const kind of ["original", "metadata"]) {
@@ -181,7 +181,7 @@ export async function photo(index: number) {
       ciphertext: b64(new Uint8Array(48)),
     },
   };
-  const s = await signed(index, "photo-manifest", m);
+  const s = await signed(index, kind, m);
   const res = await http(index, "/v1/photos", "POST", s);
   if (res.status !== 200) throw new Error(await res.text());
   return { m, s };

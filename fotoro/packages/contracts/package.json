@@ -9,7 +9,8 @@
     "./schema": "./schema/contract-v1.schema.json",
     "./auth": "./src/auth.ts",
     "./share-links": "./src/share-links.ts",
-    "./visual": "./src/visual.ts"
+    "./visual": "./src/visual.ts",
+    "./camera-media": "./src/camera-media.ts"
   },
   "dependencies": {
     "ajv": "8.18.0",

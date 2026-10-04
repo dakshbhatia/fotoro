@@ -54,7 +54,12 @@ import XCTest
     }
     XCTAssertTrue(browsePredicate.evaluate(with: ["mediaType": image]))
     XCTAssertTrue(picksPredicate.evaluate(with: ["mediaType": image, "creationDate": now] as [String: Any]))
+    #if FOTORO_LOCAL_PREVIEW
     XCTAssertFalse(browsePredicate.evaluate(with: ["mediaType": PHAssetMediaType.video.rawValue]))
+    #else
+    XCTAssertTrue(browsePredicate.evaluate(with: ["mediaType": PHAssetMediaType.video.rawValue]))
+    #endif
+    XCTAssertFalse(picksPredicate.evaluate(with: ["mediaType": PHAssetMediaType.video.rawValue, "creationDate": now] as [String: Any]))
     XCTAssertEqual(browse.fetchLimit, 0, "The source retains all permitted stills without materializing them all")
     XCTAssertEqual(picks.fetchLimit, RecentPhotosPolicy.maximumPickCandidates)
     XCTAssertFalse(browse.includeHiddenAssets)

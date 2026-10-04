@@ -46,6 +46,7 @@ struct BackupSource: Codable, Identifiable {
   var message: String?
   var sourceRevision: String?
   var originalSha256: String?
+  var skipProcessor: String?
   var isRetainedOriginal: Bool { id.hasPrefix("fotoro-retained-original:") }
 }
 
@@ -237,6 +238,13 @@ struct BackupStatus: Codable {
           if index.isMultiple(of: 128) { await Task.yield(); try fence() }
           var source = try existing[candidate.id] ?? store.backupSource(candidate.id)
           dates[candidate.id] = candidate.capturedAt
+          if source.phase == .skipped, candidate.skipReason == nil,
+            source.skipProcessor != "camera-original-v1" || source.sourceRevision != candidate.sourceRevision {
+            source.phase = .pending
+            source.message = nil
+            source.skipProcessor = nil
+            try store.putBackupSource(source)
+          }
           if (source.phase == .pending || source.phase == .failed), source.sourceRevision != candidate.sourceRevision {
             source.sourceRevision = candidate.sourceRevision
             try store.putBackupSource(source)
@@ -245,6 +253,7 @@ struct BackupStatus: Codable {
           {
             source.phase = .skipped
             source.message = reason
+            source.skipProcessor = "camera-original-v1"
             try store.putBackupSource(source)
           }
         }
@@ -283,7 +292,8 @@ struct BackupStatus: Codable {
               try store.putBackupSource(source)
               throw error
             }
-            source.phase = .failed
+            source.phase = error is CameraMediaAdmissionError ? .skipped : .failed
+            source.skipProcessor = error is CameraMediaAdmissionError ? "camera-original-v1" : nil
             source.message = error.localizedDescription
             try store.putBackupSource(source)
           }

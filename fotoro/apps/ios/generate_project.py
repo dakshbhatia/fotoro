@@ -16,7 +16,7 @@ for folder in ['Fotoro','FotoroTests']:
  for p in sorted((root/folder).rglob('*')):
   if any(parent.suffix=='.xcassets' for parent in p.parents):continue
   if not (p.is_file() or p.suffix=='.xcassets') or p.suffix in [".plist",".entitlements"]:continue
-  rel=str(p.relative_to(root)); typ='folder.assetcatalog' if p.suffix=='.xcassets' else 'sourcecode.swift' if p.suffix=='.swift' else 'text.json' if p.suffix=='.json' else 'text.xml' if p.suffix=='.xcprivacy' else 'image.jpeg'
+  rel=str(p.relative_to(root)); typ='folder.assetcatalog' if p.suffix=='.xcassets' else 'sourcecode.swift' if p.suffix=='.swift' else 'text.json' if p.suffix=='.json' else 'text.xml' if p.suffix=='.xcprivacy' else 'text' if p.suffix=='.txt' else 'video.quicktime' if p.suffix=='.mov' else 'file' if p.suffix=='.fotoro-live' else 'image.jpeg'
   f=add(rel,f'isa = PBXFileReference; lastKnownFileType = {typ}; path = {q(rel)}; sourceTree = SOURCE_ROOT;');files.append(f);file_refs[rel]=f
   b=add(rel+'build',f'isa = PBXBuildFile; fileRef = {f};')
   (testfiles if folder=='FotoroTests' and p.suffix=='.swift' else testres if folder=='FotoroTests' else build if p.suffix=='.swift' else resources).append(b)
@@ -84,10 +84,10 @@ for target,sources,res,ptype,host,target_deps,target_frameworks in definitions:
   conditions=(['DEBUG'] if conf=='Debug' else [])+(['FOTORO_LOCAL_PREVIEW'] if preview else [])
   if conditions: settings+='SWIFT_ACTIVE_COMPILATION_CONDITIONS = '+q(' '.join(conditions))+'; '
   if app:
-   settings+='INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Browse your last 10 days of photos and share selected originals."; INFOPLIST_FILE = Fotoro/Info.plist; INFOPLIST_KEY_UILaunchScreen_Generation = YES; '
+   settings+='INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Browse your photos and share selected originals."; INFOPLIST_FILE = Fotoro/Info.plist; INFOPLIST_KEY_UILaunchScreen_Generation = YES; '
    if preview:
     settings+='PRODUCT_MODULE_NAME = Fotoro; INFOPLIST_KEY_CFBundleDisplayName = Fotoro; FOTORO_BUILD_MODE = "local-preview"; INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO; '
-   else: settings+='CODE_SIGN_ENTITLEMENTS = Fotoro/Fotoro.entitlements; FOTORO_BUILD_MODE = encrypted; '
+   else: settings+='CODE_SIGN_ENTITLEMENTS = Fotoro/Fotoro.entitlements; FOTORO_BUILD_MODE = encrypted; INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = \"Save your verified originals back to Photos.\"; '
   else:
    settings+='TEST_HOST = "$(BUILT_PRODUCTS_DIR)/'+host+'.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/'+host+'"; BUNDLE_LOADER = "$(TEST_HOST)"; '
   configs.append(add(target+conf,f'isa = XCBuildConfiguration; name = {conf}; buildSettings = {{{settings}}};'))

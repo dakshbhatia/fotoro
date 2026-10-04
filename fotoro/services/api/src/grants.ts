@@ -1,3 +1,4 @@
+import {acceptedPhotoManifestKind, MEDIA_MANIFEST_KIND} from "@fotoro/contracts/camera-media";
 import { validateWire } from "@fotoro/contracts/validate";
 import {
   type Env,
@@ -182,12 +183,12 @@ export async function inbox(env: Env, a: Actor) {
     .all<any>();
   return { version: 1, grants: rows.results.map((r) => JSON.parse(r.json)) };
 }
-export async function detail(env: Env, a: Actor, id: string) {
+export async function detail(env: Env, a: Actor, id: string, media = false) {
   const row = await active(env, a, id);
   const photos = await env.DB.prepare(
-    "SELECT p.signed,p.account_id,gp.envelope FROM grant_photos gp JOIN photos p ON p.id=gp.photo_id WHERE gp.grant_id=?",
+    "SELECT p.signed,p.account_id,gp.envelope FROM grant_photos gp JOIN photos p ON p.id=gp.photo_id WHERE gp.grant_id=? AND (?=1 OR json_extract(p.signed,'$.kind')<>?)",
   )
-    .bind(id)
+    .bind(id, media ? 1 : 0, MEDIA_MANIFEST_KIND)
     .all<any>();
   const ids = [
     ...new Set([
@@ -301,11 +302,13 @@ export async function contribute(env: Env, a: Actor, moment: string, i: any) {
     fail("FORBIDDEN", 403);
   const writes = [];
   for (const s of i.manifests) {
+    let kind: string;
+    try { kind = acceptedPhotoManifestKind(s.kind); } catch { fail("INVALID_WIRE"); }
     const m = await signedBody<PhotoManifestV1>(
       env,
       a,
       s,
-      "photo-manifest",
+      kind!,
       "PhotoManifestV1",
     );
     const e = i.envelopes.find((x: any) => x.photoId === m.photoId);

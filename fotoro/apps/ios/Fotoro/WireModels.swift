@@ -120,6 +120,7 @@ struct ChangeV1: Codable, Sendable {
 }
 struct ChangePageV1: Codable, Sendable {
   var version: Int
+  var mediaVersion: Int? = nil
   var changes: [ChangeV1]
   var nextCursor: String?
   var hasMore: Bool

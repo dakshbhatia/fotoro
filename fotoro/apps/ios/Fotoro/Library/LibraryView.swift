@@ -2,10 +2,33 @@ import NukeUI
 import Observation
 import SwiftUI
 
+struct IncomingInvitationPasswordRetry {
+  let link: FotoroShareLink
+  let origin: String
+  private(set) var pending = true
+  private var authorization: PhotoAccountAccess?
+  var awaitingPassword: Bool { pending && authorization == nil }
+  var presented: Bool { !pending && authorization != nil }
+  mutating func authorize(_ access: PhotoAccountAccess?, origin: String) {
+    guard pending, authorization == nil, self.origin == origin, let access else { return }
+    authorization = access
+  }
+  func isAuthorized(_ access: PhotoAccountAccess?, origin: String) -> Bool {
+    authorization != nil && authorization == access && self.origin == origin
+  }
+  mutating func consume(active: Bool, access: PhotoAccountAccess?, origin: String) -> FotoroShareLink? {
+    guard pending, active, isAuthorized(access, origin: origin) else { return nil }
+    pending = false
+    return link
+  }
+  mutating func cancel() { pending = false; authorization = nil }
+}
+
 struct LibraryView: View {
   @Bindable var services: AppServices
   let saveSelection: [RecentPhotoSource]?
   @State private var pendingIncoming: FotoroShareLink?
+  @State private var invitationPasswordRetry: IncomingInvitationPasswordRetry?
   @State private var sharedPhotos: SharedPhotosPresentation?
   @State private var saveIntent: ManualPhotoSaveIntent?
   @State private var authenticationTask: Task<Void, Never>?
@@ -56,13 +79,16 @@ struct LibraryView: View {
   var body: some View {
     NavigationStack {
       Group {
-        if services.auth.startPassword != nil || services.photoAccountAccess == nil {
+        if invitationPasswordRetry?.awaitingPassword == true || services.auth.startPassword != nil || services.photoAccountAccess == nil {
           VStack(alignment: .leading, spacing: 0) {
             if let saveSelection {
               Text("Open Fotoro to save \(saveSelection.count) \(saveSelection.count == 1 ? "photo" : "photos")")
                 .font(.headline).padding(.horizontal).padding(.top)
             }
-            AccountView(services: services, onSignedIn: openedAccount,
+            if invitationPasswordRetry?.awaitingPassword == true {
+              Text("Open the Fotoro this invitation was sent to.").font(.headline).padding(.horizontal).padding(.top)
+            }
+            AccountView(services: services, enterPassword: invitationPasswordRetry?.awaitingPassword == true, onSignedIn: openedAccount,
               onAuthenticationTask: { authenticationTask = $0 })
           }
         } else if authenticationTask != nil {
@@ -135,8 +161,8 @@ struct LibraryView: View {
                 }
                 ToolbarItem(placement: .bottomBar) {
                   Menu("Share \(selection.count)", systemImage: "square.and.arrow.up") {
+                    Button("Share photos") { shareOriginals() }
                     Button("Share in Fotoro") { shareInFotoro() }
-                    Button("Share originals") { shareOriginals() }
                   }.disabled(preparingShare || sharingOriginals)
                 }
               }
@@ -168,8 +194,11 @@ struct LibraryView: View {
           PhotoViewer(
             services: services, initialID: presentation.initial.id, displayedPhotos: presentation.photos)
         }
-        .sheet(item: $sharedPhotos) { presentation in
-          ExchangeView(services: services, selected: presentation.photos, incoming: presentation.incoming)
+        .sheet(item: $sharedPhotos, onDismiss: {
+          if invitationPasswordRetry?.presented == true { invitationPasswordRetry = nil }
+        }) { presentation in
+          ExchangeView(services: services, selected: presentation.photos, incoming: presentation.incoming,
+            onRetryPassword: retryInvitationPassword)
         }
         .onChange(of: authenticationTask == nil) { openIncomingLink() }
         .onChange(of: services.photoAccountAccess) {
@@ -196,6 +225,7 @@ struct LibraryView: View {
         .onChange(of: services.vault.isUnlocked) { _, unlocked in
           if !unlocked {
             if authenticationTask == nil { saveIntent?.cancel(); pendingIncoming = nil }
+            if authenticationTask == nil && invitationPasswordRetry?.awaitingPassword != true { invitationPasswordRetry = nil }
             sharedPhotos = nil
             viewer = nil
             shareTask?.cancel()
@@ -215,8 +245,11 @@ struct LibraryView: View {
         }
         .onChange(of: services.session.accountId) {
           catalogSearch.cancel(clearResults: true)
-          if authenticationTask == nil { pendingIncoming = nil; sharedPhotos = nil }
+          if authenticationTask == nil && invitationPasswordRetry?.isAuthorized(services.photoAccountAccess, origin: services.api.origin) != true {
+            pendingIncoming = nil; sharedPhotos = nil; invitationPasswordRetry = nil
+          }
         }
+        .onChange(of: services.api.origin) { pendingIncoming = nil; sharedPhotos = nil; cancelAuthentication() }
         .onChange(of: services.consumerCatalogGeneration) { validateSelection() }
         .onDisappear {
           cancelAuthentication(); shareTask?.cancel(); cleanupShare(); catalogRefresh.cancel()
@@ -236,15 +269,33 @@ struct LibraryView: View {
   }
 
   private func openedAccount() {
+    if invitationPasswordRetry != nil {
+      invitationPasswordRetry?.authorize(services.photoAccountAccess, origin: services.api.origin)
+      openIncomingLink()
+      return
+    }
     saveIntent?.authorize(services.photoAccountAccess)
     startSelectedSave()
     openIncomingLink()
   }
   private func openIncomingLink() {
     guard scenePhase == .active, authenticationTask == nil, services.auth.startPassword == nil,
-      services.photoAccountAccess != nil, let incoming = pendingIncoming else { return }
+      services.photoAccountAccess != nil else { return }
+    if let incoming = invitationPasswordRetry?.consume(active: true, access: services.photoAccountAccess, origin: services.api.origin) {
+      sharedPhotos = SharedPhotosPresentation(incoming: incoming)
+      return
+    }
+    guard invitationPasswordRetry == nil, let incoming = pendingIncoming else { return }
     pendingIncoming = nil
     sharedPhotos = SharedPhotosPresentation(incoming: incoming)
+  }
+  private func retryInvitationPassword(_ link: FotoroShareLink) {
+    guard scenePhase == .active, !services.busy, case .moment = link else { return }
+    cancelAuthentication()
+    pendingIncoming = nil; sharedPhotos = nil
+    invitationPasswordRetry = IncomingInvitationPasswordRetry(link: link, origin: services.api.origin)
+    services.error = nil
+    services.lockAccount()
   }
   private func shareInFotoro() {
     do { sharedPhotos = SharedPhotosPresentation(photos: try selection.resolve(using: services.consumerSavedPhoto)) }
@@ -268,6 +319,7 @@ struct LibraryView: View {
   }
   private func cancelAuthentication() {
     saveIntent?.cancel()
+    invitationPasswordRetry?.cancel(); invitationPasswordRetry = nil
     authenticationTask?.cancel()
     authenticationTask = nil
     services.auth.cancelStart()
@@ -341,7 +393,15 @@ struct LibraryView: View {
       }
       do {
         for photo in selected {
-          urls.append(try await services.consumerShareOriginal(photo))
+          let original = try await services.consumerShareOriginal(photo)
+          urls.append(original)
+          try Task.checkCancellation()
+          if photo.metadata.mediaType == CameraMedia.liveType {
+            let exported = try CameraMedia.exportOriginals(try Data(contentsOf: original), metadata: photo.metadata,
+              directory: original.deletingLastPathComponent())
+            urls.removeLast()
+            urls.append(contentsOf: exported)
+          }
           try Task.checkCancellation()
         }
         guard services.vault.isUnlocked, services.vault.generation == generation,

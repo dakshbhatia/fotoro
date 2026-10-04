@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 import GRDB
 import Nuke
 import Observation
@@ -73,6 +74,12 @@ enum ReviewedPhotosBackupPolicy {
       elapsed: ProcessInfo.processInfo.systemUptime - started))
   }
   @ObservationIgnored private weak var localSearch: LocalSearchStore?
+  @ObservationIgnored private var savedVisualIndex: SearchIndex?
+  @ObservationIgnored private var savedVisualRoot: URL?
+  @ObservationIgnored private var savedVisualTask: Task<Void, Never>?
+  @ObservationIgnored private var savedVisualWork = UUID()
+  @ObservationIgnored private var savedVisualCatalogGeneration: UInt64?
+  @ObservationIgnored private var savedVisualFence: UInt64 = 0
   let storageRoot: URL
   var photos: [LocalPhoto] = []
   var received: [LocalPhoto] = []
@@ -115,9 +122,14 @@ enum ReviewedPhotosBackupPolicy {
     let deviceHits = try await local.consumerResults(query)
     try Task.checkCancellation()
     let saved: [LocalPhoto]
+    var visualSavedIDs = Set<String>()
     if let account {
       guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account else { throw CancellationError() }
-      saved = try await searchCatalog(query).filter { ["committed", "saved"].contains($0.transferState) }
+      let lexical = try await searchCatalog(query).filter { ["committed", "saved"].contains($0.transferState) }
+      let visual = local.acceptedMeaningID == nil ? try await consumerSavedVisualSearch(query) : []
+      let matched = Set(lexical.map(\.id))
+      saved = lexical + visual.filter { !matched.contains($0.id) }
+      visualSavedIDs = Set(visual.map(\.id)).subtracting(matched)
       guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account else { throw CancellationError() }
     } else { saved = [] }
     try Task.checkCancellation()
@@ -136,7 +148,7 @@ enum ReviewedPhotosBackupPolicy {
     let copies = ConsumerSearchBinding.verifiedCopies(sources: sources, records: records)
     for photo in saved {
       if !ConsumerSearchBinding.duplicate(saved: photo, copies: copies) {
-        result.append(ConsumerSearchHit(photo: .saved(photo.id), evidence: "Saved photo"))
+        result.append(ConsumerSearchHit(photo: .saved(photo.id), evidence: visualSavedIDs.contains(photo.id) ? "Visual similarity" : "Saved photo"))
       }
     }
     return result
@@ -147,6 +159,119 @@ enum ReviewedPhotosBackupPolicy {
       photo.manifest.ownerAccountId == account, photo.manifest.photoId == id,
       ["committed", "saved"].contains(photo.transferState) else { return nil }
     return photo
+  }
+  private func consumerSavedVisualSearch(_ query: String) async throws -> [LocalPhoto] {
+    let phrase = NaturalDateQuery.parse(query).text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard phrase.count >= 3, vault.isUnlocked, let account = session.accountId else { return [] }
+    let catalog = store, generation = vault.generation
+    let root = catalog.root.appendingPathComponent("VisualSearch", isDirectory: true)
+    if savedVisualRoot != root {
+      invalidateSavedVisualSearch()
+      savedVisualIndex = try SearchIndex(root: root); savedVisualRoot = root
+      savedVisualCatalogGeneration = nil
+    }
+    guard let index = savedVisualIndex else { return [] }
+    let catalogSnapshotGeneration = consumerCatalogGeneration
+    if savedVisualCatalogGeneration != catalogSnapshotGeneration {
+      let candidates = try await searchCatalog("").filter { ["committed", "saved"].contains($0.transferState) }
+      try Task.checkCancellation()
+      guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account,
+        consumerCatalogGeneration == catalogSnapshotGeneration else {
+        throw CancellationError()
+      }
+      let records = candidates.map { photo -> SearchRecord in
+        var record = SearchRecord(id: photo.id)
+        record.scope = "saved"; record.revision = photo.metadata.originalSha256
+        record.filename = photo.metadata.filename
+        record.capturedAt = ["photos", "exif"].contains(photo.metadata.dateSource) ? Wire.parseDate(photo.metadata.sourceDate) : nil
+        record.ocrStatus = .complete; record.visualStatus = .complete
+        return record
+      }
+      _ = try await Task.detached(priority: .utility) { try index.replacePermitted(records) }.value
+      try Task.checkCancellation()
+      guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account,
+        consumerCatalogGeneration == catalogSnapshotGeneration else {
+        throw CancellationError()
+      }
+      savedVisualCatalogGeneration = catalogSnapshotGeneration
+    }
+    if savedVisualTask == nil, photoSyncForeground {
+      let work = UUID(); savedVisualWork = work
+      savedVisualFence &+= 1
+      let fence = savedVisualFence
+      try index.setWorkGeneration(fence)
+      savedVisualTask = Task { [weak self] in
+        guard let self else { return }
+        defer { if savedVisualWork == work { savedVisualTask = nil } }
+        func current() -> Bool {
+          !Task.isCancelled && savedVisualWork == work && vault.isUnlocked && vault.generation == generation
+            && store === catalog && session.accountId == account && photoSyncForeground
+        }
+        func notifyProgress() {
+          let snapshotWasCurrent = savedVisualCatalogGeneration == consumerCatalogGeneration
+          consumerCatalogGeneration &+= 1
+          if snapshotWasCurrent { savedVisualCatalogGeneration = consumerCatalogGeneration }
+        }
+        do {
+          try await MobileCLIPProcessor.shared.prepare()
+          guard current() else { return }
+          let pending = try await Task.detached { try index.pendingSemanticRecords() }.value
+          var completed = 0
+          for record in pending {
+            guard current(), let photo = try consumerSavedPhoto(record.id),
+              photo.metadata.originalSha256 == record.revision else { continue }
+            do {
+              try await ensurePreview(photo)
+              guard current(), let updated = try consumerSavedPhoto(photo.id),
+                updated.metadata == photo.metadata, updated.manifest == photo.manifest,
+                let url = updated.previewURL,
+                let preview = try await Self.semanticPreview(url) else { continue }
+              guard current() else { return }
+              let vector = try await MobileCLIPProcessor.shared.image(preview)
+              guard current() else { return }
+              _ = try await Task.detached {
+                try index.applySemantic(vector, photoID: record.id, revision: record.revision, generation: fence)
+              }.value
+              guard current() else { return }
+              completed += 1
+              if completed % 8 == 0 { notifyProgress() }
+            } catch is CancellationError { return } catch { continue }
+            await Task.yield()
+          }
+          if current(), completed > 0 { notifyProgress() }
+        } catch {}
+      }
+    }
+    guard let vector = try? await MobileCLIPProcessor.shared.textIfReady(phrase) else { return [] }
+    let response = try await Task.detached(priority: .userInitiated) {
+      let base = try index.search(query, scope: SearchScope(source: "saved"))
+      return try index.addingSemantic(vector, to: base)
+    }.value
+    guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account else {
+      throw CancellationError()
+    }
+    return try response.results.compactMap { try consumerSavedPhoto($0.id) }
+  }
+  private func invalidateSavedVisualSearch() {
+    savedVisualWork = UUID(); savedVisualTask?.cancel(); savedVisualTask = nil
+    savedVisualFence &+= 1
+    try? savedVisualIndex?.setWorkGeneration(savedVisualFence)
+    Task { await MobileCLIPProcessor.shared.clearQueryCache() }
+  }
+  private nonisolated static func semanticPreview(_ url: URL) async throws -> SearchPreview? {
+    let worker = Task.detached(priority: .utility) { () throws -> SearchPreview? in
+      try Task.checkCancellation()
+      let data = try Data(contentsOf: url, options: .mappedIfSafe)
+      guard data.count <= 2 * 1024 * 1024, let source = CGImageSourceCreateWithData(data as CFData, nil),
+        let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+          kCGImageSourceCreateThumbnailFromImageAlways: true,
+          kCGImageSourceCreateThumbnailWithTransform: true,
+          kCGImageSourceThumbnailMaxPixelSize: 512,
+        ] as CFDictionary) else { return nil }
+      try Task.checkCancellation()
+      return SearchPreview(image: image)
+    }
+    return try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
   }
   func consumerShareOriginal(_ photo: LocalPhoto) async throws -> URL {
     guard let current = try consumerSavedPhoto(photo.id),
@@ -201,6 +326,38 @@ enum ReviewedPhotosBackupPolicy {
     try catalog.put(updated)
     if let at = photos.firstIndex(where: { $0.id == current.id }) { photos[at] = updated }
     return try export(bytes)
+  }
+  func consumerMediaOriginal(_ photo: LocalPhoto, grant: GrantV1?) async throws -> URL {
+    guard let grant else { return try await consumerShareOriginal(photo) }
+    let generation = vault.generation, account = session.accountId, catalog = store
+    let origin = BackgroundUploadPolicy.origin(api.baseURL), cards = session.pinnedCards
+    @MainActor func check() throws {
+      try Task.checkCancellation()
+      guard vault.isUnlocked, vault.generation == generation, session.accountId == account,
+        store === catalog, BackgroundUploadPolicy.origin(api.baseURL) == origin,
+        session.pinnedCards == cards, isReceivedGrantCurrent(grant),
+        received.contains(where: { $0.id == photo.id && $0.metadata == photo.metadata && $0.manifest == photo.manifest }) else { throw CancellationError() }
+    }
+    try check()
+    guard let rep = photo.manifest.representations.first(where: { $0.binding.kind == "original" }),
+      let encoded = photo.metadata.representationKeys[rep.binding.representationId] else { throw FotoroError("Original is unavailable") }
+    let cipher = try await api.request("/v1/objects/\(rep.objectId)")
+    try check()
+    let key = try Data(b64: encoded)
+    let bytes = try await Task.detached { try CryptoAdapter().decrypt(cipher, key: key, representation: rep) }.value
+    try check()
+    guard bytes.count == photo.metadata.originalBytes, bytes.digest == photo.metadata.originalSha256 else { throw FotoroError("Original could not be verified") }
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("fotoro-share-" + Wire.id())
+    do {
+      let urls = try CameraMedia.exportOriginals(bytes, metadata: photo.metadata, directory: directory)
+      try check()
+      if photo.metadata.mediaType == CameraMedia.liveType {
+        let archive = directory.appendingPathComponent("original.fotoro-live")
+        try bytes.write(to: archive, options: [.atomic, .completeFileProtection])
+        return archive
+      }
+      return urls[0]
+    } catch { try? FileManager.default.removeItem(at: directory); throw error }
   }
   func refreshConsumerSyncSummary() {
     let accountState: NativeDiagnosticAccountState
@@ -339,6 +496,7 @@ enum ReviewedPhotosBackupPolicy {
     }
     ImageCache.shared.costLimit = 48 * 1024 * 1024
     vault.onLock = { [weak self] in
+      self?.invalidateSavedVisualSearch()
       self?.cancelSharedMomentRefresh()
       self?.suspendAutomaticPhotoSync()
       self?.activatedPhotoAccount = nil
@@ -423,19 +581,19 @@ enum ReviewedPhotosBackupPolicy {
     guard photoAccountAccess != nil, session.isSignedIn else { return status(.locked, "Open Fotoro to continue automatic photo sync.") }
     guard RecentPhotosPolicy.canRead(automaticPhotosPermission) else { return status(.permissionRequired, "Allow Photos access to continue automatic photo sync.") }
     guard photoSyncForeground else { return status(.background, "iOS can finish scheduled encrypted uploads. Open Fotoro to sync more photos.") }
-    if automaticSyncTask != nil || backup.isRunning || annotations.busy { return status(.syncing, "Syncing permitted still photos. Your originals stay in Photos.") }
+    if automaticSyncTask != nil || backup.isRunning || annotations.busy { return status(.syncing, "Syncing permitted photos and videos. Your originals stay in Photos.") }
     if let automaticSyncFailure { return status(.needsAttention, automaticSyncFailure) }
     if let consumerFailure { return status(.needsAttention, consumerFailure) }
     if backup.status.phase == .failed {
-      return status(.needsAttention, backup.status.message ?? "Some photos could not sync. Live Photos and video are not supported.")
+      return status(.needsAttention, backup.status.message ?? "Some originals could not sync. Originals larger than 50 MiB stay in Photos.")
     }
     if !annotations.errors.isEmpty {
       return status(.needsAttention, "Some photo changes could not sync. Use Sync changes to try again.")
     }
     if backup.status.skipped > 0 {
-      return status(.ready, "Supported still photos are synced. Live Photos and video stay in Photos and are not synced.")
+      return status(.ready, "Supported photos, videos and complete Live Photos are synced. Originals larger than 50 MiB stay in Photos.")
     }
-    return status(.ready, "Automatic sync is on for permitted still photos while Fotoro is open. Live Photos and video are not supported.")
+    return status(.ready, "Automatic sync is on for permitted photos and videos while Fotoro is open. Complete originals must fit within 50 MiB.")
   }
   func enableAutomaticPhotoSync() throws {
     try Task.checkCancellation()
@@ -471,6 +629,7 @@ enum ReviewedPhotosBackupPolicy {
     photoSyncForeground = active
     if active { kickAutomaticPhotoSync() }
     else {
+      invalidateSavedVisualSearch()
       suspendAutomaticPhotoSync()
       backup.pause()
       journal.pause()
@@ -539,6 +698,10 @@ enum ReviewedPhotosBackupPolicy {
         while self.automaticSyncNeedsScan {
           self.automaticSyncNeedsScan = false
           try check()
+          // Another device may already own these originals under different Photos identifiers.
+          // Hydrate verified account records before the importer resolves their original digests.
+          try await self.sync()
+          try check()
           try self.startPhotosBackup(selection: nil, automatic: true)
           await self.backup.waitUntilSettled()
           try check()
@@ -599,7 +762,7 @@ enum ReviewedPhotosBackupPolicy {
         }
       #endif
       guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [source.id], options: nil).firstObject,
-        !asset.isHidden, asset.mediaType == .image, !asset.mediaSubtypes.contains(.photoLive) else { return false }
+        !asset.isHidden, CameraMedia.sourceSkipReason(asset) == nil else { return false }
       return RecentPhoto.sourceRevision(asset) == source.sourceRevision
     }
     @MainActor func reconcile(_ candidates: [BackupCandidate]) async throws -> [BackupCandidate] {
@@ -610,7 +773,10 @@ enum ReviewedPhotosBackupPolicy {
           if source.phase == .committed || (automatic && source.phase == .queued),
             source.sourceRevision != candidate.sourceRevision || source.originalSha256 == nil,
             let photo = try catalog.backupPhoto(source.photoId) {
-            let digest = try await importWorker.sourceDigest(candidate.id)
+            var digest: String?
+            var oversized: CameraMediaAdmissionError?
+            do { digest = try await importWorker.sourceDigest(candidate.id) }
+            catch let error as CameraMediaAdmissionError { oversized = error }
             try Task.checkCancellation()
             guard self.vault.generation == generation, self.session.accountId == account,
               self.store === catalog, BackgroundUploadPolicy.origin(self.api.baseURL) == origin,
@@ -633,6 +799,18 @@ enum ReviewedPhotosBackupPolicy {
               } == true
             #endif
             guard current else { throw FotoroError("Photo changed during sync. Try again.") }
+            if let oversized {
+              if source.phase == .queued { source = try catalog.retainQueuedBackup(source, currentRevision: candidate.sourceRevision) }
+              else { source.photoId = Wire.id() }
+              source.phase = .skipped
+              source.sourceRevision = candidate.sourceRevision
+              source.originalSha256 = nil
+              source.skipProcessor = "camera-original-v1"
+              source.message = oversized.localizedDescription
+              try catalog.putBackupSource(source)
+              continue
+            }
+            guard let digest else { throw FotoroError("Original could not be verified") }
             if digest == photo.metadata.originalSha256 {
               source.sourceRevision = candidate.sourceRevision
               source.originalSha256 = digest
@@ -716,11 +894,7 @@ enum ReviewedPhotosBackupPolicy {
           }
           let asset = assets.object(at: index)
           if (selection != nil || automatic) && asset.isHidden { continue }
-          if selection != nil && asset.mediaType != .image { continue }
-          let skip =
-            asset.mediaType != .image
-            ? "Video is not backed up."
-            : asset.mediaSubtypes.contains(.photoLive) ? "Live Photo pairs are not backed up." : nil
+          let skip = CameraMedia.sourceSkipReason(asset)
           candidates.append(
             BackupCandidate(
               id: asset.localIdentifier, capturedAt: asset.creationDate, skipReason: skip,
@@ -765,7 +939,7 @@ enum ReviewedPhotosBackupPolicy {
                 let selected = selection.first(where: { $0.id == source.id }),
                 selected.revision == source.sourceRevision,
                 let asset = PHAsset.fetchAssets(withLocalIdentifiers: [source.id], options: nil).firstObject,
-                !asset.isHidden, asset.mediaType == .image else { return false }
+                !asset.isHidden, CameraMedia.sourceSkipReason(asset) == nil else { return false }
               return RecentPhoto.sourceRevision(asset) == selected.revision
             }
             guard let picks = acceptedPicks, let recent = self.recentPhotos,
@@ -957,7 +1131,7 @@ enum ReviewedPhotosBackupPolicy {
       PhotoMetadataV1.self,
       crypto.decrypt(meta, key: key, representation: manifest.metadataRepresentation))
     guard metadata.version == 1,
-      ["image/jpeg", "image/png", "image/heic"].contains(metadata.mediaType),
+      CameraMedia.supportedTypes.contains(metadata.mediaType),
       metadata.originalBytes > 0, metadata.originalBytes <= 50 * 1024 * 1024,
       try Data(b64: metadata.originalSha256).count == 32
     else { throw FotoroError("Unsupported original metadata") }
@@ -983,6 +1157,7 @@ enum ReviewedPhotosBackupPolicy {
         guard plain.digest == metadata.originalSha256, plain.count == metadata.originalBytes else {
           throw FotoroError("Original digest mismatch")
         }
+        if metadata.mediaType == CameraMedia.liveType { _ = try CameraMedia.decodeLivePhoto(plain) }
         result.originalURL = try catalog.write(
           plain,
           name: "cache-" + manifest.photoId + "-original."
@@ -1048,10 +1223,13 @@ enum ReviewedPhotosBackupPolicy {
     let authorizedAccount = session.accountId
     let generation = vault.generation
     let catalog = store
+    let authorizedOrigin = api.origin
+    let authorizedCard = authorizedAccount.flatMap { session.pinnedCards[$0] }
     func fence() throws {
       try Task.checkCancellation()
       guard vault.isUnlocked, vault.generation == generation,
-        session.accountId == authorizedAccount, store === catalog
+        session.accountId == authorizedAccount, store === catalog, api.origin == authorizedOrigin,
+        authorizedAccount.flatMap({ session.pinnedCards[$0] }) == authorizedCard
       else { throw CancellationError() }
     }
     consumerChecking = true
@@ -1068,10 +1246,10 @@ enum ReviewedPhotosBackupPolicy {
       try fence()
       let cursor = try catalog.cursor()
       let page: ChangePageV1 = try await api.get(
-        "/v1/changes?limit=100" + (cursor.map { "&cursor=\($0)" } ?? ""))
-      guard vault.isUnlocked, vault.generation == generation, session.accountId == authorizedAccount
-      else {
-        throw FotoroError("Vault changed during sync")
+        "/v1/changes?limit=100&media=1" + (cursor.map { "&cursor=\($0)" } ?? ""))
+      try fence()
+      guard page.mediaVersion == 1 else {
+        throw FotoroError("The photo service needs an update before sync can continue. Try again shortly.")
       }
       var verified: [String: LocalPhoto] = [:]
       var ownedChanges: [ChangeV1] = []
@@ -1079,7 +1257,7 @@ enum ReviewedPhotosBackupPolicy {
         guard let signed = c.payload else { throw FotoroError("Missing signed change") }
         let card = try session.requireCard(signed.accountId)
         let manifest = try Wire.decode(
-          PhotoManifestV1.self, crypto.verify(signed, card: card, kind: "photo-manifest"))
+          PhotoManifestV1.self, crypto.verify(signed, card: card, kind: CameraMedia.acceptedManifestKind(signed)))
         guard manifest.photoId == c.entityId else { throw FotoroError("Catalog binding mismatch") }
         if manifest.ownerAccountId != session.accountId { continue }
         try fence()
@@ -1091,6 +1269,7 @@ enum ReviewedPhotosBackupPolicy {
       try fence()
       let ownedPage = ChangePageV1(
         version: page.version,
+        mediaVersion: page.mediaVersion,
         changes: ownedChanges + page.changes.filter { $0.deleted || $0.entity != "photo" },
         nextCursor: page.nextCursor, hasMore: page.hasMore)
       for change in page.changes where change.entity == "annotation" && !change.deleted {
@@ -1544,7 +1723,7 @@ enum ReviewedPhotosBackupPolicy {
   func endSharedAccess(_ grant: GrantV1) async throws {
     let access = try sharingAccess()
     guard grant.ownerAccountId == access.account else { throw FotoroError("Only the sender can end access.") }
-    _ = try await api.request("/v1/grants/\(grant.grantId)", method: "DELETE")
+    _ = try await api.request("/v1/grants/\(grant.grantId)?media=1", method: "DELETE")
     try requireSharingAccess(access)
     try await refreshSharedMoments()
   }
@@ -1596,7 +1775,7 @@ enum ReviewedPhotosBackupPolicy {
   }
   func receive(_ grant: GrantV1) async throws {
     let access = try sharingAccess()
-    let detail: GrantDetailV1 = try await api.get("/v1/grants/\(grant.grantId)")
+    let detail: GrantDetailV1 = try await api.get("/v1/grants/\(grant.grantId)?media=1")
     try requireSharingAccess(access)
     guard detail.version == 1 else { throw FotoroError("This photo invitation needs a newer Fotoro version.") }
     try requireGrant(detail.grant, matches: grant, account: access.account)
@@ -1609,7 +1788,7 @@ enum ReviewedPhotosBackupPolicy {
       }
       let sender = try verifiedSharingCard(signed.accountId, in: detail)
       let manifest = try Wire.decode(
-        PhotoManifestV1.self, crypto.verify(signed, card: sender, kind: "photo-manifest"))
+        PhotoManifestV1.self, crypto.verify(signed, card: sender, kind: CameraMedia.acceptedManifestKind(signed)))
       guard manifest.ownerAccountId == sender.accountId,
         let e = detail.envelopes.first(where: {
           $0.photoId == manifest.photoId && $0.recipientAccountId == recipient.accountId
@@ -1638,7 +1817,7 @@ enum ReviewedPhotosBackupPolicy {
       try await finishSave(pending)
       return
     }
-    let detail: GrantDetailV1 = try await api.get("/v1/grants/\(grant.grantId)")
+    let detail: GrantDetailV1 = try await api.get("/v1/grants/\(grant.grantId)?media=1")
     try requireSharingAccess(access)
     guard detail.version == 1 else { throw FotoroError("This photo invitation needs a newer Fotoro version.") }
     try requireGrant(detail.grant, matches: grant, account: access.account)
@@ -1657,7 +1836,7 @@ enum ReviewedPhotosBackupPolicy {
       let source = detail.manifests.first(where: { signed in
         guard signed.accountId == e.senderAccountId,
           let decoded = try? Wire.decode(PhotoManifestV1.self,
-            crypto.verify(signed, card: verifiedSharingCard(e.senderAccountId, in: detail), kind: "photo-manifest")) else { return false }
+            crypto.verify(signed, card: verifiedSharingCard(e.senderAccountId, in: detail), kind: CameraMedia.acceptedManifestKind(signed))) else { return false }
         return decoded == photo.manifest
       }), source.accountId == photo.manifest.ownerAccountId else {
       throw FotoroError("This shared photo has changed. Open the invitation again.")
@@ -1673,7 +1852,7 @@ enum ReviewedPhotosBackupPolicy {
       manifest.ownerAccountId = recipient.accountId
       manifest.ownerWrappedMetadataKey = try crypto.wrap(key, key: Data(b64: bundle.vaultKey))
       let signed = try crypto.sign(
-        manifest, kind: "photo-manifest", accountId: recipient.accountId,
+        manifest, kind: CameraMedia.manifestKind(for: photo.metadata.mediaType), accountId: recipient.accountId,
         secret: Data(b64: bundle.signingSecretKey))
       let save = SavedPhotoV1(
         operationId: Wire.id(), photoId: manifest.photoId, sourceGrantId: grant.grantId,
@@ -1697,7 +1876,7 @@ enum ReviewedPhotosBackupPolicy {
     let saved: SavedPhotoV1 = try await api.post("/v1/saves", pending.request)
     try requireSharingAccess(access)
     let manifest = try Wire.decode(PhotoManifestV1.self,
-      crypto.verify(saved.signedPayload, card: session.requireCard(access.account), kind: "photo-manifest"))
+      crypto.verify(saved.signedPayload, card: session.requireCard(access.account), kind: CameraMedia.acceptedManifestKind(saved.signedPayload)))
     guard saved.version == 1, saved.operationId == pending.request.save.operationId,
       saved.photoId == pending.request.save.photoId,
       saved.sourceGrantId == pending.request.save.sourceGrantId,
@@ -1730,7 +1909,7 @@ enum ReviewedPhotosBackupPolicy {
     }
     let manifests = try committed.map { photo in
       try crypto.sign(
-        photo.manifest, kind: "photo-manifest", accountId: access.account,
+        photo.manifest, kind: CameraMedia.manifestKind(for: photo.metadata.mediaType), accountId: access.account,
         secret: Data(b64: bundle.signingSecretKey))
     }
     let envelopes = try committed.map { photo in

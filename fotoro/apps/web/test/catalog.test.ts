@@ -3,8 +3,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import accounts from "../../../fixtures/accounts.json";
 import { ready, unb64 } from "@fotoro/crypto";
-import { configureVault, unlockVault, lockVault } from "../src/vault/vault";
-import { get } from "../src/exchange/cache";
+import { configureVault, unlockVault, lockVault, encryptPrivate, decryptPrivate } from "../src/vault/vault";
+import { get, put } from "../src/exchange/cache";
 import { syncCatalog } from "../src/library/catalog";
 
 async function open(index: number) {
@@ -74,4 +74,36 @@ test("an old account's delayed sync cannot write the new account's cursor", asyn
     globalThis.fetch = old;
     lockVault();
   }
+});
+
+test("an older service cannot acknowledge media support or advance the current reader cursor", async () => {
+  await ready; await open(0);
+  const old = globalThis.fetch, id = accounts.accounts[0].accountId;
+  globalThis.fetch = (async (path: string | URL | Request) => {
+    assert.ok(String(path).includes("media=1"));
+    return new Response(JSON.stringify({version: 1, changes: [], nextCursor: "unsupported", hasMore: false}));
+  }) as any;
+  try {
+    await assert.rejects(syncCatalog(), /MEDIA_READER_UPDATE_REQUIRED/);
+    assert.equal(await get("settings", id + ":cursor"), undefined);
+    assert.equal(await get("settings", id + ":media-reader-v1"), undefined);
+  } finally {globalThis.fetch = old; lockVault();}
+});
+
+test("current media reader rescans a legacy cursor once, then resumes the acknowledged cursor", async () => {
+  await ready; await open(0);
+  const old = globalThis.fetch, id = accounts.accounts[0].accountId, requests: URL[] = [];
+  await put("settings", id + ":cursor", encryptPrivate("legacy-skipped-media"));
+  globalThis.fetch = (async (path: string | URL | Request) => {
+    requests.push(new URL(String(path), "http://localhost"));
+    return new Response(JSON.stringify({version: 1, mediaVersion: 1, changes: [], nextCursor: "current-media", hasMore: false}));
+  }) as any;
+  try {
+    await syncCatalog();
+    assert.equal(requests[0].searchParams.get("media"), "1");
+    assert.equal(requests[0].searchParams.get("cursor"), null);
+    assert.equal(decryptPrivate(await get("settings", id + ":media-reader-v1")), true);
+    await syncCatalog();
+    assert.equal(requests[1].searchParams.get("cursor"), "current-media");
+  } finally {globalThis.fetch = old; lockVault();}
 });

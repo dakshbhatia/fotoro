@@ -1,3 +1,5 @@
+import {isCameraMedia, LIVE_PHOTO_TYPE} from "@fotoro/contracts/camera-media";
+import {cameraOriginalFiles, readCameraPlayback} from "../media/camera-original";
 import { useState, useEffect, useRef } from "react";
 import { photoBytes, type Photo } from "./catalog";
 import { Icon } from "./icons";
@@ -5,7 +7,7 @@ import { saveReceivedPhoto } from "../exchange/share-service";
 import {readableShareError} from "../exchange/sharing";
 import {requireVault, type UnlockedVault} from "../vault/vault";
 import {sameVault} from "../vault/scope";
-import {canShareOriginal, downloadOriginal, OriginalShareAttempt} from "./system-share";
+import {canShareOriginals, downloadOriginal, OriginalShareAttempt} from "./system-share";
 import {useDialogFocus} from "./dialog-focus";
 import {photoChangeState, type ConsumerPhotoChanges} from "./consumer-changes";
 import {failedViewerPreview, readViewerPreview, viewerPreviewSource, type ViewerPreview} from "./viewer-preview";
@@ -45,7 +47,10 @@ export function Viewer({
     [preparingShare, setPreparingShare] = useState(false),
     [sharing, setSharing] = useState(false),
     [shareAttempt] = useState(() => new OriginalShareAttempt()),
-    [prepared, setPrepared] = useState<{file: File; photo: Photo; session: UnlockedVault} | null>(null);
+    [playRequest, setPlayRequest] = useState<string>(),
+    [playAttempt, setPlayAttempt] = useState(0),
+    [motion, setMotion] = useState<{source: string; url?: string; failed?: boolean}>(),
+    [prepared, setPrepared] = useState<{files: File[]; photo: Photo; session: UnlockedVault} | null>(null);
   const touch = useRef<{ x: number; y: number } | undefined>(undefined);
   const panel = useRef<HTMLDivElement>(null), originalPanel = useRef<HTMLElement>(null), originalButton = useRef<HTMLButtonElement>(null), hadOriginalOptions = useRef(false);
   const index = viewerPhotoIndex(photos, selected), photo = photos[index];
@@ -79,7 +84,7 @@ export function Viewer({
     return () => window.removeEventListener("keydown", key);
   }, [photos, index, selected, prepared]);
   useEffect(() => {
-    shareGeneration.current++; setPrepared(null); setPreparingShare(false);
+    shareGeneration.current++; setPrepared(null); setPreparingShare(false); setPlayRequest(undefined); setMotion(undefined);
   }, [photo]);
   useEffect(() => {
     if (!photo) return;
@@ -107,6 +112,26 @@ export function Viewer({
       controller.abort();
     };
   }, [previewSource, previewAttempt]);
+  useEffect(() => {
+    if (!photo || playRequest !== previewSource || !isCameraMedia(photo.metadata.mediaType)) return;
+    let session: UnlockedVault;
+    try {session = requireVault();} catch {return;}
+    const controller = new AbortController(), source = previewSource;
+    let alive = true, url: string | undefined;
+    const current = () => alive && mounted.current && currentPreviewSource.current === source && sameVault(session);
+    const clear = () => {alive = false; controller.abort(); if (url) URL.revokeObjectURL(url);};
+    const hidden = () => {if (document.hidden) {clear(); setMotion(undefined);}};
+    window.addEventListener("fotoro-lock", clear);
+    document.addEventListener("visibilitychange", hidden);
+    setMotion({source});
+    void readCameraPlayback(photo, controller.signal, current).then(blob => {
+      if (!blob || !current()) return;
+      url = URL.createObjectURL(blob);
+      if (!current()) {URL.revokeObjectURL(url); url = undefined; return;}
+      setMotion({source, url});
+    }).catch(() => {if (!controller.signal.aborted && current()) setMotion({source, failed: true});});
+    return () => {clear(); window.removeEventListener("fotoro-lock", clear); document.removeEventListener("visibilitychange", hidden);};
+  }, [previewSource, playRequest, playAttempt]);
   if (!photo) return null;
   const previewState = preview?.source === previewSource ? preview.state : "loading";
   const previewURL = previewState === "ready" ? preview?.url : undefined;
@@ -124,8 +149,9 @@ export function Viewer({
       const bytes = await photoBytes(photo, "original");
       try {
         if (!authorized(photo, session) || shareGeneration.current !== generation) return;
-        const file = new File([new Uint8Array(bytes)], photo.metadata.filename, {type: photo.metadata.mediaType});
-        setPrepared({file, photo, session}); setStatus("");
+        const files = await cameraOriginalFiles(bytes, photo.metadata);
+        if (!authorized(photo, session) || shareGeneration.current !== generation) return;
+        setPrepared({files, photo, session}); setStatus("");
       } finally {bytes.fill(0);}
     } catch (error) {if (authorized(photo, session) && shareGeneration.current === generation) setStatus((error as Error).message);}
     finally {if (authorized(photo, session) && shareGeneration.current === generation) setPreparingShare(false);}
@@ -186,7 +212,7 @@ export function Viewer({
         }}
         onDoubleClick={() => setZoom(!zoom)}
       >
-        {previewURL ? (
+        {motion?.source === previewSource && motion.url ? <video src={motion.url} controls autoPlay playsInline aria-label={photo.metadata.filename} style={{maxWidth: "100%", maxHeight: "100%"}} onError={() => setMotion({source: previewSource, failed: true})} /> : previewURL ? (
           <img
             className={zoom ? "zoomed" : ""}
             src={previewURL}
@@ -209,7 +235,11 @@ export function Viewer({
         >
           <Icon kind="previous" />
         </button>}
-        <button onClick={() => setZoom(!zoom)}>{zoom ? "Fit" : "Zoom"}</button>
+        {!isCameraMedia(photo.metadata.mediaType) && <button onClick={() => setZoom(!zoom)}>{zoom ? "Fit" : "Zoom"}</button>}
+        {isCameraMedia(photo.metadata.mediaType) && <button disabled={playRequest === previewSource && !motion?.url && !motion?.failed} onClick={() => {setPlayRequest(previewSource); setPlayAttempt(value => value + 1);}}>
+          {playRequest === previewSource && !motion?.url && !motion?.failed ? "Opening original…" : photo.metadata.mediaType === LIVE_PHOTO_TYPE ? "Play Live Photo" : "Play video"}
+        </button>}
+        {motion?.source === previewSource && motion.failed && <p role="status">This browser cannot play the original. You can download its unchanged resources.</p>}
         {onShare && !photo.grantId && <button onClick={() => onShare(photo)}>Share in Fotoro</button>}
         <button
           ref={originalButton}
@@ -238,16 +268,16 @@ export function Viewer({
         <button className="close" aria-label="Close share options" onClick={() => setPrepared(null)}><Icon kind="close" /></button>
         <h2>Original ready</h2><p className="hint">{photo.metadata.filename} · verified, unchanged</p>
         <div className="actions">
-          {canShareOriginal(prepared.file) && <button disabled={sharing} onClick={() => {
+          {canShareOriginals(prepared.files) && <button disabled={sharing} onClick={() => {
             if (shareAttempt.pending) return;
             const current = () => authorized(prepared.photo, prepared.session);
             setSharing(true); setStatus("");
-            void shareAttempt.run(prepared.file, current).then(result => {
+            void shareAttempt.runFiles(prepared.files, current).then(result => {
               if (current() && result !== "cancelled" && result !== "busy") {setPrepared(null); if (result === "downloaded") setStatus("Original downloaded");}
             }).catch(error => {if (current()) setStatus("Sharing could not finish. You can download the original instead.");})
               .finally(() => {if (mounted.current) setSharing(false);});
           }}>{sharing ? "Sharing…" : "Share original"}</button>}
-          <button disabled={sharing} onClick={() => {if (!authorized(prepared.photo, prepared.session)) return; downloadOriginal(prepared.file); setPrepared(null); setStatus("Original downloaded");}}>Download original</button>
+          <button disabled={sharing} onClick={() => {if (!authorized(prepared.photo, prepared.session)) return; for (const file of prepared.files) downloadOriginal(file); setPrepared(null); setStatus("Original downloaded");}}>Download original</button>
         </div>
       </aside>}
       {details && (

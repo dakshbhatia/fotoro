@@ -9,6 +9,13 @@ final class SearchIndex: @unchecked Sendable {
   init(root: URL? = nil) throws {
     var configuration = Configuration()
     configuration.prepareDatabase { db in
+      #if !FOTORO_LOCAL_PREVIEW
+      db.add(function: DatabaseFunction("semanticSimilarity", argumentCount: 2, pure: true) { values in
+        guard let image = Data.fromDatabaseValue(values[0]).flatMap(SemanticVector.values),
+          let text = Data.fromDatabaseValue(values[1]).flatMap(SemanticVector.values) else { return -1.0 }
+        return SemanticVector.similarity(image, text)
+      })
+      #endif
       db.add(
         function: DatabaseFunction("searchDecay", argumentCount: 2, pure: true) { values in
           guard let at = Double.fromDatabaseValue(values[0]),
@@ -52,6 +59,7 @@ final class SearchIndex: @unchecked Sendable {
         sql: """
           CREATE TABLE IF NOT EXISTS searchRecords(id TEXT PRIMARY KEY, scope TEXT NOT NULL, capture REAL, favorite INTEGER NOT NULL, moment INTEGER NOT NULL, ocrState TEXT NOT NULL, visualState TEXT NOT NULL DEFAULT 'pending', preview INTEGER NOT NULL, burst TEXT, value BLOB NOT NULL);
           CREATE INDEX IF NOT EXISTS searchSourceDate ON searchRecords(scope,capture);
+          CREATE TABLE IF NOT EXISTS searchVectors(photo TEXT PRIMARY KEY REFERENCES searchRecords(id) ON DELETE CASCADE, revision TEXT NOT NULL, processor TEXT NOT NULL, vector BLOB NOT NULL);
           CREATE TABLE IF NOT EXISTS searchTerms(meaning TEXT NOT NULL, term TEXT NOT NULL, display TEXT NOT NULL, relation TEXT NOT NULL, PRIMARY KEY(meaning,term));
           CREATE INDEX IF NOT EXISTS searchTermPrefix ON searchTerms(term,meaning);
           CREATE TABLE IF NOT EXISTS searchPostings(meaning TEXT NOT NULL, photo TEXT NOT NULL REFERENCES searchRecords(id) ON DELETE CASCADE, evidence INTEGER NOT NULL, confidence REAL NOT NULL, display TEXT NOT NULL DEFAULT '', PRIMARY KEY(meaning,photo));
@@ -88,6 +96,54 @@ final class SearchIndex: @unchecked Sendable {
         decode)
     }
   }
+  #if !FOTORO_LOCAL_PREVIEW
+  func pendingSemanticRecords() throws -> [SearchRecord] {
+    try database.read { db in
+      try Row.fetchAll(db, sql: """
+        SELECT r.value FROM searchRecords r LEFT JOIN searchVectors v ON v.photo=r.id
+        WHERE v.photo IS NULL OR v.processor!=? OR v.revision!=json_extract(r.value,'$.revision')
+        ORDER BY r.favorite DESC,r.capture DESC,r.id
+        """, arguments: [SemanticVector.processor]).map(decode)
+    }
+  }
+  @discardableResult func applySemantic(_ vector: [Float], photoID: String, revision: String,
+    generation: UInt64? = nil) throws -> Bool {
+    guard let normalized = SemanticVector.normalized(vector) else { return false }
+    return try database.write { db in
+      guard acceptsGeneration(generation), let current = try Row.fetchOne(db,
+        sql: "SELECT value FROM searchRecords WHERE id=?", arguments: [photoID]).map(decode),
+        current.revision == revision else { return false }
+      try db.execute(sql: "INSERT OR REPLACE INTO searchVectors(photo,revision,processor,vector) VALUES(?,?,?,?)",
+        arguments: [photoID, revision, SemanticVector.processor, SemanticVector.data(normalized)])
+      return true
+    }
+  }
+  func addingSemantic(_ vector: [Float], to base: SearchResponse, now: Date = Date()) throws -> SearchResponse {
+    guard let normalized = SemanticVector.normalized(vector) else { return base }
+    return try database.read { db in
+      let (condition, args) = filter(base.scope)
+      let rows = try Row.fetchAll(db, sql: """
+        SELECT r.id,r.preview,r.burst,semanticSimilarity(v.vector,?) similarity
+        FROM searchVectors v JOIN searchRecords r ON r.id=v.photo
+        WHERE v.processor=? AND v.revision=json_extract(r.value,'$.revision') AND \(condition)
+          AND similarity>=0.20
+        ORDER BY similarity DESC,r.favorite DESC,r.capture DESC,r.id LIMIT 100
+        """, arguments: StatementArguments([SemanticVector.data(normalized), SemanticVector.processor]) + args)
+      var result = base
+      var included = Set(base.results.flatMap { [$0.id] + $0.children })
+      var bursts: [String: Int] = [:]
+      for row in rows {
+        let id: String = row["id"]
+        guard included.insert(id).inserted else { continue }
+        let burst: String? = row["burst"]
+        if let burst, let index = bursts[burst] { result.results[index].children.append(id); continue }
+        if let burst { bursts[burst] = result.results.count }
+        result.results.append(SearchHit(id: id, evidenceClass: 6, reason: "Visual similarity", previewAvailable: row["preview"]))
+      }
+      return result
+    }
+  }
+  #endif
   func applyOCR(
     _ result: SearchOCRResult?, status: SearchOCRStatus, photoID: String, revision: String,
     generation: UInt64? = nil
@@ -263,6 +319,7 @@ final class SearchIndex: @unchecked Sendable {
           sql:
             "DELETE FROM searchFTS WHERE id NOT IN (SELECT id FROM permittedSearchIDs); DELETE FROM searchRecords WHERE id NOT IN (SELECT id FROM permittedSearchIDs); DELETE FROM searchPins WHERE photo NOT IN (SELECT id FROM permittedSearchIDs); DELETE FROM searchEvents WHERE photo != '' AND photo NOT IN (SELECT id FROM permittedSearchIDs); DELETE FROM searchTerms WHERE meaning NOT IN (SELECT meaning FROM searchPostings)"
         )
+        try db.execute(sql: "DELETE FROM searchVectors WHERE photo NOT IN (SELECT id FROM searchRecords) OR revision!= (SELECT json_extract(value,'$.revision') FROM searchRecords WHERE id=photo)")
         if records.isEmpty {
           try db.execute(sql: "DELETE FROM searchEvents; DELETE FROM searchPins")
         }

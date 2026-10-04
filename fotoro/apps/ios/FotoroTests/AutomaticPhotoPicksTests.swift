@@ -18,12 +18,13 @@ final class AutomaticPhotoPicksTests: XCTestCase {
       hash: hash, luminance: 0.5, contrast: 0.15, sharpness: sharpness, color: [120, 120, 120])
   }
 
-  func testTenPercentQuotaUsesUniqueAssessedGroupsAndPreservesInput() {
+  func testDistinctStrongHighlightsDoNotFillAFixedQuota() {
     let photos = (0..<20).map { photo(String($0)) }
-    let signals = Dictionary(
+    var signals = Dictionary(
       uniqueKeysWithValues: photos.enumerated().map { index, photo in
         (photo.id, signal(UInt64(index), sharpness: index == 5 ? 0.5 : index == 12 ? 0.4 : 0.01))
       })
+    signals["12"]?.color = [230, 20, 50]
     let result = AutomaticPhotoPickPolicy.recommend(photos, signals: signals)
     XCTAssertEqual(result.ids, ["5", "12"])
     XCTAssertEqual(result.groupCount, 20)
@@ -33,6 +34,25 @@ final class AutomaticPhotoPicksTests: XCTestCase {
     XCTAssertTrue(AutomaticPhotoPickPolicy.recommend([], signals: [:]).ids.isEmpty)
   }
 
+  func testEachCaptureMomentKeepsItsHighlightInsteadOfAQuota() {
+    let photos = (0..<10).map { photo(String($0), seconds: Double($0) * 10800) }
+    let signals = Dictionary(uniqueKeysWithValues: photos.map { ($0.id, signal()) })
+    let result = AutomaticPhotoPickPolicy.recommend(photos, signals: signals)
+    XCTAssertEqual(result.ids, Set(photos.map(\.id)))
+    XCTAssertEqual(photos.count, 10)
+  }
+  func testFaceQualityAndUtilityInfluenceSuggestionsWithoutRemovingOriginals() {
+    let photos = [photo("soft-face", seconds: 0), photo("clear-face", seconds: 1), photo("document", seconds: 2)]
+    var soft = signal(); soft.faceQuality = 0.05
+    var clear = signal(); clear.faceQuality = 0.95
+    var document = signal(); document.utility = true
+    let result = AutomaticPhotoPickPolicy.recommend(photos, signals: ["soft-face": soft, "clear-face": clear, "document": document])
+    XCTAssertEqual(result.ids, ["clear-face"])
+    XCTAssertEqual(photos.count, 3)
+    let favorite = photo("document", seconds: 2, favorite: true)
+    XCTAssertEqual(AutomaticPhotoPickPolicy.recommend([favorite], signals: [favorite.id: document]).ids, [favorite.id])
+  }
+
   func testFavoriteHasPriorityOverASharperNonFavorite() {
     let photos = (0..<20).map { photo(String($0), favorite: $0 == 19) }
     let signals = Dictionary(
@@ -40,7 +60,7 @@ final class AutomaticPhotoPicksTests: XCTestCase {
         ($0.id, signal(sharpness: $0.favorite ? 0.01 : 0.3))
       })
     let result = AutomaticPhotoPickPolicy.recommend(photos, signals: signals)
-    XCTAssertEqual(result.ids, ["19", "0"])
+    XCTAssertEqual(result.ids, ["19"])
     XCTAssertTrue(result.reasons["19"]?.contains("Favorite") == true)
   }
 

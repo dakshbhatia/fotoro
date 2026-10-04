@@ -36,9 +36,17 @@ struct SearchAnalysisProgress: Equatable, Sendable {
   @ObservationIgnored private let processor = VisionTextProcessor()
   @ObservationIgnored private var imageRequest: SearchImageRequest?
   @ObservationIgnored private var queryExecutor: QueryExecutor = { index, value, accepted, previous, generation in
-    try await Task.detached(priority: .userInitiated) {
+    let lexical = try await Task.detached(priority: .userInitiated) {
       try index.search(value, acceptedMeaningID: accepted, previous: previous, generation: generation)
     }.value
+    #if FOTORO_LOCAL_PREVIEW
+      return lexical
+    #else
+    let phrase = NaturalDateQuery.parse(value).text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard accepted == nil, phrase.count >= 3, let vector = try? await MobileCLIPProcessor.shared.textIfReady(phrase) else { return lexical }
+    try Task.checkCancellation()
+    return try await Task.detached(priority: .userInitiated) { try index.addingSemantic(vector, to: lexical) }.value
+    #endif
   }
 
   static func defaultIndexRoot(in directory: URL) -> URL {
@@ -182,6 +190,10 @@ struct SearchAnalysisProgress: Equatable, Sendable {
       guard applied, token == work.generation, !Task.isCancelled else { return }
       completePermittedSnapshotRefresh(photos: scanned.photos)
       try onSnapshotReady?()
+      // Ordinary metadata/OCR search stays available while the public model prepares.
+      #if !FOTORO_LOCAL_PREVIEW
+        let semanticPreparation = Task { try? await MobileCLIPProcessor.shared.prepare() }
+      #endif
       // Snapshot the retry list once: another Vision failure waits for an explicit/foreground refresh.
       let pending = try await Task.detached { try localIndex.pendingAnalysisRecords(retryFailed: retryFailedOCR) }.value
       guard token == work.generation, !Task.isCancelled else { return }
@@ -247,6 +259,30 @@ struct SearchAnalysisProgress: Equatable, Sendable {
         analysisProgress?.processed += 1
         updateQuery(query)
       }
+      #if !FOTORO_LOCAL_PREVIEW
+      await semanticPreparation.value
+      try Task.checkCancellation()
+      guard token == work.generation else { return }
+      if await MobileCLIPProcessor.shared.ready {
+        let remaining = try await Task.detached { try localIndex.pendingSemanticRecords() }.value
+        for record in remaining {
+          try Task.checkCancellation()
+          guard token == work.generation, let photo = assets[record.id],
+            RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)) else { break }
+          guard let preview = await loadPreview(photo.asset) else { continue }
+          try Task.checkCancellation()
+          guard token == work.generation, assets[record.id]?.sourceRevision == record.revision else { break }
+          if let vector = try? await MobileCLIPProcessor.shared.image(preview) {
+            _ = try await Task.detached {
+              try localIndex.applySemantic(vector, photoID: record.id, revision: record.revision, generation: token)
+            }.value
+            guard token == work.generation, !Task.isCancelled else { break }
+            updateQuery(query)
+          }
+          await Task.yield()
+        }
+      }
+      #endif
     } catch is CancellationError {} catch {
       if token == work.generation { self.error = error.localizedDescription }
     }
@@ -258,7 +294,11 @@ struct SearchAnalysisProgress: Equatable, Sendable {
   }
   private nonisolated static func scan() -> Scan {
     let options = PHFetchOptions()
+    #if FOTORO_LOCAL_PREVIEW
     options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
+    #else
+    options.predicate = NSPredicate(format: "mediaType == %d OR mediaType == %d", PHAssetMediaType.image.rawValue, PHAssetMediaType.video.rawValue)
+    #endif
     options.includeHiddenAssets = false
     options.includeAllBurstAssets = true
     #if compiler(>=6.4)
@@ -268,9 +308,14 @@ struct SearchAnalysisProgress: Equatable, Sendable {
     var photos: [RecentPhoto] = []
     var records: [SearchRecord] = []
     fetched.enumerateObjects { asset, _, _ in
+      #if FOTORO_LOCAL_PREVIEW
+        let searchableMedia = asset.mediaType == .image
+      #else
+        let searchableMedia = asset.mediaType == .image || asset.mediaType == .video
+      #endif
       guard
         LocalSearchPhotosPolicy.includes(
-          image: asset.mediaType == .image, hidden: asset.isHidden, capturedAt: asset.creationDate,
+          image: searchableMedia, hidden: asset.isHidden, capturedAt: asset.creationDate,
           authorized: true)
       else { return }
       let photo = RecentPhoto(asset: asset)
@@ -281,7 +326,7 @@ struct SearchAnalysisProgress: Equatable, Sendable {
       r.favorite = asset.isFavorite
       r.burstID = asset.burstIdentifier
       r.filename =
-        PHAssetResource.assetResources(for: asset).first(where: { $0.type == .photo })?
+        PHAssetResource.assetResources(for: asset).first(where: { $0.type == .photo || $0.type == .video })?
         .originalFilename ?? ""
       #if compiler(>=6.4)
         if #available(iOS 27, *) {
@@ -293,6 +338,7 @@ struct SearchAnalysisProgress: Equatable, Sendable {
       #endif
       if photo.isScreenshot { r.facts.append("screenshot") }
       if photo.isLivePhoto { r.facts.append("live photo") }
+      if asset.mediaType == .video { r.facts.append("video") }
       if let location = photo.location { r.facts += ["location gps", location] }
       records.append(r)
     }
@@ -370,9 +416,7 @@ struct SearchAnalysisProgress: Equatable, Sendable {
     let queryToken = queryGeneration
     let previous = response
     let accepted = acceptedMeaningID
-    let next = try await Task.detached(priority: .userInitiated) {
-      try index.search(value, acceptedMeaningID: accepted, previous: previous, generation: queryToken)
-    }.value
+    let next = try await queryExecutor(index, value, accepted, previous, queryToken)
     try Task.checkCancellation()
     guard ready, token == work.generation, library == libraryGeneration else { return [] }
     guard queryToken == queryGeneration else { throw CancellationError() }

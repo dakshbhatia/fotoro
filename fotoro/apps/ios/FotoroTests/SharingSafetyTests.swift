@@ -4,6 +4,67 @@ import XCTest
 @testable import Fotoro
 
 final class SharingSafetyTests: XCTestCase {
+  @MainActor func testInvitationPasswordRetryKeepsTheOriginalAccountWorkAndReopensOnlyAfterExplicitAuthorization() async throws {
+    let context = try SharingSafetyContext()
+    let services = try await context.open(index: 0)
+    let originalCatalog = services.store, originalLedger = services.annotations.ledger
+    let originalAccount = context.cards[0].accountId
+    defer {
+      UserDefaults.standard.removeObject(forKey: "fotoro.manualLock." + originalAccount)
+      context.restore()
+    }
+    var original = context.server.source
+    original.transferState = "committed"
+    try originalCatalog.put(original)
+    try services.reload()
+    try services.setLabels(["Unsent family edit"], photo: original)
+    let pending = try context.pendingSave()
+    _ = try originalCatalog.operation("kept-save") { pending }
+    let invitation = FotoroMomentInvitation(grantId: context.server.grant.grantId, senderCard: context.cards[0])
+    let link = FotoroShareLink.moment(invitation), origin = services.api.origin
+    var retry = IncomingInvitationPasswordRetry(link: link, origin: origin)
+    XCTAssertNil(retry.consume(active: true, access: services.photoAccountAccess, origin: origin), "Opening another password must be explicit")
+    services.lockAccount()
+    XCTAssertTrue(Keychain.contains(originalAccount), "Switching passwords is a memory lock, not sign-out")
+    XCTAssertEqual(try originalLedger.pendingIDs(), [original.id])
+    XCTAssertNotNil(try originalCatalog.existingOperation("kept-save", as: PendingSave.self))
+    XCTAssertTrue(retry.awaitingPassword)
+    XCTAssertTrue(context.server.requests.isEmpty)
+    try await context.changeAccount(to: 1)
+    let invitedAccess = try XCTUnwrap(services.photoAccountAccess)
+    retry.authorize(invitedAccess, origin: origin)
+    XCTAssertNil(retry.consume(active: false, access: invitedAccess, origin: origin))
+    XCTAssertNil(retry.consume(active: true, access: invitedAccess, origin: "https://another.invalid"))
+    let reopened = try XCTUnwrap(retry.consume(active: true, access: invitedAccess, origin: origin))
+    XCTAssertEqual(reopened, link)
+    XCTAssertTrue(retry.presented)
+    XCTAssertNil(retry.consume(active: true, access: invitedAccess, origin: origin), "One password success cannot open duplicate sheets")
+    XCTAssertTrue(context.server.requests.isEmpty, "Restoring the invitation does not auto-accept it")
+    try await services.openMoment(invitation)
+    XCTAssertEqual(services.selectedGrant?.grantId, invitation.grantId)
+    XCTAssertFalse(services.received.isEmpty)
+    XCTAssertEqual(try originalLedger.pendingIDs(), [original.id])
+    XCTAssertNotNil(try originalCatalog.existingOperation("kept-save", as: PendingSave.self))
+    XCTAssertTrue(try originalCatalog.photos().contains { $0.id == original.id })
+  }
+
+  @MainActor func testCancelledInvitationPasswordRetryCannotBeRevivedByLateAuthenticationOrAnotherAccountBinding() async throws {
+    let context = try SharingSafetyContext(), services = try await context.open(index: 1)
+    defer { context.restore() }
+    let link = FotoroShareLink.moment(FotoroMomentInvitation(grantId: context.server.grant.grantId, senderCard: context.cards[0]))
+    let access = try XCTUnwrap(services.photoAccountAccess), origin = services.api.origin
+    var cancelled = IncomingInvitationPasswordRetry(link: link, origin: origin)
+    cancelled.cancel(); cancelled.authorize(access, origin: origin)
+    XCTAssertFalse(cancelled.awaitingPassword)
+    XCTAssertNil(cancelled.consume(active: true, access: access, origin: origin))
+    var retry = IncomingInvitationPasswordRetry(link: link, origin: origin)
+    retry.authorize(access, origin: origin)
+    try await context.changeAccount(to: 0)
+    XCTAssertFalse(retry.isAuthorized(services.photoAccountAccess, origin: origin))
+    XCTAssertNil(retry.consume(active: true, access: services.photoAccountAccess, origin: origin))
+    XCTAssertTrue(context.server.requests.isEmpty)
+  }
+
   @MainActor func testActiveInboxUpdatesKeepAlreadyOpenedReceivedPhotos() async throws {
     let context = try SharingSafetyContext()
     let services = try await context.open(index: 1)
