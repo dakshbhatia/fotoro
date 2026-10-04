@@ -26,10 +26,16 @@ A Worker preview with a different RP creates different passkey credentials. Do n
 
 Current release source adds opted-in iPhone photo sync, clearer browser Saved
 entry and correction status, atomic ciphertext allocation limits and production
-auth throttles. Apply migration 0006 before cutting over the new Worker. The
-migration preserves old Worker SQL behavior; deploy and read back an exact
-reviewed build before claiming the service changed. Preserve the immediately
-preceding Worker version as rollback. Apple distribution and physical-device
+auth throttles. PR 25 is merged at `56449463f3f585ef7bcd500ff355e8d0cf855732`;
+its reviewed tree and all required checks pass. Migration 0006 is applied with no
+pending migrations. Worker `483a3e90-28d7-4450-9448-b55488aafc52` is read back at
+100% in deployment `ca2cd458-cb4c-484e-9634-164dbcaaeb91`; the immediately
+preceding rollback version is `eb01e8ca-bc92-45a7-8096-843940e5a6d8`.
+All published JS/CSS and entry HTML match the reviewed build byte for byte.
+Public production checks verify responsive browsing and a fresh-browser
+same-password restore of an unchanged original. The native follow-up makes
+remembered sign-in recoverable, displays sync progress in Saved, and rechecks
+the catalog on return or pull-to-refresh. Apple distribution and physical-device
 acceptance remain separate from Worker deployment. See [verification](verification.md).
 
 ## Previous release checkpoints

@@ -87,13 +87,17 @@ struct LibraryView: View {
             if filtered.isEmpty && !catalogRefresh.isRefreshing {
               ContentUnavailableView(
                 "No photos", systemImage: "photo",
-                description: Text(query.isEmpty ? "Save photos in Fotoro, or refresh photos you've already saved." : "Try a label, filename or words in a photo."))
+                description: Text(query.isEmpty ? savedLibraryEmptyMessage(sync: services.automaticPhotoSync,
+                  favoritesOnly: favoritesOnly) : "Try a label, filename or words in a photo."))
             }
             ForEach(services.notices, id: \.self) { Text($0).font(.caption).padding() }
           }.scrollPosition(id: $scrollID, anchor: .top)
             .scrollDismissesKeyboard(.interactively)
-            .task(id: SavedLibraryOpenBinding(services)) {
-              await catalogRefresh.open(services)
+            .refreshable { await catalogRefresh.refresh(services) }
+            .task(id: SavedLibraryReadPresentation(services, isActive: scenePhase == .active)) {
+              guard !Task.isCancelled else { return }
+              guard scenePhase == .active else { catalogRefresh.cancel(); return }
+              await catalogRefresh.open(services, recheck: true)
             }
             .searchable(text: $query, prompt: "Search")
             .task(id: SavedCatalogSearchPresentationID(query: query,
@@ -127,8 +131,11 @@ struct LibraryView: View {
                 }
               }
               ToolbarItem(placement: .topBarTrailing) {
-                Menu("Filter", systemImage: "line.3.horizontal.decrease") {
+                Menu("Saved options", systemImage: "ellipsis.circle") {
                   Toggle("Favorites", isOn: $favoritesOnly)
+                  Button("Refresh", systemImage: "arrow.clockwise") {
+                    Task { await catalogRefresh.refresh(services) }
+                  }.accessibilityIdentifier("saved.refresh")
                 }
               }
             }
@@ -265,24 +272,17 @@ struct LibraryView: View {
   private func loadMoreIfNeeded(photoID: String) {
     if photoID == services.photos.last?.id { try? services.loadMore() }
   }
-  private var catalogFeedback: some View {
-    VStack(alignment: .leading, spacing: 8) {
-      if catalogRefresh.isRefreshing {
-        ProgressView("Loading saved photos…")
-      } else if let error = catalogRefresh.error {
+  @ViewBuilder private var catalogFeedback: some View {
+    if catalogRefresh.isRefreshing {
+      ProgressView("Loading saved photos…").padding()
+    } else if let error = catalogRefresh.error {
+      VStack(alignment: .leading, spacing: 8) {
         Text(error).font(.footnote).foregroundStyle(.secondary)
         Button("Try again", systemImage: "arrow.clockwise") {
           Task { await catalogRefresh.refresh(services) }
         }
-      } else {
-        HStack {
-          Spacer()
-          Button("Refresh", systemImage: "arrow.clockwise") {
-            Task { await catalogRefresh.refresh(services) }
-          }.font(.footnote)
-        }
-      }
-    }.frame(maxWidth: .infinity, alignment: .leading).padding()
+      }.frame(maxWidth: .infinity, alignment: .leading).padding()
+    }
   }
   private func validateSelection() {
     selection.removeWithdrawn(using: services.consumerSavedPhoto)
@@ -430,16 +430,19 @@ struct ConsumerSaveStatus: View {
   @ObservationIgnored private var openedBinding: SavedLibraryOpenBinding?
   @ObservationIgnored private var operation: UUID?
   @ObservationIgnored private var task: Task<Void, Never>?
-  func open(_ services: AppServices) async {
+  func open(_ services: AppServices, recheck: Bool = false) async {
+    guard !Task.isCancelled else { return }
     if isRefreshing, task?.isCancelled == true { cancel() }
     let binding = SavedLibraryOpenBinding(services)
-    guard openedBinding != binding, services.photoAccountAccess != nil else { return }
+    guard services.photoAccountAccess != nil else { return }
+    if openedBinding == binding && (isRefreshing || !recheck) { return }
     if isRefreshing { cancel() }
     openedBinding = binding
     await refresh(services)
   }
   func refresh(_ services: AppServices) async {
-    guard !isRefreshing, services.photoAccountAccess != nil else { return }
+    guard !Task.isCancelled, !isRefreshing, services.photoAccountAccess != nil else { return }
+    openedBinding = SavedLibraryOpenBinding(services)
     let token = UUID(), account = services.session.accountId, generation = services.vault.generation
     let catalog = services.store
     operation = token
@@ -482,6 +485,24 @@ struct SavedLibraryOpenBinding: Equatable {
     vault = services.vault.generation
     catalog = ObjectIdentifier(services.store)
   }
+}
+
+struct SavedLibraryReadPresentation: Equatable {
+  var binding: SavedLibraryOpenBinding
+  var isActive: Bool
+  @MainActor init(_ services: AppServices, isActive: Bool) {
+    binding = SavedLibraryOpenBinding(services)
+    self.isActive = isActive
+  }
+}
+
+func savedLibraryEmptyMessage(sync: AutomaticPhotoSyncStatus, favoritesOnly: Bool = false) -> String {
+  if favoritesOnly { return "No saved favorites yet." }
+  if sync.enabled {
+    return sync.paused ? "Sync is paused. Resume to add your photos."
+      : "Photos appear here as they sync. Keep Fotoro open."
+  }
+  return "Save photos in Fotoro, or pull down to check photos saved on another device."
 }
 
 private struct SavedCatalogSearchPresentationID: Equatable {
