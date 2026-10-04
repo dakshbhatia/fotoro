@@ -245,6 +245,15 @@ struct PhotoAnnotationsV1: Codable, Equatable, Sendable {
     var confidence: Double
     var processor: String
   }
+  struct Visual: Codable, Equatable, Sendable {
+    struct Label: Codable, Equatable, Sendable {
+      var label: String
+      var identifier: String
+      var confidence: Double
+    }
+    var processor: String
+    var labels: [Label]
+  }
   var version = 1
   var photoId: String
   var originalSha256: String
@@ -254,6 +263,7 @@ struct PhotoAnnotationsV1: Codable, Equatable, Sendable {
   var facts: [String]?
   var favorite: Bool?
   var ocr: OCR?
+  var visual: Visual?
 }
 struct PhotoAnnotationsUpdateV1: Codable, Equatable, Sendable {
   var version = 1

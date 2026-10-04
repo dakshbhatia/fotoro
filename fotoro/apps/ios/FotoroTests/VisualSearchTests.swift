@@ -6,6 +6,40 @@ import XCTest
 @testable import Fotoro
 
 final class VisualSearchTests: XCTestCase {
+  private struct PolicyFixture: Decodable {
+    struct Policy: Decodable {
+      struct Label: Decodable, Equatable {
+        var label: String
+        var identifier: String
+        var confidence: Double
+      }
+      struct Vector: Decodable {
+        var name: String
+        var processor: String
+        var labels: [Label]
+        var expected: [Label]
+      }
+      var processor: String
+      var publicationEnabled: Bool
+      var cases: [Vector]
+    }
+    var visualPolicy: Policy
+  }
+  func testNativeAndWebShareExactVisualPolicyVectors() throws {
+    let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "search-cases", withExtension: "json"))
+    let policy = try JSONDecoder().decode(PolicyFixture.self, from: Data(contentsOf: url)).visualPolicy
+    XCTAssertEqual(policy.processor, SearchVisualPolicy.processor)
+    XCTAssertEqual(policy.publicationEnabled, SearchVisualPolicy.publicationEnabled)
+    for vector in policy.cases {
+      let visual = vector.labels.map {
+        SearchVisualLabel(label: $0.label, identifier: $0.identifier, confidence: $0.confidence, processor: vector.processor)
+      }
+      let actual = SearchVisualPolicy.validated(visual, processor: vector.processor).map {
+        PolicyFixture.Policy.Label(label: $0.label, identifier: $0.identifier, confidence: $0.confidence)
+      }
+      XCTAssertEqual(actual, vector.expected, vector.name)
+    }
+  }
   private func result(_ candidates: [(String, Double)]) -> SearchVisualResult {
     SearchVisualResult(labels: SearchVisualPolicy.labels(candidates), processor: SearchVisualPolicy.processor)
   }

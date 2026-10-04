@@ -22,6 +22,9 @@ struct LocalSearchFields: Codable, Sendable {
   var ocrText: String
   var ocrConfidence: Double
   var ocrStatus: SearchOCRStatus
+  var visualLabels: [SearchVisualLabel]?
+  var visualStatus: SearchVisualStatus?
+  var visualProcessor: String?
 }
 struct SearchRecord: Codable, Sendable {
   var version = 1
@@ -40,7 +43,7 @@ struct SearchRecord: Codable, Sendable {
   var ocrConfidence: Double = 0
   var ocrStatus = SearchOCRStatus.pending
   var processor = "vision-text-v1"
-  // Device-local image classification never replaces an owner's supplied labels.
+  // Inferred scenes stay distinct from an owner's supplied labels.
   var visualLabels: [SearchVisualLabel] = []
   var visualStatus = SearchVisualStatus.pending
   var visualProcessor = SearchVisualPolicy.processor
@@ -90,6 +93,8 @@ extension SearchRecord {
 
 enum SearchVisualPolicy {
   static let processor = "vision-image-classification-r1-v1"
+  // Reader-first rollout. Enable with the web policy only after installed-reader qualification.
+  static let publicationEnabled = false
   static let minimumConfidence = 0.65
   static let maximumLabels = 6
   // Exact Vision identifiers only. No faces, identities, demographic traits, or
@@ -127,6 +132,14 @@ enum SearchVisualPolicy {
       $0.processor == processor && categories[$0.identifier] == $0.label
     }.map { ($0.identifier, $0.confidence) })
   }
+  #if !FOTORO_LOCAL_PREVIEW
+  static func validated(_ value: PhotoAnnotationsV1.Visual?) -> [SearchVisualLabel] {
+    guard let value else { return [] }
+    return validated(value.labels.map {
+      SearchVisualLabel(label: $0.label, identifier: $0.identifier, confidence: $0.confidence, processor: value.processor)
+    }, processor: value.processor)
+  }
+  #endif
 }
 struct SearchScope: Equatable, Sendable {
   var source = "photos"

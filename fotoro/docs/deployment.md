@@ -31,11 +31,25 @@ its reviewed tree and all required checks pass. Migration 0006 is applied with n
 pending migrations. Worker `483a3e90-28d7-4450-9448-b55488aafc52` is read back at
 100% in deployment `ca2cd458-cb4c-484e-9634-164dbcaaeb91`; the immediately
 preceding rollback version is `eb01e8ca-bc92-45a7-8096-843940e5a6d8`.
-The photo-journey follow-up has prepared Worker version
-`103856a0-471a-4702-891d-91278059de0d`, tagged `photo-journey-20261004`.
-Activation follows exact-head CI and merge; its rollback target is the recorded
-`483a3e90-28d7-4450-9448-b55488aafc52` version. It changes web assets only,
-with the same API, bindings and migrations.
+PR 27 is merged at `72207e4612e2f2e9ac8f07497d75143fbe2db80b`; its main CI
+run 37213350159 passes. The photo-journey Worker
+`103856a0-471a-4702-891d-91278059de0d` is live at 100% in deployment
+`94f731c4-952f-429d-aa97-8acc285011a8`, tagged `photo-journey-20261004`.
+Its rollback version is `483a3e90-28d7-4450-9448-b55488aafc52`. The next
+seamless-home source keeps these API bindings and migrations. Its visual
+readers are ready, but outgoing scene metadata is disabled so installed strict
+v1 readers can still refresh Saved. Scene publication requires qualification
+of installed native readers before activation.
+
+The seamless-home Worker `7f78c6a7-70fc-4dea-886d-e9b0774e25e0`, tagged
+`seamless-home-20261004`, is prepared from the current source. Deploy only after
+its exact-head checks and merge; its rollback target is
+`103856a0-471a-4702-891d-91278059de0d`. Full build 26 archives and passes the
+source, identity, production-domain, dSYM and retained-crypto audit. Its export
+is pending restoration of the existing Xcode developer account: the account
+list is empty and the cached profile uses Cloud Managed Apple Distribution.
+Build 25 remains the verified TestFlight build until the exact build 26 IPA
+is distribution-signed, Apple-validated, uploaded and read back.
 All published JS/CSS and entry HTML match the reviewed build byte for byte.
 Public production checks verify responsive browsing and a fresh-browser
 same-password restore of an unchanged original. The native follow-up makes

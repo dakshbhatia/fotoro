@@ -1,6 +1,63 @@
 # Verification — October 4, 2026
 
-The current source adds one explicit Turn on sync choice on iPhone. Consent is
+The seamless-home follow-up replaces the hidden first-sync icon with a visible
+Turn on sync action on iPhone, retaining the existing account/Photos consent and
+Pause behavior. Enabled Sync puts its detailed format and foreground limits in
+How sync works. A fresh browser offers Open Saved photos first and local photos
+second. Neither entry uploads photos.
+
+Rendered checks use the Codex in-app browser, with no Brave. The new entry fits
+320×568 and 390×844 with 48 px actions and no horizontal overflow; 844×390 uses
+an internal scrolling region. Open Saved focuses the password, and Back from a
+direct /saved entry normalizes the URL to /. No console errors occurred.
+
+Native/web readers now validate optional signed, encrypted visual results,
+keeping inferred scenes separate from supplied labels and binding matches to
+original identity, account and source lifetime. Malformed optional scenes cannot
+hide an otherwise valid annotation or original. Scene publication is disabled
+in signing and frozen retry paths: installed strict v1 readers would otherwise
+reject a page and block Saved refresh. Activation requires installed-reader
+qualification. These checks do not prove physical classifier accuracy or broad
+semantic search.
+
+Opted-in sync can publish completed on-device OCR through the existing annotation
+journal without publishing unfinished labels, captions, keywords, facts or
+favorite edits. Foreground/Resume can retry that metadata even when originals
+are unchanged; coalesced work retains the requesting publication mode and
+account/source fences. Adjusted Photos renditions are excluded from automatic
+analysis publication because the saved bytes are the unadjusted original.
+Manual Save changes retains its existing explicit behavior.
+
+Verification passes 20 core, 68 API, 290 web and 28 release-metadata tests,
+typechecks and the production web build. Four isolated D1/R2 checks restore
+identical JPEG, PNG and HEIC bytes in a fresh session. Full native verification
+passes 290 of 291 tests; local preview passes 97 of 98. Each suite has one known
+iOS 27 Vision inference-context skip and no failures. The emitted startup graph
+is 353,826 bytes across three chunks, inside its 500 KiB budget.
+
+Full build 26 archives with all 57 source inputs frozen, production associated
+domains, matching dSYM and full static encryption verified. Distribution export
+is pending: Xcode now has an empty developer-account list, while the existing
+App Store profile requires Cloud Managed Apple Distribution. Restoring the same
+Xcode account is required; cached profiles cannot replace that cloud private key.
+Build 25 remains the latest verified internal TestFlight build.
+
+The seamless-home Worker version 7f78c6a7-70fc-4dea-886d-e9b0774e25e0 is prepared
+from this source. Activation follows exact-head CI and merge; rollback is the
+preceding live version 103856a0-471a-4702-891d-91278059de0d.
+
+The preceding PR 27 checkpoint is merged at
+72207e4612e2f2e9ac8f07497d75143fbe2db80b and main CI 37213350159 passes.
+Worker 103856a0-471a-4702-891d-91278059de0d is verified live at 100%, with
+all entry HTML and JS/CSS matching reviewed bytes. Full 0.1.0 (25) is VALID /
+IN_BETA_TESTING in Fotoro Internal. Full encryption remains present. France is
+excluded from the first release; no public availability is configured. Physical
+installation, personal phone-to-Safari acceptance and device performance remain
+unverified; build 21 is the last verified physical installation.
+
+## Previous release evidence
+
+The preceding source adds one explicit Turn on sync choice on iPhone. Consent is
 persisted per account and API origin; Pause survives reopening. The existing
 serial backup and encrypted journal cover permitted supported still photos of
 any age. New preparation requires the app open and unlocked; iOS can finish
@@ -83,8 +140,6 @@ The authenticated storage read reports a 10 GiB limit with no outstanding
 reservations after commit. Exact signed Apple association and API auth checks
 also pass. This establishes public production exchange, not personal phone
 backup or TestFlight availability.
-
-## Previous release evidence
 
 The consumer experience now opens Photos immediately, with one Find field and
 Picks / Photos / Saved scopes. Native PhotoKit browsing pages all permitted

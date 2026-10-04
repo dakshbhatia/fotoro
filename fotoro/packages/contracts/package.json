@@ -8,7 +8,8 @@
     "./validate": "./src/validate.ts",
     "./schema": "./schema/contract-v1.schema.json",
     "./auth": "./src/auth.ts",
-    "./share-links": "./src/share-links.ts"
+    "./share-links": "./src/share-links.ts",
+    "./visual": "./src/visual.ts"
   },
   "dependencies": {
     "ajv": "8.18.0",

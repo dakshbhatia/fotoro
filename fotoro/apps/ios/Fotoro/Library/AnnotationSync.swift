@@ -1,10 +1,14 @@
 import Foundation
 import GRDB
 import Observation
+import Photos
 
 enum AnnotationSourceBinding {
   static func accepts(sourceRevision: String?, recordRevision: String) -> Bool {
     sourceRevision == recordRevision && sourceRevision != nil
+  }
+  static func permitsAutomaticDerived(resourceTypes: [PHAssetResourceType]) -> Bool {
+    !resourceTypes.contains(.adjustmentData)
   }
 }
 enum AnnotationCrypto {
@@ -13,6 +17,14 @@ enum AnnotationCrypto {
     guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any], Set(object.keys).isSubset(of: allowed), object.values.allSatisfy({ !($0 is NSNull) }) else {
       throw FotoroError("Unsupported photo labels fields")
     }
+  }
+  private static func validVisual(_ visual: PhotoAnnotationsV1.Visual) -> Bool {
+    !visual.processor.isEmpty && visual.processor.unicodeScalars.count <= 120
+      && visual.labels.count <= SearchVisualPolicy.maximumLabels && visual.labels.allSatisfy {
+        !$0.label.isEmpty && $0.label.unicodeScalars.count <= 120
+          && !$0.identifier.isEmpty && $0.identifier.unicodeScalars.count <= 120
+          && $0.confidence.isFinite && (0...1).contains($0.confidence)
+      }
   }
   static func validate(_ value: PhotoAnnotationsV1, photo: LocalPhoto, accountId: String) throws {
     func strings(_ values: [String]?, max: Int) -> Bool {
@@ -32,13 +44,24 @@ enum AnnotationCrypto {
         !ocr.processor.isEmpty, ocr.processor.unicodeScalars.count <= 120
       else { throw FotoroError("Photo text is too large or invalid") }
     }
+    if let visual = value.visual, !validVisual(visual) { throw FotoroError("Photo scenes are invalid") }
   }
   static func seal(_ value: PhotoAnnotationsV1, revision: Int, photo: LocalPhoto, accountId: String, bundle: AccountBundle) throws -> SignedPayloadV1 {
     try validate(value, photo: photo, accountId: accountId)
     guard revision > 0, revision <= 2147483647 else { throw FotoroError("Invalid labels revision") }
-    let encrypted = try CryptoAdapter().wrap(Wire.encode(value), key: Data(b64: bundle.vaultKey))
+    var outgoing = value
+    if !SearchVisualPolicy.publicationEnabled { outgoing.visual = nil }
+    let encrypted = try CryptoAdapter().wrap(Wire.encode(outgoing), key: Data(b64: bundle.vaultKey))
     guard encrypted.ciphertext.count <= 262144 else { throw FotoroError("Photo labels are too large") }
     return try CryptoAdapter().sign(PhotoAnnotationsUpdateV1(photoId: photo.id, revision: revision, encrypted: encrypted), kind: "photo-annotations", accountId: accountId, secret: Data(b64: bundle.signingSecretKey))
+  }
+  static func publicationAllowed(_ signed: SignedPayloadV1, bundle: AccountBundle) throws -> Bool {
+    guard !SearchVisualPolicy.publicationEnabled else { return true }
+    let update = try Wire.decode(PhotoAnnotationsUpdateV1.self, Data(b64: signed.body))
+    let raw = try CryptoAdapter().unwrap(update.encrypted, key: Data(b64: bundle.vaultKey))
+    guard let fields = try JSONSerialization.jsonObject(with: raw) as? [String: Any] else { return false }
+    // An exact frozen retry containing a new field cannot be rewritten under its old revision.
+    return fields["visual"] == nil
   }
   static func open(_ signed: SignedPayloadV1, photo: LocalPhoto, card: AccountCardV1, bundle: AccountBundle) throws -> Opened {
     guard signed.accountId == photo.manifest.ownerAccountId else { throw FotoroError("Labels belong to another account") }
@@ -53,11 +76,23 @@ enum AnnotationCrypto {
       update.encrypted.ciphertext.count <= 262144
     else { throw FotoroError("Invalid labels revision or photo") }
     let plaintext = try crypto.unwrap(update.encrypted, key: Data(b64: bundle.vaultKey))
-    try checkKeys(plaintext, allowed: ["version", "photoId", "originalSha256", "labels", "caption", "keywords", "facts", "favorite", "ocr"])
+    guard var fields = try JSONSerialization.jsonObject(with: plaintext) as? [String: Any] else { throw FotoroError("Unsupported photo labels fields") }
+    let requiredFields = fields.filter { $0.key != "visual" }
+    try checkKeys(JSONSerialization.data(withJSONObject: requiredFields), allowed: ["version", "photoId", "originalSha256", "labels", "caption", "keywords", "facts", "favorite", "ocr"])
     if let object = try JSONSerialization.jsonObject(with: plaintext) as? [String: Any], let ocr = object["ocr"] {
       try checkKeys(JSONSerialization.data(withJSONObject: ocr), allowed: ["text", "confidence", "processor"])
     }
-    let value = try Wire.decode(PhotoAnnotationsV1.self, plaintext)
+    if let visual = fields["visual"] {
+      // Invalid optional scene data must not hide a verified original or valid supplied labels.
+      do {
+        guard let object = visual as? [String: Any], let labels = object["labels"] as? [[String: Any]] else { throw FotoroError("Invalid scenes") }
+        let data = try JSONSerialization.data(withJSONObject: object)
+        try checkKeys(data, allowed: ["processor", "labels"])
+        for label in labels { try checkKeys(JSONSerialization.data(withJSONObject: label), allowed: ["label", "identifier", "confidence"]) }
+        guard validVisual(try Wire.decode(PhotoAnnotationsV1.Visual.self, data)) else { throw FotoroError("Invalid scenes") }
+      } catch { fields.removeValue(forKey: "visual") }
+    }
+    let value = try Wire.decode(PhotoAnnotationsV1.self, JSONSerialization.data(withJSONObject: fields))
     try validate(value, photo: photo, accountId: card.accountId)
     return Opened(revision: update.revision, annotations: value)
   }
@@ -81,6 +116,7 @@ enum AnnotationMerge {
     (mine.facts, theirs.facts) = field(base.facts, local.facts, remote.facts, "facts")
     (mine.favorite, theirs.favorite) = field(base.favorite, local.favorite, remote.favorite, "favorite")
     (mine.ocr, theirs.ocr) = field(base.ocr, local.ocr, remote.ocr, "ocr")
+    (mine.visual, theirs.visual) = field(base.visual, local.visual, remote.visual, "visual")
     return Result(local: mine, remote: theirs, conflicts: conflicts)
   }
   static func stillConflicting(_ fields: [String], local: PhotoAnnotationsV1, remote: PhotoAnnotationsV1) -> [String] {
@@ -92,6 +128,7 @@ enum AnnotationMerge {
       case "facts": return local.facts != remote.facts
       case "favorite": return local.favorite != remote.favorite
       case "ocr": return local.ocr != remote.ocr
+      case "visual": return local.visual != remote.visual
       default: return false
       }
     }
@@ -104,6 +141,7 @@ enum AnnotationMerge {
     if fields.contains("facts") { value.facts = remote.facts }
     if fields.contains("favorite") { value.favorite = remote.favorite }
     if fields.contains("ocr") { value.ocr = remote.ocr }
+    if fields.contains("visual") { value.visual = remote.visual }
     return value
   }
 }
@@ -172,14 +210,36 @@ final class AnnotationLedger: @unchecked Sendable {
       try save(state, db: db)
     }
   }
-  func prepare(photo: LocalPhoto, bundle: AccountBundle) throws -> SignedPayloadV1? {
+  func prepare(photo: LocalPhoto, bundle: AccountBundle, card: AccountCardV1? = nil, derivedOnly: Bool = false) throws -> SignedPayloadV1? {
     try store.database.write { db in
       guard var state = try Data.fetchOne(db, sql: "SELECT value FROM annotations WHERE id=?", arguments: [photo.id]).map({ try Wire.decode(AnnotationState.self, $0) }) else { return nil }
       try checked(state, photo: photo)
       guard !state.conflict else { return nil }
-      if let pending = state.pending { return pending }
+      func eligible(_ value: PhotoAnnotationsV1) throws -> Bool {
+        guard derivedOnly else { return true }
+        guard let card, card.accountId == accountId else { throw FotoroError("Labels belong to another account") }
+        let base = try state.accepted.map { try AnnotationCrypto.open($0, photo: photo, card: card, bundle: bundle).annotations }
+          ?? PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+        // Automatic sync never publishes an unfinished supplied-field edit, including a frozen retry.
+        return value.labels == base.labels && value.caption == base.caption && value.keywords == base.keywords
+          && value.facts == base.facts && value.favorite == base.favorite
+          && (value.ocr == base.ocr || value.ocr?.processor == "vision-text-v1")
+          && (value.visual == base.visual || (value.visual?.processor == SearchVisualPolicy.processor
+            && value.visual?.labels == SearchVisualPolicy.validated(value.visual).map {
+              PhotoAnnotationsV1.Visual.Label(label: $0.label, identifier: $0.identifier, confidence: $0.confidence)
+            }))
+      }
+      if let pending = state.pending {
+        guard try AnnotationCrypto.publicationAllowed(pending, bundle: bundle) else { return nil }
+        if derivedOnly {
+          guard let card else { throw FotoroError("Labels belong to another account") }
+          guard try eligible(AnnotationCrypto.open(pending, photo: photo, card: card, bundle: bundle).annotations) else { return nil }
+        }
+        return pending
+      }
       guard let draft = state.draft, state.revision < 2147483647 else { return nil }
       let value = try Wire.decode(PhotoAnnotationsV1.self, CryptoAdapter().unwrap(draft, key: Data(b64: bundle.vaultKey)))
+      guard try eligible(value) else { return nil }
       state.pending = try AnnotationCrypto.seal(value, revision: state.revision + 1, photo: photo, accountId: accountId, bundle: bundle)
       state.pendingEditId = state.editId
       try save(state, db: db)
@@ -259,24 +319,37 @@ final class AnnotationLedger: @unchecked Sendable {
   let ledger: AnnotationLedger
   private(set) var busy = false
   private(set) var errors: [String: String] = [:]
+  private var requestedDrain: (derivedOnly: Bool, action: () async -> Void)?
   init(ledger: AnnotationLedger) { self.ledger = ledger }
-  func resume(bundle: AccountBundle, card: AccountCardV1, valid: () -> Bool, send: (SignedPayloadV1) async throws -> Void) async {
-    guard !busy, valid() else { return }
+  func resume(bundle: AccountBundle, card: AccountCardV1, derivedOnly: Bool = false, eligible: @escaping (LocalPhoto) -> Bool = { _ in true }, valid: @escaping () -> Bool, send: @escaping (SignedPayloadV1) async throws -> Void) async {
+    guard valid() else { return }
+    if busy {
+      // Preserve the requesting mode and its source/account fences. An automatic wakeup
+      // cannot broaden an earlier explicit Save into another manual publication pass.
+      if requestedDrain == nil || !derivedOnly {
+        requestedDrain = (derivedOnly, { [weak self] in
+          await self?.resume(bundle: bundle, card: card, derivedOnly: derivedOnly, eligible: eligible, valid: valid, send: send)
+        })
+      }
+      return
+    }
     busy = true
-    defer { busy = false }
     do {
       for id in try ledger.pendingIDs() {
-        guard valid(), !Task.isCancelled else { return }
+        guard valid(), !Task.isCancelled else { throw CancellationError() }
         guard let photo = try ledger.store.backupPhoto(id), ["committed", "saved"].contains(photo.transferState) else { continue }
-        while let signed = try ledger.prepare(photo: photo, bundle: bundle) {
-          guard valid(), !Task.isCancelled else { return }
+        guard eligible(photo) else { continue }
+        while let signed = try ledger.prepare(photo: photo, bundle: bundle, card: card, derivedOnly: derivedOnly) {
+          guard valid(), !Task.isCancelled else { throw CancellationError() }
+          guard eligible(photo) else { break }
           do {
             try await send(signed)
-            guard valid(), !Task.isCancelled else { return }
+            guard valid(), !Task.isCancelled else { throw CancellationError() }
+            guard eligible(photo) else { break }
             try ledger.receive(signed, photo: photo, bundle: bundle, card: card)
             errors.removeValue(forKey: id)
           } catch {
-            guard valid(), !Task.isCancelled else { return }
+            guard valid(), !Task.isCancelled else { throw CancellationError() }
             if (error as? FotoroError)?.message == "VERSION_CONFLICT" {
               try ledger.markConflict(id)
               errors[id] = "Labels changed on another device. Your edits are still saved here."
@@ -285,6 +358,11 @@ final class AnnotationLedger: @unchecked Sendable {
           }
         }
       }
+    } catch is CancellationError {
     } catch { errors["sync"] = error.localizedDescription }
+    busy = false
+    let next = requestedDrain
+    requestedDrain = nil
+    if !Task.isCancelled { await next?.action() }
   }
 }

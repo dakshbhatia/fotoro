@@ -877,6 +877,77 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     XCTAssertEqual(services.annotation(photo).labels, ["  My exact label  "])
   }
 
+  @MainActor func testAutomaticOptInWithoutCompletedAnalysisNeverCreatesAnEmptySidecar() async throws {
+    for status in [SearchOCRStatus.pending, .unavailable] {
+      let context = try PausedUploadContext()
+      defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
+      let services = try await context.enroll()
+      defer { services.vault.lock() }
+      let bytes = try Data(contentsOf: context.sample)
+      services.automaticPhotosAuthorization = { .limited }
+      services.importer = PhotoImport(store: services.store, sourceReader: { _ in (bytes, "public-sample.jpg", false) }, sourceRevision: { _ in "current" })
+      services.photosBackupSnapshot = { _ in [BackupCandidate(id: "asset", sourceRevision: "current")] }
+      let index = try SearchIndex()
+      var record = SearchRecord(id: "asset"); record.revision = "current"
+      record.ocrStatus = status; record.visualStatus = .unavailable
+      try index.replacePermitted([record])
+      let search = LocalSearchStore(index: index)
+      services.bindLocalSearch(search)
+      defer { withExtendedLifetime(search) {} }
+      try services.enableAutomaticPhotoSync()
+      await services.waitForAutomaticPhotoSync()
+      XCTAssertEqual(try search.record("asset")?.ocrStatus, status)
+      XCTAssertEqual(services.backup.status.completed, 1)
+      XCTAssertTrue(try services.annotations.ledger.pendingIDs().isEmpty)
+      XCTAssertTrue(PausedUploadProtocol.server.requests.filter { $0.path.hasSuffix("/annotations") }.isEmpty)
+    }
+  }
+
+  @MainActor func testFreshAutomaticOptInPublishesCompletedAnalysisWithoutSuppliedFieldsOrManualSave() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
+    let services = try await context.enroll()
+    defer { services.vault.lock() }
+    let bytes = try Data(contentsOf: context.sample)
+    services.automaticPhotosAuthorization = { .limited }
+    services.importer = PhotoImport(store: services.store, sourceReader: { _ in (bytes, "public-sample.jpg", false) }, sourceRevision: { _ in "current" })
+    services.photosBackupSnapshot = { _ in [BackupCandidate(id: "asset", sourceRevision: "current")] }
+    let index = try SearchIndex()
+    var record = SearchRecord(id: "asset"); record.revision = "current"
+    record.labels = ["Unpublished label"]; record.captions = ["Unpublished caption"]
+    record.keywords = ["Unpublished keyword"]; record.facts = ["PhotoKit fact"]; record.favorite = true
+    record.ocrStatus = .complete; record.ocrText = "public fixture receipt"; record.ocrConfidence = 0.9
+    record.visualStatus = .complete; record.visualLabels = SearchVisualPolicy.labels([("beach", 0.9)])
+    try index.replacePermitted([record])
+    let search = LocalSearchStore(index: index)
+    services.bindLocalSearch(search)
+    defer { withExtendedLifetime(search) {} }
+    PausedUploadProtocol.server.failAnnotationWrites(1)
+    try services.enableAutomaticPhotoSync()
+    await services.waitForAutomaticPhotoSync()
+    XCTAssertEqual(try search.record("asset")?.ocrStatus, .complete)
+    let photo = try XCTUnwrap(services.store.photos().first)
+    let value = try XCTUnwrap(services.annotations.ledger.current(photo: photo, bundle: services.vault.requireBundle(), card: services.session.requireCard(XCTUnwrap(services.session.accountId))))
+    XCTAssertNil(value.labels); XCTAssertNil(value.caption); XCTAssertNil(value.keywords)
+    XCTAssertNil(value.facts); XCTAssertNil(value.favorite)
+    XCTAssertEqual(value.ocr?.text, "public fixture receipt")
+    XCTAssertNil(value.visual, "Reader-first rollout keeps scenes local until installed readers are qualified")
+    XCTAssertEqual(try services.annotations.ledger.pendingIDs(), [photo.id], "Offline analysis remains in the same durable outbox")
+    XCTAssertFalse(services.annotations.errors.isEmpty)
+    let failedRequest = try XCTUnwrap(services.annotations.ledger.state(photo.id)?.pending)
+    services.setPhotoSyncForeground(false)
+    services.setPhotoSyncForeground(true)
+    await services.waitForAutomaticPhotoSync()
+    XCTAssertTrue(try services.annotations.ledger.pendingIDs().isEmpty, "Foreground retries analysis even when original work is empty")
+    XCTAssertEqual(try services.annotations.ledger.state(photo.id)?.accepted, failedRequest)
+    XCTAssertTrue(services.annotations.errors.isEmpty)
+    let requests = PausedUploadProtocol.server.requests.count
+    services.kickAutomaticPhotoSync()
+    await services.waitForAutomaticPhotoSync()
+    await services.syncAnnotations(derivedOnly: true)
+    XCTAssertEqual(PausedUploadProtocol.server.requests.count, requests, "Completed unchanged analysis never needs another write")
+  }
+
   @MainActor func testPauseSurvivesReopenAndExplicitOptInResumesOnlyAfterConsent() async throws {
     let context = try PausedUploadContext()
     defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
@@ -1099,6 +1170,8 @@ private final class PausedUploadServer: @unchecked Sendable {
   var reservedPhotoIDs: [String] { lock.lock(); defer { lock.unlock() }; return reservations.values.map { $0.binding.photoId } }
   var publishedPhotoIDs: [String] { lock.lock(); defer { lock.unlock() }; return published }
   var reservationGate: UploadRequestGate?
+  private var annotationFailures = 0
+  func failAnnotationWrites(_ count: Int) { lock.lock(); defer { lock.unlock() }; annotationFailures = count }
   var requests: [Request] {
     lock.lock()
     defer { lock.unlock() }
@@ -1111,6 +1184,7 @@ private final class PausedUploadServer: @unchecked Sendable {
     reservations = [:]
     published = []
     reservationGate = nil
+    annotationFailures = 0
   }
   func response(_ request: URLRequest) throws -> Data {
     if request.url?.path == "/v1/uploads/reserve" { reservationGate?.visit() }
@@ -1138,7 +1212,10 @@ private final class PausedUploadServer: @unchecked Sendable {
         // A commit probe found a previously uploaded immutable representation.
         return try Wire.encode(UploadCommitV1(version: 1, uploadId: request.url!.deletingLastPathComponent().lastPathComponent, objectId: Wire.id(), ciphertextBytes: input.ciphertextBytes, ciphertextSha256: input.ciphertextSha256))
       }
-      if path.hasSuffix("/annotations"), request.httpMethod == "PUT" { return Data("{}".utf8) }
+      if path.hasSuffix("/annotations"), request.httpMethod == "PUT" {
+        if annotationFailures > 0 { annotationFailures -= 1; throw URLError(.notConnectedToInternet) }
+        return Data("{}".utf8)
+      }
       throw FotoroError("Unexpected controlled request: \(path)")
     }
   }

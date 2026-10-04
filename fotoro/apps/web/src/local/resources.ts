@@ -17,6 +17,8 @@ export interface LocalPhoto {
   facts?: string[];
   favorite?: boolean;
   ocr?: SearchOcr;
+  visual?: SearchPhoto["visual"];
+  current?: () => boolean;
   filename: string;
   date: string;
   dateSource: SearchPhoto["dateSource"];
