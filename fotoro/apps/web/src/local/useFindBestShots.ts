@@ -17,6 +17,9 @@ export function useFindBestShots(photos: LocalPhoto[], scope: string, source: un
   const done = active && state?.input === input ? state.done : 0;
   useLayoutEffect(() => {
     analyzer.clear(); resources.clear();
+    return () => {analyzer.clear(); resources.clear();};
+  }, [source, enabled, analyzer, resources]);
+  useLayoutEffect(() => {
     if (!active) return;
     let alive = true;
     const check = () => {
@@ -29,7 +32,7 @@ export function useFindBestShots(photos: LocalPhoto[], scope: string, source: un
       completed => {setState({input, done: completed});}).then(result => {
       try {check(); if (result) setState({input, done: photos.length, recommendations: result});} catch {}
     });
-    return () => {alive = false; analyzer.clear(); resources.clear();};
+    return () => {alive = false; analyzer.cancel();};
   }, [active, input, analyzer, resources, photos]);
   useLayoutEffect(() => {
     const cancel = () => {analyzer.clear(); resources.clear(); setChosenScope(undefined); setState(undefined);};

@@ -1,5 +1,35 @@
 # Verification — October 4, 2026
 
+The consumer-core pass prevents previous-query results from appearing as the
+current answer. Unfinished search shows progress, completed matches remain
+usable during the same-query analysis, and real empty results appear only when
+the current search finishes. Picks reuses completed measurements for unchanged
+sources, retries unavailable previews on a later review, and yields between
+bounded batches. Its ranking and ten-percent quota are unchanged.
+
+Returning to a visible browser window refreshes Saved through the existing
+read-only path. Native Saved guidance follows the actual sync phase. Failed
+photo changes and catalog reads remain visible until real recovery; an empty
+scan cannot clear a failed read. Explicit Retry reads the catalog before
+resuming the admitted automatic work. Resolved outbox errors are pruned while
+unresolved drafts and conflicts retain their errors. Automatic publication
+remains derived-only; scene publication remains disabled.
+
+Local checks pass 20 core, 68 API, 296 web and 28 release-metadata tests,
+typechecks, the production build and four isolated original-restore checks.
+Full native tests pass 300 of 301; preview passes 102 of 103, each with the known
+Vision inference-context skip. After the final successful-retry reset, all 36
+annotation/automatic-sync checks pass again. Startup remains inside 500 KiB.
+The in-app browser verifies public-photo Picks, search and Best shots; mobile
+controls remain at least 44 px with no horizontal overflow. A single match
+uses its photo's natural height and omits inactive navigation arrows.
+
+Exact committed-head CI and production readback are required before rollout.
+Distribution remains blocked by the empty Xcode developer-account list; build
+25 remains the latest verified internal TestFlight build.
+
+## Previous UI cleanup
+
 The UI cleanup removes the large brand, segmented tabs, repeated section
 headings/source captions and healthy idle counts. Native retains one library
 menu, search and Sync; web expands search on demand. Empty entry keeps only

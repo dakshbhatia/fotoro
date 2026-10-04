@@ -49,7 +49,7 @@ export function LocalSearch({photos, result, resources, committed, pinned, canCo
   };
   const selecting = !!photo && !!selection?.eligible(photo.id);
   return <section className="local-search" aria-label="Search result">
-    <div className="search-caption"><p className="local-coverage" role="status">{result.photoIds.length} {result.photoIds.length === 1 ? "match" : "matches"}</p><button className="text-button" aria-label="Search details" aria-expanded={details} onClick={() => setDetails(!details)}><Icon kind="info" /></button></div>
+    <div className="search-caption">{result.photoIds.length > 1 && <p className="local-coverage" role="status">{result.photoIds.length} matches</p>}<button className="text-button" aria-label="Search details" aria-expanded={details} onClick={() => setDetails(!details)}><Icon kind="info" /></button></div>
     {photo && meaning ? <>
       <button className="local-leading" id={"local-photo-" + photo.id} aria-label={(selecting ? "Select " : "Open ") + photo.filename} aria-pressed={selecting ? selection!.ids.has(photo.id) : undefined} disabled={selecting && selection!.disabled}
         onClick={() => {if (swiped.current) {swiped.current = false; return;} if (selecting) selection!.onChange(photo.id, !selection!.ids.has(photo.id)); else onOpen(photo.id);}} onTouchStart={event => {swiped.current = false; touch.current = event.touches.length === 1 ? {x: event.touches[0].clientX, y: event.touches[0].clientY} : undefined;}}
@@ -62,11 +62,11 @@ export function LocalSearch({photos, result, resources, committed, pinned, canCo
         }}>
         {loaded.photo === photo && loaded.url ? <img src={loaded.url} alt={photo.filename} /> : <span>{error || "Preparing preview…"}</span>}
       </button>
-      <div className="local-search-controls">
+      {result.photoIds.length > 1 && <div className="local-search-controls">
         <button aria-label="Previous matching photo" disabled={index <= 0} onClick={() => move(-1)}><Icon kind="previous" /></button>
         <span>{index + 1} / {result.photoIds.length}</span>
         <button aria-label="Next matching photo" disabled={index >= result.photoIds.length - 1} onClick={() => move(1)}><Icon kind="next" /></button>
-      </div>
+      </div>}
       {reasons?.get(photo.id)?.length ? <p className="find-shot-reason">{reasons.get(photo.id)!.join(" · ")}</p> : null}
       {result.meanings.some(value => value.id !== meaning.id && value.photoIds.some(id => !meaning.photoIds.includes(id))) && <div className="local-alternatives" aria-label="Other matches"><span>Also try</span>{result.meanings.filter(value => value.id !== meaning.id && value.photoIds.some(id => !meaning.photoIds.includes(id))).slice(0, 3).map(value => <button key={value.id} onClick={() => onAccept(value)}>{value.term}</button>)}</div>}
       {details && <aside className="search-info" aria-label="About this match">

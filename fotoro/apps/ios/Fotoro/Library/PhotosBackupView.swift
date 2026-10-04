@@ -96,7 +96,11 @@ struct PhotoSyncView: View {
                 Button("Pause sync", systemImage: "pause") { services.pauseAutomaticPhotoSync() }
                   .accessibilityIdentifier("sync.pause")
                 if status.phase == .needsAttention {
-                  Button("Try again", systemImage: "arrow.clockwise") { services.kickAutomaticPhotoSync() }
+                  Button("Try again", systemImage: "arrow.clockwise") {
+                    services.run {
+                      try await services.retryAutomaticPhotoSync()
+                    }
+                  }.disabled(services.busy)
                 }
               }
             }

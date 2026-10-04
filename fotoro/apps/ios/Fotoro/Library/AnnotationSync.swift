@@ -335,7 +335,10 @@ final class AnnotationLedger: @unchecked Sendable {
     }
     busy = true
     do {
-      for id in try ledger.pendingIDs() {
+      let pending = try ledger.pendingIDs()
+      let pendingSet = Set(pending)
+      errors = errors.filter { $0.key == "sync" || pendingSet.contains($0.key) }
+      for id in pending {
         guard valid(), !Task.isCancelled else { throw CancellationError() }
         guard let photo = try ledger.store.backupPhoto(id), ["committed", "saved"].contains(photo.transferState) else { continue }
         guard eligible(photo) else { continue }
@@ -358,6 +361,9 @@ final class AnnotationLedger: @unchecked Sendable {
           }
         }
       }
+      guard valid(), !Task.isCancelled else { throw CancellationError() }
+      let remaining = Set(try ledger.pendingIDs())
+      errors = errors.filter { $0.key != "sync" && remaining.contains($0.key) }
     } catch is CancellationError {
     } catch { errors["sync"] = error.localizedDescription }
     busy = false

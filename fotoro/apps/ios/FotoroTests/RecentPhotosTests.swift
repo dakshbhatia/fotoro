@@ -364,6 +364,28 @@ final class RecentPhotosTests: XCTestCase {
     original.response = 2
     XCTAssertEqual(next, original)
   }
+  func testCurrentSearchCanKeepEnrichmentButCannotReuseAnotherQueryOrSource() {
+    let original = ConsumerSearchPresentationID(query: "receipt", library: 1,
+      results: [], indexed: 1, response: 1, acceptedMeaning: nil,
+      catalog: 1, account: "account", vault: UUID())
+    var enrichment = original
+    enrichment.response = 2
+    enrichment.indexed = 2
+    enrichment.results = [SearchHit(id: "new", evidenceClass: 1, reason: "Text")]
+    XCTAssertTrue(original.permitsResults(for: enrichment))
+    for field in ["query", "library", "meaning", "catalog", "account", "vault"] {
+      var changed = enrichment
+      switch field {
+      case "query": changed.query = "beach"
+      case "library": changed.library = 2
+      case "meaning": changed.acceptedMeaning = "another"
+      case "catalog": changed.catalog = 2
+      case "account": changed.account = "other"
+      default: changed.vault = UUID()
+      }
+      XCTAssertFalse(original.permitsResults(for: changed), field)
+    }
+  }
   func testOwnedShareCleanupRemovesOnlyTemporaryExports() throws {
     let temporary = FileManager.default.temporaryDirectory
     let export = temporary.appendingPathComponent("fotoro-share-" + Wire.id())

@@ -375,13 +375,11 @@ export default function CloudApp({
     const leave = () => receivedAccessRefresh.cancel();
     document.addEventListener("visibilitychange", hide);
     window.addEventListener("pagehide", leave);
-    window.addEventListener("focus", recheck);
     const remaining = captured.grant.expiresAt ? Date.parse(captured.grant.expiresAt) - Date.now() : null;
     const timer = remaining == null ? undefined : window.setTimeout(() => {setReceivedNow(Date.now()); recheck();}, Math.max(0, Math.min(remaining + 1, 2_147_483_647)));
     return () => {
       alive = false; receivedAccessRefresh.cancel(); detach();
       document.removeEventListener("visibilitychange", hide); window.removeEventListener("pagehide", leave);
-      window.removeEventListener("focus", recheck);
       window.clearTimeout(timer);
     };
   }, [active, account, receivedContext]);

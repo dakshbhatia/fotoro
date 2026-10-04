@@ -2,6 +2,24 @@ import XCTest
 @testable import Fotoro
 
 final class ConsumerCoreTests: XCTestCase {
+  func testEmptySavedGuidanceUsesTheActualSyncPhase() {
+    let expected: [(AutomaticPhotoSyncStatus.Phase, String)] = [
+      (.paused, "Sync is paused. Resume to add your photos."),
+      (.locked, "Open Fotoro to resume sync."),
+      (.permissionRequired, "Allow Photos access in Settings to sync your photos."),
+      (.needsAttention, "Open Sync to review what needs attention."),
+      (.background, "Open Fotoro to continue syncing your photos."),
+      (.syncing, "Photos appear here as they sync. Keep Fotoro open."),
+      (.ready, "No photos saved yet. Sync is on for the photos you allow.")
+    ]
+    for (phase, message) in expected {
+      let status = AutomaticPhotoSyncStatus(enabled: true, paused: phase == .paused, phase: phase, detail: "")
+      XCTAssertEqual(savedLibraryEmptyMessage(sync: status), message)
+      XCTAssertEqual(savedLibraryEmptyMessage(sync: status, favoritesOnly: true), "No saved favorites yet.")
+    }
+    XCTAssertEqual(savedLibraryEmptyMessage(sync: AutomaticPhotoSyncStatus(enabled: false, paused: false, phase: .off, detail: "")),
+      "Save photos in Fotoro, or pull down to check photos saved on another device.")
+  }
   func testServiceLimitsExplainTheNextActionWithoutChangingRetrySemantics() {
     let full = FotoroError("STORAGE_QUOTA_EXCEEDED")
     XCTAssertEqual(full.errorDescription, "Fotoro storage is full. Pause sync or contact support.")
