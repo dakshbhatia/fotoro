@@ -110,3 +110,88 @@ test("a newer library snapshot wins over an older analysis completing late", asy
   release(signal(0n));
   assert.deepEqual([...current!.ids],["current"]); assert.equal(await old,undefined);
 });
+
+
+test("cancelling a metadata review retains completed measurements and applies the newest favorites", async () => {
+  const analyzer = new PickAnalyzer();
+  const photos = Array.from({length: 20}, (_, i) => ({...photo(String(i)), file: new File([String(i)], i + ".png")}));
+  let reads = 0;
+  const load = async () => {reads++; return signal(0n);};
+  assert.deepEqual([...(await analyzer.run(photos, load))!.ids], ["0", "1"]);
+  analyzer.cancel();
+  const updated = photos.map(value => ({...value, favorite: value.id === "19", labels: ["trip"], caption: "updated"}));
+  assert.deepEqual([...(await analyzer.run(updated, load))!.ids], ["19", "0"]);
+  assert.equal(reads, 20);
+  analyzer.clear();
+  await analyzer.run(updated, load);
+  assert.equal(reads, 40, "Clear must fully invalidate completed measurements");
+});
+
+test("cancelled pending measurements neither populate nor erase the replacement cache", async () => {
+  const analyzer = new PickAnalyzer(), source = {...photo("same"), file: new File(["same"], "same.png")};
+  let release!: (value: PhotoSignals) => void, reads = 0;
+  const old = analyzer.run([source], () => {reads++; return new Promise(resolve => {release = resolve;});});
+  analyzer.cancel();
+  const replacement = await analyzer.run([{...source, favorite: true}], async () => {reads++; return signal(0n, .4);});
+  release(signal(0n, .01));
+  assert.equal(await old, undefined);
+  assert.deepEqual([...replacement!.ids], ["same"]);
+  await analyzer.run([source], async () => {reads++; return signal(0n);});
+  assert.equal(reads, 2, "The old completion must not overwrite or discard the newer completed cache");
+});
+
+test("a failed or invalid preview is retried by the next review without looping in the current review", async () => {
+  for (const failure of ["decode", "invalid"]) {
+    const analyzer = new PickAnalyzer(), source = {...photo(failure), previewLoader: async () => new Blob(["preview"])};
+    let reads = 0;
+    const load = async () => {
+      reads++;
+      if (reads === 1) {
+        if (failure === "decode") throw new Error("Temporary preview failure");
+        return {...signal(0n), sharpness: NaN};
+      }
+      return signal(0n);
+    };
+    const missing = await analyzer.run([source, source], load);
+    assert.equal(missing!.unassessed, 1); assert.equal(missing!.ids.size, 0); assert.equal(reads, 1);
+    assert.equal((await analyzer.run([source], load))!.ids.has(source.id), true);
+    await analyzer.run([source], load); assert.equal(reads, 2);
+  }
+});
+
+test("measurement dimensions and preview availability invalidate same-source cached pixels", async () => {
+  const analyzer = new PickAnalyzer(), source = {...photo("same"), file: new File(["same"], "same.png")};
+  let reads = 0;
+  const load = async () => {reads++; return signal(0n);};
+  await analyzer.run([source], load);
+  await analyzer.run([{...source, width: 800, height: 1200}], load); assert.equal(reads, 2);
+  const unavailable = await analyzer.run([{...source, width: 800, height: 1200, previewAvailable: false}], load);
+  assert.equal(unavailable!.unassessed, 1); assert.equal(reads, 2);
+  await analyzer.run([{...source, width: 800, height: 1200, previewAvailable: true}], load); assert.equal(reads, 3);
+});
+
+test("batched review keeps exact ranking, grouping, reasons and quota while letting browser tasks run", async () => {
+  const analyzer = new PickAnalyzer();
+  const photos = Array.from({length: 300}, (_, i) => ({...photo(String(i), `2026-10-0${1 + i % 2}T12:${String(Math.floor(i / 2) % 60).padStart(2, "0")}:00Z`),
+    file: new File([String(i)], i + ".png"), favorite: i === 249}));
+  const measurements = new Map(photos.map((value, i) => [value.id, signal(BigInt(i), (i % 7 + 1) / 30)]));
+  const expected = recommendPhotos(photos, measurements);
+  let reads = 0, heartbeat = false;
+  const load = async (value: LocalPhoto) => {reads++; return measurements.get(value.id)!;};
+  assert.deepEqual(await analyzer.run(photos, load), expected);
+  setTimeout(() => {heartbeat = true;}, 0);
+  assert.deepEqual(await analyzer.run(photos.map(value => ({...value, caption: "updated"})), load), expected);
+  assert.equal(reads, 300); assert.equal(heartbeat, true, "A cached review must yield to tasks, not only microtasks");
+});
+
+test("cancellation during a ranking batch prevents publication and leaves completed measurements reusable", async () => {
+  let yields = 0, reads = 0;
+  const analyzer = new PickAnalyzer(async () => {if (++yields === 2) analyzer.cancel();});
+  const photos = Array.from({length: 128}, (_, i) => ({...photo(String(i)), file: new File([String(i)], i + ".png")}));
+  const measurements = new Map(photos.map(value => [value.id, signal(0n)]));
+  const load = async (value: LocalPhoto) => {reads++; return measurements.get(value.id)!;};
+  assert.equal(await analyzer.run(photos, load), undefined);
+  assert.equal(yields, 2, "Cancellation reaches a ranking checkpoint after the loading batch");
+  assert.deepEqual(await analyzer.run(photos, load), recommendPhotos(photos, measurements));
+  assert.equal(reads, 128);
+});

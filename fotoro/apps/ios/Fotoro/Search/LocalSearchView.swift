@@ -20,8 +20,7 @@ struct LocalSearchView: View {
     VStack(alignment: .leading, spacing: 16) {
       SearchAlternatives(search: search, selected: choseMeaning)
       if matches.isEmpty {
-        ContentUnavailableView(review == nil ? "No photos found" : "No suggestions", systemImage: "magnifyingglass",
-          description: Text(review == nil ? "Try a label, a date or words in a photo." : "Use All matches to review every photo."))
+        SearchEmptyResults(search: search, finished: search.hasCurrentResponse, reviewing: review != nil)
       } else {
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 2), spacing: 3) {
           ForEach(matches) { photo in
@@ -53,12 +52,44 @@ struct LocalSearchView: View {
           }
         }
       }
-      if search.indexing {
-        Label("Preparing photo search…", systemImage: "text.viewfinder")
-          .font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+      if !matches.isEmpty, search.searching || search.indexing {
+        SearchProgressFeedback(search: search).padding(.horizontal)
       }
       if let error = search.error { Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal) }
     }
+  }
+}
+
+private struct SearchEmptyResults: View {
+  let search: LocalSearchStore
+  var searchPending = false
+  var finished = true
+  var reviewing = false
+  var body: some View {
+    if searchPending || search.searching || search.indexing {
+      SearchProgressFeedback(search: search, searchPending: searchPending)
+        .frame(maxWidth: .infinity).padding(.vertical, 40)
+    } else if search.error != nil {
+      ContentUnavailableView("Search unavailable", systemImage: "magnifyingglass")
+    } else if !finished {
+      ContentUnavailableView("Search paused", systemImage: "magnifyingglass")
+    } else {
+      ContentUnavailableView(reviewing ? "No suggestions" : "No photos found", systemImage: "magnifyingglass",
+        description: Text(reviewing ? "Use All matches to review every photo." : "Try a label, a date or words in a photo."))
+    }
+  }
+}
+
+private struct SearchProgressFeedback: View {
+  let search: LocalSearchStore
+  var searchPending = false
+  var body: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      ProgressView(searchPending || search.searching ? "Searching photos…" : "Preparing photo search…")
+      if search.indexing, let progress = search.analysisProgress {
+        Text("\(progress.processed) of \(progress.total) photos checked")
+      }
+    }.font(.caption).foregroundStyle(.secondary)
   }
 }
 
@@ -87,6 +118,7 @@ struct ConsumerSearchResultsView: View {
   let saved: [String: LocalPhoto]
   let search: LocalSearchStore
   let photos: RecentPhotosStore
+  var searchPending: Bool = false
   var review: PhotoPicksSnapshot? = nil
   var selected: Set<ConsumerPhotoReference> = []
   var selecting = false
@@ -103,8 +135,7 @@ struct ConsumerSearchResultsView: View {
     VStack(alignment: .leading, spacing: 16) {
       SearchAlternatives(search: search, selected: choseAlternative)
       if matches.isEmpty {
-        ContentUnavailableView(review == nil ? "No photos found" : "No suggestions", systemImage: "magnifyingglass",
-          description: Text(review == nil ? "Try a label, a date or words in a photo." : "Use All matches to review every photo."))
+        SearchEmptyResults(search: search, searchPending: searchPending, reviewing: review != nil)
       } else {
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 2), spacing: 3) {
           ForEach(matches) { hit in
@@ -116,9 +147,8 @@ struct ConsumerSearchResultsView: View {
           }
         }
       }
-      if search.indexing {
-        Label("Preparing photo search…", systemImage: "text.viewfinder")
-          .font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+      if !matches.isEmpty, searchPending || search.searching || search.indexing {
+        SearchProgressFeedback(search: search, searchPending: searchPending).padding(.horizontal)
       }
       if let error = search.error {
         Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)

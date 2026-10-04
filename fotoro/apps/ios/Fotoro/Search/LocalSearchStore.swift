@@ -4,10 +4,18 @@ import Observation
 import Photos
 import UIKit
 
+struct SearchAnalysisProgress: Equatable, Sendable {
+  var processed: Int
+  var total: Int
+}
+
 @MainActor @Observable final class LocalSearchStore: NSObject, PHPhotoLibraryChangeObserver {
+  typealias QueryExecutor = @Sendable (SearchIndex, String, String?, SearchResponse, UInt64) async throws -> SearchResponse
   private(set) var response = SearchResponse()
   private(set) var assets: [String: RecentPhoto] = [:]
   private(set) var indexing = false
+  private(set) var searching = false
+  private(set) var analysisProgress: SearchAnalysisProgress?
   private(set) var libraryGeneration: UInt64 = 0
   private(set) var query = ""
   private(set) var acceptedMeaningID: String?
@@ -27,6 +35,11 @@ import UIKit
   @ObservationIgnored private let images = PHImageManager()
   @ObservationIgnored private let processor = VisionTextProcessor()
   @ObservationIgnored private var imageRequest: SearchImageRequest?
+  @ObservationIgnored private var queryExecutor: QueryExecutor = { index, value, accepted, previous, generation in
+    try await Task.detached(priority: .userInitiated) {
+      try index.search(value, acceptedMeaningID: accepted, previous: previous, generation: generation)
+    }.value
+  }
 
   static func defaultIndexRoot(in directory: URL) -> URL {
     #if FOTORO_LOCAL_PREVIEW
@@ -38,8 +51,9 @@ import UIKit
   @ObservationIgnored private(set) var root = LocalSearchStore.defaultIndexRoot(in: FileManager.default.urls(
     for: .applicationSupportDirectory, in: .userDomainMask)[0])
   override init() { super.init() }
-  init(index: SearchIndex) {
+  init(index: SearchIndex, queryExecutor: QueryExecutor? = nil) {
     self.index = index
+    if let queryExecutor { self.queryExecutor = queryExecutor }
     ready = true
     super.init()
   }
@@ -80,6 +94,8 @@ import UIKit
     imageRequest?.cancel()
     imageRequest = nil
     indexing = false
+    searching = false
+    analysisProgress = nil
   }
   func refresh(status: PHAuthorizationStatus, retryFailedOCR: Bool = true) {
     guard opened else { return }
@@ -168,6 +184,8 @@ import UIKit
       try onSnapshotReady?()
       // Snapshot the retry list once: another Vision failure waits for an explicit/foreground refresh.
       let pending = try await Task.detached { try localIndex.pendingAnalysisRecords(retryFailed: retryFailedOCR) }.value
+      guard token == work.generation, !Task.isCancelled else { return }
+      analysisProgress = pending.isEmpty ? nil : SearchAnalysisProgress(processed: 0, total: pending.count)
       for record in pending {
         try Task.checkCancellation()
         guard token == work.generation, let photo = assets[record.id] else { break }
@@ -226,12 +244,13 @@ import UIKit
         if let current = try localIndex.record(record.id), current.revision == record.revision {
           try onRecordChanged?(current, false)
         }
+        analysisProgress?.processed += 1
         updateQuery(query)
       }
     } catch is CancellationError {} catch {
       if token == work.generation { self.error = error.localizedDescription }
     }
-    if token == work.generation { indexing = false }
+    if token == work.generation { indexing = false; analysisProgress = nil }
   }
   private struct Scan: @unchecked Sendable {
     var photos: [RecentPhoto]
@@ -330,6 +349,10 @@ import UIKit
       priorPermittedResponse = prior
     }
     ready = false
+    queryGeneration &+= 1
+    queryTask?.cancel()
+    searching = false
+    analysisProgress = nil
     assets = [:]
     response = SearchResponse()
     displayedID = nil
@@ -360,35 +383,54 @@ import UIKit
     return try index?.record(id)
   }
   func updateQuery(_ value: String) {
+    let normalized = SearchNormalization.text(value)
+    let changed = normalized != SearchNormalization.text(query)
     query = value
     queryGeneration &+= 1
     queryTask?.cancel()
     let generation = queryGeneration
-    if SearchNormalization.text(value).isEmpty {
-      acceptedMeaningID = nil
-      displayedID = nil
-      sessionID = UUID().uuidString
-      priorPermittedResponse = nil
-    }
-    guard ready, let index else { return }
     var previous = response.meaning == nil ? (priorPermittedResponse ?? response) : response
     if let displayedID, let at = previous.results.firstIndex(where: { $0.id == displayedID }) {
       previous.results.insert(previous.results.remove(at: at), at: 0)
     }
+    if normalized.isEmpty {
+      acceptedMeaningID = nil
+      displayedID = nil
+      sessionID = UUID().uuidString
+      priorPermittedResponse = nil
+      response = SearchResponse()
+      searching = false
+      return
+    }
+    if changed {
+      // Retain tie evidence privately; a previous query must never look like the current answer.
+      priorPermittedResponse = previous.meaning == nil ? nil : previous
+      response = SearchResponse()
+      displayedID = nil
+      error = nil
+    }
+    guard ready, let index else { searching = false; return }
+    searching = true
     let accepted = acceptedMeaningID
+    let execute = queryExecutor
     queryTask = Task {
       do {
-        let next = try await Task.detached(priority: .userInitiated) {
-          try index.search(
-            value, acceptedMeaningID: accepted, previous: previous, generation: generation)
-        }.value
+        let next = try await execute(index, value, accepted, previous, generation)
         guard generation == queryGeneration, !Task.isCancelled else { return }
         if accepted != nil, next.meaning?.id != accepted { acceptedMeaningID = nil }
         response = next
         displayedID = next.leading?.id
         priorPermittedResponse = nil
-      } catch { if generation == queryGeneration { self.error = error.localizedDescription } }
+        searching = false
+      } catch {
+        guard generation == queryGeneration, !Task.isCancelled else { return }
+        searching = false
+        if !(error is CancellationError) { self.error = error.localizedDescription }
+      }
     }
+  }
+  var hasCurrentResponse: Bool {
+    response.generation != 0 && SearchNormalization.text(response.query) == SearchNormalization.text(query)
   }
   var displayedHit: SearchHit? {
     response.results.first { $0.id == displayedID } ?? response.leading

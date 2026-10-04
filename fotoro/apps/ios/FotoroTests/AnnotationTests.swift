@@ -252,6 +252,37 @@ final class AnnotationTests: XCTestCase {
     let next = try XCTUnwrap(ledger.prepare(photo: photo, bundle: bundle))
     XCTAssertEqual(try AnnotationCrypto.open(next, photo: photo, card: card, bundle: bundle).revision, 2)
   }
+  @MainActor func testReconciledOutboxClearsErrorsWithoutRepublishingAcknowledgedEdits() async throws {
+    let (store, photo, bundle, card) = try context()
+    let ledger = AnnotationLedger(store: store, accountId: card.accountId)
+    let worker = AnnotationSync(ledger: ledger)
+    let value = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256, labels: ["Mine"])
+    try ledger.edit(value, photo: photo, bundle: bundle, card: card)
+    await worker.resume(bundle: bundle, card: card, valid: { true }, send: { _ in throw URLError(.notConnectedToInternet) })
+    XCTAssertNotNil(worker.errors[photo.id])
+    let acknowledged = try XCTUnwrap(ledger.state(photo.id)?.pending)
+    try ledger.receive(acknowledged, photo: photo, bundle: bundle, card: card)
+    XCTAssertTrue(try ledger.pendingIDs().isEmpty)
+    await worker.resume(bundle: bundle, card: card, valid: { true }, send: { _ in XCTFail("Already acknowledged edits need no write") })
+    XCTAssertTrue(worker.errors.isEmpty)
+  }
+  @MainActor func testUnresolvedConflictErrorRemainsUntilTheUserChooses() async throws {
+    let (store, photo, bundle, card) = try context()
+    let ledger = AnnotationLedger(store: store, accountId: card.accountId)
+    let worker = AnnotationSync(ledger: ledger)
+    let mine = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256, labels: ["Mine"])
+    try ledger.edit(mine, photo: photo, bundle: bundle, card: card)
+    await worker.resume(bundle: bundle, card: card, valid: { true }, send: { _ in throw FotoroError("VERSION_CONFLICT") })
+    let remote = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256, labels: ["Other device"])
+    try ledger.receive(AnnotationCrypto.seal(remote, revision: 1, photo: photo, accountId: card.accountId, bundle: bundle), photo: photo, bundle: bundle, card: card)
+    await worker.resume(bundle: bundle, card: card, valid: { true }, send: { _ in XCTFail("An unresolved conflict cannot publish") })
+    XCTAssertNotNil(worker.errors[photo.id])
+    try ledger.resolve(photo.id, keepLocal: false)
+    await worker.resume(bundle: bundle, card: card, valid: { true }, send: { _ in })
+    XCTAssertTrue(worker.errors.isEmpty)
+    XCTAssertTrue(try ledger.pendingIDs().isEmpty)
+    XCTAssertEqual(try ledger.current(photo: photo, bundle: bundle, card: card)?.labels, ["Other device"])
+  }
   func testEditedSourceAndDifferentAccountCannotPublishCachedLabels() throws {
     let (store, photo, bundle, card) = try context()
     let ledger = AnnotationLedger(store: store, accountId: card.accountId)

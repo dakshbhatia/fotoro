@@ -222,6 +222,7 @@ struct RecentPhotosView: View {
   @State private var photoSyncPresentation: PhotoSyncPresentation?
   @State private var pendingPhotoSync = false
   @State private var searchHits: [ConsumerSearchHit] = []
+  @State private var completedSearchID: ConsumerSearchPresentationID?
   @State private var savedResults: [String: LocalPhoto] = [:]
   @State private var savedViewer: SavedPhotoViewerPresentation?
   @State private var pendingBackup = false
@@ -306,7 +307,7 @@ struct RecentPhotosView: View {
 #if FOTORO_LOCAL_PREVIEW
     search.matchingPhotos
 #else
-    searchHits.compactMap {
+    currentSearchHits.compactMap {
       if case .device(let id) = $0.photo { return search.assets[id] }
       return nil
     }
@@ -321,12 +322,16 @@ struct RecentPhotosView: View {
     #if FOTORO_LOCAL_PREVIEW
       searchPhotos.count
     #else
-      searchHits.count
+      currentSearchHits.count
     #endif
   }
 #if !FOTORO_LOCAL_PREVIEW
+  private var currentSearchHits: [ConsumerSearchHit] {
+    guard let completedSearchID, completedSearchID.permitsResults(for: searchTaskID) else { return [] }
+    return searchHits
+  }
   private var savedPhotos: [LocalPhoto] {
-    searchHits.filter { bestShots.snapshot?.recommendations.ids.contains($0.id) ?? true }.compactMap {
+    currentSearchHits.filter { bestShots.snapshot?.recommendations.ids.contains($0.id) ?? true }.compactMap {
       if case .saved(let id) = $0.photo { return savedResults[id] }
       return nil
     }
@@ -639,7 +644,8 @@ struct RecentPhotosView: View {
             openViewer($0)
           }
 #else
-          ConsumerSearchResultsView(hits: searchHits, saved: savedResults, search: search, photos: store, review: bestShots.snapshot,
+          ConsumerSearchResultsView(hits: currentSearchHits, saved: savedResults, search: search, photos: store,
+            searchPending: completedSearchID != searchTaskID, review: bestShots.snapshot,
             selected: selectedReferences, selecting: selecting,
             toggleDevice: toggleSelection, toggleSaved: toggleSavedSelection,
             inspectDevice: { queryFocused = false; openViewer($0) },
@@ -1226,11 +1232,12 @@ struct RecentPhotosView: View {
     } catch { store.error = error.localizedDescription }
   }
   private func updateSearch() async {
-    guard !query.isEmpty else { searchHits = []; savedResults = [:]; return }
+    guard !query.isEmpty else { searchHits = []; savedResults = [:]; completedSearchID = nil; return }
     let token = searchTaskID
     do {
-      try await Task.sleep(for: .milliseconds(100))
-      guard let services else { return }
+      if !search.indexing { try await Task.sleep(for: .milliseconds(100)) }
+      try Task.checkCancellation()
+      guard let services else { searchHits = []; savedResults = [:]; completedSearchID = token; return }
       let hits = try await services.consumerSearch(query, local: search)
       try Task.checkCancellation()
       guard token == searchTaskID else { return }
@@ -1240,10 +1247,12 @@ struct RecentPhotosView: View {
       }
       searchHits = hits
       savedResults = saved
+      completedSearchID = token
     } catch is CancellationError {} catch {
       guard !Task.isCancelled, token == searchTaskID else { return }
       searchHits = []
       savedResults = [:]
+      completedSearchID = token
       store.error = error.localizedDescription
     }
   }
@@ -1323,6 +1332,10 @@ struct ConsumerSearchPresentationID: Equatable {
   var catalog: UInt64?
   var account: String?
   var vault: UUID?
+  func permitsResults(for current: Self) -> Bool {
+    query == current.query && library == current.library && acceptedMeaning == current.acceptedMeaning
+      && catalog == current.catalog && account == current.account && vault == current.vault
+  }
 }
 #endif
 

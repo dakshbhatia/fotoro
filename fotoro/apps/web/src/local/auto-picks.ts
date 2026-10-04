@@ -66,17 +66,28 @@ function score(photo: LocalPhoto, signal: PhotoSignals) {
   return (photo.favorite ? 2 : 0) + (photo.labels?.length ? .15 : 0) + .45 * Math.min(1, signal.sharpness * 6) +
     .2 * Math.max(0, 1 - Math.abs(signal.luminance - .5) * 2) + .15 * Math.min(1, signal.contrast * 4);
 }
-export function recommendPhotos(photos:LocalPhoto[], signals:ReadonlyMap<string,PhotoSignals>):PhotoRecommendations {
-  const unique = [...new Map(photos.map(photo => [photo.id, photo])).values()];
-  const candidates = unique.flatMap((photo, order) => {
-    const signal = signals.get(photo.id);
-    if (!signal || !valid(signal) || signal.contrast < .006) return [];
-    return [{photo, signal, order, time: captured(photo), score: score(photo, signal)}];
-  }).sort((a, b) => ((a.time ?? Infinity) - (b.time ?? Infinity)) || a.order - b.order);
-  type Candidate = typeof candidates[number];
+const PICK_WORK_BATCH = 128;
+function* recommendationSteps(photos: LocalPhoto[], signals: ReadonlyMap<string, PhotoSignals>): Generator<void, PhotoRecommendations> {
+  const byID = new Map<string, LocalPhoto>();
+  for (let i = 0; i < photos.length; i++) {
+    byID.set(photos[i].id, photos[i]);
+    if ((i + 1) % PICK_WORK_BATCH === 0) yield;
+  }
+  const unique = [...byID.values()];
+  type Candidate = {photo: LocalPhoto; signal: PhotoSignals; order: number; time?: number; score: number};
+  const candidates: Candidate[] = [];
+  let unassessed = 0;
+  for (let order = 0; order < unique.length; order++) {
+    const photo = unique[order], signal = signals.get(photo.id);
+    if (!signal || !valid(signal)) unassessed++;
+    else if (signal.contrast >= .006) candidates.push({photo, signal, order, time: captured(photo), score: score(photo, signal)});
+    if ((order + 1) % PICK_WORK_BATCH === 0) yield;
+  }
+  candidates.sort((a, b) => ((a.time ?? Infinity) - (b.time ?? Infinity)) || a.order - b.order);
   type Group = {anchor: Candidate; best: Candidate; count: number};
   const groups: Group[] = [], recent: Group[] = [];
-  for (const candidate of candidates) {
+  for (let index = 0; index < candidates.length; index++) {
+    const candidate = candidates[index];
     let group: Group | undefined;
     // Only verified bursts are grouped. The fixed candidate window bounds collision-heavy work.
     if (candidate.time !== undefined) for (let i = recent.length - 1; i >= 0; i--) {
@@ -91,18 +102,23 @@ export function recommendPhotos(photos:LocalPhoto[], signals:ReadonlyMap<string,
       group = {anchor: candidate, best: candidate, count: 1}; groups.push(group);
       if (candidate.time !== undefined) {recent.push(group); if (recent.length > 24) recent.shift();}
     }
+    if ((index + 1) % PICK_WORK_BATCH === 0) yield;
   }
   const buckets = new Map<string, Group[]>();
-  for (const group of groups) {
+  for (let index = 0; index < groups.length; index++) {
+    const group = groups[index];
     const day = group.best.time === undefined ? "unknown" : new Date(group.best.time).toISOString().slice(0, 10);
     const values = buckets.get(day); values ? values.push(group) : buckets.set(day, [group]);
+    if ((index + 1) % PICK_WORK_BATCH === 0) yield;
   }
   const compare = (a: Group, b: Group) => b.best.score - a.best.score || a.best.order - b.best.order;
   const queues = [...buckets.values()].map(values => values.sort(compare)).sort((a, b) => compare(a[0], b[0]));
   const ids = new Set<string>(), reasons = new Map<string, string[]>(), target = Math.ceil(groups.length * .1);
+  let reviewed = 0;
   for (let round = 0; ids.size < target; round++) {
     let added = false;
     for (const queue of queues) {
+      if (++reviewed % PICK_WORK_BATCH === 0) yield;
       const group = queue[round]; if (!group || ids.size === target) continue;
       ids.add(group.best.photo.id); added = true;
       reasons.set(group.best.photo.id, [group.best.photo.favorite ? "Favorite" : "Clarity and exposure",
@@ -111,14 +127,29 @@ export function recommendPhotos(photos:LocalPhoto[], signals:ReadonlyMap<string,
     }
     if (!added) break;
   }
-  return {ids, reasons, groupCount: groups.length, duplicateCount: candidates.length - groups.length,
-    unassessed: unique.filter(photo => !signals.has(photo.id) || !valid(signals.get(photo.id)!)).length};
+  return {ids, reasons, groupCount: groups.length, duplicateCount: candidates.length - groups.length, unassessed};
+}
+export function recommendPhotos(photos: LocalPhoto[], signals: ReadonlyMap<string, PhotoSignals>): PhotoRecommendations {
+  const steps = recommendationSteps(photos, signals);
+  let next = steps.next();
+  while (!next.done) next = steps.next();
+  return next.value;
+}
+interface CachedSignals {
+  source: WeakRef<object>;
+  digest?: string;
+  width?: number;
+  height?: number;
+  signal?: PhotoSignals;
+  promise?: Promise<PhotoSignals | undefined>;
 }
 export class PickAnalyzer {
   private version = 0;
-  private cache = new Map<string, {source: unknown; digest?: string; width?: number; height?: number; promise: Promise<PhotoSignals | undefined>}>();
+  private cache = new Map<string, CachedSignals>();
+  constructor(private readonly yieldWork: () => Promise<void> = () => new Promise(resolve => setTimeout(resolve, 0))) {}
   async run(photos:LocalPhoto[], load:(photo:LocalPhoto)=>Promise<PhotoSignals>, progress?:(done:number,total:number)=>void):Promise<PhotoRecommendations|undefined> {
-    const version = ++this.version, unique = [...new Map(photos.map(photo => [photo.id, photo])).values()];
+    this.cancel();
+    const version = this.version, unique = [...new Map(photos.map(photo => [photo.id, photo])).values()];
     const ids = new Set(unique.map(photo => photo.id));
     for (const id of this.cache.keys()) if (!ids.has(id)) this.cache.delete(id);
     const signals = new Map<string, PhotoSignals>();
@@ -127,16 +158,41 @@ export class PickAnalyzer {
       const photo = unique[i], source = photo.file ?? photo.preview ?? photo.previewLoader;
       if (source && photo.previewAvailable !== false) {
         let entry = this.cache.get(photo.id);
-        if (!entry || entry.source !== source || entry.digest !== photo.digest || entry.width !== photo.width || entry.height !== photo.height) {
-          entry = {source, digest: photo.digest, width: photo.width, height: photo.height, promise: load(photo).catch(() => undefined)}; this.cache.set(photo.id, entry);
+        if (!entry || entry.source.deref() !== source || entry.digest !== photo.digest || entry.width !== photo.width || entry.height !== photo.height) {
+          entry = {source: new WeakRef(source), digest: photo.digest, width: photo.width, height: photo.height};
+          this.cache.set(photo.id, entry);
         }
-        const signal = await entry.promise;
+        const cached = entry;
+        if (!cached.signal && !cached.promise) cached.promise = (async () => {
+          try {
+            const signal = await load(photo);
+            if (!valid(signal)) return;
+            if (version === this.version && this.cache.get(photo.id) === cached) cached.signal = signal;
+            return signal;
+          } catch {return;}
+          finally {
+            cached.promise = undefined;
+            if (!cached.signal && this.cache.get(photo.id) === cached) this.cache.delete(photo.id);
+          }
+        })();
+        const signal = cached.signal ?? await cached.promise;
         if (version !== this.version) return;
         if (signal) signals.set(photo.id, signal);
-      }
+      } else this.cache.delete(photo.id);
       if ((i + 1) % 8 === 0 || i + 1 === unique.length) progress?.(i + 1, unique.length);
+      if ((i + 1) % PICK_WORK_BATCH === 0) await this.yieldWork();
     }
-    return version === this.version ? recommendPhotos(unique, signals) : undefined;
+    const steps = recommendationSteps(unique, signals);
+    while (version === this.version) {
+      const next = steps.next();
+      if (next.done) return version === this.version ? next.value : undefined;
+      await this.yieldWork();
+    }
   }
-  clear() {this.version++; this.cache.clear();}
+  // Completed measurements survive harmless metadata updates; pending work never crosses a cancellation.
+  cancel() {
+    this.version++;
+    for (const [id, entry] of this.cache) if (!entry.signal) this.cache.delete(id);
+  }
+  clear() {this.cancel(); this.cache.clear();}
 }

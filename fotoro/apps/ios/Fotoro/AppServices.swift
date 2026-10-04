@@ -423,10 +423,14 @@ enum ReviewedPhotosBackupPolicy {
     guard photoAccountAccess != nil, session.isSignedIn else { return status(.locked, "Open Fotoro to continue automatic photo sync.") }
     guard RecentPhotosPolicy.canRead(automaticPhotosPermission) else { return status(.permissionRequired, "Allow Photos access to continue automatic photo sync.") }
     guard photoSyncForeground else { return status(.background, "iOS can finish scheduled encrypted uploads. Open Fotoro to sync more photos.") }
-    if automaticSyncTask != nil || backup.isRunning { return status(.syncing, "Syncing permitted still photos. Your originals stay in Photos.") }
+    if automaticSyncTask != nil || backup.isRunning || annotations.busy { return status(.syncing, "Syncing permitted still photos. Your originals stay in Photos.") }
     if let automaticSyncFailure { return status(.needsAttention, automaticSyncFailure) }
+    if let consumerFailure { return status(.needsAttention, consumerFailure) }
     if backup.status.phase == .failed {
       return status(.needsAttention, backup.status.message ?? "Some photos could not sync. Live Photos and video are not supported.")
+    }
+    if !annotations.errors.isEmpty {
+      return status(.needsAttention, "Some photo changes could not sync. Use Sync changes to try again.")
     }
     if backup.status.skipped > 0 {
       return status(.ready, "Supported still photos are synced. Live Photos and video stay in Photos and are not synced.")
@@ -450,6 +454,11 @@ enum ReviewedPhotosBackupPolicy {
     kickAutomaticPhotoSync()
   }
   func pauseAutomaticPhotoSync() { pauseSync() }
+  func retryAutomaticPhotoSync() async throws {
+    try await sync()
+    try Task.checkCancellation()
+    kickAutomaticPhotoSync()
+  }
   func disableAutomaticPhotoSync() throws {
     suspendAutomaticPhotoSync(cancelBackground: true)
     let preference = AutomaticPhotoSyncPreference()
@@ -538,6 +547,10 @@ enum ReviewedPhotosBackupPolicy {
           try check()
           if self.backup.status.phase == .failed { break }
         }
+        try check()
+        if self.backup.status.phase != .failed && self.annotations.errors.isEmpty {
+          self.automaticSyncFailure = nil
+        }
       } catch is CancellationError {
       } catch {
         if self.automaticSyncGeneration == token { self.automaticSyncFailure = error.localizedDescription }
@@ -563,8 +576,10 @@ enum ReviewedPhotosBackupPolicy {
     guard store.root.lastPathComponent == account else { throw FotoroError("Open this account before saving photos.") }
     let bundle = try vault.requireBundle()
     try store.setSyncIntent(enabled: false, uploadsPaused: false)
-    consumerOffline = false
-    consumerFailure = nil
+    if !automatic {
+      consumerOffline = false
+      consumerFailure = nil
+    }
     refreshConsumerSyncSummary()
     let generation = vault.generation
     let origin = BackgroundUploadPolicy.origin(api.baseURL)

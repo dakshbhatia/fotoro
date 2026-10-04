@@ -719,6 +719,30 @@ final class PhotosBackupTests: XCTestCase {
 }
 
 final class AutomaticPhotoSyncTests: XCTestCase {
+  @MainActor func testEmptyAutomaticScanKeepsFailedReadVisibleUntilExplicitRetryReadsAgain() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
+    let services = try await context.enroll()
+    defer { services.vault.lock() }
+    services.automaticPhotosAuthorization = { .limited }
+    services.photosBackupSnapshot = { _ in [] }
+    try services.enableAutomaticPhotoSync()
+    await services.waitForAutomaticPhotoSync()
+    PausedUploadProtocol.server.failCatalogReads(1)
+    do { try await services.sync(); XCTFail("The controlled catalog read must fail") }
+    catch { XCTAssertTrue(error is URLError) }
+    XCTAssertEqual(services.automaticPhotoSync.phase, .needsAttention)
+    let reads = PausedUploadProtocol.server.requests.filter { $0.path == "/v1/changes" }.count
+    services.kickAutomaticPhotoSync()
+    await services.waitForAutomaticPhotoSync()
+    XCTAssertEqual(PausedUploadProtocol.server.requests.filter { $0.path == "/v1/changes" }.count, reads)
+    XCTAssertEqual(services.automaticPhotoSync.phase, .needsAttention, "A no-work scan cannot pretend a failed read recovered")
+    try await services.retryAutomaticPhotoSync()
+    await services.waitForAutomaticPhotoSync()
+    XCTAssertEqual(PausedUploadProtocol.server.requests.filter { $0.path == "/v1/changes" }.count, reads + 1)
+    XCTAssertEqual(services.automaticPhotoSync.phase, .ready)
+    XCTAssertTrue(PausedUploadProtocol.server.requests.allSatisfy { $0.method == "GET" }, "Empty retry never publishes an edit or original")
+  }
   @MainActor func testQueuedRevisionAndPermissionReturnSyncCurrentDigestWithoutPublishingRetainedCopy() async throws {
     for changedDigest in [false, true] {
       let context = try PausedUploadContext()
@@ -934,6 +958,9 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     XCTAssertNil(value.visual, "Reader-first rollout keeps scenes local until installed readers are qualified")
     XCTAssertEqual(try services.annotations.ledger.pendingIDs(), [photo.id], "Offline analysis remains in the same durable outbox")
     XCTAssertFalse(services.annotations.errors.isEmpty)
+    XCTAssertEqual(services.automaticPhotoSync.phase, .needsAttention,
+      "Completed originals cannot hide a failed search-data write")
+    XCTAssertEqual(services.automaticPhotoSync.detail, "Some photo changes could not sync. Use Sync changes to try again.")
     let failedRequest = try XCTUnwrap(services.annotations.ledger.state(photo.id)?.pending)
     services.setPhotoSyncForeground(false)
     services.setPhotoSyncForeground(true)
@@ -941,6 +968,7 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     XCTAssertTrue(try services.annotations.ledger.pendingIDs().isEmpty, "Foreground retries analysis even when original work is empty")
     XCTAssertEqual(try services.annotations.ledger.state(photo.id)?.accepted, failedRequest)
     XCTAssertTrue(services.annotations.errors.isEmpty)
+    XCTAssertEqual(services.automaticPhotoSync.phase, .ready, "A successful retry clears the attention state")
     let requests = PausedUploadProtocol.server.requests.count
     services.kickAutomaticPhotoSync()
     await services.waitForAutomaticPhotoSync()
@@ -1171,6 +1199,8 @@ private final class PausedUploadServer: @unchecked Sendable {
   var publishedPhotoIDs: [String] { lock.lock(); defer { lock.unlock() }; return published }
   var reservationGate: UploadRequestGate?
   private var annotationFailures = 0
+  private var catalogFailures = 0
+  func failCatalogReads(_ count: Int) { lock.lock(); defer { lock.unlock() }; catalogFailures = count }
   func failAnnotationWrites(_ count: Int) { lock.lock(); defer { lock.unlock() }; annotationFailures = count }
   var requests: [Request] {
     lock.lock()
@@ -1185,6 +1215,7 @@ private final class PausedUploadServer: @unchecked Sendable {
     published = []
     reservationGate = nil
     annotationFailures = 0
+    catalogFailures = 0
   }
   func response(_ request: URLRequest) throws -> Data {
     if request.url?.path == "/v1/uploads/reserve" { reservationGate?.visit() }
@@ -1194,6 +1225,7 @@ private final class PausedUploadServer: @unchecked Sendable {
     recorded.append(Request(method: request.httpMethod ?? "GET", path: path))
     switch path {
     case "/v1/changes":
+      if catalogFailures > 0 { catalogFailures -= 1; throw URLError(.notConnectedToInternet) }
       return try Wire.encode(ChangePageV1(version: 1, changes: [], nextCursor: nil, hasMore: false))
     case "/v1/grants":
       return try Wire.encode(GrantInboxV1(version: 1, grants: []))

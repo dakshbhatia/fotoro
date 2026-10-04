@@ -503,8 +503,16 @@ struct SavedLibraryReadPresentation: Equatable {
 func savedLibraryEmptyMessage(sync: AutomaticPhotoSyncStatus, favoritesOnly: Bool = false) -> String {
   if favoritesOnly { return "No saved favorites yet." }
   if sync.enabled {
-    return sync.paused ? "Sync is paused. Resume to add your photos."
-      : "Photos appear here as they sync. Keep Fotoro open."
+    switch sync.phase {
+    case .paused: return "Sync is paused. Resume to add your photos."
+    case .locked: return "Open Fotoro to resume sync."
+    case .permissionRequired: return "Allow Photos access in Settings to sync your photos."
+    case .needsAttention: return "Open Sync to review what needs attention."
+    case .background: return "Open Fotoro to continue syncing your photos."
+    case .syncing: return "Photos appear here as they sync. Keep Fotoro open."
+    case .ready: return "No photos saved yet. Sync is on for the photos you allow."
+    case .off: break
+    }
   }
   return "Save photos in Fotoro, or pull down to check photos saved on another device."
 }

@@ -63,7 +63,7 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, sync
   const closeSettings = () => setSettings(false);
   useDialogFocus(settingsPanel, closeSettings, settings);
   retainedRef.current = retained;
-  const picks = usePhotoPicks(photos, resources, ready && !progress);
+  const picks = usePhotoPicks(photos, resources, ready && !progress, sourceGeneration);
   const reviewedPhotos = useMemo(() => photos.filter(photo => picks.ids.has(photo.id)), [photos, picks.ids]);
   const openBackup = () => {onPhotosChange?.(reviewedPhotos); onBackup();};
   const scope = "local:all";
