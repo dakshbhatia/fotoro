@@ -52,8 +52,9 @@ through the complete journey; separate green components are insufficient.
 - Reuse the current account, catalog, transfer queue and sharing protocols.
   Presentation can be shared across local/saved/received sources; authorization
   and ownership boundaries remain explicit.
-- Only an explicit Save/Continue creates or resumes upload work. Opening an
-  account, refreshing, browsing and returning to the app remain read-only.
+- Manual uploads require an explicit Save/Continue. Opted-in, unpaused native
+  photo sync can prepare new supported photos while the app is open. Opening
+  Saved and refreshing its catalog remain read-only.
 - UI state belongs to its feature. Use existing services for durable work;
   avoid parallel status flags, a second queue, a second search index or a new
   global state framework.
@@ -112,11 +113,11 @@ are separate checks. “Partial” identifies a concrete remaining capability.
 
 | # | Work | Current state and remaining work |
 | --- | --- | --- |
-| 1 | One-password sign-in | Implemented on native/web; wrong-password, interrupted enrollment and retry regressions pass. Owner acceptance remains open. |
+| 1 | One-password sign-in | Implemented on native/web; wrong-password, interrupted enrollment and retry regressions pass. Failed remembered sign-in offers another password without deleting pending work. Owner acceptance remains open. |
 | 2 | Remember the current user | Protected session/password persistence, account reference and expired-session renewal are implemented. Initial restoration respects manual lock; explicit Open retries a failed renewal. |
-| 3 | Install the current full build | Signed encrypted build 22 passes strict signature and production association checks. Build 21 is verified installed and launched after a fresh unlocked check during the owner's phone window; build 22 remains ready for installation. Owner authentication acceptance remains open. |
+| 3 | Install the current full build | Signed encrypted archive build 24 passes strict signature and production association checks. Build 21 is verified installed and launched during the owner's phone window; build 24 is prepared, with no new phone installation or TestFlight upload claim. Owner authentication acceptance remains open. |
 | 4 | Save chosen photos through sign-in | Immutable reviewed sources and one-shot authenticated Save are implemented. Fresh native signup → selected PNG Save and fresh-browser password restore pass against isolated D1/R2. |
-| 5 | Restore identical originals in Safari | Isolated D1/R2 tests verify JPEG/PNG/HEIC bytes in a fresh session. A native-created account restores its selected PNG byte for byte in a fresh browser. Personal phone-to-Safari acceptance remains open. |
+| 5 | Restore identical originals in Safari | Isolated D1/R2 tests verify JPEG/PNG/HEIC bytes in a fresh session. Production saves and restores a public PNG byte for byte in a fresh browser. Native Saved rechecks on return and supports pull-to-refresh, preserving paused uploads and local edits. Personal phone-to-Safari acceptance remains open. |
 | 6 | Manual Save progress and Pause/Continue | Implemented. Continue uses the durable queue; it does not scan for new photos. |
 | 7 | Offline/background/relaunch recovery | Fixed cold launch after a chosen Save: persisted selection now reads its own encoding. Regression and rendered Simulator reopening pass without scanning or uploading. Physical daemon/relaunch acceptance remains open. |
 | 8 | Retry without losing selection | Implemented for authentication, manual Save and sharing; incomplete work preserves exact sources for explicit Retry, and concurrent recipient Saves reuse one durable request. |

@@ -352,9 +352,11 @@ struct RecentPhotosView: View {
               Toggle("Favorites", isOn: $savedFavoritesOnly)
               Button("Shared photos", systemImage: "person.2") { sharedSavedPhotos = SharedPhotosPresentation() }
               Button("Refresh", systemImage: "arrow.clockwise") { Task { await savedRefresh.refresh(services) } }
+                .accessibilityIdentifier("saved.refresh")
             }.labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
             selectionToggle
           }.padding(.horizontal, 16).padding(.bottom, 12)
+          ConsumerSaveStatus(services: services).padding(.horizontal, 16).padding(.bottom, 12)
           if savedRefresh.isRefreshing { ProgressView("Loading saved photos…").padding(.bottom, 12) }
           if let error = savedRefresh.error {
             VStack(spacing: 8) {
@@ -386,10 +388,16 @@ struct RecentPhotosView: View {
           .scrollTargetLayout()
           if ownedPhotos.isEmpty && !savedRefresh.isRefreshing {
             ContentUnavailableView("No saved photos", systemImage: "photo.stack",
-              description: Text(savedFavoritesOnly ? "No saved favorites yet." : "Choose photos, then Save to keep them in Fotoro."))
+              description: Text(savedLibraryEmptyMessage(sync: services.automaticPhotoSync,
+                favoritesOnly: savedFavoritesOnly)))
           }
         }.scrollPosition(id: $savedScrollID, anchor: .top).scrollDismissesKeyboard(.interactively)
-          .task(id: SavedLibraryOpenBinding(services)) { await savedRefresh.open(services) }
+          .refreshable { await savedRefresh.refresh(services) }
+          .task(id: SavedLibraryReadPresentation(services, isActive: scenePhase == .active)) {
+            guard !Task.isCancelled else { return }
+            guard scenePhase == .active else { savedRefresh.cancel(); return }
+            await savedRefresh.open(services, recheck: true)
+          }
       }
     } else {
       ProgressView("Opening Fotoro…")

@@ -25,8 +25,13 @@ struct AccountView: View {
   var onSignedIn: () -> Void = {}
   var onAuthenticationTask: (Task<Void, Never>?) -> Void = { _ in }
   @State private var password = ""
+  @State private var enteringPassword = false
   @State private var apiURL = ""
   @FocusState private var passwordFocused: Bool
+  private var canOpenRememberedAccount: Bool {
+    services.auth.hasRememberedPassword || services.session.isSignedIn && services.vault.canUnlockLocally
+  }
+  private var authenticationInProgress: Bool { services.busy || services.auth.isOpeningRememberedAccount }
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
@@ -44,9 +49,9 @@ struct AccountView: View {
               try await services.auth.completeStart(code: code)
               try await finishSignIn()
             }
-          }.buttonStyle(.borderedProminent).disabled(services.busy)
-          Button("Cancel") { services.auth.cancelStart(); services.error = nil }.disabled(services.busy)
-        } else if services.auth.hasRememberedPassword || services.session.isSignedIn && services.vault.canUnlockLocally {
+          }.buttonStyle(.borderedProminent).disabled(authenticationInProgress)
+          Button("Cancel") { services.auth.cancelStart(); services.error = nil }.disabled(authenticationInProgress)
+        } else if canOpenRememberedAccount && !enteringPassword {
           Button("Open Fotoro") {
             authenticate {
               let generation: UUID
@@ -59,29 +64,43 @@ struct AccountView: View {
               guard services.vault.generation == generation else { throw CancellationError() }
               try await finishSignIn()
             }
-          }.buttonStyle(.borderedProminent).disabled(services.busy || services.auth.isOpeningRememberedAccount)
+          }.buttonStyle(.borderedProminent).disabled(authenticationInProgress)
             .accessibilityIdentifier("account.unlock")
+          Button("Use another password") {
+            enteringPassword = true
+            services.error = nil
+          }.disabled(authenticationInProgress)
+            .accessibilityIdentifier("account.useAnotherPassword")
         } else {
           Text("Open your Fotoro").font(.title2.bold())
           SecureField("Fotoro password", text: $password)
             .focused($passwordFocused)
-            .onAppear { passwordFocused = !services.busy }
+            .onAppear { passwordFocused = !authenticationInProgress }
             .textFieldStyle(.roundedBorder)
             .textContentType(.password).textInputAutocapitalization(.never)
             .autocorrectionDisabled().submitLabel(.go).onSubmit(signIn)
-            .disabled(services.busy).accessibilityIdentifier("account.password")
+            .disabled(authenticationInProgress).accessibilityIdentifier("account.password")
           Button("Open Fotoro", action: signIn).buttonStyle(.borderedProminent)
-            .disabled(services.busy || password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(authenticationInProgress || password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             .accessibilityIdentifier("account.signIn")
           Button("New Fotoro") {
             authenticate { try await services.auth.prepareStart() }
-          }.disabled(services.busy)
+          }.disabled(authenticationInProgress)
             .accessibilityIdentifier("account.create")
+          if canOpenRememberedAccount {
+            Button("Use saved account") {
+              enteringPassword = false
+              password = ""
+              passwordFocused = false
+              services.error = nil
+            }.disabled(authenticationInProgress)
+              .accessibilityIdentifier("account.useSavedAccount")
+          }
         }
         if let error = services.error {
           Text(error).foregroundStyle(.red).accessibilityIdentifier("account.error")
         }
-        if services.busy || services.auth.isOpeningRememberedAccount {
+        if authenticationInProgress {
           ProgressView("Opening your Fotoro…").accessibilityIdentifier("account.connecting")
         }
         #if DEBUG
@@ -102,6 +121,7 @@ struct AccountView: View {
     ShareLink("Save password", item: code)
   }
   private func authenticate(_ action: @escaping @MainActor () async throws -> Void) {
+    guard !authenticationInProgress else { return }
     passwordFocused = false
     if let task = services.run(phase: .auth, {
       defer { onAuthenticationTask(nil) }

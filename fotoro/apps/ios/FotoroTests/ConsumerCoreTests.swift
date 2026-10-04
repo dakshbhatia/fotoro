@@ -521,6 +521,7 @@ extension ConsumerCoreTests {
       await fulfillment(of: [gate.started], timeout: 3)
       XCTAssertTrue(refresh.isRefreshing)
       await refresh.open(services)
+      await refresh.open(services, recheck: true)
       await refresh.refresh(services)
       XCTAssertEqual(server.requests.count, 1, "Repeated taps cannot start a second catalog request")
       gate.release.signal()
@@ -543,6 +544,55 @@ extension ConsumerCoreTests {
       await refresh.open(services)
       XCTAssertGreaterThan(server.requests.count, completed, "Explicit unlock opens a fresh vault binding")
       XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" })
+    }
+  }
+  @MainActor func testSavedForegroundRecheckCoalescesAnExplicitRefreshAlreadyInFlight() async throws {
+    let gate = SavedLibraryRequestGate(started: expectation(description: "Explicit Saved refresh started"))
+    defer { gate.release.signal() }
+    try await withSavedLibrary(gate: gate) { services, server in
+      let refresh = SavedLibraryRefresh()
+      let reading = Task { await refresh.refresh(services) }
+      await fulfillment(of: [gate.started], timeout: 3)
+      await refresh.open(services, recheck: true)
+      await refresh.refresh(services)
+      XCTAssertEqual(server.requests.count, 1, "Foreground and pull-to-refresh share one read")
+      gate.release.signal()
+      await reading.value
+      XCTAssertFalse(refresh.isRefreshing)
+      XCTAssertNil(refresh.error)
+      XCTAssertNotNil(try services.consumerSavedPhoto(server.photoID))
+      XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" })
+    }
+  }
+  @MainActor func testReturningToSavedRechecksCatalogWithoutSendingPausedOriginalsOrLocalDrafts() async throws {
+    try await withSavedLibrary { services, server in
+      var queued = try self.samplePhoto()
+      queued.manifest.ownerAccountId = services.session.accountId!
+      queued.transferState = "pending"
+      try services.store.put(queued)
+      try services.journal.enqueue(queued, publicSample: true)
+      try services.store.setSyncIntent(enabled: false, uploadsPaused: true)
+      try services.reload()
+      try services.setLabels(["local-only-draft"], photo: queued)
+      let drafts = try services.annotations.ledger.pendingIDs()
+      let refresh = SavedLibraryRefresh()
+      await refresh.open(services, recheck: true)
+      let firstRead = server.requests.count
+      XCTAssertNotNil(try services.consumerSavedPhoto(server.photoID))
+      await refresh.open(services)
+      XCTAssertEqual(server.requests.count, firstRead, "An unchanged binding does not poll")
+      await refresh.open(services, recheck: true)
+      XCTAssertGreaterThan(server.requests.count, firstRead, "Returning to visible Saved checks for cross-device changes")
+      XCTAssertEqual(server.requests.filter { $0.path == "/v1/changes" }.count, 2)
+      XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" })
+      XCTAssertTrue(try services.store.uploadsPaused(), "Reading Saved does not resume uploads")
+      XCTAssertEqual(try services.journal.entries().map { $0.photo.id }, [queued.id])
+      XCTAssertEqual(try services.annotations.ledger.pendingIDs(), drafts)
+      let completed = server.requests.count
+      services.vault.lock()
+      await refresh.open(services, recheck: true)
+      XCTAssertEqual(server.requests.count, completed, "A locked account cannot start a foreground read")
+      XCTAssertFalse(refresh.isRefreshing)
     }
   }
   @MainActor func testUnlockedUnactivatedAccountCannotReadWrongCatalogAndRemainsOpenable() async throws {

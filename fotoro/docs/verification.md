@@ -8,14 +8,21 @@ already scheduled ciphertext uploads. Videos and Live Photo pairs remain
 unsupported. Turning off sync cancels pending view consent and automatic work.
 Denied Photos access has an explicit system Settings action.
 
-Final native verification covers 269 full-app tests and 94 local-preview tests,
-each with the known iOS 27 Vision-context integration skip. New regressions cover
+Final native verification covers 271 full-app tests, with the known iOS 27
+Vision-context integration skip. New regressions cover
 default-off consent, scope withdrawal, all-age intake, unchanged no-HTTP scans,
 persistent Pause, foreground-only restoration, quota early-stop and queued
 original edits after permission returns. The edited-original regression was
 reproduced failing before repair, then passed for unchanged and changed digests;
 older queued bytes remain available only through explicit manual Continue.
 Saved date-plus-text queries now use the existing capture-date parser.
+The continuity follow-up exposes another password after remembered sign-in
+fails, without sign-out or deleting unfinished work. Both native Saved grids
+recheck read-only when visible again and support pull-to-refresh. Overlapping
+foreground and explicit refresh coalesce; regression checks preserve paused
+originals, local annotation drafts and locked-account boundaries. The home Saved
+grid displays the existing sync progress and Pause/Resume controls, with
+sync-aware empty states.
 
 Web verification passes 272 tests and a 349,058-byte, three-chunk startup budget.
 Rendered public-image acceptance passes at 320, 390 and 1440 px: same-password
@@ -31,8 +38,21 @@ attempts remain charged. Production auth/enrollment throttles return 429 with
 Retry-After. Migration 0006 preserves legacy Worker SQL behavior, including its
 PUT affected-row checks, before service cutover. Reserved and final copies can
 both remain in R2; object collection and complete restore qualification remain
-open. Development-signed Release build 23 is prepared separately from TestFlight
-distribution. The previous owner's phone window is not reused for installation.
+open. Development-signed Release archive build 24 is prepared and passes strict
+signature, build identity and exact production associated-domain checks
+separately from TestFlight distribution. The previous owner's phone window is not
+reused for installation.
+
+PR 25 is merged and its main CI run passes. Production migration 0006 has no
+pending successors. The new Worker is read back at 100%; all published entry
+HTML and JS/CSS match the reviewed build. Public production acceptance passes
+at 320, 390 and 1440 px without runtime errors or upload writes during browse,
+Find and review. A fresh account saves one public PNG, then a separate browser
+opens the same password and downloads identical 214,852-byte original bytes.
+The authenticated storage read reports a 10 GiB limit with no outstanding
+reservations after commit. Exact signed Apple association and API auth checks
+also pass. This establishes public production exchange, not personal phone
+backup or TestFlight availability.
 
 ## Previous release evidence
 
