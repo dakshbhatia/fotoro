@@ -7,6 +7,7 @@ import { validateWire } from "@fotoro/contracts/validate";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { ApiError, type Env, type Actor, fail, json, b64 } from "./errors";
 import type { ErrorPhase } from "./diagnostics";
+import {expireStorage, storageLimit} from "./limits";
 type Upload = {
   id: string;
   account_id: string;
@@ -97,13 +98,15 @@ export async function reserveUpload(
 ): Promise<UploadReservationV1> {
   validateWire("ReserveUploadV1", input);
   if (input.ciphertextBytes > 55 * 1024 * 1024) fail("TOO_LARGE", 413);
-  const id = crypto.randomUUID(),
+  const now = Date.now(), limit = storageLimit(env), id = crypto.randomUUID(),
     cap = b64(crypto.getRandomValues(new Uint8Array(32))),
-    expires = Date.now() + 900000;
-  await env.DB.prepare(
-    "INSERT OR IGNORE INTO uploads(id,account_id,device_id,operation_id,input,cap,expires,object_id) VALUES(?,?,?,?,?,?,?,?)",
-  )
-    .bind(
+    expires = now + 900000;
+  await env.DB.batch([
+    expireStorage(env, actor.accountId, now),
+    env.DB.prepare("INSERT OR IGNORE INTO account_storage(account_id) VALUES(?)").bind(actor.accountId),
+    env.DB.prepare(
+      "INSERT OR IGNORE INTO uploads(id,account_id,device_id,operation_id,input,cap,expires,object_id) SELECT ?,?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM uploads WHERE account_id=? AND operation_id=?) OR EXISTS(SELECT 1 FROM account_storage WHERE account_id=? AND reserved_bytes+stored_bytes+?<=?)",
+    ).bind(
       id,
       actor.accountId,
       actor.deviceId,
@@ -112,29 +115,38 @@ export async function reserveUpload(
       cap,
       expires,
       crypto.randomUUID(),
-    )
-    .run();
+      actor.accountId, input.operationId, actor.accountId, input.ciphertextBytes, limit,
+    ),
+    // The insert trigger charges legacy writers conservatively. Only this
+    // atomic batch can establish that its exact new capability is unused.
+    env.DB.prepare("UPDATE upload_storage_claims SET state='reserved' WHERE upload_id=? AND cap=?").bind(id, cap),
+  ]);
   let row = await env.DB.prepare(
     "SELECT * FROM uploads WHERE account_id=? AND operation_id=?",
   )
     .bind(actor.accountId, input.operationId)
     .first<Upload>();
-  if (!row || row.input !== json(input)) fail("IDEMPOTENCY_CONFLICT", 409);
+  if (!row) fail("STORAGE_QUOTA_EXCEEDED", 413);
+  if (row!.input !== json(input)) fail("IDEMPOTENCY_CONFLICT", 409);
   if (row!.state === "reserved" && row!.expires <= Date.now()) {
-    await env.DB.prepare(
-      "UPDATE uploads SET cap=?,expires=?,revision=revision+1 WHERE id=? AND account_id=? AND input=? AND state='reserved' AND revision=? AND expires<=?",
-    )
-      .bind(
+    const renewalAt = Date.now(), renewalExpires = renewalAt + 900000;
+    await env.DB.batch([
+      expireStorage(env, actor.accountId, renewalAt),
+      env.DB.prepare(
+        "UPDATE uploads SET cap=?,expires=?,revision=revision+1 WHERE id=? AND account_id=? AND input=? AND state='reserved' AND revision=? AND expires<=? AND EXISTS(SELECT 1 FROM account_storage WHERE account_id=? AND reserved_bytes+stored_bytes+?<=?)",
+      ).bind(
         cap,
-        expires,
+        renewalExpires,
         row!.id,
         actor.accountId,
         json(input),
         row!.revision,
-        Date.now(),
-      )
-      .run();
+        renewalAt, actor.accountId, input.ciphertextBytes, limit,
+      ),
+      env.DB.prepare("UPDATE upload_storage_claims SET state='reserved' WHERE upload_id=? AND cap=?").bind(row!.id, cap),
+    ]);
     row = await owned(env, actor, row!.id);
+    if (row.state === "reserved" && row.expires <= renewalAt) fail("STORAGE_QUOTA_EXCEEDED", 413);
   }
   return {
     version: 1,
@@ -160,6 +172,12 @@ export async function putStaging(
   const len = Number(request.headers.get("content-length"));
   if (request.headers.has("content-length") && len !== input.ciphertextBytes)
     fail("DIGEST_MISMATCH", 422);
+  // Charge before allowing R2 to write. An interrupted/late write must never
+  // become refundable merely because its capability expires or is renewed.
+  const charged = await env.DB.prepare(
+    "UPDATE upload_storage_claims SET state='stored' WHERE upload_id=? AND cap=? AND expires>? AND EXISTS(SELECT 1 FROM uploads WHERE id=? AND account_id=? AND cap=? AND state='reserved' AND revision=? AND expires>?) RETURNING upload_id",
+  ).bind(id, cap, Date.now(), id, actor.accountId, cap, row.revision, Date.now()).first<{upload_id: string}>();
+  if (!charged) fail("FORBIDDEN", 403);
   const object = await writeStaging(env, stagingKey(row), request.body!, input.ciphertextBytes);
   const result = await env.DB.prepare(
     "UPDATE uploads SET state='uploaded',etag=?,revision=revision+1 WHERE id=? AND account_id=? AND state='reserved' AND revision=? AND expires>?",

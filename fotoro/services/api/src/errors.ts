@@ -7,6 +7,9 @@ export interface Env {
   AUTH_MODE: "local" | "production";
   ASSETS?: Fetcher;
   APPLE_APP_IDS?: string;
+  ACCOUNT_STORAGE_LIMIT_BYTES?: string;
+  AUTH_REQUESTS_PER_MINUTE?: string;
+  ENROLLMENTS_PER_MINUTE?: string;
 }
 export interface Actor {
   accountId: string;
@@ -17,10 +20,11 @@ export class ApiError extends Error {
     public code: string,
     public status = 400,
     public diagnostic?: ErrorDiagnostic,
+    public retryAfterSeconds?: number,
   ) {
     super(code);
   }
-  get retryable() { return this.status >= 500 || this.status === 408; }
+  get retryable() { return this.status >= 500 || this.status === 408 || this.status === 429; }
 }
 export const fail = (code: string, status = 400): never => {
   throw new ApiError(code, status);

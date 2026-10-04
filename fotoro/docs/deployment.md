@@ -24,6 +24,16 @@ A Worker preview with a different RP creates different passkey credentials. Do n
 
 ## Current state
 
+Current release source adds opted-in iPhone photo sync, clearer browser Saved
+entry and correction status, atomic ciphertext allocation limits and production
+auth throttles. Apply migration 0006 before cutting over the new Worker. The
+migration preserves old Worker SQL behavior; deploy and read back an exact
+reviewed build before claiming the service changed. Preserve the immediately
+preceding Worker version as rollback. Apple distribution and physical-device
+acceptance remain separate from Worker deployment. See [verification](verification.md).
+
+## Previous release checkpoints
+
 The preceding production Worker `a92aa209-1a6c-4fd6-a6ff-da2bb830a52c`, tagged
 `experience-clarity-20261003`, is read back at 100% in deployment
 `4888118e-2a7f-422c-9b31-c0872fca0ba8`. Saved photos opens read-only;

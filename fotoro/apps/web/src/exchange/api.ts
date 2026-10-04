@@ -1,3 +1,4 @@
+import {ApiError} from "./api-errors";
 import { validateWire } from "@fotoro/contracts/validate";
 let fixtureAccount: string | undefined;
 export const fixtureMode =
@@ -37,24 +38,14 @@ export function resolveUploadURL(
 export function setFixtureAccount(id?: string) {
   fixtureAccount = id;
 }
-export class ApiError extends Error {
-  readonly requestId?: string;
-  constructor(
-    readonly code: string,
-    readonly retryable = false,
-    requestId?: unknown,
-  ) {
-    super(code);
-    if (typeof requestId === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(requestId))
-      this.requestId = requestId;
-  }
-}
+export {ApiError, accountLimitMessage} from "./api-errors";
 async function responseError(response: Response) {
   const error = await response.json().catch(() => null);
   return new ApiError(
     typeof error?.code === "string" ? error.code : `HTTP_${response.status}`,
     error?.retryable === true,
     error?.requestId,
+    response.headers.get("Retry-After"),
   );
 }
 export async function api<T>(

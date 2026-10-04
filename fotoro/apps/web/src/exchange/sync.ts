@@ -7,6 +7,7 @@ import type { WrappedKeyV1 } from "@fotoro/contracts";
 import { assertVault } from "../vault/scope";
 import { get, put } from "./cache";
 import { flushAnnotations, pendingAnnotations } from "./annotations";
+import {accountLimitMessage} from "./api-errors";
 export function syncStatus(
   imports: Pick<PendingImport, "state">[],
   lastSuccessfulSync: string | null,
@@ -172,6 +173,8 @@ export function saveSync(session = requireVault(), signal?: AbortSignal) {
   });
 }
 export function readableSyncError(error: unknown) {
+  const limit = accountLimitMessage(error);
+  if (limit) return limit;
   const code = error instanceof Error ? error.message : "";
   if (
     error instanceof Error &&

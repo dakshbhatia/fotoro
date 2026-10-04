@@ -2,6 +2,14 @@ import XCTest
 @testable import Fotoro
 
 final class ConsumerCoreTests: XCTestCase {
+  func testServiceLimitsExplainTheNextActionWithoutChangingRetrySemantics() {
+    let full = FotoroError("STORAGE_QUOTA_EXCEEDED")
+    XCTAssertEqual(full.errorDescription, "Fotoro storage is full. Pause sync or contact support.")
+    XCTAssertFalse(full.retryable)
+    let limited = FotoroError("AUTH_RATE_LIMITED", retryable: true)
+    XCTAssertEqual(limited.errorDescription, "Too many attempts. Wait a minute and try again.")
+    XCTAssertTrue(limited.retryable)
+  }
   func testUnknownTotalsAreOmittedAndQueuedPhotosDoNotCountAsCompleted() {
     var facts = ConsumerSyncFacts()
     facts.unlocked = true
@@ -188,6 +196,66 @@ final class ConsumerCoreTests: XCTestCase {
     XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(written).deletingLastPathComponent().path))
     services.consumerShareDidWrite = nil
   }
+  @MainActor func testSavedNaturalDatesComposeTextAndOnlyTrustCaptureProvenance() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    let previousCards = UserDefaults.standard.data(forKey: "fotoro.pinnedCards")
+    let accounts = try fixture(FixtureAccounts.self, "accounts")
+    let services = try AppServices(root: root)
+    defer {
+      services.vault.lock(); Keychain.remove(accounts.accounts[0].accountId)
+      if let previousCards { UserDefaults.standard.set(previousCards, forKey: "fotoro.pinnedCards") }
+      else { UserDefaults.standard.removeObject(forKey: "fotoro.pinnedCards") }
+      try? FileManager.default.removeItem(at: root)
+    }
+    services.session.accountId = accounts.accounts[0].accountId
+    services.session.fixture = true
+    try services.session.pin(accounts.accounts[0])
+    try await services.vault.unlock(.recoveryEnvelope(secret: Data(b64: accounts.testSecrets[0].recoverySecret), wrapper: accounts.testSecrets[0].encryptedBundle))
+    try services.activateAccount()
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "America/New_York")!
+    let now = calendar.date(from: DateComponents(year: 2026, month: 4, day: 15, hour: 12))!
+    let march = calendar.date(from: DateComponents(year: 2026, month: 3, day: 8, hour: 12))!
+    let end = calendar.date(from: DateComponents(year: 2026, month: 4, day: 1))!
+    var photos = try samplePhoto()
+    photos.metadata.filename = "beach.png"
+    photos.metadata.sourceDate = Wire.date(march)
+    photos.metadata.dateSource = "photos"
+    var exif = try samplePhoto()
+    exif.metadata.filename = "other.png"
+    exif.metadata.sourceDate = Wire.date(march)
+    exif.metadata.dateSource = "exif"
+    var imported = try samplePhoto()
+    imported.metadata.filename = "beach-import.png"
+    imported.metadata.sourceDate = Wire.date(march)
+    imported.metadata.dateSource = "import"
+    var boundary = try samplePhoto()
+    boundary.metadata.filename = "beach-end.png"
+    boundary.metadata.sourceDate = Wire.date(end)
+    boundary.metadata.dateSource = "photos"
+    var malformed = try samplePhoto()
+    malformed.metadata.filename = "beach-invalid.png"
+    malformed.metadata.sourceDate = "invalid"
+    malformed.metadata.dateSource = "photos"
+    var unrelated = try samplePhoto()
+    unrelated.metadata.filename = "beach-other-account.png"
+    unrelated.metadata.sourceDate = Wire.date(march)
+    unrelated.manifest.ownerAccountId = accounts.accounts[1].accountId
+    for photo in [photos, exif, imported, boundary, malformed, unrelated] { try services.store.put(photo) }
+    try services.setLabels(["beach"], photo: exif)
+    let combined = try await services.searchCatalog("beach last month", now: now, calendar: calendar)
+    XCTAssertEqual(Set(combined.map(\.id)), [photos.id, exif.id])
+    let dateOnly = try await services.searchCatalog("last month", now: now, calendar: calendar)
+    XCTAssertEqual(Set(dateOnly.map(\.id)), [photos.id, exif.id])
+    let plain = try await services.searchCatalog("beach", now: now, calendar: calendar)
+    XCTAssertTrue(plain.contains(where: { $0.id == imported.id }), "An import date is ineligible only for capture-date queries")
+    let invalid = try await services.searchCatalog("beach 2026-02-30", now: now, calendar: calendar)
+    XCTAssertTrue(invalid.isEmpty, "An invalid date stays evidence text, without partial date matching")
+    let unsupported = try await services.searchCatalog("Aunt Mira last month", now: now, calendar: calendar)
+    XCTAssertTrue(unsupported.isEmpty, "Date matches cannot invent a named-person match")
+    XCTAssertEqual(try services.annotations.ledger.pendingIDs(), [exif.id])
+  }
+
   private func samplePhoto() throws -> LocalPhoto {
     let accounts = try fixture(FixtureAccounts.self, "accounts")
     let owner = accounts.testSecrets[0]

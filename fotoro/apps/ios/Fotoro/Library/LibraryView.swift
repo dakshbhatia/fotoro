@@ -163,12 +163,13 @@ struct LibraryView: View {
           if scenePhase == .background {
             pendingIncoming = nil; sharedPhotos = nil
             cancelAuthentication()
-            services.pauseSync()
+            services.setPhotoSyncForeground(false)
           } else if scenePhase == .active {
+            services.setPhotoSyncForeground(true)
             resumeSelectedSave()
             openIncomingLink()
           } else {
-            services.backup.pause()
+            services.setPhotoSyncForeground(false)
           }
         }
         .sheet(isPresented: $sharingOriginals, onDismiss: cleanupShare) {
@@ -368,6 +369,18 @@ struct ConsumerSaveStatus: View {
   private var summary: ConsumerSyncSummary { services.consumerSyncSummary }
   private var saving: Bool { services.backup.isRunning || services.journal.running }
   private var title: String {
+    let automatic = services.automaticPhotoSync
+    if automatic.enabled {
+      switch automatic.phase {
+      case .paused: return "Sync paused"
+      case .locked: return "Open Fotoro to resume sync"
+      case .permissionRequired: return "Photos access needed"
+      case .background: return "Sync resumes when you open Fotoro"
+      case .ready: return "Sync on"
+      case .needsAttention: return "Sync needs attention"
+      case .off, .syncing: break
+      }
+    }
     if summary.state == .preparing { return "Preparing photos…" }
     if saving {
       if let completed = summary.completedPhotos, let total = summary.totalPhotos {
@@ -390,13 +403,20 @@ struct ConsumerSaveStatus: View {
           Spacer(minLength: 0)
           if saving {
             Button("Pause") { services.pauseSync() }.font(.footnote).frame(minHeight: 44)
-          } else if summary.action == .continue || summary.action == .retry {
+          } else if services.automaticPhotoSync.enabled && services.automaticPhotoSync.paused {
+            Button("Resume") {
+              do { try services.enableAutomaticPhotoSync() }
+              catch { services.error = error.localizedDescription }
+            }.font(.footnote).frame(minHeight: 44).disabled(services.busy || services.photoAccountAccess == nil)
+          } else if !services.automaticPhotoSync.enabled && (summary.action == .continue || summary.action == .retry) {
             Button(summary.action == .retry ? "Try again" : "Continue") {
               services.run { try await services.continueSync() }
             }.font(.footnote).frame(minHeight: 44).disabled(services.busy)
           }
         }
-        if summary.state == .needsAttention, let detail = summary.detail {
+        if services.automaticPhotoSync.enabled && services.automaticPhotoSync.phase == .needsAttention {
+          Text(services.automaticPhotoSync.detail).font(.caption).foregroundStyle(.secondary)
+        } else if !services.automaticPhotoSync.enabled, summary.state == .needsAttention, let detail = summary.detail {
           Text(detail).font(.caption).foregroundStyle(.secondary)
         }
       }.accessibilityElement(children: .contain)

@@ -2,11 +2,13 @@
 
 Fotoro is for enjoying your photos, finding the shot you mean, and sharing a
 chosen moment. Photos shows this device’s library. Picks suggests highlights;
-Saved holds the originals you explicitly keep in Fotoro across devices. Find
+Saved holds originals kept in Fotoro across devices, through chosen Save or
+opted-in automatic photo sync. Find
 reaches the photo the user means.
 The viewer makes it easy to enjoy the original. Choosing Save keeps that photo
 available on another device; choosing Share sends a deliberate set to a person.
-Account handling supports that journey. Automatic uploads remain off.
+Account handling supports that journey. Automatic photo sync starts after one
+explicit Turn on sync choice and remembers Pause. Browser uploads stay explicit.
 
 The foundation and core journey are now composed into one consumer experience.
 Photos, persistent selection, contextual manual Save, other-device originals and
@@ -26,7 +28,7 @@ parallel feature project.
 | 4 | One Find experience | Keep the protected local index, verified cloud records, dates, labels and OCR. Use one query interaction with clear results and alternative meanings. | Supported queries find the right eligible photo without duplicate local/cloud results, stale matches or a blocking analysis screen. |
 | 5 | Picks and moments worth opening | Tune existing quality, burst and capture-time policies against a fixed public corpus and owner-selected examples. Keep All Photos reachable. | Picks favor useful variety and suppress junk; each moment uses real capture evidence and keeps every original accessible. |
 | 6 | Quiet identity | Keep the existing password protocol, protected remembered password and renewal. Remove competing consumer setup paths and technical credential terminology. | First Save offers one password entry or New Fotoro; returning users continue their action without retyping a remembered password. |
-| 7 | Obvious manual Save | Keep one durable queue and explicit authorization. Present the chosen count, progress, Saved, Pause and one appropriate Continue/Retry action in context. | Backgrounding, offline recovery, re-sign-in and repeated taps cannot lose selection, create duplicate copies or save unrelated photos. |
+| 7 | Simple photo sync and chosen Save | Keep one durable queue. One explicit Turn on sync choice covers permitted supported photos, while manual Save retains the exact chosen sources. Show progress and persistent Pause/Resume. | Reopening respects account, service, Photos access and Pause; repeated taps never duplicate copies or bypass consent. |
 | 8 | Dependable other-device library | Keep signed catalog verification, encrypted previews and unchanged originals. Make Saved understandable on native and web, with direct /saved entry and the same password on each device. | A fresh device opens the same account, sees the chosen photos and retrieves identical JPEG/PNG/HEIC originals. |
 | 9 | Share a chosen moment | Keep accepted contacts, selected grants, canonical invitations and recipient-owned Save. Present one recipient picker and the selected set. | A two-person journey sends the intended set, opens it and saves an independent copy without resuming unrelated uploads. |
 | 10 | Simple receiving and adding back | Keep explicit identity acceptance, access-ended states and contribution checks. Show the sender, photos and one next action. | A valid invitation survives sign-in and returning to the app; the recipient can view, Save and add selected owned photos back. |
@@ -152,7 +154,7 @@ are separate checks. “Partial” identifies a concrete remaining capability.
 | 40 | Exact duplicate review | Not implemented. SHA-256 verifies originals; it does not automatically delete or merge photos. |
 | 41 | Trash and undo | Not implemented. Requires recoverable signed deletion before consumer deletion is exposed. |
 | 42 | Free phone storage after verified backup | Not implemented. Requires full media-resource restore proof and explicit deletion consent. |
-| 43 | Quotas/GC/restore operations | Private R2/D1 and durable journals exist. Quotas, final-object collection and operational restore proof remain open. |
+| 43 | Quotas/GC/restore operations | Atomic account ciphertext allocation limits and production auth throttles are implemented. Final-object collection and operational restore proof remain open. Written or ambiguous attempts keep their charge; staging plus final copies can exceed the allocated ciphertext bytes. |
 | 44 | Private diagnostics | Bounded protected state/timing/count diagnostics are implemented; credential, filename and raw path logging is excluded. |
 | 45 | Export/delete/permissions | Original export, local retention clearing and Photos permission controls are implemented. Whole-account export/deletion remain open. |
 | 46 | Accessibility | Focused native/web password entry, native keyboard submit and Clear selection, and 44 px web search choices are verified. Public native Info is checked at accessibility-medium; full VoiceOver/Dynamic Type acceptance remains open. |

@@ -25,6 +25,9 @@ invocation_logs = false
 
 [env.production.vars]
 AUTH_MODE = "production"
+ACCOUNT_STORAGE_LIMIT_BYTES = "10737418240"
+AUTH_REQUESTS_PER_MINUTE = "30"
+ENROLLMENTS_PER_MINUTE = "6"
 APPLE_APP_IDS = "A7TGPQ27JF.cloud.fotoro.Fotoro"
 
 [[env.production.d1_databases]]
