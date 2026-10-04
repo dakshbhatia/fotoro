@@ -64,10 +64,14 @@ both remain in R2; object collection and complete restore qualification remain
 open. Full Release build 25 is App Store distribution-signed and passes strict
 signature, build identity, exact production associated-domain and matching-dSYM
 checks. Its exact IPA passed Apple validation and upload; the API reports VALID
-/ MISSING_EXPORT_COMPLIANCE with encryption use unset. What to Test notes are
-saved and verified. The prepared factual declaration still awaits the owner's
-France availability answer. TestFlight access and new physical installation are
-not established; the previous owner's phone window is not reused.
+/ IN_BETA_TESTING, and the existing Fotoro Internal group includes build 25.
+What to Test notes are saved and verified. The owner excludes France from the
+first release. Apple refused an uploaded declaration resource for this factual
+combination; published third-party encryption outside France requires no such
+document. The documented exempt-documentation build metadata is saved and read
+back without changing encryption or IPA bytes. App Store availability is not yet
+configured and must exclude France before first publication. New physical
+installation remains unverified; the earlier phone window is not reused.
 
 PR 25 is merged and its main CI run passes. Production migration 0006 has no
 pending successors. The new Worker is read back at 100%; all published entry
@@ -788,10 +792,10 @@ records; it cannot enumerate an iPhone photo library automatically.
 
 ## Remaining release gates
 
-- Full encrypted TestFlight access: build 24 is uploaded and `VALID` but remains
-  `MISSING_EXPORT_COMPLIANCE`. Its actual encryption declaration and France
-  distribution answer are open. Local Photos preview build 3 is separately
-  `VALID / IN_BETA_TESTING`; personal TestFlight installation remains unverified.
+- Full encrypted TestFlight access: build 25 is `VALID / IN_BETA_TESTING` in
+  Fotoro Internal. The owner excludes France from first App Store publication;
+  the documented encryption metadata is saved and verified. Local Photos preview
+  build 3 remains separate. Personal TestFlight installation remains unverified.
   Full build 21 is the last verified physical installation and successful launch;
   build 25 has no physical installation claim.
   Production HTTPS, API routing and the signed passkey association now pass.

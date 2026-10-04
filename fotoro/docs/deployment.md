@@ -45,13 +45,16 @@ acceptance remain separate from Worker deployment. Full Release 0.1.0 (25)
 from the current photo-journey follow-up is now App Store distribution-signed. Its exact IPA passed
 strict signature, app identity, associated domains, full-encryption and matching
 dSYM checks, Apple validation and upload. App Store Connect reports `VALID` and
-`MISSING_EXPORT_COMPLIANCE`; `usesNonExemptEncryption` remains unset. Existing
-`Fotoro Internal` receives all builds, but this does not establish installable
-access before compliance clears. What to Test notes are saved and read back.
-The owner has restored the Xcode account; distribution signing is resolved.
-France availability remains the missing owner input for the prepared encryption
-declaration. No declaration or exemption override has been submitted, and no
-new physical installation is claimed. See [verification](verification.md).
+`IN_BETA_TESTING`; the existing `Fotoro Internal` group includes build 25.
+What to Test notes are saved and read back. The owner excludes France from the
+first release. Apple rejected a declaration-document resource for the verified
+non-proprietary, published third-party encryption outside France; its guidance
+permits `usesNonExemptEncryption=false` for encryption exempt from documentation.
+That per-build metadata is saved and verified; full encryption and the exact IPA
+remain unchanged. App Store availability has no configured resource yet: first
+publication must exclude France. Distribution signing is resolved. No new tester,
+public App Store release or physical installation is claimed. See
+[verification](verification.md).
 
 ## Previous release checkpoints
 
