@@ -252,6 +252,29 @@ final class RecentPhotosTests: XCTestCase {
     empty.authorize(access)
     XCTAssertNil(empty.consume(active: true, access: access))
   }
+  func testAutomaticSyncConsentRequiresTheSameActivatedAccountOriginAndForeground() {
+    let catalog = NSObject(), replacement = NSObject()
+    let access = PhotoAccountAccess(account: "opened", vault: UUID(), catalog: ObjectIdentifier(catalog))
+    var consent = AutomaticPhotoSyncConsent()
+    XCTAssertFalse(consent.consume(active: true, access: access, origin: "https://fotoro.cloud"))
+    consent.authorize(access, origin: "https://fotoro.cloud")
+    XCTAssertFalse(consent.consume(active: false, access: access, origin: "https://fotoro.cloud"))
+    XCTAssertFalse(consent.consume(active: true, access: access, origin: "https://other.example"))
+    XCTAssertFalse(consent.consume(active: true, access: nil, origin: "https://fotoro.cloud"))
+    let changed = [PhotoAccountAccess(account: "another", vault: access.vault, catalog: access.catalog),
+      PhotoAccountAccess(account: access.account, vault: UUID(), catalog: access.catalog),
+      PhotoAccountAccess(account: access.account, vault: access.vault, catalog: ObjectIdentifier(replacement))]
+    for other in changed {
+      consent.authorize(other, origin: "https://fotoro.cloud")
+      XCTAssertFalse(consent.consume(active: true, access: other, origin: "https://fotoro.cloud"))
+    }
+    XCTAssertTrue(consent.consume(active: true, access: access, origin: "https://fotoro.cloud"))
+    XCTAssertFalse(consent.consume(active: true, access: access, origin: "https://fotoro.cloud"))
+    var cancelled = AutomaticPhotoSyncConsent()
+    cancelled.authorize(access, origin: "https://fotoro.cloud")
+    cancelled.cancel()
+    XCTAssertFalse(cancelled.consume(active: true, access: access, origin: "https://fotoro.cloud"))
+  }
   func testPendingManualSaveCanAuthorizeWhenAccountRestorationFinishes() {
     let source = RecentPhotoSource(id: "chosen", revision: "original")
     let catalog = NSObject()

@@ -9,6 +9,7 @@ import { savePhoto } from "./saves";
 import * as annotations from "./annotations";
 import {diagnosticMethod, diagnosticPhase, diagnosticErrorClass} from "./diagnostics";
 import { readJson } from "./requests";
+import {accountStorage, throttleAuth} from "./limits";
 const app = new Hono<{ Bindings: Env; Variables: { actor: Actor } }>();
 app.onError((error, c) => {
   const e =
@@ -27,6 +28,7 @@ app.onError((error, c) => {
   const phase = e.diagnostic?.phase ?? diagnosticPhase(c.req.path);
   const errorClass = e.diagnostic?.errorClass ?? diagnosticErrorClass(e.code, e.status);
   const diagnostic = JSON.stringify({event: "api.error", requestId, method, status: e.status, code: e.code, phase, errorClass});
+  if (e.retryAfterSeconds) c.header("Retry-After", String(e.retryAfterSeconds));
   if (e.status >= 500) console.error(diagnostic);
   else console.warn(diagnostic);
   return c.json(
@@ -76,6 +78,12 @@ app.use("/v1/*", async (c, next) => {
     if (c.req.method !== "GET") auth.origin(c.env, c.req.raw);
     c.set("actor", await auth.actorFor(c.env, c.req.raw));
   }
+  if (c.req.method === "POST" && (c.req.path.startsWith("/v1/auth/") && c.req.path !== "/v1/auth/logout" || c.req.path === "/v1/devices/enroll")) {
+    auth.origin(c.env, c.req.raw);
+    await throttleAuth(c.env, c.req.raw,
+      /^\/v1\/auth\/(start|register)\/options$/.test(c.req.path) || c.req.path === "/v1/devices/enroll",
+      c.req.path === "/v1/devices/enroll" ? c.get("actor").accountId : undefined);
+  }
   await next();
 });
 for (const kind of ["register", "login", "recovery", "start"]) {
@@ -99,6 +107,10 @@ app.post("/v1/auth/logout", async (c) => {
 app.get("/v1/vault", async (c) =>
   c.json(await auth.vault(c.env, c.get("actor").accountId)),
 );
+app.get("/v1/storage", async (c) => {
+  c.header("Cache-Control", "no-store");
+  return c.json(await accountStorage(c.env, c.get("actor")));
+});
 app.put("/v1/vault/wrappers/:id", async (c) =>
   c.json(
     await auth.putWrapper(

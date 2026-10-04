@@ -1,6 +1,7 @@
 import type { AccountCardV1, GrantV1 } from "@fotoro/contracts";
 import type { FotoroShareLink } from "@fotoro/contracts/share-links";
 import type { Photo } from "../library/catalog";
+import {accountLimitMessage} from "./api-errors";
 
 export const sameIdentity = (a: AccountCardV1, b: AccountCardV1) =>
   a.accountId === b.accountId && a.boxPublicKey === b.boxPublicKey && a.signingPublicKey === b.signingPublicKey;
@@ -11,6 +12,8 @@ export function grantState(grant: GrantV1, now = Date.now()) {
   return grant.expiresAt ? `Until ${new Date(grant.expiresAt).toLocaleTimeString([], {hour: "numeric", minute: "2-digit"})}` : "Ongoing";
 }
 export function readableShareError(error: unknown) {
+  const limit = accountLimitMessage(error);
+  if (limit) return limit;
   const code = error instanceof Error ? error.message : "";
   if (error instanceof Error && error.name === "AbortError") return "";
   const messages: Record<string, string> = {

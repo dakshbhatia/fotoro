@@ -137,7 +137,7 @@ struct FotoroPasswordView: View {
     NavigationStack {
       ScrollView {
         VStack(alignment: .leading, spacing: 20) {
-          Text("On another device, open fotoro.cloud/saved or choose Saved in Fotoro. Use this same password to see the photos you explicitly Save.")
+          Text("On another device, open fotoro.cloud/saved or choose Saved in Fotoro. Use this same password to see your saved photos.")
             .foregroundStyle(.secondary)
           Link("fotoro.cloud/saved", destination: URL(string: "https://fotoro.cloud/saved")!)
             .accessibilityIdentifier("account.otherDeviceWebsite")

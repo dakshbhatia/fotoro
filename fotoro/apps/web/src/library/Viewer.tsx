@@ -8,6 +8,7 @@ import {requireVault, type UnlockedVault} from "../vault/vault";
 import {sameVault} from "../vault/scope";
 import {canShareOriginal, downloadOriginal, OriginalShareAttempt} from "./system-share";
 import {useDialogFocus} from "./dialog-focus";
+import {photoChangeState, type ConsumerPhotoChanges} from "./consumer-changes";
 export function viewerPhotoIndex(photos: Photo[], selected: string) {
   return Math.max(0, photos.findIndex(photo => photo.manifest.photoId === selected));
 }
@@ -19,20 +20,24 @@ export function Viewer({
   onLabels,
   onShare,
   onFavorite,
+  changes,
 }: {
   photos: Photo[];
   initial: string;
   onClose: () => void;
   onSaved: () => void;
-  onLabels?: (photo: Photo, labels: string[]) => void;
+  onLabels?: (photo: Photo, labels: string[]) => void | Promise<void>;
   onShare?: (photo: Photo) => void;
-  onFavorite?: (photo: Photo, favorite: boolean) => void;
+  onFavorite?: (photo: Photo, favorite: boolean) => void | Promise<void>;
+  changes?: ConsumerPhotoChanges;
 }) {
   const [selected, setSelected] = useState(initial),
     [url, setUrl] = useState(""),
     [zoom, setZoom] = useState(false),
     [details, setDetails] = useState(false),
     [status, setStatus] = useState(""),
+    [editError, setEditError] = useState(""),
+    [savingChanges, setSavingChanges] = useState(false),
     [label, setLabel] = useState(""),
     [saving, setSaving] = useState(false),
     [saveState, setSaveState] = useState<"idle" | "saved" | "failed">("idle"),
@@ -44,6 +49,7 @@ export function Viewer({
   const panel = useRef<HTMLDivElement>(null), originalPanel = useRef<HTMLElement>(null), originalButton = useRef<HTMLButtonElement>(null), hadOriginalOptions = useRef(false);
   const index = viewerPhotoIndex(photos, selected), photo = photos[index];
   const currentPhoto = useRef(photo), mounted = useRef(false), shareGeneration = useRef(0), savingRef = useRef(false);
+  const savingChangesRef = useRef(false);
   currentPhoto.current = photo;
   const authorized = (source: Photo, session: UnlockedVault) => mounted.current && currentPhoto.current === source && sameVault(session);
   useDialogFocus(panel, () => prepared ? setPrepared(null) : onClose());
@@ -77,6 +83,7 @@ export function Viewer({
     setLabel("");
     setUrl("");
     setStatus("");
+    setEditError("");
     setSaveState("idle");
     setZoom(false);
     photoBytes(photo, "preview")
@@ -99,6 +106,13 @@ export function Viewer({
     };
   }, [photo?.manifest.photoId]);
   if (!photo) return null;
+  const correction = photoChangeState(photo.grantId ? undefined : changes, photo.manifest.photoId, photo.metadata.originalSha256, photo.manifest.ownerAccountId);
+  const applyChange = async (action: () => void | Promise<unknown>) => {
+    const source = photo;
+    let session: UnlockedVault | undefined;
+    try {session = requireVault(); await action(); if (mounted.current && sameVault(session)) setEditError("");}
+    catch {if (session && mounted.current && sameVault(session) && currentPhoto.current?.manifest.photoId === source.manifest.photoId && currentPhoto.current?.metadata.originalSha256 === source.metadata.originalSha256) setEditError("Changes could not be kept. Try again.");}
+  };
   const prepareShare = async () => {
     const session = requireVault(), generation = ++shareGeneration.current;
     setPreparingShare(true); setStatus("Preparing original…");
@@ -184,13 +198,13 @@ export function Viewer({
           <Icon kind="previous" />
         </button>
         <button onClick={() => setZoom(!zoom)}>{zoom ? "Fit" : "Zoom"}</button>
-        {onShare && !photo.grantId && <button onClick={() => onShare(photo)}>Share</button>}
+        {onShare && !photo.grantId && <button onClick={() => onShare(photo)}>Share in Fotoro</button>}
         <button
           ref={originalButton}
           disabled={preparingShare || sharing}
           onClick={() => void prepareShare()}
         >
-          {preparingShare ? "Preparing…" : sharing ? "Sharing…" : onShare ? "Original" : "Share"}
+          {preparingShare ? "Preparing…" : sharing ? "Sharing…" : "Share original"}
         </button>
         {photo.grantId && (
           <button
@@ -238,14 +252,23 @@ export function Viewer({
             · {new Date(photo.metadata.sourceDate).toLocaleString()}
           </p>
           {!photo.grantId && <>
-            {onFavorite && <button aria-pressed={photo.annotations?.favorite === true} onClick={() => onFavorite(photo, photo.annotations?.favorite !== true)}>{photo.annotations?.favorite ? "Unfavorite" : "Favorite"}</button>}
+            {(correction.pending || correction.error || editError) && <section className="viewer-changes" aria-label="Photo changes">
+              <p role="status">{correction.error || editError || (correction.conflict ? "This photo changed on another device. Review before saving." : "Changes stay on this device until you Save changes.")}</p>
+              {correction.pending && changes && <button disabled={correction.busy || savingChanges} onClick={() => {
+                if (savingChangesRef.current || !changes.current()) return;
+                if (correction.conflict) {changes.review(); return;}
+                savingChangesRef.current = true; setSavingChanges(true);
+                void applyChange(async () => {if (!await changes.save()) throw new Error("SAVE_FAILED");}).finally(() => {savingChangesRef.current = false; if (mounted.current) setSavingChanges(false);});
+              }}>{savingChanges ? "Saving changes…" : correction.conflict ? "Review changes" : "Save changes"}</button>}
+            </section>}
+            {onFavorite && <button aria-pressed={photo.annotations?.favorite === true} onClick={() => void applyChange(() => onFavorite(photo, photo.annotations?.favorite !== true))}>{photo.annotations?.favorite ? "Unfavorite" : "Favorite"}</button>}
             <h3>Labels</h3>
-            <div className="local-labels">{(photo.annotations?.labels ?? []).map((value, index) => onLabels ? <button key={index} aria-label={"Remove label " + value} onClick={() => onLabels(photo, photo.annotations!.labels!.filter((_, position) => position !== index))}>{value} ×</button> : <span key={index}>{value}</span>)}</div>
+            <div className="local-labels">{(photo.annotations?.labels ?? []).map((value, index) => onLabels ? <button key={index} aria-label={"Remove label " + value} onClick={() => void applyChange(() => onLabels(photo, photo.annotations!.labels!.filter((_, position) => position !== index)))}>{value} ×</button> : <span key={index}>{value}</span>)}</div>
             {onLabels && <form className="local-label-form" onSubmit={event => {
               event.preventDefault();
               const labels = photo.annotations?.labels ?? [];
               if (!label.trim() || labels.length >= 64) return;
-              if (!labels.includes(label)) onLabels(photo, [...labels, label]);
+              if (!labels.includes(label)) void applyChange(() => onLabels(photo, [...labels, label]));
               setLabel("");
             }}><label>New label<input aria-label="New label" value={label} maxLength={120} onChange={event => setLabel(event.target.value)} /></label><button disabled={!label.trim() || (photo.annotations?.labels?.length ?? 0) >= 64}>Add label</button></form>}
             {photo.annotations?.ocr && <details><summary>Text in photo</summary><p className="local-ocr-text">{photo.annotations.ocr.text || "No readable text found."}</p></details>}
@@ -253,7 +276,7 @@ export function Viewer({
         </aside>
       )}
       <p role="status" className="viewer-status">
-        {status}
+        {status || (!details && (correction.error || editError || (correction.pending ? "Changes on this device · open Info to Save changes" : "")))}
       </p>
     </div>
   );

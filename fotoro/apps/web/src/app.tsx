@@ -8,6 +8,8 @@ import {IncomingShareIntent} from "./exchange/sharing";
 import {parseShareLink} from "@fotoro/contracts/share-links";
 import {requireVault} from "./vault/vault";
 import type {Photo} from "./library/catalog";
+import {hasRememberedAccount} from "./vault/account-reference";
+import type {ConsumerPhotoChanges} from "./library/consumer-changes";
 function readIncomingLink() {
   if (!/^#(?:contact|moment)(?:=|$)/.test(location.hash)) return null;
   try {
@@ -30,6 +32,14 @@ export default function App() {
     [savedViewer, setSavedViewer] = useState<string | null>(null),
     [saveIntent, setSaveIntent] = useState<ChosenSaveIntent | null>(null),
     [sharePhotos, setSharePhotos] = useState<Photo[] | null>(null);
+  const [rememberedAccount, setRememberedAccount] = useState(false);
+  const [photoChanges, setPhotoChanges] = useState<ConsumerPhotoChanges | null>(null);
+  useEffect(() => {
+    let current = true;
+    const read = () => {void hasRememberedAccount().then(value => {if (current) setRememberedAccount(value);}).catch(() => {});};
+    read(); window.addEventListener("fotoro-lock", read);
+    return () => {current = false; window.removeEventListener("fotoro-lock", read);};
+  }, [ownedPhotos?.accountId]);
   const pendingShare = useRef(incoming);
   const cancelIncoming = useCallback(() => {
     pendingShare.current?.cancel(); pendingShare.current = null; setIncoming(null); setIncomingError("");
@@ -70,7 +80,7 @@ export default function App() {
     });
   };
   useEffect(() => {
-    const locked = () => {setOwnedPhotos(null); setSavedViewer(null); setSharePhotos(null); pendingSave.current?.vaultLocked(); pendingShare.current?.vaultLocked(); if (pendingShare.current && !pendingShare.current.pending) cancelIncoming();};
+    const locked = () => {setOwnedPhotos(null); setPhotoChanges(null); setSavedViewer(null); setSharePhotos(null); pendingSave.current?.vaultLocked(); pendingShare.current?.vaultLocked(); if (pendingShare.current && !pendingShare.current.pending) cancelIncoming();};
     const hidden = () => {if (document.visibilityState === "hidden") cancelSave();};
     window.addEventListener("fotoro-lock", locked);
     window.addEventListener("pagehide", cancelSave);
@@ -90,6 +100,7 @@ export default function App() {
           onPhotosChange={setLocalPhotos}
           syncSummary={syncSummary}
           ownedPhotos={ownedPhotos}
+          rememberedAccount={rememberedAccount}
           onOpenSaved={photoId => {
             photoOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
             setSavedViewer(photoId);
@@ -133,17 +144,18 @@ export default function App() {
               localPhotos={localPhotos}
               onSyncSummary={setSyncSummary}
               onOwnedPhotos={setOwnedPhotos}
+              onPhotoChanges={setPhotoChanges}
               onBack={returnToPhotos}
             />
           </Suspense>
         </div>
       )}
-      {viewingSaved && ownedPhotos && savedViewer && <Suspense fallback={<div className="viewer" role="dialog" aria-modal="true" aria-label="Opening photo"><header className="viewer-top glass"><p className="hint" role="status">Opening photo…</p><button autoFocus onClick={closeSavedPhoto}>Close</button></header></div>}><SavedViewer key={savedViewer} photos={ownedPhotos.photos} initial={savedViewer} onSaved={() => {}} onLabels={ownedPhotos.edit ? (photo, labels) => {
+      {viewingSaved && ownedPhotos && savedViewer && <Suspense fallback={<div className="viewer" role="dialog" aria-modal="true" aria-label="Opening photo"><header className="viewer-top glass"><p className="hint" role="status">Opening photo…</p><button autoFocus onClick={closeSavedPhoto}>Close</button></header></div>}><SavedViewer key={savedViewer} photos={ownedPhotos.photos} initial={savedViewer} onSaved={() => {}} changes={photoChanges?.token === ownedPhotos.token && photoChanges.current() ? {...photoChanges, review: () => {setSavedViewer(null); setOpened(true); setCloud(true); photoChanges.review();}} : undefined} onLabels={ownedPhotos.edit ? (photo, labels) => {
         if (!ownedPhotos.current() || !ownedPhotos.photos.includes(photo) || photo.grantId || photo.manifest.ownerAccountId !== ownedPhotos.accountId) return;
-        void ownedPhotos.edit?.(photo, {labels}).catch(() => {});
+        return ownedPhotos.edit?.(photo, {labels});
       } : undefined} onFavorite={ownedPhotos.edit ? (photo, favorite) => {
         if (!ownedPhotos.current() || !ownedPhotos.photos.includes(photo) || photo.grantId || photo.manifest.ownerAccountId !== ownedPhotos.accountId) return;
-        void ownedPhotos.edit?.(photo, {favorite}).catch(() => {});
+        return ownedPhotos.edit?.(photo, {favorite});
       } : undefined} onShare={photo => {
         if (!ownedPhotos.current() || !ownedPhotos.photos.includes(photo)) return;
         setSavedViewer(null); setSharePhotos([photo]); setOpened(true); setCloud(true);

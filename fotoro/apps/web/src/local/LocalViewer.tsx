@@ -77,7 +77,7 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
         try {const result = await shareAttempt.run(photo.file, current); if (current() && result !== "cancelled" && result !== "busy") onUse?.(photo.id);}
         catch (error) {if (current()) setStatus("The photo could not be shared. Download the original from Info.");}
         finally {if (alive.current) setSharing(false);}
-      }}>{sharing ? "Sharing…" : "Share"}</button> : <button onClick={download} disabled={!photo.file || sharing}>Download</button>}
+      }}>{sharing ? "Sharing…" : "Share original"}</button> : <button onClick={download} disabled={!photo.file || sharing}>Download original</button>}
       <button aria-label="Next photo" disabled={index === photos.length - 1} onClick={() => setSelected(photos[index + 1].id)}><Icon kind="next" /></button>
     </div>
     {details && <aside className="details local-details">

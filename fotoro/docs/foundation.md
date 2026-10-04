@@ -11,7 +11,7 @@ in place.
 | Photos permission, asset metadata, HEIC/still previews and thumbnails | PhotoKit, `PHAsset`, `PHCachingImageManager` and Apple's decoder                                                                                  |
 | Original-file sharing                                                 | `PHAssetResourceManager` and `UIActivityViewController`; browser Web Share or download                                                            |
 | Browser grid and previews                                             | React, the existing virtualized layout and a bounded sequential image cache                                                                       |
-| Encrypted saving and exchange                                         | The existing Fotoro protocol, libsodium, GRDB, Hono, D1 and private R2; one-password accounts and explicit manual saves                             |
+| Encrypted saving and exchange                                         | The existing Fotoro protocol, libsodium, GRDB, Hono, D1 and private R2; one-password accounts, chosen Save and account-scoped opt-in photo sync       |
 | Resumable Photos backup                                               | Account-scoped PhotoKit source checkpoints, atomic GRDB source/catalog/transfer insertion, sequential encrypted upload and receipt reconciliation |
 | Local text search and photo picks                                     | Apple's Vision OCR and bounded on-device image analysis; browser OCR and preview analysis use same-origin assets                                  |
 

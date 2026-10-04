@@ -182,6 +182,10 @@ private struct PhotosAccountPresentation: Identifiable {
   let selection: [RecentPhotoSource]?
   var incoming: FotoroShareLink? = nil
 }
+private struct PhotoSyncPresentation: Identifiable {
+  let id = UUID()
+  let services: AppServices
+}
 #endif
 
 enum RecentPhotosContentMode {
@@ -203,10 +207,10 @@ private enum PhotoHomeScope: String, CaseIterable, Identifiable, Hashable {
   var id: String { rawValue }
   var hint: String {
     switch self {
-    case .photos: "Photos you allow Fotoro to access on this device."
-    case .picks: "Suggested best shots from the last 10 days. You choose what to Save."
+    case .photos: "On this device."
+    case .picks: "Your best recent shots."
     #if !FOTORO_LOCAL_PREVIEW
-    case .saved: "Only photos you explicitly Save, available across devices."
+    case .saved: "Photos saved to Fotoro, across your devices."
     #endif
     }
   }
@@ -224,6 +228,8 @@ struct RecentPhotosView: View {
 #if !FOTORO_LOCAL_PREVIEW
   @State private var services: AppServices?
   @State private var backupAccount: PhotosAccountPresentation?
+  @State private var photoSyncPresentation: PhotoSyncPresentation?
+  @State private var pendingPhotoSync = false
   @State private var searchHits: [ConsumerSearchHit] = []
   @State private var savedResults: [String: LocalPhoto] = [:]
   @State private var savedViewer: SavedPhotoViewerPresentation?
@@ -428,6 +434,7 @@ struct RecentPhotosView: View {
       .sheet(item: $backupAccount) {
         LibraryView(services: $0.services, saveSelection: $0.selection, incomingLink: $0.incoming)
       }
+      .sheet(item: $photoSyncPresentation) { PhotoSyncView(services: $0.services) }
       .onOpenURL { url in
         do {
           let incoming = try FotoroShareLinks.parse(url, expectedOrigin: services?.api.origin ?? FotoroShareLinks.origin)
@@ -435,6 +442,7 @@ struct RecentPhotosView: View {
           services?.bindLocalSearch(search); services?.bindRecentPhotos(store)
           queryFocused = false; pendingShare = nil; shareTask?.cancel(); cleanupShare()
           settings = false; viewer = nil; savedViewer = nil
+          photoSyncPresentation = nil
           if let services { backupAccount = PhotosAccountPresentation(services: services, selection: nil, incoming: incoming) }
         } catch { store.error = error.localizedDescription }
       }
@@ -489,6 +497,7 @@ struct RecentPhotosView: View {
         .sheet(isPresented: $settings, onDismiss: {
 #if !FOTORO_LOCAL_PREVIEW
           if pendingBackup { pendingBackup = false; openBackup() }
+          else if pendingPhotoSync { pendingPhotoSync = false; openPhotoSync() }
 #endif
         }) { settingsView }
         .onChange(of: query) { cancelBestShots(); search.updateQuery(query) }
@@ -508,6 +517,7 @@ struct RecentPhotosView: View {
 #if !FOTORO_LOCAL_PREVIEW
           searchHits = []
           savedResults = [:]
+          services?.kickAutomaticPhotoSync(sourcesChanged: true)
 #endif
           store.refresh()
         }
@@ -515,12 +525,13 @@ struct RecentPhotosView: View {
           if scenePhase == .active {
             restorePhotos()
 #if !FOTORO_LOCAL_PREVIEW
+            services?.setPhotoSyncForeground(true)
             if let services { Task { await services.resumeSavedAccount() } }
 #endif
           } else {
             cancelBestShots()
 #if !FOTORO_LOCAL_PREVIEW
-            services?.backup.pause()
+            services?.setPhotoSyncForeground(false)
             if scenePhase == .background {
               savedPassword = nil
               homeAuthenticationTask?.cancel()
@@ -539,6 +550,7 @@ struct RecentPhotosView: View {
             if services == nil { services = try AppServices() }
             services?.bindLocalSearch(search)
             services?.bindRecentPhotos(store)
+            services?.setPhotoSyncForeground(scenePhase == .active)
             await services?.resumeSavedAccount(initialRestoration: true)
           } catch { store.error = error.localizedDescription }
 #endif
@@ -889,6 +901,12 @@ struct RecentPhotosView: View {
       HStack {
         Text("Fotoro").font(.system(.largeTitle, design: .rounded, weight: .bold))
         Spacer()
+#if !FOTORO_LOCAL_PREVIEW
+        Button("Sync", systemImage: services?.automaticPhotoSync.enabled == true ? "icloud.fill" : "icloud") { openPhotoSync() }
+          .labelStyle(.iconOnly).font(.title3).frame(width: 44, height: 44)
+          .background(.white.opacity(0.12), in: .circle).foregroundStyle(.white)
+          .accessibilityIdentifier("home.sync")
+#endif
         Button("Settings", systemImage: "gearshape") { queryFocused = false; settings = true }
           .labelStyle(.iconOnly).font(.title3).frame(width: 44, height: 44)
           .background(.white.opacity(0.12), in: .circle).foregroundStyle(.white)
@@ -1004,7 +1022,9 @@ struct RecentPhotosView: View {
           if let services {
             AccountIdentityView(session: services.session, unlocked: services.vault.isUnlocked)
           }
-          Text("Automatic sync is off. Save photos when you choose.")
+          Button(services?.automaticPhotoSync.enabled == true ? "Sync settings" : "Turn on sync", systemImage: "icloud.and.arrow.up") {
+            pendingPhotoSync = true; settings = false
+          }.accessibilityIdentifier("settings.sync")
           Button("Saved photos") { pendingBackup = true; settings = false }
           if let services {
             if services.auth.hasSavedPassword {
@@ -1106,6 +1126,16 @@ struct RecentPhotosView: View {
   }
   private func openBackup() {
     presentAccount()
+  }
+  private func openPhotoSync() {
+    queryFocused = false
+    do {
+      if services == nil { services = try AppServices() }
+      services?.bindLocalSearch(search)
+      services?.bindRecentPhotos(store)
+      services?.setPhotoSyncForeground(scenePhase == .active)
+      if let services { photoSyncPresentation = PhotoSyncPresentation(services: services) }
+    } catch { store.error = error.localizedDescription }
   }
   private func reviewSave(_ sources: [RecentPhotoSource]) {
     guard !sources.isEmpty else { return }

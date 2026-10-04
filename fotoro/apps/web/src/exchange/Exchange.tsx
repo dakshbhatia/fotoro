@@ -28,7 +28,7 @@ export function Exchange({selection, incoming, onClose, onReceived, onRefresh, o
   selection: Photo[];
   incoming?: IncomingShareIntent | null;
   onClose: () => void;
-  onReceived: (photos: Photo[], grant: GrantV1) => void;
+  onReceived: (photos: Photo[], grant: GrantV1, sender?: string) => void;
   onRefresh: () => void;
   onRetryPassword?: () => void;
 }) {
@@ -89,7 +89,7 @@ export function Exchange({selection, incoming, onClose, onReceived, onRefresh, o
     if (incoming?.link.kind === "moment") {
       const result = await receive(incoming.link.grantId, scope, candidate);
       if (!current()) {for (const photo of result.photos) photo.metadataKey.fill(0); return;}
-      onReceived(result.photos, result.grant);
+      onReceived(result.photos, result.grant, candidateName.trim() || "Fotoro " + result.grant.ownerAccountId.slice(0, 8));
     } else {setCandidate(undefined); setLinkInput(""); setStatus("Contact accepted. You can share photos with this person.");}
   }, incoming?.link.kind === "moment" ? "Opening shared photos…" : "Accepting contact…");
   const copyLink = (value: string) => run(async () => {
@@ -128,7 +128,7 @@ export function Exchange({selection, incoming, onClose, onReceived, onRefresh, o
     </div> : !isMoment && <>
       {count > 0 && <>
         {people.length > 0 && <div className="share-recipients" role="group" aria-label="Choose a person"><h3>Choose a person</h3>{people.map(person => <button key={person.accountId} disabled={busy} aria-pressed={recipient?.accountId === person.accountId} onClick={() => setRecipient(person)}>{contactLabel(person.accountId)}{recipient?.accountId === person.accountId && <span aria-hidden="true"> ✓</span>}</button>)}</div>}
-        <details open={people.length === 0}><summary>{people.length ? "Add a person" : "Connect with a person"}</summary><form onSubmit={event => {event.preventDefault(); void inspectLink();}}><label>Recipient’s contact link<input type="url" autoComplete="off" value={linkInput} onChange={event => setLinkInput(event.target.value)} placeholder="https://fotoro.cloud/#contact=…" /></label><button disabled={busy || !linkInput.trim()}>Continue</button></form></details>
+        <details open={people.length === 0}><summary>{people.length ? "Add a person" : "Connect with a person"}</summary><form onSubmit={event => {event.preventDefault(); void inspectLink();}}><p className="hint">Ask this person to open Shared and send you their contact link. After you connect, send them the photo invitation.</p><label>Recipient’s contact link<input type="url" autoComplete="off" value={linkInput} onChange={event => setLinkInput(event.target.value)} placeholder="https://fotoro.cloud/#contact=…" /></label><button disabled={busy || !linkInput.trim()}>Continue</button></form></details>
         <details><summary>Photo access</summary><label>Access<select value={access} disabled={busy} onChange={event => setAccess(event.target.value as "ongoing" | "temporary")}><option value="ongoing">Until I end access</option><option value="temporary">15 minutes</option></select></label></details>
         <button className="primary-action" disabled={busy || !recipient || count > 100} onClick={() => void run(async () => {
           const grant = await sharePhotos(snapshot.photos, recipient!, access, scope);
@@ -145,7 +145,7 @@ export function Exchange({selection, incoming, onClose, onReceived, onRefresh, o
     {!isMoment && <details className="share-inbox" open={!count}><summary>{count ? "Shared moments" : "Received and sent"}</summary>
       <div className="share-inbox-heading"><h3>Received photos</h3><button disabled={busy} onClick={() => void run(reload, "Refreshing shared photos…")}>Refresh</button></div>
       {!received.length && <p className="hint">Photos shared with you appear here.</p>}
-      {received.map(grant => <div className="grant" key={grant.grantId}><p>Photos from {contactLabel(grant.ownerAccountId)}</p><p className="hint">{grantState(grant, now)}</p><button disabled={busy || !!grant.revokedAt || (!!grant.expiresAt && Date.parse(grant.expiresAt) <= now)} onClick={() => void run(async () => {const result = await receive(grant.grantId, scope); if (current()) onReceived(result.photos, result.grant); else for (const photo of result.photos) photo.metadataKey.fill(0);}, "Opening shared photos…")}>Open photos</button>{count > 0 && grant.role === "contributor" && <button disabled={busy || !!grant.revokedAt || (!!grant.expiresAt && Date.parse(grant.expiresAt) <= now)} onClick={() => void run(async () => {await contribute(grant, snapshot.photos, scope); if (current()) {setStatus("Photos added."); onRefresh();}}, "Adding selected photos…")}>Add selected photos</button>}</div>)}
+      {received.map(grant => <div className="grant" key={grant.grantId}><p>Photos from {contactLabel(grant.ownerAccountId)}</p><p className="hint">{grantState(grant, now)}</p><button disabled={busy || !!grant.revokedAt || (!!grant.expiresAt && Date.parse(grant.expiresAt) <= now)} onClick={() => void run(async () => {const result = await receive(grant.grantId, scope); if (current()) onReceived(result.photos, result.grant, contactLabel(result.grant.ownerAccountId)); else for (const photo of result.photos) photo.metadataKey.fill(0);}, "Opening shared photos…")}>Open photos</button>{count > 0 && grant.role === "contributor" && <button disabled={busy || !!grant.revokedAt || (!!grant.expiresAt && Date.parse(grant.expiresAt) <= now)} onClick={() => void run(async () => {await contribute(grant, snapshot.photos, scope); if (current()) {setStatus("Photos added."); onRefresh();}}, "Adding selected photos…")}>Add selected photos</button>}</div>)}
       {!count && <form onSubmit={event => {event.preventDefault(); void inspectLink();}}><label>Add someone’s contact link<input type="url" autoComplete="off" value={linkInput} onChange={event => setLinkInput(event.target.value)} placeholder="https://fotoro.cloud/#contact=…" /></label><button disabled={busy || !linkInput.trim()}>Continue</button></form>}
       {sent.length > 0 && <details><summary>Sent photos</summary>{sent.map(grant => <div className="grant" key={grant.grantId}><p>Shared with {contactLabel(grant.recipientAccountId)}</p><p className="hint">{grantState(grant, now)}</p><div className="actions"><button disabled={busy || !!grant.revokedAt || (!!grant.expiresAt && Date.parse(grant.expiresAt) <= now)} onClick={() => shareLink(createMomentLink(grant.grantId, session.card))}>Share invitation</button><button disabled={busy || !!grant.revokedAt} onClick={() => void run(async () => {await api("/v1/grants/" + grant.grantId, undefined, "GrantV1", "DELETE", scope.signal); if (current()) {await reload(); setStatus("Access ended. Copies already saved stay in their library.");}}, "Ending access…")}>End access</button></div></div>)}</details>}
     </details>}

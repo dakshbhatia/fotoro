@@ -24,7 +24,7 @@ import {
   isPublicDemoAccount,
 } from "./exchange/api";
 import { Exchange } from "./exchange/Exchange";
-import {IncomingShareIntent} from "./exchange/sharing";
+import {IncomingShareIntent, grantState} from "./exchange/sharing";
 import {
   stageImport,
   pendingImports,
@@ -58,6 +58,9 @@ import {useDialogFocus} from "./library/dialog-focus";
 import {AccountAccess} from "./vault/AccountAccess";
 import {ChosenSaveIntent, type ChosenSaveSnapshot} from "./exchange/chosen-save";
 import type {UnlockedVault} from "./vault/vault";
+import {subscribeSavedRefresh} from "./library/consumer-refresh";
+import {saveQueuedAnnotations} from "./library/consumer-annotation-save";
+import type {ConsumerPhotoChanges} from "./library/consumer-changes";
 const noLocalPhotos: LocalPhoto[] = [];
 const SearchIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -76,6 +79,7 @@ export default function CloudApp({
   active = true,
   onSyncSummary,
   onOwnedPhotos,
+  onPhotoChanges,
   saveIntent = null,
   incoming = null,
   incomingError = "",
@@ -88,6 +92,7 @@ export default function CloudApp({
   active?: boolean;
   onSyncSummary?: (summary: ConsumerSyncSummary) => void;
   onOwnedPhotos?: (snapshot: OwnedPhotoSnapshot | null) => void;
+  onPhotoChanges?: (changes: ConsumerPhotoChanges | null) => void;
   saveIntent?: ChosenSaveIntent | null;
   incoming?: IncomingShareIntent | null;
   incomingError?: string;
@@ -115,6 +120,9 @@ export default function CloudApp({
     [busy, setBusy] = useState(false),
     [recovery, setRecovery] = useState(""),
     [pending, setPending] = useState<PendingImport[]>([]);
+  const [receivedContext, setReceivedContext] = useState<{grant: GrantV1; sender: string} | null>(null);
+  const [receivedNow, setReceivedNow] = useState(Date.now);
+  const [annotationError, setAnnotationError] = useState<{message: string; photoId?: string; originalSha256?: string} | null>(null);
   const [recoveryNew, setRecoveryNew] = useState(""),
     [reselect, setReselect] = useState<PendingImport | undefined>(undefined);
   const [lastSuccessfulSync, setLastSuccessfulSync] = useState<string | null>(null),
@@ -173,6 +181,7 @@ export default function CloudApp({
     setAccount("");
     setPhotos([]);
     setReceived(null);
+    setReceivedContext(null);
     setSelected(new Set());
     setSelecting(false);
     setPickedFiles([]);
@@ -183,6 +192,7 @@ export default function CloudApp({
     setReselect(undefined);
     setPending([]);
     setAnnotationPending([]);
+    setAnnotationError(null);
     setCommittedMeaning(undefined);
     setQuery("");
     setLastSuccessfulSync(null);
@@ -327,17 +337,17 @@ export default function CloudApp({
   }, [account]);
   useEffect(() => {
     if (!account) return;
-    const update = () => {
-      if (document.visibilityState === "visible" && !pausedRef.current)
-        void run(refresh);
-    };
-    window.addEventListener("online", update);
-    document.addEventListener("visibilitychange", update);
-    return () => {
-      window.removeEventListener("online", update);
-      document.removeEventListener("visibilitychange", update);
-    };
+    return subscribeSavedRefresh(window, document, () => {void run(refresh);});
   }, [account]);
+  useEffect(() => {
+    setReceivedNow(Date.now());
+    const expiresAt = receivedContext?.grant.expiresAt;
+    if (!expiresAt) return;
+    const remaining = Date.parse(expiresAt) - Date.now();
+    if (remaining <= 0) return;
+    const timer = window.setTimeout(() => setReceivedNow(Date.now()), Math.min(remaining + 1, 2_147_483_647));
+    return () => window.clearTimeout(timer);
+  }, [receivedContext]);
   useEffect(() => {
     const update = () => setOnline(navigator.onLine !== false);
     window.addEventListener("online", update); window.addEventListener("offline", update);
@@ -484,6 +494,19 @@ export default function CloudApp({
     }};
   }, [account, photos, publicDemo]);
   useEffect(() => {onOwnedPhotos?.(ownedSnapshot);}, [ownedSnapshot, onOwnedPhotos]);
+  const photoChanges = useMemo<ConsumerPhotoChanges | null>(() => {
+    if (!account || publicDemo) return null;
+    let session;
+    try {session = requireVault();} catch {return null;}
+    if (session.accountId !== account) return null;
+    return {token: session, accountId: session.accountId, current: () => sameVault(session), pending: annotationPending, busy,
+      error: annotationError?.message ?? "",
+      errorSource: annotationError?.photoId && annotationError.originalSha256 ? {photoId: annotationError.photoId, originalSha256: annotationError.originalSha256} : undefined,
+      save: async () => sameVault(session) ? saveAnnotationChanges(session) : false,
+      review: () => {if (sameVault(session)) setMenu(true);},
+    };
+  }, [account, publicDemo, annotationPending, busy, annotationError]);
+  useEffect(() => {onPhotoChanges?.(photoChanges);}, [photoChanges, onPhotoChanges]);
   const searchable = received ?? photos;
   const index = useMemo(() => new PhotoSearchIndex(cloudSearchRecords(searchable)), [searchable]);
   const searchResult = useMemo(() => index.search(query, {scope: "account:" + account, committedMeaning}), [index, query, account, committedMeaning]);
@@ -514,11 +537,33 @@ export default function CloudApp({
     setAnnotationPending(previous => sameVault(session) && current() ? edits : previous);
   };
   const editAnnotations = async (photo: Photo, changes: {labels?: string[]; favorite?: boolean}, session = requireVault()) => {
-    if (!sameVault(session) || !currentCatalog.current.includes(photo) || photo.grantId || photo.manifest.ownerAccountId !== session.accountId) return;
+    if (!sameVault(session) || !currentCatalog.current.includes(photo) || photo.grantId || photo.manifest.ownerAccountId !== session.accountId) throw new Error("VAULT_LOCKED");
     try {
+      setAnnotationError(null);
       await queueAnnotations({ownerAccountId: photo.manifest.ownerAccountId, photoId: photo.manifest.photoId, originalSha256: photo.metadata.originalSha256}, changes, session);
       await publishLocalAnnotations([photo], session);
-    } catch (error) {if (sameVault(session)) {setStatus(readableSyncError(error)); setNeedsAttention(true);}}
+    } catch (error) {if (sameVault(session)) {
+      const message = "Changes could not be kept on this device. Try again.";
+      setAnnotationError({message, photoId: photo.manifest.photoId, originalSha256: photo.metadata.originalSha256});
+      setStatus(message); setNeedsAttention(true);
+    } throw error;}
+  };
+  const saveAnnotationChanges = async (session = requireVault()) => {
+    if (!sameVault(session) || publicDemo || running.current) return false;
+    let failure = "Changes could not be saved. Check your connection and try again.";
+    const saved = await run(async () => {
+      try {
+        const result = await saveQueuedAnnotations(session);
+        if (!sameVault(session)) return false;
+        setPhotos(result.photos); setAnnotationPending(result.annotations);
+      }
+      catch (error) {failure = readableSyncError(error); throw error;}
+    });
+    if (sameVault(session)) {
+      setAnnotationError(saved ? null : {message: failure});
+      if (saved) {setStatus(""); setNeedsAttention(false);}
+    }
+    return saved;
   };
   useEffect(() => {
     if (!account || publicDemo) return;
@@ -673,14 +718,14 @@ export default function CloudApp({
             </div>
             <nav className="consumer-scopes" aria-label="Photo library">
               <button ref={backButton} onClick={onBack}>Photos</button>
-              <button aria-current={!received ? "page" : undefined} onClick={() => {setReceived(null); setQuery(""); setCommittedMeaning(undefined);}}>Saved</button>
+              <button aria-current={!received ? "page" : undefined} onClick={() => {setReceived(null); setReceivedContext(null); setQuery(""); setCommittedMeaning(undefined);}}>Saved</button>
               <button aria-current={received ? "page" : undefined} onClick={() => openSharing()}>Shared</button>
             </nav>
             <div className="consumer-section">
               <h2>{query ? "Search results" : received ? "Shared photos" : "Saved photos"}</h2>
               {!received && <button aria-pressed={selecting} onClick={() => setSelecting(value => !value)}>{selecting ? "Done" : "Select"}</button>}
             </div>
-            {!received && <p className="consumer-scope-hint">Photos you chose to Save in Fotoro, available across devices.</p>}
+            {!received && <p className="consumer-scope-hint">Photos saved in Fotoro, available across devices.</p>}
             {!received && (busy || localCount > 0 || summary.pending > 0 || summary.failed > 0 || needsAttention || annotationPending.length > 0) && <section className={"consumer-save-progress state-" + consumerSummary.state} aria-label="Save progress">
               <div><p role="status">{status || syncStateLabel[consumerSummary.state]}</p>{consumerSummary.detail && <p className="hint">{consumerSummary.detail}</p>}</div>
               <div className="actions">
@@ -691,10 +736,11 @@ export default function CloudApp({
             </section>}
             {received && (
               <div className="received-bar">
-                <span>Shared photos · open a photo to Save</span>
+                <span>{receivedContext ? <><strong>{received.length} {received.length === 1 ? "photo" : "photos"} from {receivedContext.sender}</strong><small>{grantState(receivedContext.grant, receivedNow)} · open a photo to Save your own copy</small></> : "Shared photos · open a photo to Save"}</span>
                 <button
                   onClick={() => {
                     setReceived(null);
+                    setReceivedContext(null);
                     setSelected(new Set());
                   }}
                 >
@@ -737,7 +783,7 @@ export default function CloudApp({
             {!received && selected.size > 0 && <div className="consumer-selection glass" aria-label="Selected photos">
               <span role="status">{selected.size} selected</span>
               <button onClick={() => setSelected(new Set())}>Clear</button>
-              <button className="primary-action" onClick={() => openSharing(chosen)}>Share</button>
+              <button className="primary-action" onClick={() => openSharing(chosen)}>Share in Fotoro</button>
             </div>}
             <input
               ref={input}
@@ -807,7 +853,7 @@ export default function CloudApp({
             <details>
               <summary>Open on another device</summary>
               <p className="hint">Open <a href="https://fotoro.cloud/saved" target="_blank" rel="noopener">fotoro.cloud/saved</a> and enter the same Fotoro password. In another Fotoro app, choose Saved.</p>
-              <p className="hint">Only photos you chose to Save appear there.</p>
+              <p className="hint">Automatic sync enabled in the Fotoro app can add photos here too. Photos opened in this browser stay here until you choose Save.</p>
             </details>
             <details>
               <summary>Settings</summary>
@@ -886,8 +932,9 @@ export default function CloudApp({
           onClose={closeSharing}
           onRetryPassword={incoming?.pending ? () => {incoming.retryPassword(); setExchange(false); setExchangePhotos([]); lockVault();} : undefined}
           onRefresh={() => run(refresh)}
-          onReceived={(items: Photo[], _grant: GrantV1) => {
+          onReceived={(items: Photo[], grant: GrantV1, sender?: string) => {
             setReceived(items);
+            setReceivedContext({grant, sender: sender || "Fotoro " + grant.ownerAccountId.slice(0, 8)});
             closeSharing();
             setQuery(""); setCommittedMeaning(undefined);
             setSelected(new Set());
@@ -900,8 +947,9 @@ export default function CloudApp({
           initial={viewer}
           onSaved={() => run(refresh)}
           onShare={!received ? photo => {setViewer(null); openSharing([photo]);} : undefined}
-          onLabels={!received && !publicDemo ? (photo, labels) => {void editAnnotations(photo, {labels});} : undefined}
-          onFavorite={!received && !publicDemo ? (photo, favorite) => {void editAnnotations(photo, {favorite});} : undefined}
+          changes={!received ? photoChanges ?? undefined : undefined}
+          onLabels={!received && !publicDemo ? (photo, labels) => editAnnotations(photo, {labels}) : undefined}
+          onFavorite={!received && !publicDemo ? (photo, favorite) => editAnnotations(photo, {favorite}) : undefined}
           onClose={() => setViewer(null)}
         />
       )}

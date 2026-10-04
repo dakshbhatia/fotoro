@@ -5,7 +5,7 @@ The default screen is a private local photo browser. The Ente tree at repository
 root remains a reference; the new app lives here. See [what we reuse](docs/foundation.md).
 The complete implementation and acceptance list is in [product work](docs/product-backlog.md).
 
-On iOS, Open Photos requests access and shows the last 10 days using PhotoKit and
+On iOS, Open Photos requests access and pages permitted still photos using PhotoKit and
 Apple's thumbnail cache. HEIC and Live Photo still previews use the system decoder.
 Dates, favorites, screenshots and GPS coordinates come from the Photos library.
 Browsing does not initialize an account or upload photos. Sharing explicitly
@@ -20,13 +20,18 @@ group by day or bounded capture-time moments; filters preserve reviewed selectio
 Saved photos
 opens the account library directly. Select → Save and the viewer's Save preserve
 the exact reviewed sources; an unlocked account starts that manual batch, and
-password entry completes the same Save if needed. Automatic sync is off.
+password entry completes the same Save if needed. Sync offers one explicit
+Turn on sync choice. It remembers this account and service, then saves permitted
+supported photos of any age and new photos while Fotoro is open. Pause persists
+across reopening; Resume is explicit. Turn off stops automatic work without
+deleting originals or photos already saved.
 
 One Fotoro password opens the same saved photos on iPhone and the web. New Fotoro
 creates that password; Open Fotoro opens the account. The iPhone keeps it in
 protected Keychain. A remembered account opens locally while its session is valid;
 expired sessions renew through a signed password proof at initial launch or an
-explicit Open Fotoro. Manual lock is respected and reopening never starts uploads.
+explicit Open Fotoro. Manual lock is respected. Reopening resumes photo sync only
+for an opted-in, unpaused account with current Photos access.
 Settings shows the current account reference, Fotoro password
 and Sign out. Existing passkeys remain under Settings, and existing recovery codes
 work in the password field.
@@ -48,7 +53,7 @@ In the browser, Open photos selects JPEG/PNG files and supported HEIC stills for
 day grouping, zoom and original sharing/download work without an account. The
 selection's Save action carries the chosen originals through password entry and
 starts the same manual save once the account opens. Saved photos opens read-only.
-browser cannot scan the iPhone Photos library. Settings optionally enables local
+The browser cannot scan the iPhone Photos library. Settings optionally enables local
 English text recognition and retained search. Retention saves encrypted labels,
 text, preferences and up to 100 MiB of previews using a browser-held key; originals
 are not retained. After reopening, reselecting the matching SHA-256 original
@@ -80,9 +85,10 @@ not teach a preference. Text mentions never establish named face identity.
 
 On iOS, select photos and tap Save, or tap Save in a photo viewer. Preparation
 processes one original at a time. Continue saving resumes queued encrypted files.
-Reopening Fotoro and editing labels do not start uploads. Opening Saved photos or
+Editing labels does not start uploads. Reopening Fotoro starts photo sync only
+after the explicit Turn on sync choice. Opening Saved photos or
 tapping Refresh downloads the catalog without sending queued uploads or edits.
-Encrypted file uploads scheduled by a manual batch can finish through iOS
+Encrypted file uploads already scheduled can finish through iOS
 background transfer; force quitting interrupts system transfers. In the browser,
 Settings → Sync photos connects the local canvas to the encrypted account catalog.
 Opening setup preserves selected files and
@@ -105,6 +111,13 @@ HEIC stills when the native browser decoder is available. HEIC capture-time
 extraction is not implemented in browser intake, so those imports are excluded
 from capture-date searches until a verified capture date is available. Live Photo
 motion pairs and videos are visibly skipped by backup.
+
+Production limits each account to 10 GiB of allocated ciphertext by default.
+Reservations consume headroom atomically; unused leases expire, while writes
+that started keep their charge even if interrupted. Promotion can retain both
+staging and final copies, so this is an allocation limit rather than an exact
+R2 billing total. Auth and enrollment limits return a timed retry. Object
+collection and full disaster-restore qualification remain unfinished.
 
 Select saved photos → Share in Fotoro chooses an accepted contact. Public contact
 links replace account-card JSON; optional contact names are encrypted locally.

@@ -1,4 +1,40 @@
-# Verification — October 3, 2026
+# Verification — October 4, 2026
+
+The current source adds one explicit Turn on sync choice on iPhone. Consent is
+persisted per account and API origin; Pause survives reopening. The existing
+serial backup and encrypted journal cover permitted supported still photos of
+any age. New preparation requires the app open and unlocked; iOS can finish
+already scheduled ciphertext uploads. Videos and Live Photo pairs remain
+unsupported. Turning off sync cancels pending view consent and automatic work.
+Denied Photos access has an explicit system Settings action.
+
+Final native verification covers 269 full-app tests and 94 local-preview tests,
+each with the known iOS 27 Vision-context integration skip. New regressions cover
+default-off consent, scope withdrawal, all-age intake, unchanged no-HTTP scans,
+persistent Pause, foreground-only restoration, quota early-stop and queued
+original edits after permission returns. The edited-original regression was
+reproduced failing before repair, then passed for unchanged and changed digests;
+older queued bytes remain available only through explicit manual Continue.
+Saved date-plus-text queries now use the existing capture-date parser.
+
+Web verification passes 272 tests and a 349,058-byte, three-chunk startup budget.
+Rendered public-image acceptance passes at 320, 390 and 1440 px: same-password
+restoration, unchanged originals, remembered-account entry requiring the
+password, unified Find Saved-viewer corrections with explicit Save changes, and
+two-person receiving with an injected 503 retry. There are no runtime errors or
+unexpected API failures. Browser uploads remain deliberate; paused uploads do
+not block read refresh. Annotation-only Save never restarts queued originals.
+
+API verification passes 68 tests. Account allocation is atomically bounded at
+10 GiB ciphertext by default; unused claims expire, while written or ambiguous
+attempts remain charged. Production auth/enrollment throttles return 429 with
+Retry-After. Migration 0006 preserves legacy Worker SQL behavior, including its
+PUT affected-row checks, before service cutover. Reserved and final copies can
+both remain in R2; object collection and complete restore qualification remain
+open. Development-signed Release build 23 is prepared separately from TestFlight
+distribution. The previous owner's phone window is not reused for installation.
+
+## Previous release evidence
 
 The consumer experience now opens Photos immediately, with one Find field and
 Picks / Photos / Saved scopes. Native PhotoKit browsing pages all permitted

@@ -8,6 +8,8 @@ import { atomic, clearAccount, get } from "../src/exchange/cache";
 import { queueAnnotations, pendingAnnotations } from "../src/exchange/annotations";
 import { pendingImports } from "../src/exchange/journal";
 import { cachedSync, refreshSync, saveSync } from "../src/exchange/sync";
+import {saveQueuedAnnotations} from "../src/library/consumer-annotation-save";
+import {loadUploadPause, saveUploadPause} from "../src/library/consumer-preferences";
 
 const owner = "55555555-5555-4555-8555-555555555555", other = "66666666-6666-4666-8666-666666666666";
 const identity = { ownerAccountId: owner, photoId: "77777777-7777-4777-8777-777777777777", originalSha256: "A".repeat(43) };
@@ -108,4 +110,55 @@ test("a delayed read refresh cannot publish into or close a newer account", asyn
   assert.equal(requireVault(), newer);
   assert.equal(await get("settings", owner + ":cursor"), undefined);
   assert.equal((await pendingImports()).length, 0);
+}));
+
+test("viewer Save changes sends annotations only and preserves paused originals through a read refresh", async () => scoped(async () => {
+  const session = await open(), queued = await stageQueuedOriginal();
+  await saveUploadPause(true, session);
+  await queueAnnotations(identity, {labels: ["family"], favorite: true}, session);
+  const calls: {path: string; method: string}[] = [];
+  globalThis.fetch = (async (path, init) => {
+    calls.push({path: String(path), method: init?.method ?? "GET"});
+    if (String(path).endsWith("/annotations")) return response(JSON.parse(init!.body as string));
+    if (String(path).startsWith("/v1/changes?")) return response(page());
+    throw new Error("Save changes must not send original files");
+  }) as typeof fetch;
+  const saved = await saveQueuedAnnotations(session);
+  assert.deepEqual(calls.map(call => call.method), ["PUT"], "Viewer Save changes needs no original upload or catalog request");
+  assert.equal(saved.annotations.length, 0);
+  assert.deepEqual(saved.pending, [queued.pending]);
+  const refreshed = await refreshSync(session);
+  assert.deepEqual(calls.map(call => call.method), ["PUT", "GET"]);
+  assert.equal(refreshed.annotations.length, 0);
+  assert.deepEqual(refreshed.pending, [queued.pending]);
+  assert.deepEqual(await get("staging", queued.stagingKey), queued.bytes);
+  assert.equal(await loadUploadPause(session), true);
+}));
+
+test("failed viewer Save changes retains its exact draft and never resumes queued originals", async () => scoped(async () => {
+  const session = await open(), queued = await stageQueuedOriginal();
+  await queueAnnotations(identity, {labels: ["family"]}, session);
+  const draft = (await pendingAnnotations(session))[0].signed;
+  globalThis.fetch = (async (path, init) => {
+    assert.match(String(path), /\/annotations$/); assert.equal(init?.method, "PUT");
+    return response({version: 1, code: "UNAVAILABLE"}, 503);
+  }) as typeof fetch;
+  await assert.rejects(saveQueuedAnnotations(session));
+  assert.deepEqual((await pendingAnnotations(session))[0].signed, draft);
+  assert.deepEqual(await pendingImports(), [queued.pending]);
+  assert.deepEqual(await get("staging", queued.stagingKey), queued.bytes);
+}));
+
+test("a delayed viewer annotation save cannot publish across an account switch", async () => scoped(async () => {
+  const session = await open();
+  await queueAnnotations(identity, {favorite: true}, session);
+  let release!: (response: Response) => void, sent!: string;
+  globalThis.fetch = (async (_path, init) => {sent = init!.body as string; return new Promise<Response>(resolve => {release = resolve;});}) as typeof fetch;
+  const saving = saveQueuedAnnotations(session);
+  while (!release) await new Promise(resolve => setTimeout(resolve, 0));
+  lockVault(); const newer = await open(other);
+  release(response(JSON.parse(sent)));
+  await assert.rejects(saving, /VAULT_LOCKED/);
+  assert.equal(requireVault(), newer);
+  assert.equal((await pendingAnnotations(newer)).length, 0);
 }));

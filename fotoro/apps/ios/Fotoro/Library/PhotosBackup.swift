@@ -11,6 +11,33 @@ enum NativeBackupPolicy {
   }
 }
 
+struct AutomaticPhotoSyncPreference: Codable, Equatable {
+  var enabled = false
+  var paused = false
+  var origin: String?
+}
+
+struct AutomaticPhotoSyncStatus {
+  enum Phase { case off, paused, locked, permissionRequired, background, ready, syncing, needsAttention }
+  var enabled: Bool
+  var paused: Bool
+  var phase: Phase
+  var detail: String
+}
+
+@MainActor final class AutomaticPhotoSyncObserver: NSObject, PHPhotoLibraryChangeObserver {
+  private let changed: @MainActor () -> Void
+  init(changed: @escaping @MainActor () -> Void) {
+    self.changed = changed
+    super.init()
+    PHPhotoLibrary.shared().register(self)
+  }
+  deinit { PHPhotoLibrary.shared().unregisterChangeObserver(self) }
+  nonisolated func photoLibraryDidChange(_ changeInstance: PHChange) {
+    Task { @MainActor [weak self] in self?.changed() }
+  }
+}
+
 struct BackupSource: Codable, Identifiable {
   enum Phase: String, Codable { case pending, queued, committed, skipped, failed }
   var id: String
@@ -19,6 +46,7 @@ struct BackupSource: Codable, Identifiable {
   var message: String?
   var sourceRevision: String?
   var originalSha256: String?
+  var isRetainedOriginal: Bool { id.hasPrefix("fotoro-retained-original:") }
 }
 
 extension LibraryStore {
@@ -51,6 +79,23 @@ extension LibraryStore {
   }
   func putBackupSource(_ source: BackupSource) throws {
     try database.write { db in try putBackupSource(source, db: db) }
+  }
+  func retainQueuedBackup(_ source: BackupSource, currentRevision: String?) throws -> BackupSource {
+    var retained = source
+    retained.id = "fotoro-retained-original:" + source.photoId
+    retained.message = "An earlier original is kept on this device. Continue manually to save it."
+    let current = BackupSource(id: source.id, photoId: Wire.id(), sourceRevision: currentRevision)
+    try database.write { db in
+      guard let bytes = try Data.fetchOne(db, sql: "SELECT value FROM backupSources WHERE id=?", arguments: [source.id]) else {
+        throw FotoroError("Photo changed during sync. Try again.")
+      }
+      let previous = try Wire.decode(BackupSource.self, bytes)
+      guard previous.phase == .queued, previous.photoId == source.photoId,
+        previous.sourceRevision == source.sourceRevision else { throw FotoroError("Photo changed during sync. Try again.") }
+      try putBackupSource(retained, db: db)
+      try putBackupSource(current, db: db)
+    }
+    return current
   }
   private func putBackupSource(_ source: BackupSource, db: Database) throws {
     try db.execute(
@@ -152,8 +197,8 @@ struct BackupStatus: Codable {
   }
   private func countedSources() throws -> [BackupSource] {
     try store.backupSources().filter {
-      selectionIDs == nil || selectionIDs?.contains($0.id) == true
-        || $0.phase == .queued || $0.phase == .committed
+      !$0.isRetainedOriginal && (selectionIDs == nil || selectionIDs?.contains($0.id) == true
+        || $0.phase == .queued || $0.phase == .committed)
     }
   }
   func unpreparedSources() throws -> [BackupSource] {
@@ -166,7 +211,9 @@ struct BackupStatus: Codable {
     valid: @escaping () -> Bool,
     stage: @escaping (BackupSource, Date?) async throws -> Void,
     upload: @escaping (BackupSource) async throws -> Void,
-    checkCatalog: @escaping () async throws -> Void
+    checkCatalog: @escaping () async throws -> Void,
+    checkCatalogOnlyAfterWork: Bool = false,
+    restrictQueuedToSnapshot: Bool = false
   ) {
     guard task == nil else { return }
     task = Task {
@@ -185,10 +232,12 @@ struct BackupStatus: Codable {
         try fence()
         selectionIDs = Set(candidates.map(\.id))
         var dates: [String: Date] = [:]
-        for candidate in candidates {
-          var source = try store.backupSource(candidate.id)
+        let existing = Dictionary(try store.backupSources().map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for (index, candidate) in candidates.enumerated() {
+          if index.isMultiple(of: 128) { await Task.yield(); try fence() }
+          var source = try existing[candidate.id] ?? store.backupSource(candidate.id)
           dates[candidate.id] = candidate.capturedAt
-          if source.phase == .pending || source.phase == .failed {
+          if (source.phase == .pending || source.phase == .failed), source.sourceRevision != candidate.sourceRevision {
             source.sourceRevision = candidate.sourceRevision
             try store.putBackupSource(source)
           }
@@ -201,8 +250,11 @@ struct BackupStatus: Codable {
         }
         // Sources already queued survive aging out of the current Photos selection.
         let selectedIDs = Set(candidates.map { $0.id })
+        let permitted = Dictionary(candidates.filter { $0.skipReason == nil }.map { ($0.id, $0) },
+          uniquingKeysWith: { first, _ in first })
         let work = try store.backupSources().filter {
-          $0.phase == .queued
+          ($0.phase == .queued && (!restrictQueuedToSnapshot
+            || (permitted[$0.id] != nil && permitted[$0.id]?.sourceRevision == $0.sourceRevision)))
             || (($0.phase == .pending || $0.phase == .failed) && selectedIDs.contains($0.id))
         }.sorted { ($0.phase == .queued ? 0 : 1) < ($1.phase == .queued ? 0 : 1) }
         status.sourceTotal = try countedSources().count
@@ -237,7 +289,7 @@ struct BackupStatus: Codable {
           }
           try refreshCounts()
         }
-        try await checkCatalog()
+        if !checkCatalogOnlyAfterWork || !work.isEmpty { try await checkCatalog() }
         try fence()
         status.lastChecked = Date()
         try refreshCounts()

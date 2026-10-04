@@ -153,6 +153,24 @@ final class LibraryStore: @unchecked Sendable {
       }
     }
   }
+  func automaticPhotoSyncPreference() throws -> AutomaticPhotoSyncPreference {
+    try database.read { db in
+      guard let value = try String.fetchOne(db, sql: "SELECT value FROM state WHERE key='automaticPhotoSync'"),
+        let bytes = Data(base64Encoded: value) else { return AutomaticPhotoSyncPreference() }
+      return try Wire.decode(AutomaticPhotoSyncPreference.self, bytes)
+    }
+  }
+  func setAutomaticPhotoSyncPreference(_ preference: AutomaticPhotoSyncPreference,
+    uploadsPaused: Bool? = nil) throws {
+    try database.write { db in
+      try db.execute(sql: "INSERT INTO state(key,value) VALUES('automaticPhotoSync',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        arguments: [try Wire.encode(preference).base64EncodedString()])
+      if let uploadsPaused {
+        try db.execute(sql: "INSERT INTO state(key,value) VALUES('uploadsPaused',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+          arguments: [uploadsPaused ? "1" : "0"])
+      }
+    }
+  }
   // A verified caller supplies decoded catalog records; the page and cursor commit together.
   func apply(_ page: ChangePageV1, verified: [String: LocalPhoto]) throws {
     guard page.version == 1 else { throw FotoroError("Unsupported change version") }
