@@ -28,9 +28,15 @@ enum SemanticVector {
   static func values(_ data: Data) -> [Float]? {
     guard data.count == dimensions * 4 else { return nil }
     let bytes = [UInt8](data)
-    let result = stride(from: 0, to: bytes.count, by: 4).map { index in
-      Float(bitPattern: UInt32(bytes[index]) | UInt32(bytes[index + 1]) << 8
-        | UInt32(bytes[index + 2]) << 16 | UInt32(bytes[index + 3]) << 24)
+    var result: [Float] = []
+    result.reserveCapacity(dimensions)
+    for index in stride(from: 0, to: bytes.count, by: 4) {
+      let low = UInt32(bytes[index])
+      let second = UInt32(bytes[index + 1]) << 8
+      let third = UInt32(bytes[index + 2]) << 16
+      let high = UInt32(bytes[index + 3]) << 24
+      let bits = low | second | third | high
+      result.append(Float(bitPattern: bits))
     }
     return result.allSatisfy(\.isFinite) ? result : nil
   }
@@ -163,7 +169,7 @@ actor PhotoSemanticProcessor {
     for kind in ["image", "text"] {
       try Task.checkCancellation()
       let package = kind == "image" ? "Image.mlpackage" : "Text.mlpackage"
-      let compiled = try MLModel.compileModel(at: root.appendingPathComponent(package))
+      let compiled = try await MLModel.compileModel(at: root.appendingPathComponent(package))
       let target = root.appendingPathComponent("\(kind).mlmodelc")
       try? FileManager.default.removeItem(at: target)
       try FileManager.default.moveItem(at: compiled, to: target)
