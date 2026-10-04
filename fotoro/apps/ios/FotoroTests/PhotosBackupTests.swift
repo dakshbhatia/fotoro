@@ -1140,7 +1140,7 @@ private actor AutomaticSourceReads {
   }
 }
 
-@MainActor private final class PausedUploadContext {
+@MainActor final class PausedUploadContext {
   let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
   let sample = Bundle.main.url(forResource: "singapore", withExtension: "jpg")!
   private let accounts: FixtureAccounts
