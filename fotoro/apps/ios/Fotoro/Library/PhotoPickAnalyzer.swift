@@ -152,7 +152,7 @@ struct PhotoPicksSnapshot: Sendable {
     }
     try Task.checkCancellation()
     if (try? VNImageRequestHandler(cgImage: image).perform([faces])) != nil {
-      let qualities = (faces.results ?? []).compactMap { $0.faceCaptureQuality?.doubleValue }
+      let qualities = (faces.results ?? []).compactMap { $0.faceCaptureQuality.map(Double.init) }
       if !qualities.isEmpty { signals.faceQuality = qualities.min() }
     }
     try Task.checkCancellation()
