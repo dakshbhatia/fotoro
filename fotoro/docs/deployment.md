@@ -22,7 +22,7 @@ The new Fotoro web and API build is developed in `fotoro/`. The upstream Ente ru
 
 A Worker preview with a different RP creates different passkey credentials. Do not assume those credentials migrate to the production RP.
 
-## Current state
+## Current source and last recorded service checkpoint
 
 Current release source adds opted-in iPhone photo sync, clearer browser Saved
 entry and correction status, atomic ciphertext allocation limits and production
@@ -31,13 +31,18 @@ its reviewed tree and all required checks pass. Migration 0006 is applied with n
 pending migrations. Worker `483a3e90-28d7-4450-9448-b55488aafc52` is read back at
 100% in deployment `ca2cd458-cb4c-484e-9634-164dbcaaeb91`; the immediately
 preceding rollback version is `eb01e8ca-bc92-45a7-8096-843940e5a6d8`.
+The photo-journey follow-up has prepared Worker version
+`103856a0-471a-4702-891d-91278059de0d`, tagged `photo-journey-20261004`.
+Activation follows exact-head CI and merge; its rollback target is the recorded
+`483a3e90-28d7-4450-9448-b55488aafc52` version. It changes web assets only,
+with the same API, bindings and migrations.
 All published JS/CSS and entry HTML match the reviewed build byte for byte.
 Public production checks verify responsive browsing and a fresh-browser
 same-password restore of an unchanged original. The native follow-up makes
 remembered sign-in recoverable, displays sync progress in Saved, and rechecks
 the catalog on return or pull-to-refresh. Apple distribution and physical-device
-acceptance remain separate from Worker deployment. Full Release 0.1.0 (24)
-from merged PR 26 is now App Store distribution-signed. Its exact IPA passed
+acceptance remain separate from Worker deployment. Full Release 0.1.0 (25)
+from the current photo-journey follow-up is now App Store distribution-signed. Its exact IPA passed
 strict signature, app identity, associated domains, full-encryption and matching
 dSYM checks, Apple validation and upload. App Store Connect reports `VALID` and
 `MISSING_EXPORT_COMPLIANCE`; `usesNonExemptEncryption` remains unset. Existing

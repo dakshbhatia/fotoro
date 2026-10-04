@@ -16,10 +16,10 @@ they never replace the full Photos library. Saved is the other-device library,
 not a second selection to manage.
 
 The core still-photo journey is implemented and has public-fixture acceptance
-evidence. Web/API are live. Full build 24 is uploaded and Apple reports `VALID`,
+evidence. Web/API are live. Full build 25 is uploaded and Apple reports `VALID`,
 but `MISSING_EXPORT_COMPLIANCE` still prevents TestFlight access. The remaining
 owner input is France availability for the encryption declaration. Build 21 is
-the last verified physical installation; build 24 has not been installed on the
+the last verified physical installation; build 25 has not been installed on the
 phone. Personal-library acceptance and physical performance remain open.
 
 ## Active queue
@@ -133,14 +133,14 @@ are separate checks. “Partial” identifies a concrete remaining capability.
 | --- | --- | --- |
 | 1 | One-password sign-in | Implemented on native/web; wrong-password, interrupted enrollment and retry regressions pass. Failed remembered sign-in offers another password without deleting pending work. Owner acceptance remains open. |
 | 2 | Remember the current user | Protected session/password persistence, account reference and expired-session renewal are implemented. Initial restoration respects manual lock; explicit Open retries a failed renewal. |
-| 3 | Install the current full build | Full build 24 passes App Store distribution-signature, identity, production association and matching-dSYM checks. Its exact validated IPA uploaded and Apple reports VALID. TestFlight compliance and physical installation remain open; build 21 is the last verified installed/launched build. |
+| 3 | Install the current full build | Full build 25 passes App Store distribution-signature, identity, production association and matching-dSYM checks. Its exact validated IPA uploaded and Apple reports VALID. TestFlight compliance and physical installation remain open; build 21 is the last verified installed/launched build. |
 | 4 | Save chosen photos through sign-in | Immutable reviewed sources and one-shot authenticated Save are implemented. Fresh native signup → selected PNG Save and fresh-browser password restore pass against isolated D1/R2. |
 | 5 | Restore identical originals in Safari | Isolated D1/R2 tests verify JPEG/PNG/HEIC bytes in a fresh session. Production saves and restores a public PNG byte for byte in a fresh browser. Native Saved rechecks on return and supports pull-to-refresh, preserving paused uploads and local edits. Personal phone-to-Safari acceptance remains open. |
 | 6 | Manual Save progress and Pause/Continue | Implemented. Continue uses the durable queue; it does not scan for new photos. |
 | 7 | Offline/background/relaunch recovery | Fixed cold launch after a chosen Save: persisted selection now reads its own encoding. Regression and rendered Simulator reopening pass without scanning or uploading. Physical daemon/relaunch acceptance remains open. |
 | 8 | Retry without losing selection | Implemented for authentication, manual Save and sharing; incomplete work preserves exact sources for explicit Retry, and concurrent recipient Saves reuse one durable request. |
 | 9 | Green release checks | Core/API/web/native checks are required on each exact PR head. |
-| 10 | Full TestFlight release | Full build 24 is VALID / MISSING_EXPORT_COMPLIANCE. The prepared factual declaration awaits the owner's France availability answer. Preview build 3 is a separate binary. |
+| 10 | Full TestFlight release | Full build 25 is VALID / MISSING_EXPORT_COMPLIANCE. The prepared factual declaration awaits the owner's France availability answer. Preview build 3 is a separate binary. |
 | 11 | Sharp thumbnails | System-sized native thumbnails and late degraded-image rejection are implemented; browser gallery thumbnails use 512 px with bounded decoded caches. |
 | 12 | Large-library responsiveness | 10,000 synthetic indexed records are tested; browser saved rows are virtualized. Physical frame/memory/battery measurements remain open. |
 | 13 | Swipe/zoom/quiet viewer controls | Local, saved and received native viewers support paging, zoom and Info; browser viewer supports zoom and paging. |

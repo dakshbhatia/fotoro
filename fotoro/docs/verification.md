@@ -61,7 +61,7 @@ attempts remain charged. Production auth/enrollment throttles return 429 with
 Retry-After. Migration 0006 preserves legacy Worker SQL behavior, including its
 PUT affected-row checks, before service cutover. Reserved and final copies can
 both remain in R2; object collection and complete restore qualification remain
-open. Full Release build 24 is App Store distribution-signed and passes strict
+open. Full Release build 25 is App Store distribution-signed and passes strict
 signature, build identity, exact production associated-domain and matching-dSYM
 checks. Its exact IPA passed Apple validation and upload; the API reports VALID
 / MISSING_EXPORT_COMPLIANCE with encryption use unset. What to Test notes are
@@ -793,7 +793,7 @@ records; it cannot enumerate an iPhone photo library automatically.
   distribution answer are open. Local Photos preview build 3 is separately
   `VALID / IN_BETA_TESTING`; personal TestFlight installation remains unverified.
   Full build 21 is the last verified physical installation and successful launch;
-  build 24 has no physical installation claim.
+  build 25 has no physical installation claim.
   Production HTTPS, API routing and the signed passkey association now pass.
   Contact and moment universal-link handling is implemented; physical acceptance remains open.
 - Owner password signup/sign-in, protected credential restoration, original
