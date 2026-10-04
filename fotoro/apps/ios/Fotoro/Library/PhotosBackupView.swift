@@ -101,6 +101,16 @@ struct PhotoSyncView: View {
               }
             }
             if services.photoAccountAccess != nil {
+              if (try? services.annotations.ledger.pendingIDs().isEmpty) == false {
+                Section {
+                  Text("Photo changes are saved on this device.").font(.footnote).foregroundStyle(.secondary)
+                  Button("Sync changes") { Task { await services.syncAnnotations() } }
+                    .disabled(services.busy || services.annotations.busy ||
+                      (try? services.store.uploadsPaused()) != false ||
+                      !(services.session.isSignedIn || services.session.fixture))
+                    .accessibilityIdentifier("sync.changes")
+                }
+              }
               Section {
                 AccountIdentityView(session: services.session, unlocked: services.vault.isUnlocked)
                 if services.auth.hasSavedPassword {

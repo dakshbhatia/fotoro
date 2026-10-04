@@ -38,7 +38,6 @@ test("a remembered account offers Saved without retrieving a password, contactin
     assert.throws(requireVault, /VAULT_LOCKED/);
     const markup = renderToStaticMarkup(createElement(LocalTrial, {onBackup() {}, rememberedAccount: true}));
     assert.match(markup, /Open Saved photos/);
-    assert.match(markup, /same Fotoro password/);
     assert.match(markup, /Open photos from this device/);
     assert.throws(requireVault, /VAULT_LOCKED/);
   } finally {globalThis.fetch = fetch; await atomic([{store: "settings", key: "last-account", value: previous}]);}

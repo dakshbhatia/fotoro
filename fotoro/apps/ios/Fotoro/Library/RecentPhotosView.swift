@@ -200,20 +200,11 @@ enum RecentPhotosContentMode {
 }
 
 private enum PhotoHomeScope: String, CaseIterable, Identifiable, Hashable {
-  case picks = "Picks", photos = "Photos"
+  case photos = "Photos", picks = "Picks"
   #if !FOTORO_LOCAL_PREVIEW
     case saved = "Saved"
   #endif
   var id: String { rawValue }
-  var hint: String {
-    switch self {
-    case .photos: "On this device."
-    case .picks: "Your best recent shots."
-    #if !FOTORO_LOCAL_PREVIEW
-    case .saved: "Photos saved to Fotoro, across your devices."
-    #endif
-    }
-  }
 }
 
 struct RecentPhotosView: View {
@@ -263,6 +254,28 @@ struct RecentPhotosView: View {
   @Environment(\.scenePhase) private var scenePhase
 
   private var allPhotos: Bool { scope == .photos }
+  private var hasBrowseAccess: Bool {
+    #if FOTORO_LOCAL_PREVIEW
+      RecentPhotosPolicy.canRead(store.status)
+    #else
+      RecentPhotosPolicy.canRead(store.status) || services?.photoAccountAccess != nil
+    #endif
+  }
+  private var hasSelectablePhotos: Bool {
+    if selecting || selectedCount > 0 { return true }
+    #if !FOTORO_LOCAL_PREVIEW
+      if query.isEmpty, scope == .saved { return !ownedPhotos.isEmpty }
+      if !savedPhotos.isEmpty { return true }
+    #endif
+    return !visible.isEmpty
+  }
+  private var homeFilterIsActive: Bool {
+    guard query.isEmpty else { return false }
+    #if !FOTORO_LOCAL_PREVIEW
+      if scope == .saved { return savedFavoritesOnly }
+    #endif
+    return browseFilter != .all
+  }
   private var baseHomePhotos: [RecentPhoto] {
     if allPhotos { return store.photos }
     return store.picksSnapshot == nil ? store.recentPhotos : store.pickedPhotos
@@ -345,18 +358,6 @@ struct RecentPhotosView: View {
         AccountView(services: services, onAuthenticationTask: { homeAuthenticationTask = $0 })
       } else {
         ScrollView {
-          HStack {
-            Text("Saved photos").font(.title3.weight(.semibold))
-            Spacer()
-            Menu("Saved options", systemImage: "ellipsis.circle") {
-              Toggle("Favorites", isOn: $savedFavoritesOnly)
-              Button("Shared photos", systemImage: "person.2") { sharedSavedPhotos = SharedPhotosPresentation() }
-              Button("Refresh", systemImage: "arrow.clockwise") { Task { await savedRefresh.refresh(services) } }
-                .accessibilityIdentifier("saved.refresh")
-            }.labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
-            selectionToggle
-          }.padding(.horizontal, 16).padding(.bottom, 12)
-          ConsumerSaveStatus(services: services).padding(.horizontal, 16).padding(.bottom, 12)
           if savedRefresh.isRefreshing { ProgressView("Loading saved photos…").padding(.bottom, 12) }
           if let error = savedRefresh.error {
             VStack(spacing: 8) {
@@ -598,6 +599,13 @@ struct RecentPhotosView: View {
         Button("Open Photos") {
           Task { await store.open(); search.open(status: store.status) }
         }.buttonStyle(.borderedProminent)
+        #if !FOTORO_LOCAL_PREVIEW
+          if !hasBrowseAccess {
+            Button("Open Saved photos", systemImage: "icloud") { scope = .saved }
+              .accessibilityIdentifier("home.saved")
+            if let services { ConsumerSaveStatus(services: services, showsIdleSummary: false) }
+          }
+        #endif
       }.padding().frame(maxWidth: .infinity, maxHeight: .infinity)
     } else if mode == .accessOff {
       ContentUnavailableView {
@@ -608,16 +616,22 @@ struct RecentPhotosView: View {
 #else
         Text("Allow selected photos or full access in Settings. Your saved account photos are still searchable after signing in.")
 #endif
-      } actions: { Button("Open Settings", action: openSettings) }
+      } actions: {
+        Button("Open Settings", action: openSettings)
+        #if !FOTORO_LOCAL_PREVIEW
+          if !hasBrowseAccess {
+            Button("Open Saved photos", systemImage: "icloud") { scope = .saved }
+              .accessibilityIdentifier("home.saved")
+            if let services { ConsumerSaveStatus(services: services, showsIdleSummary: false) }
+          }
+        #endif
+      }
     } else {
       ScrollView {
         if mode == .search {
-          HStack {
-            Text("Matches").font(.title3.weight(.semibold))
-            Spacer()
-            selectionToggle
-          }.padding(.horizontal, 16).padding(.bottom, 12)
-          bestShotsControls
+          if preparingBestShots || bestShots.reviewing || bestShots.snapshot != nil || bestShots.error != nil {
+            bestShotsControls
+          }
 #if FOTORO_LOCAL_PREVIEW
           LocalSearchView(search: search, photos: store, review: bestShots.snapshot, choseMeaning: { queryFocused = false },
             selectedIDs: selected, selecting: selecting, toggleSelection: toggleSelection) {
@@ -636,7 +650,9 @@ struct RecentPhotosView: View {
             choseAlternative: { queryFocused = false })
 #endif
         } else {
-          galleryHeader
+          if !allPhotos, store.picksSnapshot == nil || (store.picksSnapshot?.recommendations.unassessed ?? 0) > 0 {
+            galleryHeader
+          }
           gallery
           if store.photos.isEmpty && !(allPhotos && store.hasMorePhotos) {
             ContentUnavailableView("No photos", systemImage: "photo", description: Text("Choose photos Fotoro may access in Settings."))
@@ -662,17 +678,6 @@ struct RecentPhotosView: View {
   }
   private var bestShotsControls: some View {
     VStack(alignment: .leading, spacing: 8) {
-      HStack {
-        Button("All matches", action: cancelBestShots)
-          .tint(bestShots.showing || preparingBestShots ? .gray : .accentColor)
-          .accessibilityValue(bestShots.showing || preparingBestShots ? "" : "Selected")
-          .accessibilityIdentifier("find.allMatches")
-        Button("Best shots", action: beginBestShots)
-          .tint(bestShots.showing || preparingBestShots ? .accentColor : .gray)
-          .disabled(searchMatchCount == 0 || preparingBestShots || bestShots.reviewing)
-          .accessibilityValue(bestShots.showing || preparingBestShots ? "Selected" : "")
-          .accessibilityIdentifier("find.bestShots")
-      }.buttonStyle(.bordered)
       if preparingBestShots || bestShots.reviewing {
         ProgressView(preparingBestShots ? "Checking matches…" : "Reviewing previews…")
           .font(.footnote)
@@ -683,10 +688,6 @@ struct RecentPhotosView: View {
           Text("\(result.recommendations.unassessed) previews unavailable. All matches keeps every photo reviewable.")
             .font(.caption).foregroundStyle(.secondary)
         }
-      }
-      if bestShots.showing || preparingBestShots {
-        Text("Uses available previews on this device. Your selection is unchanged.")
-          .font(.caption).foregroundStyle(.secondary)
       }
       if let error = bestShots.error {
         Text(error).font(.caption).foregroundStyle(.secondary)
@@ -840,12 +841,6 @@ struct RecentPhotosView: View {
   #endif
   private var galleryHeader: some View {
     VStack(alignment: .leading, spacing: 8) {
-      HStack {
-        Text(allPhotos ? "Your photos" : "Your picks").font(.title3.weight(.semibold))
-        Spacer()
-        filterMenu
-        selectionToggle
-      }
       if !allPhotos {
         if store.picksSnapshot == nil {
           Text("Finding your picks. Showing recent photos for now.")
@@ -856,20 +851,6 @@ struct RecentPhotosView: View {
         }
       }
     }.padding(.horizontal, 16).padding(.bottom, 12)
-  }
-  private var filterMenu: some View {
-    Menu {
-      Picker("Show", selection: $browseFilter) {
-        Text("All").tag(PhotoBrowseFilter.all)
-        Text("Favorites").tag(PhotoBrowseFilter.favorites)
-        Text("Screenshots").tag(PhotoBrowseFilter.screenshots)
-        Text("With a location").tag(PhotoBrowseFilter.withLocation)
-      }
-      if allPhotos { Toggle("Group by moment", isOn: $groupMoments) }
-    } label: {
-      Image(systemName: browseFilter == .all ? "line.3.horizontal.decrease" : "line.3.horizontal.decrease.circle.fill")
-        .frame(minWidth: 44, minHeight: 44)
-    }.accessibilityLabel("Filter photos").accessibilityIdentifier("gallery.filter")
   }
   private var selectionToggle: some View {
     Button(selecting ? "Done" : "Select") { selecting.toggle(); queryFocused = false }
@@ -911,62 +892,104 @@ struct RecentPhotosView: View {
       }
     }.scrollTargetLayout()
   }
-  private var homeHeader: some View {
-    VStack(spacing: 14) {
-      ViewThatFits(in: .horizontal) {
-        HStack(spacing: 12) {
-          homeTitle
-          Spacer(minLength: 0)
-          #if !FOTORO_LOCAL_PREVIEW
-            homeSyncButton.fixedSize(horizontal: true, vertical: false)
-          #endif
-          homeSettingsButton
-        }
-        VStack(alignment: .leading, spacing: 8) {
-          HStack {
-            homeTitle
+  @ViewBuilder private var homeHeader: some View {
+    if showsHomeNavigation {
+      VStack(spacing: 10) {
+        ViewThatFits(in: .horizontal) {
+          HStack(spacing: 12) {
+            homeScopeMenu.fixedSize(horizontal: true, vertical: false)
             Spacer(minLength: 0)
-            homeSettingsButton
+            #if !FOTORO_LOCAL_PREVIEW
+              homeSyncButton.fixedSize(horizontal: true, vertical: false)
+            #endif
           }
-          #if !FOTORO_LOCAL_PREVIEW
-            homeSyncButton.frame(maxWidth: .infinity, alignment: .trailing)
-          #endif
+          VStack(alignment: .leading, spacing: 8) {
+            homeScopeMenu
+            #if !FOTORO_LOCAL_PREVIEW
+              homeSyncButton.frame(maxWidth: .infinity, alignment: .trailing)
+            #endif
+          }
         }
+        if canSearch || !query.isEmpty {
+          HStack(spacing: 12) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("Search photos", text: $query).focused($queryFocused)
+              .submitLabel(.search).onSubmit { queryFocused = false }
+              .accessibilityIdentifier("find.query")
+              .accessibilityHint("Find labels, dates and words in your photos")
+            if !query.isEmpty {
+              Button("Clear search", systemImage: "xmark.circle.fill") { query = ""; queryFocused = false }
+                .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+            }
+          }.padding(.leading, 16).padding(.trailing, 8).frame(minHeight: 48)
+            .background(.white.opacity(0.10), in: .rect(cornerRadius: 16))
+        }
+        #if !FOTORO_LOCAL_PREVIEW
+          if let services { ConsumerSaveStatus(services: services, showsIdleSummary: false) }
+        #endif
+      }.padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 12)
+    }
+  }
+  private var showsHomeNavigation: Bool {
+    #if FOTORO_LOCAL_PREVIEW
+      hasBrowseAccess || !query.isEmpty
+    #else
+      hasBrowseAccess || scope == .saved || !query.isEmpty
+    #endif
+  }
+  private var homeScopeMenu: some View {
+    Menu {
+      Picker("Photo library", selection: $scope) {
+        ForEach(PhotoHomeScope.allCases) { Text($0.rawValue).tag($0) }
       }
-      HStack(spacing: 12) {
-        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-        TextField("Search photos", text: $query).focused($queryFocused)
-          .submitLabel(.search).onSubmit { queryFocused = false }
-          .disabled(!canSearch).accessibilityIdentifier("find.query")
-          .accessibilityHint("Find labels, dates and words in your photos")
-        if !query.isEmpty {
-          Button("Clear search", systemImage: "xmark.circle.fill") { query = ""; queryFocused = false }
-            .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
-        }
-      }.padding(.leading, 16).padding(.trailing, 8).frame(minHeight: 48)
-        .background(.white.opacity(0.10), in: .rect(cornerRadius: 16))
-      VStack(alignment: .leading, spacing: 6) {
-        Picker("Photo library", selection: $scope) {
-          ForEach(PhotoHomeScope.allCases) { Text($0.rawValue).tag($0) }
-        }.pickerStyle(.segmented).accessibilityIdentifier("home.scope")
-        Text(scope.hint).font(.footnote).foregroundStyle(.secondary)
-          .fixedSize(horizontal: false, vertical: true)
-          .accessibilityIdentifier("home.scopeDescription")
+      if query.isEmpty, RecentPhotosPolicy.canRead(store.status) {
+        #if !FOTORO_LOCAL_PREVIEW
+          if scope != .saved { deviceBrowseOptions }
+        #else
+          deviceBrowseOptions
+        #endif
       }
       #if !FOTORO_LOCAL_PREVIEW
-        if let services { ConsumerSaveStatus(services: services) }
+        if query.isEmpty, scope == .saved, let services, services.photoAccountAccess != nil {
+          Toggle("Favorites", isOn: $savedFavoritesOnly)
+          Button("Shared photos", systemImage: "person.2") { sharedSavedPhotos = SharedPhotosPresentation() }
+          Button("Refresh", systemImage: "arrow.clockwise") { Task { await savedRefresh.refresh(services) } }
+            .accessibilityIdentifier("saved.refresh")
+        }
       #endif
-    }.padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 18)
+      if !query.isEmpty {
+        Button("All matches", action: cancelBestShots)
+          .accessibilityValue(bestShots.showing || preparingBestShots ? "" : "Selected")
+          .accessibilityIdentifier("find.allMatches")
+        Button("Best shots", action: beginBestShots)
+          .disabled(searchMatchCount == 0 || preparingBestShots || bestShots.reviewing)
+          .accessibilityValue(bestShots.showing || preparingBestShots ? "Selected" : "")
+          .accessibilityIdentifier("find.bestShots")
+      }
+      if hasSelectablePhotos { selectionToggle }
+      Button("Settings", systemImage: "gearshape") { queryFocused = false; settings = true }
+        .accessibilityIdentifier("home.settings")
+    } label: {
+      HStack(spacing: 6) {
+        Text(scope.rawValue).font(.headline)
+        if homeFilterIsActive {
+          Image(systemName: "line.3.horizontal.decrease.circle.fill").accessibilityLabel("Filter photos")
+        }
+        Image(systemName: "chevron.down").font(.caption.weight(.semibold))
+      }.frame(minHeight: 44).fixedSize(horizontal: false, vertical: true)
+    }.accessibilityLabel("Photo library").accessibilityValue(scope.rawValue)
+      .accessibilityIdentifier("home.scope")
   }
-  private var homeTitle: some View {
-    Text("Fotoro").font(.system(.largeTitle, design: .rounded, weight: .bold))
-      .fixedSize(horizontal: true, vertical: true)
-  }
-  private var homeSettingsButton: some View {
-    Button("Settings", systemImage: "gearshape") { queryFocused = false; settings = true }
-      .labelStyle(.iconOnly).font(.title3).frame(width: 44, height: 44)
-      .background(.white.opacity(0.12), in: .circle).foregroundStyle(.white)
-      .accessibilityIdentifier("home.settings")
+  private var deviceBrowseOptions: some View {
+    Group {
+      Picker("Show", selection: $browseFilter) {
+        Text("All").tag(PhotoBrowseFilter.all)
+        Text("Favorites").tag(PhotoBrowseFilter.favorites)
+        Text("Screenshots").tag(PhotoBrowseFilter.screenshots)
+        Text("With a location").tag(PhotoBrowseFilter.withLocation)
+      }.accessibilityIdentifier("gallery.filter")
+      if allPhotos { Toggle("Group by moment", isOn: $groupMoments) }
+    }
   }
   #if !FOTORO_LOCAL_PREVIEW
     @ViewBuilder private var homeSyncButton: some View {
@@ -1053,9 +1076,9 @@ struct RecentPhotosView: View {
   }
   private var canSearch: Bool {
 #if FOTORO_LOCAL_PREVIEW
-    store.opened
+    store.opened && RecentPhotosPolicy.canRead(store.status)
 #else
-    store.opened || services?.vault.isUnlocked == true
+    (store.opened && RecentPhotosPolicy.canRead(store.status)) || services?.photoAccountAccess != nil
 #endif
   }
   private var settingsView: some View {

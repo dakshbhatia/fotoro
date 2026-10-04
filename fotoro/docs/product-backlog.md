@@ -11,14 +11,19 @@ explicit Turn on sync choice and remembers Pause. Browser uploads stay explicit.
 
 The product is one loop: install, allow Photos, scroll and find a photo, turn on
 sync once, then open the same Fotoro on another device or share chosen photos.
-One password opens the saved library on iPhone and web. Picks are suggestions;
+One compact library menu holds Photos, Picks and Saved; search and contextual
+selection lead directly to the original. Healthy sync stays quiet. One password
+opens the saved library on iPhone and web. Picks are suggestions;
 they never replace the full Photos library. Saved is the other-device library,
 not a second selection to manage.
 
 The core still-photo journey is implemented and has public-fixture acceptance
-evidence. Web/API are live at the PR 27 checkpoint. The next source makes Turn on
-sync visible on the iPhone home and gives a fresh browser one primary Open Saved
-photos entry. Completed on-device text analysis follows opted-in sync through
+evidence. Web/API are live at the PR 28 checkpoint, with Open Saved photos as
+the primary browser entry. Full build 26 makes Turn on sync visible on the iPhone
+home; its verified archive awaits restoration of the Xcode developer account
+before distribution signing and TestFlight upload. The subsequent UI cleanup is
+designated build 27 and removes duplicate browsing controls; build 26 stays
+frozen. Completed on-device text analysis follows opted-in sync through
 the existing encrypted annotation journal; supplied edits still need Save.
 Scene readers and search are prepared, but scene publication stays off until
 installed readers are qualified: older builds reject the new optional field.
@@ -36,7 +41,7 @@ phone. Personal-library acceptance and physical performance remain open.
 | Priority | Work | Complete when |
 | --- | --- | --- |
 | 1 | Finish first sync | A visible Turn on sync choice saves permitted supported still photos, resumes unfinished derived text metadata on return, and preserves manual drafts. A fresh browser opens the same Saved library with the same password. Older filtered Photos, received access and original restoration retain their regression coverage. |
-| 2 | Deliver the full app | Internal TestFlight access is verified for full build 25. Install it with fresh phone authorization, then qualify one phone-to-Safari and two-person journey. Keep France excluded from first App Store availability. |
+| 2 | Deliver the full app | Restore the existing Xcode account and publish the latest verified full build to the existing internal group. Build 27 contains the UI cleanup; the frozen build 26 archive is retained, and build 25 remains available meanwhile. Install with fresh phone authorization, then qualify one phone-to-Safari and two-person journey. Keep France excluded from first App Store availability. |
 | 3 | Make Find and Picks smarter | Qualify installed scene readers before enabling signed scene publication; keep old Saved refresh usable. Evaluate one local visual representation against held-out queries and useful-shot examples. Add correctable People only with naming, merge/split and source-permission fences. Browsing must stay usable while indexing. |
 | 4 | Complete media backup | Save and restore the complete Live Photo pair and videos, including playback and an interrupted transfer. Larger-media recovery follows the same queue. |
 | 5 | Add safe cleanup | Recoverable trash, undo and cross-device convergence come before deletion or freeing phone storage. Verify a full original restore before offering storage removal. |

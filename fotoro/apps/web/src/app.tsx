@@ -75,7 +75,7 @@ export default function App() {
     requestAnimationFrame(() => {
       const opener = syncOpener.current;
       const target = opener?.isConnected && !opener.closest("[hidden],[inert]")
-        ? opener : document.querySelector<HTMLButtonElement>(".local-trial .consumer-scopes .sync-pill");
+        ? opener : document.querySelector<HTMLElement>(".local-trial .consumer-scope-menu select, .local-trial .first-use-actions .open-photos");
       target?.focus({preventScroll: true});
     });
   };

@@ -22,53 +22,56 @@ The new Fotoro web and API build is developed in `fotoro/`. The upstream Ente ru
 
 A Worker preview with a different RP creates different passkey credentials. Do not assume those credentials migrate to the production RP.
 
-## Current source and last recorded service checkpoint
+## UI simplification qualification
 
-Current release source adds opted-in iPhone photo sync, clearer browser Saved
-entry and correction status, atomic ciphertext allocation limits and production
-auth throttles. PR 25 is merged at `56449463f3f585ef7bcd500ff355e8d0cf855732`;
-its reviewed tree and all required checks pass. Migration 0006 is applied with no
-pending migrations. Worker `483a3e90-28d7-4450-9448-b55488aafc52` is read back at
-100% in deployment `ca2cd458-cb4c-484e-9634-164dbcaaeb91`; the immediately
-preceding rollback version is `eb01e8ca-bc92-45a7-8096-843940e5a6d8`.
-PR 27 is merged at `72207e4612e2f2e9ac8f07497d75143fbe2db80b`; its main CI
-run 37213350159 passes. The photo-journey Worker
-`103856a0-471a-4702-891d-91278059de0d` is live at 100% in deployment
-`94f731c4-952f-429d-aa97-8acc285011a8`, tagged `photo-journey-20261004`.
-Its rollback version is `483a3e90-28d7-4450-9448-b55488aafc52`. The next
-seamless-home source keeps these API bindings and migrations. Its visual
-readers are ready, but outgoing scene metadata is disabled so installed strict
-v1 readers can still refresh Saved. Scene publication requires qualification
-of installed native readers before activation.
+The next UI release removes the large brand heading, segmented scope row,
+repeated section headings, source captions and healthy idle counts. Native
+keeps one Photos menu, search and Sync. Web opens search on demand; an empty
+home has only the Saved/device opening choices. Selection, attention, Pause,
+Retry, account entry and consent remain available. Saved entry works with local
+Photos access denied. There are no API, schema, dependency or binding changes.
 
-The seamless-home Worker `7f78c6a7-70fc-4dea-886d-e9b0774e25e0`, tagged
-`seamless-home-20261004`, is prepared from the current source. Deploy only after
-its exact-head checks and merge; its rollback target is
-`103856a0-471a-4702-891d-91278059de0d`. Full build 26 archives and passes the
-source, identity, production-domain, dSYM and retained-crypto audit. Its export
-is pending restoration of the existing Xcode developer account: the account
-list is empty and the cached profile uses Cloud Managed Apple Distribution.
-Build 25 remains the verified TestFlight build until the exact build 26 IPA
-is distribution-signed, Apple-validated, uploaded and read back.
-All published JS/CSS and entry HTML match the reviewed build byte for byte.
-Public production checks verify responsive browsing and a fresh-browser
-same-password restore of an unchanged original. The native follow-up makes
-remembered sign-in recoverable, displays sync progress in Saved, and rechecks
-the catalog on return or pull-to-refresh. Apple distribution and physical-device
-acceptance remain separate from Worker deployment. Full Release 0.1.0 (25)
-from the current photo-journey follow-up is now App Store distribution-signed. Its exact IPA passed
-strict signature, app identity, associated domains, full-encryption and matching
-dSYM checks, Apple validation and upload. App Store Connect reports `VALID` and
-`IN_BETA_TESTING`; the existing `Fotoro Internal` group includes build 25.
-What to Test notes are saved and read back. The owner excludes France from the
-first release. Apple rejected a declaration-document resource for the verified
-non-proprietary, published third-party encryption outside France; its guidance
-permits `usesNonExemptEncryption=false` for encryption exempt from documentation.
-That per-build metadata is saved and verified; full encryption and the exact IPA
-remain unchanged. App Store availability has no configured resource yet: first
-publication must exclude France. Distribution signing is resolved. No new tester,
-public App Store release or physical installation is claimed. See
-[verification](verification.md).
+Worker `51988906-576b-4dee-9ede-eb8ca86d425b`, tagged `minimal-ui-20261004`,
+is prepared but has no production traffic at this checkpoint. Cutover requires
+the merged source and completed exact-head CI. Rollback is the verified PR 28
+Worker below. Native source is designated build 27; build 26 remains frozen and
+does not contain this UI cleanup. Distribution signing still requires the
+existing Xcode developer account.
+
+## Verified release checkpoint (PR 28)
+
+PR 28 is merged at `16916b6423b0e4ae010c99a01223dfbcde58d276`. Its reviewed
+head `1d39a6f40bd52ed76568e59cfecdfc5f41f18d2d` has 23 completed checks with
+SUCCESS or SKIPPED, its tree matches the merged main tree, and post-merge main
+CI run `37222319970` passes. Worker
+`7f78c6a7-70fc-4dea-886d-e9b0774e25e0`, tagged `seamless-home-20261004`,
+is live at 100% in deployment `2e0232a6-41d9-4064-a893-c4930a533692`.
+Rollback is `103856a0-471a-4702-891d-91278059de0d`. Production D1/R2,
+authentication settings and migration 0006 are unchanged.
+
+All emitted JavaScript and CSS match the reviewed build byte for byte. Entry
+HTML matches after removing only the configured Cloudflare analytics injection.
+Home, /saved, /saved/, the protected vault 401 and the exact Apple associated
+domains response pass. Rendered checks use Codex in-app browser; no Brave.
+Scene readers are prepared, but scene publication stays disabled until installed
+readers are qualified, so older strict readers can still refresh Saved.
+
+Full build 26 is archived with 57 source hashes, production domains, matching
+dSYM and full static encryption verified. Distribution export still reports
+No Accounts: Xcode's preference container exists, but its nested account list is
+empty. Restore the existing developer account in Xcode Settings → Accounts;
+the individual App Store Connect API key can upload and manage metadata but
+cannot provision signing. Both failed export attempts are preserved. The frozen
+archive remains unchanged. Build 25 is the latest verified internal TestFlight
+build, reporting VALID / IN_BETA_TESTING in the existing Fotoro Internal group.
+
+The owner excludes France from the first release. Build 25's verified
+`usesNonExemptEncryption=false` reflects exemption from declaration documentation;
+full encryption and the validated IPA are unchanged. No App Store availability
+resource is configured; first publication must exclude France. No new testers,
+public App Store release or physical installation are claimed. Build 21 is the
+last verified physical installation. Personal phone-to-Safari acceptance and
+physical performance remain open. See [verification](verification.md).
 
 ## Previous release checkpoints
 
