@@ -82,6 +82,7 @@ enum ReviewedPhotosBackupPolicy {
   var busy = false
   var fixtureAccounts: FixtureAccounts?
   var selectedGrant: GrantV1?
+  @ObservationIgnored private var sharedInboxRead: (id: UUID, access: SharingOperationAccess, task: Task<GrantInboxV1, Error>)?
   #if DEBUG
     @ObservationIgnored var consumerShareDidWrite: ((URL) -> Void)?
     @ObservationIgnored var catalogSearchWillRead: (@Sendable () -> Void)?
@@ -338,6 +339,7 @@ enum ReviewedPhotosBackupPolicy {
     }
     ImageCache.shared.costLimit = 48 * 1024 * 1024
     vault.onLock = { [weak self] in
+      self?.cancelSharedMomentRefresh()
       self?.suspendAutomaticPhotoSync()
       self?.activatedPhotoAccount = nil
       self?.consumerObservation = UUID()
@@ -1085,9 +1087,8 @@ enum ReviewedPhotosBackupPolicy {
     try reload()
     try hydrateLocalAnnotations()
     try fence()
-    let inbox: GrantInboxV1 = try await api.get("/v1/grants")
+    try await refreshSharedMoments()
     try fence()
-    grants = inbox.grants
     try catalog.setConsumerLastChecked(Date())
     consumerOffline = false
     consumerFailure = nil
@@ -1393,10 +1394,44 @@ enum ReviewedPhotosBackupPolicy {
   }
   func refreshSharedMoments() async throws {
     let access = try sharingAccess()
-    let inbox: GrantInboxV1 = try await api.get("/v1/grants")
+    let reading: (id: UUID, access: SharingOperationAccess, task: Task<GrantInboxV1, Error>)
+    if let current = sharedInboxRead, current.access.photo == access.photo,
+      current.access.cards == access.cards, !current.task.isCancelled { reading = current }
+    else {
+      cancelSharedMomentRefresh()
+      let client = api
+      reading = (UUID(), access, Task { try await client.get("/v1/grants") })
+      sharedInboxRead = reading
+    }
+    defer { if sharedInboxRead?.id == reading.id { sharedInboxRead = nil } }
+    let inbox = try await reading.task.value
+    guard !reading.task.isCancelled else { throw CancellationError() }
     try requireSharingAccess(access)
+    try applySharedInbox(inbox, account: access.account)
+  }
+  func cancelSharedMomentRefresh() {
+    sharedInboxRead?.task.cancel()
+    sharedInboxRead = nil
+  }
+  func withdrawExpiredReceivedMoment(now: Date = Date()) {
+    guard let grant = selectedGrant, grant.revokedAt != nil ||
+      grant.expiresAt.map({ (Wire.parseDate($0) ?? .distantPast) <= now }) == true else { return }
+    received = []; selectedGrant = nil
+  }
+  func isReceivedGrantCurrent(_ expected: GrantV1) -> Bool {
+    guard let current = selectedGrant, let access = photoAccountAccess else { return false }
+    return (try? requireGrant(current, matches: expected, account: access.account)) != nil
+  }
+  private func applySharedInbox(_ inbox: GrantInboxV1, account: String) throws {
     guard inbox.version == 1 else { throw FotoroError("Shared photos need a newer Fotoro version.") }
-    grants = inbox.grants.filter { $0.ownerAccountId == access.account || $0.recipientAccountId == access.account }
+    grants = inbox.grants.filter { $0.ownerAccountId == account || $0.recipientAccountId == account }
+    guard let opened = selectedGrant else { return }
+    guard let current = grants.first(where: { $0.grantId == opened.grantId }),
+      (try? requireGrant(current, matches: opened, account: account)) != nil else {
+      received = []; selectedGrant = nil
+      return
+    }
+    selectedGrant = current
   }
   func openMoment(_ invitation: FotoroMomentInvitation) async throws {
     let access = try sharingAccess()

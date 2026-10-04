@@ -35,7 +35,8 @@ struct PhotoViewer: View {
     self.receivedCards = receivedGrant == nil ? nil : services.session.pinnedCards
     _selected = State(initialValue: initialID)
   }
-  private var photos: [LocalPhoto] { displayedPhotos ?? (receivedGrant == nil ? services.photos : services.received) }
+  private var receivedUnavailable: Bool { receivedGrant.map { !services.isReceivedGrantCurrent($0) } ?? false }
+  private var photos: [LocalPhoto] { receivedUnavailable ? [] : displayedPhotos ?? (receivedGrant == nil ? services.photos : services.received) }
   private var current: LocalPhoto? { photos.first { $0.id == (selected.isEmpty ? initialID : selected) } }
   var body: some View {
     NavigationStack {
@@ -52,6 +53,15 @@ struct PhotoViewer: View {
             .tag(photo.id)
         }
       }.tabViewStyle(.page(indexDisplayMode: .never)).background(.black)
+        .overlay {
+          if receivedUnavailable {
+            VStack {
+              ContentUnavailableView("Shared photos unavailable", systemImage: "photo",
+                description: Text("Copies you saved stay in your Fotoro."))
+              if saveTask != nil { ProgressView("Finishing Save…") }
+            }
+          }
+        }
         .onChange(of: selected) { zoom.reset(); feedback = nil }
         .toolbar {
           ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() } }
@@ -92,7 +102,10 @@ struct PhotoViewer: View {
         }
         .onChange(of: services.vault.generation) { shareTask?.cancel(); saveTask?.cancel(); cleanupShare(); dismiss() }
         .onChange(of: services.selectedGrant) {
-          if let receivedGrant, services.selectedGrant != receivedGrant { saveTask?.cancel(); dismiss() }
+          if receivedUnavailable {
+            details = nil
+            if saveTask == nil { dismiss() }
+          }
         }
         .onChange(of: services.session.pinnedCards) {
           if let receivedCards, services.session.pinnedCards != receivedCards { saveTask?.cancel(); dismiss() }
@@ -140,12 +153,15 @@ struct PhotoViewer: View {
     }
   }
   private func saveReceived() {
-    guard let photo = current, let receivedGrant, services.selectedGrant == receivedGrant, saveTask == nil else { return }
+    guard let photo = current, let receivedGrant, services.isReceivedGrantCurrent(receivedGrant), saveTask == nil else { return }
     saveTask = services.run(phase: .share) {
-      defer { saveTask = nil }
+      defer {
+        saveTask = nil
+        if receivedUnavailable { dismiss() }
+      }
       try await services.save(photo)
       try Task.checkCancellation()
-      guard services.selectedGrant == receivedGrant else { throw CancellationError() }
+      guard services.isReceivedGrantCurrent(receivedGrant) else { throw CancellationError() }
       savedReceivedIDs.insert(photo.id)
       feedback = "Saved in your Fotoro."
     }
@@ -191,12 +207,12 @@ private struct SavedPhotoPage: View {
       .task(id: photo.id) {
         do {
           if let receivedGrant {
-            guard services.selectedGrant == receivedGrant, services.session.pinnedCards == receivedCards else { throw CancellationError() }
+            guard services.isReceivedGrantCurrent(receivedGrant), services.session.pinnedCards == receivedCards else { throw CancellationError() }
           }
           try await services.ensurePreview(photo)
           try Task.checkCancellation()
           if let receivedGrant {
-            guard services.selectedGrant == receivedGrant, services.session.pinnedCards == receivedCards,
+            guard services.isReceivedGrantCurrent(receivedGrant), services.session.pinnedCards == receivedCards,
               let current = services.received.first(where: { $0.id == photo.id && $0.metadata == photo.metadata && $0.manifest == photo.manifest })
             else { throw CancellationError() }
             loaded = current

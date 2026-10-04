@@ -10,6 +10,9 @@ import {stageImport, validateSource} from "../src/exchange/journal";
 import {configureVault, unlockVault, lockVault, requireVault} from "../src/vault/vault";
 import {clearAccount, all, get} from "../src/exchange/cache";
 import {collect, source} from "../src/library/catalog";
+import {gridHeicWithExif, HEIC_CAPTURE_CLOCK} from "./fixtures/heic-exif";
+import {captureGroup} from "../src/local/capture-groups";
+import {PhotoSearchIndex} from "../src/local/search";
 
 const heic = new Uint8Array(readFileSync(new URL("../../../fixtures/media/singapore.heic", import.meta.url)));
 const jpeg = new Uint8Array(readFileSync(new URL("../../../fixtures/media/thumbnail.jpg", import.meta.url)));
@@ -123,6 +126,28 @@ test("manual HEIC Save encrypts the exact original with canonical MIME and bound
       metadataKey.fill(0); metadataBytes.fill(0); originalKey.fill(0); restored.fill(0);
     }
     assert.equal(environment.workers, 3); assert.deepEqual(environment.sizes, Array(3).fill([{width: 256, height: 160}, {width: 1600, height: 1000}]).flat());
+  } finally {environment.restore(); lockVault(); await clearAccount(owner);}
+});
+test("HEIC capture dates reach grouping, date search and manual Save while preserving exact originals", async () => {
+  const environment = await browserMocks();
+  try {
+    await clearAccount(owner); const session = await open();
+    const bytes = gridHeicWithExif(heic);
+    const original = new File([bytes], "camera.heic", {type: "image/heic", lastModified: Date.parse("2026-10-04T12:00:00Z")});
+    const photo = await localPhoto(original), expected = new Date(HEIC_CAPTURE_CLOCK.slice(0, 10).replaceAll(":", "-") + "T" + HEIC_CAPTURE_CLOCK.slice(11)).toISOString();
+    assert.equal(photo.date, expected); assert.equal(photo.dateSource, "exif"); assert.equal(photo.captureVerified, true);
+    assert.equal(captureGroup(photo).key, "2026-8-1");
+    assert.deepEqual(new PhotoSearchIndex([photo]).search("September 2026").photoIds, [photo.id]);
+    assert.deepEqual(new PhotoSearchIndex([photo]).search("October 2026").photoIds, [], "File modification/selection dates do not enter capture-date search");
+    const pending = await stageImport(original), metadataPart = pending.parts.find(part => part.binding.kind === "metadata")!, originalPart = pending.parts.find(part => part.binding.kind === "original")!;
+    const cipher = async (part: typeof metadataPart) => (await get<Uint8Array>("staging", pending.stagingKeys[pending.parts.indexOf(part)]))!;
+    const metadataKey = unwrapKey(pending.wrapped, session.vaultKey), metadataBytes = await collect(decryptMedia(source(await cipher(metadataPart)), metadataKey, metadataPart.binding));
+    const metadata = JSON.parse(new TextDecoder().decode(metadataBytes)), originalKey = unb64(metadata.representationKeys[originalPart.binding.representationId]);
+    const restored = await collect(decryptMedia(source(await cipher(originalPart)), originalKey, originalPart.binding));
+    assert.equal(metadata.sourceDate, expected); assert.equal(metadata.dateSource, "exif"); assert.equal(metadata.mediaType, "image/heic");
+    assert.equal(metadata.originalSha256, pending.sourceDigest); assert.equal(Buffer.from(unb64(pending.sourceDigest)).toString("hex"), photo.digest);
+    assert.deepEqual(restored, bytes); assert.deepEqual(new Uint8Array(await original.arrayBuffer()), bytes);
+    metadataKey.fill(0); metadataBytes.fill(0); originalKey.fill(0); restored.fill(0);
   } finally {environment.restore(); lockVault(); await clearAccount(owner);}
 });
 test("unsupported native HEIC decode and unsafe dimensions stop before encryption or durable staging", async () => {

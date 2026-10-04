@@ -25,6 +25,7 @@ import {
 } from "./exchange/api";
 import { Exchange } from "./exchange/Exchange";
 import {IncomingShareIntent, grantState} from "./exchange/sharing";
+import {ReceivedAccessRefresh} from "./exchange/received-access";
 import {
   stageImport,
   pendingImports,
@@ -122,6 +123,7 @@ export default function CloudApp({
     [pending, setPending] = useState<PendingImport[]>([]);
   const [receivedContext, setReceivedContext] = useState<{grant: GrantV1; sender: string} | null>(null);
   const [receivedNow, setReceivedNow] = useState(Date.now);
+  const [receivedAccessRefresh] = useState(() => new ReceivedAccessRefresh());
   const [annotationError, setAnnotationError] = useState<{message: string; photoId?: string; originalSha256?: string} | null>(null);
   const [recoveryNew, setRecoveryNew] = useState(""),
     [reselect, setReselect] = useState<PendingImport | undefined>(undefined);
@@ -341,13 +343,46 @@ export default function CloudApp({
   }, [account]);
   useEffect(() => {
     setReceivedNow(Date.now());
-    const expiresAt = receivedContext?.grant.expiresAt;
-    if (!expiresAt) return;
-    const remaining = Date.parse(expiresAt) - Date.now();
-    if (remaining <= 0) return;
-    const timer = window.setTimeout(() => setReceivedNow(Date.now()), Math.min(remaining + 1, 2_147_483_647));
-    return () => window.clearTimeout(timer);
-  }, [receivedContext]);
+    if (!active || !account || !receivedContext) return;
+    const session = requireVault(), captured = receivedContext;
+    let alive = true;
+    const current = () => alive && activeRef.current && document.visibilityState === "visible" && sameVault(session);
+    const withdraw = () => {
+      if (!current()) return;
+      for (const photo of received ?? []) photo.metadataKey.fill(0);
+      setReceived(null); setReceivedContext(null); setViewer(null); setSelected(new Set());
+      setQuery(""); setCommittedMeaning(undefined);
+      setStatus("These shared photos are no longer available. Copies you saved stay in your Fotoro.");
+    };
+    const recheck = () => {
+      if (document.visibilityState !== "visible" || !current()) return;
+      if (captured.grant.expiresAt && Date.parse(captured.grant.expiresAt) <= Date.now()) {withdraw(); return;}
+      void receivedAccessRefresh.read(captured.grant, session, current).then(grant => {
+        if (!current()) return;
+        if (!grant) withdraw();
+        else if (grant.version !== captured.grant.version || grant.expiresAt !== captured.grant.expiresAt) {
+          setReceivedContext(previous => previous === captured ? {...captured, grant} : previous);
+        }
+      }).catch(error => {
+        if (current() && error?.name !== "AbortError") setStatus("Shared photos could not be checked. Check your connection and try again.");
+      });
+    };
+    recheck();
+    const detach = subscribeSavedRefresh(window, document, recheck);
+    const hide = () => {if (document.visibilityState !== "visible") receivedAccessRefresh.cancel();};
+    const leave = () => receivedAccessRefresh.cancel();
+    document.addEventListener("visibilitychange", hide);
+    window.addEventListener("pagehide", leave);
+    window.addEventListener("focus", recheck);
+    const remaining = captured.grant.expiresAt ? Date.parse(captured.grant.expiresAt) - Date.now() : null;
+    const timer = remaining == null ? undefined : window.setTimeout(() => {setReceivedNow(Date.now()); recheck();}, Math.max(0, Math.min(remaining + 1, 2_147_483_647)));
+    return () => {
+      alive = false; receivedAccessRefresh.cancel(); detach();
+      document.removeEventListener("visibilitychange", hide); window.removeEventListener("pagehide", leave);
+      window.removeEventListener("focus", recheck);
+      window.clearTimeout(timer);
+    };
+  }, [active, account, receivedContext]);
   useEffect(() => {
     const update = () => setOnline(navigator.onLine !== false);
     window.addEventListener("online", update); window.addEventListener("offline", update);

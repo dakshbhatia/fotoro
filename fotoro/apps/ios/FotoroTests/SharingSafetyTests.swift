@@ -4,6 +4,137 @@ import XCTest
 @testable import Fotoro
 
 final class SharingSafetyTests: XCTestCase {
+  @MainActor func testActiveInboxUpdatesKeepAlreadyOpenedReceivedPhotos() async throws {
+    let context = try SharingSafetyContext()
+    let services = try await context.open(index: 1)
+    defer { context.restore() }
+    let opened = context.server.grant
+    try await services.receive(opened)
+    let photoIDs = services.received.map(\.id)
+    var current = opened
+    current.version += 1
+    current.expiresAt = Wire.date(Date().addingTimeInterval(900))
+    context.server.setInbox([current])
+    try await services.refreshSharedMoments()
+    XCTAssertEqual(services.selectedGrant, current)
+    XCTAssertEqual(services.received.map(\.id), photoIDs)
+    XCTAssertTrue(services.isReceivedGrantCurrent(opened), "A higher active version keeps existing photo access")
+    current.revokedAt = Wire.date()
+    context.server.setInbox([current])
+    try await services.refreshSharedMoments()
+    XCTAssertFalse(services.isReceivedGrantCurrent(opened))
+    XCTAssertTrue(services.received.isEmpty)
+  }
+
+  @MainActor func testInboxRefreshWithdrawsUnavailableReceivedPhotosAndKeepsOwnedCopies() async throws {
+    for change in ["revoked", "expired", "missing", "binding"] {
+      let context = try SharingSafetyContext()
+      let services = try await context.open(index: 1)
+      defer { context.restore() }
+      try await services.receive(context.server.grant)
+      XCTAssertFalse(services.received.isEmpty)
+      let pending = try context.pendingSave()
+      _ = try services.store.operation("save-fixture") { pending }
+      try await services.resumeSaves()
+      let savedID = pending.request.save.photoId
+      var updated = context.server.grant
+      switch change {
+      case "revoked": updated.revokedAt = Wire.date(); updated.version += 1
+      case "expired": updated.expiresAt = "2000-01-01T00:00:00Z"
+      case "binding": updated.momentId = Wire.id()
+      default: break
+      }
+      context.server.setInbox(change == "missing" ? [] : [updated])
+      let before = context.server.requests.count
+      try await services.refreshSharedMoments()
+      XCTAssertNil(services.selectedGrant, change)
+      XCTAssertTrue(services.received.isEmpty, change)
+      XCTAssertNotNil(try services.consumerSavedPhoto(savedID), "Saved copies belong to the recipient")
+      XCTAssertNotNil(try services.store.existingOperation("save-fixture", as: PendingSave.self))
+      XCTAssertEqual(context.server.requests.dropFirst(before).map(\.path), ["/v1/grants"])
+    }
+  }
+
+  @MainActor func testInboxReadsCoalesceAndFailureDoesNotMeanAccessEnded() async throws {
+    let gate = SharingResponseGate(suffix: "/v1/grants", started: expectation(description: "inbox"))
+    let context = try SharingSafetyContext(gate: gate)
+    let services = try await context.open(index: 1)
+    defer { gate.release.signal(); context.restore() }
+    try await services.receive(context.server.grant)
+    let first = Task { try await services.refreshSharedMoments() }
+    await fulfillment(of: [gate.started], timeout: 3)
+    let second = Task { try await services.refreshSharedMoments() }
+    await Task.yield()
+    gate.release.signal()
+    try await first.value; try await second.value
+    XCTAssertEqual(context.server.requests.filter { $0.path == "/v1/grants" }.count, 1)
+    XCTAssertEqual(services.selectedGrant, context.server.grant)
+    context.server.failInbox = true
+    do { try await services.refreshSharedMoments(); XCTFail("A failed inbox read must surface failure") } catch {}
+    XCTAssertEqual(services.selectedGrant, context.server.grant)
+    XCTAssertFalse(services.received.isEmpty, "A network failure must not invent revoked access")
+  }
+
+  @MainActor func testWithdrawalDoesNotCancelAnOwnedSaveReceiptAlreadyInFlight() async throws {
+    let gate = SharingResponseGate(suffix: "/v1/saves", started: expectation(description: "owned save"))
+    let context = try SharingSafetyContext(gate: gate)
+    let services = try await context.open(index: 1)
+    defer { gate.release.signal(); context.restore() }
+    try await services.receive(context.server.grant)
+    let pending = try context.pendingSave()
+    _ = try services.store.operation("save-fixture") { pending }
+    let saving = Task { try await services.resumeSaves() }
+    await fulfillment(of: [gate.started], timeout: 3)
+    context.server.setInbox([])
+    try await services.refreshSharedMoments()
+    XCTAssertNil(services.selectedGrant)
+    XCTAssertTrue(services.received.isEmpty)
+    gate.release.signal()
+    try await saving.value
+    XCTAssertNotNil(try services.consumerSavedPhoto(pending.request.save.photoId))
+  }
+
+  @MainActor func testCancelledInboxReadCannotWithdrawTheNextForegroundPresentation() async throws {
+    let gate = SharingResponseGate(suffix: "/v1/grants", started: expectation(description: "old foreground"))
+    let context = try SharingSafetyContext(gate: gate)
+    let services = try await context.open(index: 1)
+    defer { gate.release.signal(); context.restore() }
+    try await services.receive(context.server.grant)
+    context.server.setInbox([])
+    let old = Task { try await services.refreshSharedMoments() }
+    await fulfillment(of: [gate.started], timeout: 3)
+    services.cancelSharedMomentRefresh()
+    context.server.setInbox([context.server.grant])
+    let next = Task { try await services.refreshSharedMoments() }
+    gate.release.signal()
+    do { try await old.value; XCTFail("An old lifecycle read must lose authority") }
+    catch { XCTAssertTrue(error is CancellationError || (error as? URLError)?.code == .cancelled) }
+    try await next.value
+    XCTAssertEqual(services.selectedGrant, context.server.grant)
+    XCTAssertFalse(services.received.isEmpty)
+    XCTAssertEqual(context.server.requests.filter { $0.path == "/v1/grants" }.count, 2)
+  }
+
+  @MainActor func testKnownExpiryWithdrawsTheReceivedPresentationWithoutNetworkOrOwnedChanges() async throws {
+    let context = try SharingSafetyContext()
+    let services = try await context.open(index: 1)
+    defer { context.restore() }
+    try await services.receive(context.server.grant)
+    let pending = try context.pendingSave()
+    _ = try services.store.operation("save-fixture") { pending }
+    try await services.resumeSaves()
+    let expiry = Date().addingTimeInterval(60)
+    var temporary = context.server.grant; temporary.expiresAt = Wire.date(expiry)
+    services.selectedGrant = temporary
+    let before = context.server.requests.count
+    services.withdrawExpiredReceivedMoment(now: expiry.addingTimeInterval(-1))
+    XCTAssertNotNil(services.selectedGrant)
+    services.withdrawExpiredReceivedMoment(now: expiry.addingTimeInterval(1))
+    XCTAssertNil(services.selectedGrant); XCTAssertTrue(services.received.isEmpty)
+    XCTAssertNotNil(try services.consumerSavedPhoto(pending.request.save.photoId))
+    XCTAssertEqual(context.server.requests.count, before)
+  }
+
   @MainActor func testDelayedGrantOptionsCannotSendAfterLockAccountOrTrustChange() async throws {
     for change in ["lock", "account", "trust", "cancel"] {
       let gate = SharingResponseGate(suffix: "/grants/options", started: expectation(description: change))
@@ -262,6 +393,8 @@ private final class SharingSafetyServer: @unchecked Sendable {
   private var recorded: [Request] = []
   private var created: [String] = []
   private var contributed: [String] = []
+  private var inbox: [GrantV1] = []
+  var failInbox = false
   init(cards: [AccountCardV1], secrets: [FixtureSecrets], gate: SharingResponseGate?,
     changedSender: Bool, receiptMode: ReceiptMode) throws {
     self.cards = cards; self.secrets = secrets; self.gate = gate; self.receiptMode = receiptMode
@@ -278,6 +411,7 @@ private final class SharingSafetyServer: @unchecked Sendable {
     source = LocalPhoto(photoId: id, manifest: manifest, metadata: metadata, transferState: "committed")
     grant = GrantV1(grantId: Wire.id(), momentId: Wire.id(), ownerAccountId: cards[0].accountId,
       recipientAccountId: cards[1].accountId, role: "contributor", expiresAt: nil, revokedAt: nil, version: 1)
+    inbox = [grant]
     let signed = try crypto.sign(manifest, kind: "photo-manifest", accountId: cards[0].accountId, secret: Data(b64: secrets[0].signingSecretKey))
     let envelope = try crypto.share(key, grantId: grant.grantId, photoId: id, sender: cards[0].accountId,
       recipient: cards[1], signingKey: Data(b64: secrets[0].signingSecretKey))
@@ -289,6 +423,7 @@ private final class SharingSafetyServer: @unchecked Sendable {
   var requests: [Request] { lock.lock(); defer { lock.unlock() }; return recorded }
   var createdPhotoIDs: [String] { lock.lock(); defer { lock.unlock() }; return created }
   var contributedPhotoIDs: [String] { lock.lock(); defer { lock.unlock() }; return contributed }
+  func setInbox(_ grants: [GrantV1]) { lock.lock(); inbox = grants; lock.unlock() }
   func photo(owner index: Int) throws -> LocalPhoto {
     var photo = source
     photo.photoId = Wire.id(); photo.manifest.photoId = photo.photoId
@@ -299,6 +434,12 @@ private final class SharingSafetyServer: @unchecked Sendable {
   func response(_ request: URLRequest) throws -> Data {
     let path = try XCTUnwrap(request.url?.path)
     lock.lock(); recorded.append(Request(path: path, method: request.httpMethod ?? "GET")); lock.unlock()
+    if path == "/v1/grants" {
+      lock.lock(); let current = inbox, failing = failInbox; lock.unlock()
+      gate?.visit(path)
+      if failing { throw URLError(.notConnectedToInternet) }
+      return try Wire.encode(GrantInboxV1(version: 1, grants: current))
+    }
     gate?.visit(path)
     if path == "/v1/grants/" + grant.grantId { return try Wire.encode(detail) }
     if let data = objects[String(path.split(separator: "/").last ?? "")], path.hasPrefix("/v1/objects/") { return data }

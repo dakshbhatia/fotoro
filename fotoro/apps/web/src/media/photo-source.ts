@@ -104,8 +104,8 @@ export function displayPhotoDimensions(bytes: Uint8Array, format: PhotoFormat, f
 
 interface Box {type: string; data: number; end: number;}
 // Only bounded metadata is inspected; media payloads are never searched for box names.
-export function heicDimensions(bytes: Uint8Array, fileSize = bytes.length): PhotoDimensions | undefined {
-  try {
+function heicMetadata(bytes: Uint8Array, fileSize: number) {
+    if (!Number.isSafeInteger(fileSize) || fileSize < bytes.length) throw Error();
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const u16 = (at: number) => view.getUint16(at), u32 = (at: number) => view.getUint32(at);
     const text = (at: number) => String.fromCharCode(...bytes.subarray(at, at + 4));
@@ -131,7 +131,7 @@ export function heicDimensions(bytes: Uint8Array, fileSize = bytes.length): Phot
     const tops: Box[] = [];
     for (let at = 0; at < Math.min(fileSize, bytes.length);) {
       const item = box(at, fileSize);
-      if (item.end > bytes.length) {if (item.type !== "mdat" || !tops.some(value => value.type === "meta")) throw Error(); break;}
+      if (item.end > bytes.length) {if (item.type !== "mdat" || !tops.some(value => value.type === "meta")) throw Error(); tops.push(item); break;}
       tops.push(item); if (tops.length > 128) throw Error(); at = item.end;
     }
     const ftyp = only(tops, "ftyp");
@@ -165,6 +165,11 @@ export function heicDimensions(bytes: Uint8Array, fileSize = bytes.length): Phot
       if (id === primaryId) {if (value.flags) throw Error(); primaryType = text(value.at + size + 2);}
     }
     if (!primaryType || !["hvc1", "grid"].includes(primaryType)) throw Error();
+    return {view, u16, u32, children, only, full, tops, contents, ids, types, primaryId, primaryType};
+}
+export function heicDimensions(bytes: Uint8Array, fileSize = bytes.length): PhotoDimensions | undefined {
+  try {
+    const {u16, u32, children, only, full, contents, ids, types, primaryId, primaryType} = heicMetadata(bytes, fileSize);
     const iprp = only(contents, "iprp"), properties = children(iprp.data, iprp.end), ipco = only(properties, "ipco");
     const definitions = children(ipco.data, ipco.end);
     // Bound every declared image, including tiles and auxiliary images.
@@ -255,6 +260,80 @@ export function heicDimensions(bytes: Uint8Array, fileSize = bytes.length): Phot
     if (rotations[0]) {const item = rotations[0]; if (item.end !== item.data + 1 || bytes[item.data] > 3) throw Error(); if (bytes[item.data] & 1) [width, height] = [height, width];}
     if (mirrors[0] && (mirrors[0].end !== mirrors[0].data + 1 || bytes[mirrors[0].data] > 1)) throw Error();
     return safePhotoDimensions({width, height});
+  } catch {return;}
+}
+
+export const MAX_EXIF_BYTES = 64 * 1024;
+export interface ExifExtent {offset: number; length: number;}
+// Exif must describe the primary image. Resolve its declared extents, never TIFF
+// signatures in image payloads or metadata attached only to a thumbnail/tile.
+export function heicExifExtents(header: Uint8Array, fileSize = header.length): ExifExtent[] | undefined {
+  try {
+    const bytes = header.subarray(0, PHOTO_HEADER_BYTES);
+    if (!heicDimensions(bytes, fileSize)) return;
+    const {u16, u32, children, only, full, contents, tops, ids, types, primaryId} = heicMetadata(bytes, fileSize);
+    const iref = only(contents, "iref"), refs = full(iref, [0, 1]);
+    if (refs.flags) return;
+    const idSize = refs.version ? 4 : 2;
+    let exifId: number | undefined;
+    const described = new Set<number>();
+    for (const item of children(refs.at, iref.end).filter(item => item.type === "cdsc")) {
+      if (item.data + idSize + 2 > item.end) return;
+      const from = idSize === 4 ? u32(item.data) : u16(item.data), count = u16(item.data + idSize);
+      if (!ids.has(from) || described.has(from) || item.data + idSize + 2 + count * idSize !== item.end) return;
+      described.add(from);
+      const targets = new Set<number>();
+      for (let i = 0; i < count; i++) {
+        const at = item.data + idSize + 2 + i * idSize, target = idSize === 4 ? u32(at) : u16(at);
+        if (!ids.has(target) || targets.has(target)) return;
+        targets.add(target);
+      }
+      if (types.get(from) === "Exif" && targets.has(primaryId)) {
+        if (exifId !== undefined) return; // Ambiguous primary capture provenance.
+        exifId = from;
+      }
+    }
+    if (exifId === undefined) return;
+    const iloc = only(contents, "iloc"), locations = full(iloc, [0, 1, 2]);
+    if (locations.flags || locations.at + 2 > iloc.end) return;
+    const offsetSize = bytes[locations.at] >> 4, lengthSize = bytes[locations.at] & 15;
+    const baseSize = bytes[locations.at + 1] >> 4, indexSize = bytes[locations.at + 1] & 15;
+    if ([offsetSize, lengthSize, baseSize, indexSize].some(size => size > 8) || (!locations.version && indexSize)) return;
+    let cursor = locations.at + 2;
+    const integer = (length: number) => {
+      if (cursor + length > iloc.end) throw Error();
+      let value = 0;
+      for (let i = 0; i < length; i++) value = value * 256 + bytes[cursor++];
+      if (!Number.isSafeInteger(value)) throw Error();
+      return value;
+    };
+    const count = integer(locations.version === 2 ? 4 : 2);
+    if (count > 4096) return;
+    const located = new Set<number>();
+    let selected: ExifExtent[] | undefined, totalExtents = 0;
+    for (let i = 0; i < count; i++) {
+      const id = integer(locations.version === 2 ? 4 : 2), method = locations.version ? integer(2) : 0;
+      const reference = integer(2), base = integer(baseSize), extentCount = integer(2);
+      if (!ids.has(id) || located.has(id) || (totalExtents += extentCount) > 4096) return;
+      located.add(id);
+      let totalBytes = 0;
+      if (id === exifId) {
+        if (method > 1 || reference || !extentCount || extentCount > 32) return;
+        selected = [];
+      }
+      for (let j = 0; j < extentCount; j++) {
+        const index = integer(indexSize), offset = integer(offsetSize), length = integer(lengthSize);
+        if (id !== exifId) continue;
+        if (index || !length || (totalBytes += length) > MAX_EXIF_BYTES) return;
+        const container = method === 1 ? only(contents, "idat") : undefined;
+        const start = base + offset + (container?.data ?? 0), end = start + length;
+        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end > fileSize) return;
+        if (container ? end > container.end : !tops.some(item => item.type === "mdat" && start >= item.data && end <= item.end)) return;
+        selected!.push({offset: start, length});
+      }
+    }
+    if (cursor !== iloc.end || !selected || selected.reduce((sum, extent) => sum + extent.length, 0) < 12) return;
+    return selected;
   } catch {return;}
 }
 
