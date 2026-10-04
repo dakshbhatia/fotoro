@@ -111,6 +111,7 @@ export default function CloudApp({
     [photos, setPhotos] = useState<Photo[]>([]),
     [received, setReceived] = useState<Photo[] | null>(null),
     [query, setQuery] = useState(""),
+    [searchOpen, setSearchOpen] = useState(false),
     [selected, setSelected] = useState(new Set<string>()),
     [viewer, setViewer] = useState<string | null>(null),
     [exchange, setExchange] = useState(false),
@@ -144,15 +145,16 @@ export default function CloudApp({
     intentVersion = useRef(0),
     uploadAbort = useRef<AbortController | null>(null),
     localSynced = useRef(new WeakMap<File, string>());
-  const input = useRef<HTMLInputElement>(null);
+  const input = useRef<HTMLInputElement>(null), searchInput = useRef<HTMLInputElement>(null), searchButton = useRef<HTMLButtonElement>(null), scopeSelector = useRef<HTMLSelectElement>(null);
   const activeRef = useRef(active), saveIntentRef = useRef(saveIntent), incomingRef = useRef(incoming);
   activeRef.current = active; saveIntentRef.current = saveIntent; incomingRef.current = incoming;
   const backButton = useRef<HTMLButtonElement>(null), passwordPanel = useRef<HTMLElement>(null);
   useEffect(() => {
     if (!active) return;
-    const target = account ? backButton.current : passwordPanel.current?.querySelector<HTMLInputElement>('input[name="password"]');
+    const target = account ? scopeSelector.current : passwordPanel.current?.querySelector<HTMLInputElement>('input[name="password"]');
     target?.focus({preventScroll: true});
   }, [active, account, recoveryNew]);
+  useEffect(() => {if (searchOpen && activeRef.current) searchInput.current?.focus();}, [searchOpen]);
   const accountPanel = useRef<HTMLElement>(null);
   const closeAccountPanel = () => setMenu(false);
   useDialogFocus(accountPanel, closeAccountPanel, menu && active && !!account);
@@ -646,7 +648,11 @@ export default function CloudApp({
     <>
       <main className={"cloud-library" + (selecting ? " exchange-selection" : "")} inert={viewing || exchange || menu ? true : undefined}>
         <header className="consumer-navigation">
-          <div className="brand"><h1>Fotoro</h1></div>
+          {unlocked ? <nav className="consumer-scope-menu" aria-label="Photo library"><select ref={scopeSelector} aria-label="Photo library" value={received ? "shared" : "saved"} onChange={event => {
+            if (event.target.value === "photos") onBack();
+            else if (event.target.value === "shared") openSharing();
+            else {setReceived(null); setReceivedContext(null); setQuery(""); setCommittedMeaning(undefined);}
+          }}><option value="photos">Photos</option><option value="saved">Saved</option><option value="shared">Shared</option></select></nav> : <h1>Fotoro</h1>}
           <div className="header-actions">
           {!unlocked && <button
             ref={backButton}
@@ -663,11 +669,11 @@ export default function CloudApp({
             Back to photos
           </button>}
           {unlocked && (
-            <button
-              className="menu-button glass"
-              aria-label="Settings"
-              onClick={() => setMenu(!menu)}
-            >
+            <>
+            {!received && photos.length > 0 && <button aria-pressed={selecting} onClick={() => setSelecting(value => !value)}>{selecting ? "Done" : "Select"}</button>}
+            {(photos.length > 0 || !!received?.length || !!query) && <button className="menu-button" ref={searchButton} aria-label="Search photos" aria-expanded={searchOpen || !!query} onClick={() => {setSearchOpen(true); searchInput.current?.focus();}}><SearchIcon /></button>}
+            {!received && <button className="menu-button" onClick={() => {setReselect(undefined); input.current?.click();}} aria-label="Add photos" disabled={busy || publicDemo}><PlusIcon /></button>}
+            <button className="menu-button" aria-label="Settings" onClick={() => setMenu(!menu)}>
               <svg
                 viewBox="0 0 24 24"
                 fill="none"
@@ -677,6 +683,7 @@ export default function CloudApp({
                 <circle cx="12" cy="12" r="3" /><path d="m9 3 1 2h4l1-2 3 2-1 2 2 3 2 1v3l-2 1-2 3 1 2-3 2-1-2h-4l-1 2-3-2 1-2-2-3-2-1v-3l2-1 2-3-1-2z" />
               </svg>
             </button>
+            </>
           )}
           </div>
         </header>
@@ -745,22 +752,10 @@ export default function CloudApp({
                 Public test account · private uploads disabled.
               </p>
             )}
-            <div className="toolbar glass consumer-search">
-              <SearchIcon />
-              <input aria-label="Search photos" placeholder="Search photos" value={query} onChange={event => {setQuery(event.target.value); setCommittedMeaning(undefined);}} />
-              {query && <button onClick={() => {setQuery(""); setCommittedMeaning(undefined);}} aria-label="Clear search">×</button>}
-              {!received && <button onClick={() => {setReselect(undefined); input.current?.click();}} aria-label="Add photos" disabled={busy || publicDemo}><PlusIcon /></button>}
-            </div>
-            <nav className="consumer-scopes" aria-label="Photo library">
-              <button ref={backButton} onClick={onBack}>Photos</button>
-              <button aria-current={!received ? "page" : undefined} onClick={() => {setReceived(null); setReceivedContext(null); setQuery(""); setCommittedMeaning(undefined);}}>Saved</button>
-              <button aria-current={received ? "page" : undefined} onClick={() => openSharing()}>Shared</button>
-            </nav>
-            <div className="consumer-section">
-              <h2>{query ? "Search results" : received ? "Shared photos" : "Saved photos"}</h2>
-              {!received && <button aria-pressed={selecting} onClick={() => setSelecting(value => !value)}>{selecting ? "Done" : "Select"}</button>}
-            </div>
-            {!received && <p className="consumer-scope-hint">Photos saved in Fotoro, available across devices.</p>}
+            {(searchOpen || !!query) && <div className="consumer-search">
+              <input ref={searchInput} aria-label="Search photos" placeholder="Search photos" value={query} onChange={event => {setQuery(event.target.value); setCommittedMeaning(undefined);}} />
+              <button onClick={() => {if (query) {setQuery(""); setCommittedMeaning(undefined); searchInput.current?.focus();} else {setSearchOpen(false); searchButton.current?.focus();}}} aria-label={query ? "Clear search" : "Close search"}>×</button>
+            </div>}
             {!received && (busy || localCount > 0 || summary.pending > 0 || summary.failed > 0 || needsAttention || annotationPending.length > 0) && <section className={"consumer-save-progress state-" + consumerSummary.state} aria-label="Save progress">
               <div><p role="status">{status || syncStateLabel[consumerSummary.state]}</p>{consumerSummary.detail && <p className="hint">{consumerSummary.detail}</p>}</div>
               <div className="actions">
@@ -855,9 +850,9 @@ export default function CloudApp({
             {status}
           </p>
         )}
-        {busy && (
+        {busy && (!unlocked || received) && (
           <p className="busy" role="status">
-            {syncStateLabel[consumerSummary.state]}
+            {unlocked ? "Opening photos…" : "Opening Fotoro…"}
           </p>
         )}
       </main>

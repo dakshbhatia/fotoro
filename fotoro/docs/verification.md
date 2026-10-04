@@ -1,6 +1,24 @@
 # Verification — October 4, 2026
 
-The seamless-home follow-up replaces the hidden first-sync icon with a visible
+The UI cleanup removes the large brand, segmented tabs, repeated section
+headings/source captions and healthy idle counts. Native retains one library
+menu, search and Sync; web expands search on demand. Empty entry keeps only
+functional opening choices. Selection, Pause/Retry, manual changes, permissions
+and account fences retain their existing paths. No backend or protocol changes.
+
+Cleanup checks pass all 290 web tests, typecheck/production build and both full
+and local-preview native compilation. Startup is 353,757 bytes in three chunks.
+Codex in-app browser checks public photos at 320×568, 390×844, 844×390 and
+1280×720: no horizontal overflow, 44 px header actions, password focus, search,
+selection preserved through Saved/Back, direct /saved URL normalization and no
+console errors. Native menu and largest text are reachable. A fresh Simulator
+with Photos denied and no account opens Saved password entry and returns to the
+permission screen; no local Photos grant is needed. An existing query keeps its
+Clear action after account withdrawal. Read-only review finds no remaining
+concrete regression. Full CI/release readback must qualify the exact committed
+head; build 26 remains frozen and does not contain this UI cleanup.
+
+The preceding PR 28 seamless-home follow-up replaces the hidden first-sync icon with a visible
 Turn on sync action on iPhone, retaining the existing account/Photos consent and
 Pause behavior. Enabled Sync puts its detailed format and foreground limits in
 How sync works. A fresh browser offers Open Saved photos first and local photos
@@ -37,14 +55,20 @@ is 353,826 bytes across three chunks, inside its 500 KiB budget.
 
 Full build 26 archives with all 57 source inputs frozen, production associated
 domains, matching dSYM and full static encryption verified. Distribution export
-is pending: Xcode now has an empty developer-account list, while the existing
-App Store profile requires Cloud Managed Apple Distribution. Restoring the same
-Xcode account is required; cached profiles cannot replace that cloud private key.
+is pending: two export attempts report No Accounts. Xcode's preference container
+exists but its nested account list is empty. The existing App Store profile uses
+Cloud Managed Apple Distribution. Restore the same Xcode developer account;
+cached profiles and the individual API key cannot provide distribution signing.
 Build 25 remains the latest verified internal TestFlight build.
 
-The seamless-home Worker version 7f78c6a7-70fc-4dea-886d-e9b0774e25e0 is prepared
-from this source. Activation follows exact-head CI and merge; rollback is the
-preceding live version 103856a0-471a-4702-891d-91278059de0d.
+PR 28 is merged at 16916b6423b0e4ae010c99a01223dfbcde58d276. All 23 exact-head
+checks completed with SUCCESS or SKIPPED; the reviewed and merged trees match.
+Worker 7f78c6a7-70fc-4dea-886d-e9b0774e25e0 is live at 100% in deployment
+2e0232a6-41d9-4064-a893-c4930a533692. All JavaScript/CSS bytes match the build;
+entry HTML matches after removing only the configured Cloudflare analytics
+injection. Home and both Saved paths, protected vault 401 and the exact Apple
+association pass. Final rendered proof uses Codex in-app browser. Rollback is
+103856a0-471a-4702-891d-91278059de0d.
 
 The preceding PR 27 checkpoint is merged at
 72207e4612e2f2e9ac8f07497d75143fbe2db80b and main CI 37213350159 passes.

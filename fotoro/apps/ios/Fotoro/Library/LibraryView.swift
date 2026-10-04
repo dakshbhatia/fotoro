@@ -366,10 +366,13 @@ struct SavedPhotoSelection {
 
 struct ConsumerSaveStatus: View {
   @Bindable var services: AppServices
+  var showsIdleSummary = true
   private var summary: ConsumerSyncSummary { services.consumerSyncSummary }
   private var saving: Bool { services.backup.isRunning || services.journal.running }
   private var title: String {
     let automatic = services.automaticPhotoSync
+    if !showsIdleSummary, !saving, summary.state == .notStarted || summary.state == .upToDate,
+      !automatic.enabled || automatic.phase == .ready { return summary.detail ?? "" }
     if automatic.enabled {
       switch automatic.phase {
       case .paused: return "Sync paused"
@@ -400,6 +403,7 @@ struct ConsumerSaveStatus: View {
         HStack(spacing: 10) {
           if saving { ProgressView().controlSize(.small) }
           Text(title).font(.footnote).foregroundStyle(.secondary).monospacedDigit()
+            .fixedSize(horizontal: false, vertical: true)
           Spacer(minLength: 0)
           if saving {
             Button("Pause") { services.pauseSync() }.font(.footnote).frame(minHeight: 44)
