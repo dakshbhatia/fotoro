@@ -102,6 +102,11 @@ final class SearchIndex: @unchecked Sendable {
       r.ocrText = result?.text ?? ""
       r.ocrConfidence = result?.confidence ?? 0
       r.ocrStatus = status
+      if r.beforeSync != nil {
+        r.beforeSync?.ocrText = r.ocrText
+        r.beforeSync?.ocrConfidence = r.ocrConfidence
+        r.beforeSync?.ocrStatus = r.ocrStatus
+      }
       r.previewAvailable = result != nil || status == .failed
       try put(r, db: db)
       return true
@@ -120,6 +125,11 @@ final class SearchIndex: @unchecked Sendable {
         SearchVisualPolicy.validated($0.labels, processor: $0.processor)
       } ?? []
       record.visualStatus = status
+      if record.beforeSync != nil {
+        record.beforeSync?.visualLabels = record.visualLabels
+        record.beforeSync?.visualStatus = record.visualStatus
+        record.beforeSync?.visualProcessor = record.visualProcessor
+      }
       record.previewAvailable = record.previewAvailable || result != nil || status == .failed
       try put(record, db: db)
       return true
@@ -130,7 +140,8 @@ final class SearchIndex: @unchecked Sendable {
     try database.write { db in
       guard var record = try Row.fetchOne(db, sql: "SELECT value FROM searchRecords WHERE id=?", arguments: [photoID]).map(decode), record.revision == revision else { return false }
       if record.beforeSync == nil {
-        record.beforeSync = LocalSearchFields(labels: record.labels, captions: record.captions, keywords: record.keywords, facts: record.facts, favorite: record.favorite, ocrText: record.ocrText, ocrConfidence: record.ocrConfidence, ocrStatus: record.ocrStatus)
+        record.beforeSync = LocalSearchFields(labels: record.labels, captions: record.captions, keywords: record.keywords, facts: record.facts, favorite: record.favorite, ocrText: record.ocrText, ocrConfidence: record.ocrConfidence, ocrStatus: record.ocrStatus,
+          visualLabels: record.visualLabels, visualStatus: record.visualStatus, visualProcessor: record.visualProcessor)
       }
       record.syncedAccountId = accountId
       record.labels = value.labels ?? []
@@ -142,6 +153,15 @@ final class SearchIndex: @unchecked Sendable {
         record.ocrText = ocr.text
         record.ocrConfidence = ocr.confidence
         record.ocrStatus = .complete
+      }
+      if let visual = value.visual, visual.processor == record.visualProcessor,
+        visual.processor == SearchVisualPolicy.processor {
+        record.visualLabels = SearchVisualPolicy.validated(visual)
+        record.visualStatus = .complete
+      } else {
+        record.visualLabels = record.beforeSync?.visualLabels ?? []
+        record.visualStatus = record.beforeSync?.visualStatus ?? .pending
+        record.visualProcessor = record.beforeSync?.visualProcessor ?? SearchVisualPolicy.processor
       }
       try put(record, db: db)
       return true
@@ -156,7 +176,12 @@ final class SearchIndex: @unchecked Sendable {
           record.labels = prior.labels; record.captions = prior.captions; record.keywords = prior.keywords
           record.facts = prior.facts; record.favorite = prior.favorite
           record.ocrText = prior.ocrText; record.ocrConfidence = prior.ocrConfidence; record.ocrStatus = prior.ocrStatus
-        } else { record.labels = []; record.ocrText = ""; record.ocrConfidence = 0; record.ocrStatus = .pending }
+          record.visualLabels = prior.visualLabels ?? []; record.visualStatus = prior.visualStatus ?? .pending
+          record.visualProcessor = prior.visualProcessor ?? SearchVisualPolicy.processor
+        } else {
+          record.labels = []; record.ocrText = ""; record.ocrConfidence = 0; record.ocrStatus = .pending
+          record.visualLabels = []; record.visualStatus = .pending; record.visualProcessor = SearchVisualPolicy.processor
+        }
         record.syncedAccountId = nil; record.beforeSync = nil
         try put(record, db: db)
         try db.execute(sql: "DELETE FROM searchPins WHERE photo=?; DELETE FROM searchEvents WHERE photo=?", arguments: [record.id, record.id])

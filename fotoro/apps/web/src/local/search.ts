@@ -1,4 +1,6 @@
 import {parseNaturalDateQuery} from "./natural-date";
+import type {PhotoVisualV1} from "@fotoro/contracts";
+import {validatedVisualLabels} from "@fotoro/contracts/visual";
 
 export interface SearchOcr {
   photoID: string;
@@ -21,6 +23,8 @@ export interface SearchPhoto {
   facts?: string[];
   favorite?: boolean;
   ocr?: SearchOcr;
+  visual?: PhotoVisualV1 & {photoID: string; revision: string; status: "complete"};
+  current?: () => boolean;
 }
 type Event = { at: number; session: string };
 export interface SearchFeedback {
@@ -29,7 +33,7 @@ export interface SearchFeedback {
   photos: Record<string, Event[]>;
   pins: Record<string, string>;
 }
-export type SearchEvidence = "label" | "keyword" | "caption" | "fact" | "filename" | "ocr" | "date";
+export type SearchEvidence = "label" | "keyword" | "caption" | "fact" | "filename" | "ocr" | "date" | "visual";
 export interface SearchMeaning {
   id: string;
   term: string;
@@ -62,7 +66,7 @@ export const emptyFeedback = (): SearchFeedback => ({ version: 1, meanings: {}, 
 export const normalizeSearch = (text: string) => text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().trim();
 const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 const noise = /^(?:img\d*|dsc\d*|pxl\d*|image|photo|fixture|screenshot|the|and|jpg|jpeg|png|heic)$/i;
-const tier = (source: SearchEvidence) => source === "label" || source === "date" ? 4 : source === "keyword" || source === "fact" ? 3 : source === "caption" ? 2 : 1;
+const tier = (source: SearchEvidence) => source === "label" || source === "date" ? 4 : source === "keyword" || source === "fact" ? 3 : source === "caption" ? 2 : source === "visual" ? 0 : 1;
 const count = (events: Event[] | undefined, now: number) => (events ?? []).reduce((sum, event) => sum + Math.pow(0.5, Math.max(0, now - event.at) / (30 * 86400000)), 0);
 const photoKey = (meaning: string, id: string) => JSON.stringify([meaning, id]);
 const meaningKey = (scope: string, meaning: string) => JSON.stringify([scope, meaning]);
@@ -98,7 +102,7 @@ export class PhotoSearchIndex {
     const add = (word: string, source: SearchEvidence, photoId: string) => {
       const normalized = normalizeSearch(word);
       if (!normalized) return;
-      const id = (source === "label" ? "label:" : "text:") + normalized;
+      const id = (source === "label" ? "label:" : source === "visual" ? "visual:" : "text:") + normalized;
       let meaning = terms.get(id);
       if (!meaning) {
         meaning = { id, term: word, normalized, sources: new Map() };
@@ -112,6 +116,10 @@ export class PhotoSearchIndex {
         phraseSource(label, "label", photo.id);
         add(label, "label", photo.id);
         for (const word of words(label)) add(word, "label", photo.id);
+      }
+      const visual = photo.visual;
+      if (visual?.status === "complete" && visual.photoID === photo.id && visual.revision === photo.digest) {
+        for (const label of validatedVisualLabels(visual)) add(label.label, "visual", photo.id);
       }
       for (const keyword of photo.keywords ?? []) {
         phraseSource(keyword, "keyword", photo.id);
@@ -164,7 +172,8 @@ export class PhotoSearchIndex {
       if (!dates.has(id)) dates.set(id, Date.parse(this.records.get(id)!.date));
       return dates.get(id)!;
     };
-    const eligible = (id: string) => this.records.has(id) && (!options.allowedIds || options.allowedIds.has(id)) && (!dated || (hasCaptureDate(this.records.get(id)!) && Number.isFinite(captured(id)) && (dateQuery.from === undefined || captured(id) >= dateQuery.from) && (dateQuery.until === undefined || captured(id) < dateQuery.until)));
+    const eligible = (id: string) => this.records.has(id) && this.records.get(id)?.current?.() !== false
+      && (!options.allowedIds || options.allowedIds.has(id)) && (!dated || (hasCaptureDate(this.records.get(id)!) && Number.isFinite(captured(id)) && (dateQuery.from === undefined || captured(id) >= dateQuery.from) && (dateQuery.until === undefined || captured(id) < dateQuery.until)));
     const candidates: SearchMeaning[] = [];
     const byId = new Map<string, SearchMeaning>();
     const include = (id: string, term: string, photoId: string, source: SearchEvidence) => {

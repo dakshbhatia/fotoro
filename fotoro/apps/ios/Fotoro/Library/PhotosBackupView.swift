@@ -80,7 +80,7 @@ struct PhotoSyncView: View {
           List {
             Section {
               Text(status.enabled ? syncTitle : "Your photos, everywhere").font(.title2.weight(.semibold))
-              Text(status.enabled ? status.detail : "Turn on once. Fotoro saves the photos you allow and keeps new photos in sync.")
+              Text(status.enabled ? syncDetail : "Turn on once. Fotoro saves the photos you allow and keeps new photos in sync.")
                 .foregroundStyle(.secondary)
               if permissionTask != nil || authenticationTask != nil {
                 ProgressView("Opening sync…")
@@ -113,14 +113,15 @@ struct PhotoSyncView: View {
               }
             }
             Section {
-              Text("Keep Fotoro open for the first sync. iOS can finish uploads already prepared after you leave the app.")
-              Text("JPEG, PNG and HEIC photos up to 50 MB are supported. Videos and Live Photo pairs stay in Photos for now. Originals are never removed.")
               if status.enabled {
+                DisclosureGroup("How sync works") { syncExplanation }
                 Button("Turn off automatic sync", role: .destructive) {
                   cancelConsent()
                   do { try services.disableAutomaticPhotoSync() }
                   catch { services.error = error.localizedDescription }
                 }.accessibilityIdentifier("sync.disable")
+              } else {
+                syncExplanation
               }
             }.font(.footnote).foregroundStyle(.secondary)
           }
@@ -153,6 +154,16 @@ struct PhotoSyncView: View {
     case .syncing: "Syncing your photos"
     case .needsAttention: "Sync needs attention"
     case .ready: "Sync is on"
+    }
+  }
+  private var syncDetail: String {
+    if status.phase == .ready { return "New photos sync while Fotoro is open. Your originals stay in Photos." }
+    return status.detail
+  }
+  private var syncExplanation: some View {
+    Group {
+      Text("Keep Fotoro open for the first sync. iOS can finish uploads already prepared after you leave the app.")
+      Text("JPEG, PNG and HEIC photos up to 50 MB are supported. Videos and Live Photo pairs stay in Photos for now. Originals are never removed.")
     }
   }
   private func turnOn() {

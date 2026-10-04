@@ -1,4 +1,5 @@
 import GRDB
+import Photos
 import XCTest
 
 @testable import Fotoro
@@ -35,6 +36,188 @@ final class AnnotationTests: XCTestCase {
     tampered = signed
     tampered.signature = Data(repeating: 0, count: 64).b64
     XCTAssertThrowsError(try AnnotationCrypto.open(tampered, photo: photo, card: card, bundle: bundle))
+  }
+  private func scenes(_ category: String? = "beach", processor: String = SearchVisualPolicy.processor) -> PhotoAnnotationsV1.Visual {
+    PhotoAnnotationsV1.Visual(processor: processor, labels: category.map {
+      [PhotoAnnotationsV1.Visual.Label(label: $0, identifier: $0, confidence: 0.9)]
+    } ?? [])
+  }
+  // Reader fixture deliberately includes the future optional field; production seal obeys rollout policy.
+  private func visualFixture(_ value: PhotoAnnotationsV1, revision: Int = 1, photo: LocalPhoto, bundle: AccountBundle, card: AccountCardV1) throws -> SignedPayloadV1 {
+    try AnnotationCrypto.validate(value, photo: photo, accountId: card.accountId)
+    let encrypted = try CryptoAdapter().wrap(Wire.encode(value), key: Data(b64: bundle.vaultKey))
+    return try CryptoAdapter().sign(PhotoAnnotationsUpdateV1(photoId: photo.id, revision: revision, encrypted: encrypted), kind: "photo-annotations", accountId: card.accountId, secret: Data(b64: bundle.signingSecretKey))
+  }
+  func testVisualSidecarAndCompletedEmptyResultsRoundTripWithoutChangingSuppliedLabels() throws {
+    let (_, photo, bundle, card) = try context()
+    for visual in [scenes(), scenes(nil), scenes(processor: "future-model")] {
+      let value = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256, labels: ["My exact label"], visual: visual)
+      let signed = try visualFixture(value, photo: photo, bundle: bundle, card: card)
+      XCTAssertEqual(try AnnotationCrypto.open(signed, photo: photo, card: card, bundle: bundle).annotations, value)
+      var edited = photo; edited.metadata.originalSha256 = Data("changed".utf8).digest
+      XCTAssertThrowsError(try AnnotationCrypto.open(signed, photo: edited, card: card, bundle: bundle))
+    }
+    let old = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256, labels: ["Old"])
+    XCTAssertNil(try Wire.decode(PhotoAnnotationsV1.self, Wire.encode(old)).visual)
+  }
+  func testMalformedOptionalScenesCannotHideVerifiedLabelsOrBypassSignatureAndSourceBinding() throws {
+    let (_, photo, bundle, card) = try context()
+    let value = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256, labels: ["Keep me"])
+    for visual: Any in [NSNull(), "raw category", ["processor": SearchVisualPolicy.processor, "labels": [["label": "beach"]]],
+      ["processor": SearchVisualPolicy.processor, "labels": [], "unknown": true]] {
+      var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Wire.encode(value)) as? [String: Any]); object["visual"] = visual
+      let encrypted = try CryptoAdapter().wrap(JSONSerialization.data(withJSONObject: object), key: Data(b64: bundle.vaultKey))
+      let signed = try CryptoAdapter().sign(PhotoAnnotationsUpdateV1(photoId: photo.id, revision: 1, encrypted: encrypted), kind: "photo-annotations", accountId: card.accountId, secret: Data(b64: bundle.signingSecretKey))
+      let opened = try AnnotationCrypto.open(signed, photo: photo, card: card, bundle: bundle).annotations
+      XCTAssertEqual(opened.labels, ["Keep me"]); XCTAssertNil(opened.visual)
+      XCTAssertEqual(opened.originalSha256, photo.metadata.originalSha256)
+      var tampered = signed; tampered.signature = Data(repeating: 0, count: 64).b64
+      XCTAssertThrowsError(try AnnotationCrypto.open(tampered, photo: photo, card: card, bundle: bundle))
+      var foreign = photo; foreign.manifest.ownerAccountId = Wire.id()
+      XCTAssertThrowsError(try AnnotationCrypto.open(signed, photo: foreign, card: card, bundle: bundle))
+    }
+  }
+  func testImportedScenesClearOnLockRevisionPermissionAndUnknownProcessorWithoutDiscardingLocalAnalysis() throws {
+    let index = try SearchIndex()
+    var local = SearchRecord(id: "asset"); local.revision = "current"
+    local.labels = ["Device label"]; local.ocrStatus = .complete
+    try index.replacePermitted([local])
+    try index.applyVisual(SearchVisualResult(labels: SearchVisualPolicy.labels([("cat", 0.9)]), processor: SearchVisualPolicy.processor), status: .complete, photoID: local.id, revision: local.revision)
+    var value = PhotoAnnotationsV1(photoId: Wire.id(), originalSha256: Data("original".utf8).digest, visual: scenes())
+    XCTAssertTrue(try index.applyAnnotations(value, photoID: local.id, revision: local.revision, accountId: "owner"))
+    XCTAssertEqual(try index.search("beach").leading?.id, local.id)
+    XCTAssertEqual(try index.record(local.id)?.labels, [])
+    try index.clearSyncedAnnotations()
+    XCTAssertNil(try index.search("beach").leading)
+    XCTAssertEqual(try index.search("cat").leading?.id, local.id)
+    XCTAssertEqual(try index.record(local.id)?.labels, ["Device label"])
+    try index.applyAnnotations(value, photoID: local.id, revision: local.revision, accountId: "owner")
+    value.visual = scenes(nil)
+    try index.applyAnnotations(value, photoID: local.id, revision: local.revision, accountId: "owner")
+    XCTAssertEqual(try index.record(local.id)?.visualStatus, .complete)
+    XCTAssertNil(try index.search("beach").leading)
+    value.visual = scenes(processor: "future-model")
+    try index.applyAnnotations(value, photoID: local.id, revision: local.revision, accountId: "owner")
+    XCTAssertNil(try index.search("beach").leading)
+    try index.applyVisual(SearchVisualResult(labels: SearchVisualPolicy.labels([("dog", 0.9)]), processor: SearchVisualPolicy.processor), status: .complete, photoID: local.id, revision: local.revision)
+    try index.clearSyncedAnnotations()
+    XCTAssertEqual(try index.search("dog").leading?.id, local.id)
+    value.visual = scenes()
+    try index.applyAnnotations(value, photoID: local.id, revision: local.revision, accountId: "owner")
+    local.revision = "changed"; try index.replacePermitted([local])
+    XCTAssertNil(try index.search("beach").leading)
+    XCTAssertFalse(try index.applyAnnotations(value, photoID: local.id, revision: "current", accountId: "owner"))
+    try index.replacePermitted([])
+    XCTAssertFalse(try index.applyAnnotations(value, photoID: local.id, revision: "changed", accountId: "owner"))
+  }
+  func testAutomaticDerivedRetryPreservesLaterUserEditsAndNeverRetriesMixedManualPayload() throws {
+    let (store, photo, bundle, card) = try context()
+    let ledger = AnnotationLedger(store: store, accountId: card.accountId)
+    var value = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256,
+      ocr: PhotoAnnotationsV1.OCR(text: "receipt", confidence: 0.9, processor: "vision-text-v1"), visual: scenes())
+    try ledger.edit(value, photo: photo, bundle: bundle, card: card)
+    let first = try XCTUnwrap(ledger.prepare(photo: photo, bundle: bundle, card: card, derivedOnly: true))
+    value.labels = ["Unsaved label"]; value.caption = "Unsaved caption"
+    try ledger.edit(value, photo: photo, bundle: bundle, card: card)
+    XCTAssertEqual(try ledger.prepare(photo: photo, bundle: bundle, card: card, derivedOnly: true), first)
+    try ledger.receive(first, photo: photo, bundle: bundle, card: card)
+    XCTAssertEqual(try ledger.current(photo: photo, bundle: bundle, card: card)?.labels, value.labels)
+    XCTAssertNil(try ledger.prepare(photo: photo, bundle: bundle, card: card, derivedOnly: true), "Acknowledged analysis cannot republish unsaved labels")
+    let manual = try XCTUnwrap(ledger.prepare(photo: photo, bundle: bundle))
+    XCTAssertNil(try ledger.prepare(photo: photo, bundle: bundle, card: card, derivedOnly: true), "Frozen manual payload cannot be retried by automatic sync")
+    XCTAssertEqual(try ledger.prepare(photo: photo, bundle: bundle), manual)
+  }
+  @MainActor func testDerivedOnlySenderIgnoresMixedDraftAndDoesNotRepeatAcknowledgedEmptyAnalysis() async throws {
+    let (store, photo, bundle, card) = try context()
+    let ledger = AnnotationLedger(store: store, accountId: card.accountId), sender = AnnotationSync(ledger: AnnotationLedger(store: store, accountId: card.accountId))
+    var value = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256, labels: ["Unsaved"], visual: scenes())
+    try ledger.edit(value, photo: photo, bundle: bundle, card: card)
+    var sends = 0
+    await sender.resume(bundle: bundle, card: card, derivedOnly: true, valid: { true }, send: { _ in sends += 1 })
+    XCTAssertEqual(sends, 0); XCTAssertEqual(try ledger.pendingIDs(), [photo.id])
+    value.labels = nil; value.visual = nil
+    value.ocr = PhotoAnnotationsV1.OCR(text: "", confidence: 0, processor: "vision-text-v1")
+    try ledger.edit(value, photo: photo, bundle: bundle, card: card)
+    await sender.resume(bundle: bundle, card: card, derivedOnly: true, valid: { true }, send: { _ in sends += 1 })
+    XCTAssertEqual(sends, 1); XCTAssertTrue(try ledger.pendingIDs().isEmpty)
+    try ledger.edit(value, photo: photo, bundle: bundle, card: card)
+    await sender.resume(bundle: bundle, card: card, derivedOnly: true, valid: { true }, send: { _ in sends += 1 })
+    XCTAssertEqual(sends, 1)
+  }
+  func testReleasedManualSigningAndFrozenRetryNeverPublishFieldsRejectedByInstalledReader() throws {
+    XCTAssertFalse(SearchVisualPolicy.publicationEnabled)
+    let (store, photo, bundle, card) = try context()
+    let ledger = AnnotationLedger(store: store, accountId: card.accountId)
+    let value = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256, labels: ["My label"],
+      ocr: PhotoAnnotationsV1.OCR(text: "receipt", confidence: 0.9, processor: "vision-text-v1"), visual: scenes())
+    try ledger.edit(value, photo: photo, bundle: bundle, card: card)
+    let outgoing = try XCTUnwrap(ledger.prepare(photo: photo, bundle: bundle))
+    let update = try Wire.decode(PhotoAnnotationsUpdateV1.self, Data(b64: outgoing.body))
+    let raw = try CryptoAdapter().unwrap(update.encrypted, key: Data(b64: bundle.vaultKey))
+    let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any])
+    let installedAllowed: Set<String> = ["version", "photoId", "originalSha256", "labels", "caption", "keywords", "facts", "favorite", "ocr"]
+    XCTAssertTrue(Set(fields.keys).isSubset(of: installedAllowed))
+    XCTAssertEqual(try AnnotationCrypto.open(outgoing, photo: photo, card: card, bundle: bundle).annotations.labels, value.labels)
+    XCTAssertTrue(try AnnotationCrypto.publicationAllowed(outgoing, bundle: bundle))
+    var state = try XCTUnwrap(ledger.state(photo.id))
+    state.pending = try visualFixture(value, photo: photo, bundle: bundle, card: card)
+    try store.database.write { db in
+      try db.execute(sql: "UPDATE annotations SET value=? WHERE id=?", arguments: [try Wire.encode(state), photo.id])
+    }
+    XCTAssertNil(try ledger.prepare(photo: photo, bundle: bundle, card: card))
+    XCTAssertNil(try ledger.prepare(photo: photo, bundle: bundle, card: card, derivedOnly: true))
+    XCTAssertNotNil(try ledger.state(photo.id)?.pending, "Unsupported frozen retry stays exact and local")
+  }
+  @MainActor func testDerivedDrainRequestedDuringFlightKeepsItsOwnModeAndSourceFences() async throws {
+    for firstIsDerived in [false, true] {
+      let (store, photo, bundle, card) = try context()
+      var next = photo; next.photoId = Wire.id(); next.manifest.photoId = next.id
+      try store.put(next)
+      let ledger = AnnotationLedger(store: store, accountId: card.accountId), sender = AnnotationSync(ledger: AnnotationLedger(store: store, accountId: card.accountId))
+      let first = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256,
+        labels: firstIsDerived ? nil : ["Explicit save"], ocr: PhotoAnnotationsV1.OCR(text: "one", confidence: 0.9, processor: "vision-text-v1"))
+      try ledger.edit(first, photo: photo, bundle: bundle, card: card)
+      var continuation: CheckedContinuation<Void, Never>?
+      var sent: [String] = []
+      let flight = Task {
+        await sender.resume(bundle: bundle, card: card, derivedOnly: firstIsDerived, valid: { true }, send: { _ in
+          sent.append(photo.id)
+          await withCheckedContinuation { continuation = $0 }
+        })
+      }
+      while continuation == nil { await Task.yield() }
+      let second = PhotoAnnotationsV1(photoId: next.id, originalSha256: next.metadata.originalSha256,
+        labels: firstIsDerived ? nil : ["Unfinished unrelated label"], ocr: PhotoAnnotationsV1.OCR(text: "two", confidence: 0.9, processor: "vision-text-v1"))
+      try ledger.edit(second, photo: next, bundle: bundle, card: card)
+      await sender.resume(bundle: bundle, card: card, derivedOnly: true, valid: { true }, send: { signed in
+        sent.append(try Wire.decode(PhotoAnnotationsUpdateV1.self, Data(b64: signed.body)).photoId)
+      })
+      continuation?.resume()
+      await flight.value
+      XCTAssertEqual(sent, firstIsDerived ? [photo.id, next.id] : [photo.id])
+      XCTAssertEqual(try ledger.pendingIDs(), firstIsDerived ? [] : [next.id])
+    }
+  }
+  @MainActor func testAdjustedCurrentRenditionCannotAutomaticallyPublishOCRForUnadjustedOriginal() async throws {
+    let (store, photo, bundle, card) = try context()
+    let ledger = AnnotationLedger(store: store, accountId: card.accountId), sender = AnnotationSync(ledger: AnnotationLedger(store: store, accountId: card.accountId))
+    let value = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256,
+      ocr: PhotoAnnotationsV1.OCR(text: "markup absent from original", confidence: 0.9, processor: "vision-text-v1"))
+    try ledger.edit(value, photo: photo, bundle: bundle, card: card)
+    var sends = 0
+    await sender.resume(bundle: bundle, card: card, derivedOnly: true,
+      eligible: { _ in AnnotationSourceBinding.permitsAutomaticDerived(resourceTypes: [.photo, .adjustmentData]) },
+      valid: { true }, send: { _ in sends += 1 })
+    XCTAssertEqual(sends, 0); XCTAssertEqual(try ledger.pendingIDs(), [photo.id])
+    _ = try ledger.prepare(photo: photo, bundle: bundle)
+    await sender.resume(bundle: bundle, card: card, derivedOnly: true,
+      eligible: { _ in AnnotationSourceBinding.permitsAutomaticDerived(resourceTypes: [.photo, .adjustmentData]) },
+      valid: { true }, send: { _ in sends += 1 })
+    XCTAssertEqual(sends, 0, "Frozen retry also checks representation provenance")
+    await sender.resume(bundle: bundle, card: card, derivedOnly: true,
+      eligible: { _ in AnnotationSourceBinding.permitsAutomaticDerived(resourceTypes: [.photo]) },
+      valid: { true }, send: { _ in sends += 1 })
+    XCTAssertEqual(sends, 1)
   }
   func testRetryIsIdenticalAndNewerEditSurvivesAcknowledgementAndRestart() throws {
     let (store, photo, bundle, card) = try context()
@@ -167,11 +350,13 @@ final class AnnotationTests: XCTestCase {
     let signed = try CryptoAdapter().sign(photo.manifest, kind: "photo-manifest", accountId: secret.accountId, secret: Data(b64: secret.signingSecretKey))
     _ = try await first.api.request("/v1/photos", method: "POST", body: Wire.encode(signed))
     try first.store.put(photo)
-    let value = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256, labels: ["  Private fixture label  "], ocr: PhotoAnnotationsV1.OCR(text: "cloud receipt 4821", confidence: 0.9, processor: "vision-text-v1"))
+    let value = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256, labels: ["  Private fixture label  "], ocr: PhotoAnnotationsV1.OCR(text: "cloud receipt 4821", confidence: 0.9, processor: "vision-text-v1"), visual: scenes())
     try first.annotations.ledger.edit(value, photo: photo, bundle: first.vault.requireBundle(), card: accounts.accounts[0])
     await first.syncAnnotations()
     XCTAssertTrue(first.annotations.errors.isEmpty, "\(first.annotations.errors)")
     XCTAssertTrue(try first.annotations.ledger.pendingIDs().isEmpty)
+    let readerFixture = try visualFixture(value, revision: 2, photo: photo, bundle: first.vault.requireBundle(), card: accounts.accounts[0])
+    _ = try await first.api.request("/v1/photos/\(photo.id)/annotations", method: "PUT", body: Wire.encode(readerFixture))
     let second = try AppServices(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
     try second.configureAPI("http://127.0.0.1:8787")
     try await second.auth.recover("fotoro1.\(secret.accountId).\(secret.recoverySecret)")
@@ -182,6 +367,8 @@ final class AnnotationTests: XCTestCase {
     XCTAssertEqual(second.annotation(restored).ocr?.text, "cloud receipt 4821")
     XCTAssertTrue(second.matches(restored, query: "private fixture"))
     XCTAssertTrue(second.matches(restored, query: "4821"))
+    XCTAssertEqual(second.annotation(restored).visual, scenes())
+    XCTAssertTrue(second.matches(restored, query: "beach"))
     XCTAssertEqual(restored.metadata.originalSha256, bytes.digest)
     second.vault.lock()
     XCTAssertTrue(second.photoAnnotations.isEmpty)
@@ -218,13 +405,16 @@ final class AnnotationTests: XCTestCase {
     _ = try ledger.prepare(photo: photo, bundle: bundle)
     var remote = base
     remote.ocr = PhotoAnnotationsV1.OCR(text: "Remote receipt", confidence: 0.8, processor: "vision-text-v1")
-    try ledger.receive(AnnotationCrypto.seal(remote, revision: 2, photo: photo, accountId: card.accountId, bundle: bundle), photo: photo, bundle: bundle, card: card)
+    remote.visual = scenes()
+    try ledger.receive(visualFixture(remote, revision: 2, photo: photo, bundle: bundle, card: card), photo: photo, bundle: bundle, card: card)
     XCTAssertFalse(try XCTUnwrap(ledger.state(photo.id)).conflict)
+    XCTAssertEqual(try ledger.current(photo: photo, bundle: bundle, card: card)?.visual, scenes())
     let next = try XCTUnwrap(ledger.prepare(photo: photo, bundle: bundle))
     let merged = try AnnotationCrypto.open(next, photo: photo, card: card, bundle: bundle)
     XCTAssertEqual(merged.revision, 3)
     XCTAssertEqual(merged.annotations.labels, ["Mine"])
     XCTAssertEqual(merged.annotations.ocr?.text, "Remote receipt")
+    XCTAssertNil(merged.annotations.visual, "Released writes remain old-reader compatible")
   }
   func testBothConflictChoicesPreserveUnrelatedLocalAndRemoteFields() throws {
     for keepLocal in [true, false] {
@@ -240,7 +430,8 @@ final class AnnotationTests: XCTestCase {
       var remote = base
       remote.labels = ["Other device"]
       remote.ocr = PhotoAnnotationsV1.OCR(text: "Remote receipt", confidence: 0.8, processor: "vision-text-v1")
-      try ledger.receive(AnnotationCrypto.seal(remote, revision: 2, photo: photo, accountId: card.accountId, bundle: bundle), photo: photo, bundle: bundle, card: card)
+    remote.visual = scenes()
+      try ledger.receive(visualFixture(remote, revision: 2, photo: photo, bundle: bundle, card: card), photo: photo, bundle: bundle, card: card)
       XCTAssertTrue(try XCTUnwrap(ledger.state(photo.id)).conflict)
       XCTAssertEqual(try ledger.current(photo: photo, bundle: bundle, card: card)?.ocr?.text, "Remote receipt")
       try ledger.resolve(photo.id, keepLocal: keepLocal)
@@ -249,6 +440,7 @@ final class AnnotationTests: XCTestCase {
       XCTAssertEqual(merged.labels, keepLocal ? ["Mine"] : ["Other device"])
       XCTAssertEqual(merged.keywords, ["Local keyword"])
       XCTAssertEqual(merged.ocr?.text, "Remote receipt")
+      XCTAssertNil(merged.visual, "Released writes remain old-reader compatible")
     }
   }
   func testLocalLabelDeltasSurviveLockWithoutCopyingPrivateOverlay() throws {
@@ -313,7 +505,7 @@ final class AnnotationTests: XCTestCase {
     _ = try ledger.prepare(photo: photo, bundle: bundle)
     var remote = base
     remote.labels = ["Other device"]
-    try ledger.receive(AnnotationCrypto.seal(remote, revision: 2, photo: photo, accountId: card.accountId, bundle: bundle), photo: photo, bundle: bundle, card: card)
+    try ledger.receive(visualFixture(remote, revision: 2, photo: photo, bundle: bundle, card: card), photo: photo, bundle: bundle, card: card)
     remote.ocr = PhotoAnnotationsV1.OCR(text: "Latest receipt", confidence: 0.9, processor: "vision-text-v1")
     try ledger.receive(AnnotationCrypto.seal(remote, revision: 3, photo: photo, accountId: card.accountId, bundle: bundle), photo: photo, bundle: bundle, card: card)
     XCTAssertTrue(try XCTUnwrap(ledger.state(photo.id)).conflict)

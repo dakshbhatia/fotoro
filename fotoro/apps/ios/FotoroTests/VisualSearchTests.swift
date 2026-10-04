@@ -6,6 +6,32 @@ import XCTest
 @testable import Fotoro
 
 final class VisualSearchTests: XCTestCase {
+  private struct PolicyFixture: Decodable {
+    struct Policy: Decodable {
+      struct Vector: Decodable {
+        var name: String
+        var processor: String
+        var labels: [PhotoAnnotationsV1.Visual.Label]
+        var expected: [PhotoAnnotationsV1.Visual.Label]
+      }
+      var processor: String
+      var publicationEnabled: Bool
+      var cases: [Vector]
+    }
+    var visualPolicy: Policy
+  }
+  func testNativeAndWebShareExactVisualPolicyVectors() throws {
+    let policy = try fixture(PolicyFixture.self, "search-cases").visualPolicy
+    XCTAssertEqual(policy.processor, SearchVisualPolicy.processor)
+    XCTAssertEqual(policy.publicationEnabled, SearchVisualPolicy.publicationEnabled)
+    for vector in policy.cases {
+      let visual = PhotoAnnotationsV1.Visual(processor: vector.processor, labels: vector.labels)
+      let actual = SearchVisualPolicy.validated(visual).map {
+        PhotoAnnotationsV1.Visual.Label(label: $0.label, identifier: $0.identifier, confidence: $0.confidence)
+      }
+      XCTAssertEqual(actual, vector.expected, vector.name)
+    }
+  }
   private func result(_ candidates: [(String, Double)]) -> SearchVisualResult {
     SearchVisualResult(labels: SearchVisualPolicy.labels(candidates), processor: SearchVisualPolicy.processor)
   }

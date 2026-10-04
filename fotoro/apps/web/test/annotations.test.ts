@@ -7,6 +7,7 @@ import { configureVault, unlockVault, lockVault, encryptPrivate, decryptPrivate,
 import { all, clearAccount, get } from "../src/exchange/cache";
 import { applyChanges } from "../src/library/catalog";
 import * as annotations from "../src/exchange/annotations";
+import {VISUAL_PROCESSOR} from "@fotoro/contracts/visual";
 
 const owner = "11111111-1111-4111-8111-111111111111";
 const other = "22222222-2222-4222-8222-222222222222";
@@ -95,7 +96,8 @@ test("safe rebase preserves remote OCR when only labels changed locally", async 
     await annotations.cacheAnnotations(signed(1, {labels: ["old"]}), photoId);
     await annotations.queueAnnotations(identity, {labels: ["mine"]});
     const ocr = {text: "Invoice total", confidence: 0.9, processor: "test"};
-    const remote = signed(2, {labels: ["old"], ocr});
+    const visual = {processor: VISUAL_PROCESSOR, labels: [{label: "beach", identifier: "beach", confidence: 0.9}]};
+    const remote = signed(2, {labels: ["old"], ocr, visual});
     let writes = 0;
     globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
       if (init.method !== "PUT") return reply({version: 1, annotations: remote});
@@ -104,6 +106,7 @@ test("safe rebase preserves remote OCR when only labels changed locally", async 
       assert.equal(value.revision, 3);
       assert.deepEqual(value.value.labels, ["mine"]);
       assert.deepEqual(value.value.ocr, ocr);
+      assert.equal(value.value.visual, undefined, "Reader-first rollout keeps released writes compatible with installed readers");
       return reply(JSON.parse(init.body as string));
     }) as any;
     await annotations.flushAnnotations();

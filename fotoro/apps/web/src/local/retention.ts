@@ -101,6 +101,7 @@ export class LocalRetention {
           const photo = JSON.parse(decoder.decode(await open(key, (raw as SavedPhoto).meta, name)));
           if (!validPhoto(photo) || name !== "photo:" + photo.id) throw new Error("Invalid photo");
           delete photo.file; delete photo.preview;
+          delete photo.visual; delete photo.current;
           if (!validOcr(photo.ocr, photo)) delete photo.ocr;
           // A missing/corrupt optional preview never deletes the valid label record.
           photo.previewLoader = () => this.loadPreview(photo.id, epoch);

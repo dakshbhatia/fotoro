@@ -59,7 +59,10 @@ export function savedSearchPhotos(snapshot: OwnedPhotoSnapshot | null, local: Lo
   return cloudSearchRecords(owned).map((record, index) => {
     const photo = owned[index];
     const original = record.digest ? selected.get(record.digest) : undefined;
-    const adapted = {...record, id: original?.id ?? "saved:" + photo.manifest.photoId, originalSize: photo.metadata.originalBytes,
+    const id = original?.id ?? "saved:" + photo.manifest.photoId;
+    const adapted = {...record, id, originalSize: photo.metadata.originalBytes,
+      visual: record.visual ? {...record.visual, photoID: id} : undefined,
+      current: () => snapshot.current() && record.current?.() !== false,
       captureVerified: record.dateSource === "exif" ? true as const : undefined,
       previewLoader: async () => {
         if (!snapshot.current()) throw new Error("Your saved library is locked.");

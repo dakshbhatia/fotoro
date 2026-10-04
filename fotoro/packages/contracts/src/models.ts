@@ -30,6 +30,10 @@ export interface PhotoMetadataV1 {
   representationKeys: Record<UUID, Base64Url>;
 }
 /* Account-private search data. Encrypted separately from shared photo metadata. */
+export interface PhotoVisualV1 {
+  processor: string;
+  labels: {label: string; identifier: string; confidence: number}[];
+}
 export interface PhotoAnnotationsV1 {
   version: 1;
   photoId: UUID;
@@ -40,6 +44,7 @@ export interface PhotoAnnotationsV1 {
   facts?: string[];
   favorite?: boolean;
   ocr?: { text: string; confidence: number; processor: string };
+  visual?: PhotoVisualV1;
 }
 export interface PhotoAnnotationsUpdateV1 {
   version: 1;

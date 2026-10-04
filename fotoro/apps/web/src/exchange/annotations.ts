@@ -7,10 +7,11 @@ import { all, atomic, get, put, type Store } from "./cache";
 import { api, ApiError, fixtureMode, isPublicDemoAccount } from "./api";
 import type { LocalPhoto } from "../local/resources";
 import { OCR_PROCESSOR } from "../local/ocr";
+import {VISUAL_PUBLICATION_ENABLED} from "@fotoro/contracts/visual";
 
 export interface AnnotationIdentity { ownerAccountId: string; photoId: string; originalSha256: string }
 export interface VerifiedAnnotations { signed: SignedPayloadV1; revision: number; value: PhotoAnnotationsV1 }
-const fields = ["labels", "caption", "keywords", "facts", "favorite", "ocr"] as const;
+const fields = ["labels", "caption", "keywords", "facts", "favorite", "ocr", "visual"] as const;
 export type AnnotationPatch = Pick<Partial<PhotoAnnotationsV1>, typeof fields[number]>;
 export interface PendingAnnotation {
   version: 1;
@@ -48,7 +49,15 @@ function decode(signed: SignedPayloadV1, photoId: string, session: UnlockedVault
   try {update = validateWire("PhotoAnnotationsUpdateV1", JSON.parse(new TextDecoder().decode(body)));}
   finally {body.fill(0);}
   if (update.photoId !== photoId) throw new Error("ANNOTATION_BINDING_MISMATCH");
-  const value = validateWire<PhotoAnnotationsV1>("PhotoAnnotationsV1", decryptPrivate(update.encrypted));
+  const raw = decryptPrivate<PhotoAnnotationsV1>(update.encrypted);
+  let value: PhotoAnnotationsV1;
+  try {value = validateWire<PhotoAnnotationsV1>("PhotoAnnotationsV1", raw);}
+  catch (error) {
+    if (!raw || typeof raw !== "object" || !Object.hasOwn(raw, "visual")) throw error;
+    // A malformed optional visual result cannot hide valid labels or the verified original.
+    const supported = {...raw}; delete supported.visual;
+    value = validateWire<PhotoAnnotationsV1>("PhotoAnnotationsV1", supported);
+  }
   if (value.photoId !== photoId) throw new Error("ANNOTATION_BINDING_MISMATCH");
   return {signed, revision: update.revision, value};
 }
@@ -82,6 +91,7 @@ export async function readAnnotations(identity: AnnotationIdentity, session = re
 }
 function createSigned(identity: AnnotationIdentity, value: PhotoAnnotationsV1, revision: number, session: UnlockedVault) {
   assertVault(session);
+  if (!VISUAL_PUBLICATION_ENABLED) {value = {...value}; delete value.visual;}
   validateWire("PhotoAnnotationsV1", value);
   const update = validateWire<PhotoAnnotationsUpdateV1>("PhotoAnnotationsUpdateV1", {version: 1, photoId: identity.photoId, revision, encrypted: encryptPrivate(value)});
   return signPayload("photo-annotations", session.accountId, utf8(update), session.signingSecretKey);
@@ -106,9 +116,11 @@ export async function cacheAnnotations(signed: SignedPayloadV1, photoId: string,
   });
 }
 export async function queueAnnotations(identity: AnnotationIdentity, changes: AnnotationPatch, session = requireVault()) {
+  if (!VISUAL_PUBLICATION_ENABLED) {changes = {...changes}; delete changes.visual;}
   return serializeAnnotationWrites(session, async () => {
     if (identity.ownerAccountId !== session.accountId) throw new Error("ANNOTATION_IDENTITY_MISMATCH");
     if (fixtureMode || isPublicDemoAccount(session.accountId)) throw new Error("PUBLIC_TEST_ACCOUNT_UPLOAD_DISABLED");
+    if (!Object.keys(changes).length) return false;
     const existing = await pendingOne(identity.photoId, session), remote = await cached(identity, session);
     const projected = existing ? verifyAnnotations(existing.signed, identity, session) : remote;
     const patch: AnnotationPatch = {...existing?.patch};
@@ -167,6 +179,12 @@ export function flushAnnotations(session = requireVault(), signal?: AbortSignal)
         const pending = await pendingOne(item.photoId, session);
         if (!pending || pending.conflict) break;
         const identity = identityFor(session, pending);
+        if (!VISUAL_PUBLICATION_ENABLED) {
+          // Preserve the exact retry locally; rewriting it at the same revision would conflict.
+          const update = validateWire<PhotoAnnotationsUpdateV1>("PhotoAnnotationsUpdateV1", JSON.parse(new TextDecoder().decode(unb64(pending.signed.body))));
+          const plaintext = decryptPrivate<Record<string, unknown>>(update.encrypted);
+          if (Object.hasOwn(plaintext, "visual")) break;
+        }
         try {
           const response = await api<SignedPayloadV1>("/v1/photos/" + item.photoId + "/annotations", pending.signed, "SignedPayloadV1", "PUT", signal);
           assertVault(session);

@@ -913,19 +913,25 @@ struct RecentPhotosView: View {
   }
   private var homeHeader: some View {
     VStack(spacing: 14) {
-      HStack {
-        Text("Fotoro").font(.system(.largeTitle, design: .rounded, weight: .bold))
-        Spacer()
-#if !FOTORO_LOCAL_PREVIEW
-        Button("Sync", systemImage: services?.automaticPhotoSync.enabled == true ? "icloud.fill" : "icloud") { openPhotoSync() }
-          .labelStyle(.iconOnly).font(.title3).frame(width: 44, height: 44)
-          .background(.white.opacity(0.12), in: .circle).foregroundStyle(.white)
-          .accessibilityIdentifier("home.sync")
-#endif
-        Button("Settings", systemImage: "gearshape") { queryFocused = false; settings = true }
-          .labelStyle(.iconOnly).font(.title3).frame(width: 44, height: 44)
-          .background(.white.opacity(0.12), in: .circle).foregroundStyle(.white)
-          .accessibilityIdentifier("home.settings")
+      ViewThatFits(in: .horizontal) {
+        HStack(spacing: 12) {
+          homeTitle
+          Spacer(minLength: 0)
+          #if !FOTORO_LOCAL_PREVIEW
+            homeSyncButton.fixedSize(horizontal: true, vertical: false)
+          #endif
+          homeSettingsButton
+        }
+        VStack(alignment: .leading, spacing: 8) {
+          HStack {
+            homeTitle
+            Spacer(minLength: 0)
+            homeSettingsButton
+          }
+          #if !FOTORO_LOCAL_PREVIEW
+            homeSyncButton.frame(maxWidth: .infinity, alignment: .trailing)
+          #endif
+        }
       }
       HStack(spacing: 12) {
         Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -952,6 +958,32 @@ struct RecentPhotosView: View {
       #endif
     }.padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 18)
   }
+  private var homeTitle: some View {
+    Text("Fotoro").font(.system(.largeTitle, design: .rounded, weight: .bold))
+      .fixedSize(horizontal: true, vertical: true)
+  }
+  private var homeSettingsButton: some View {
+    Button("Settings", systemImage: "gearshape") { queryFocused = false; settings = true }
+      .labelStyle(.iconOnly).font(.title3).frame(width: 44, height: 44)
+      .background(.white.opacity(0.12), in: .circle).foregroundStyle(.white)
+      .accessibilityIdentifier("home.settings")
+  }
+  #if !FOTORO_LOCAL_PREVIEW
+    @ViewBuilder private var homeSyncButton: some View {
+      if store.opened, RecentPhotosPolicy.canRead(store.status), services?.automaticPhotoSync.enabled == false {
+        Button("Turn on sync", systemImage: "icloud.and.arrow.up", action: openPhotoSync)
+          .font(.subheadline.weight(.semibold)).buttonStyle(.borderedProminent)
+          .frame(minHeight: 44).fixedSize(horizontal: false, vertical: true)
+          .accessibilityHint("Choose to save your photos across your devices")
+          .accessibilityIdentifier("home.sync")
+      } else {
+        Button("Sync", systemImage: services?.automaticPhotoSync.enabled == true ? "icloud.fill" : "icloud", action: openPhotoSync)
+          .labelStyle(.iconOnly).font(.title3).frame(width: 44, height: 44)
+          .background(.white.opacity(0.12), in: .circle).foregroundStyle(.white)
+          .accessibilityIdentifier("home.sync")
+      }
+    }
+  #endif
   private var selectionTray: some View {
     ViewThatFits(in: .horizontal) {
       HStack(spacing: 12) {

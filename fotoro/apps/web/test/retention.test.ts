@@ -28,6 +28,16 @@ test("reopening restores labels and preview but never the original File", async 
   await saved.clear();
   assert.equal((await saved.load()).enabled, false);
 });
+test("account-derived scene fields and scope callbacks never enter local browser retention", async () => {
+  const saved = store();
+  await saved.save([{...fixture(), visual: {photoID: "sha-photo", revision: "sha-photo", status: "complete" as const,
+    processor: "vision-image-classification-r1-v1", labels: [{label: "beach", identifier: "beach", confidence: 0.9}]}, current: () => true}], emptyFeedback());
+  const loaded = await saved.load();
+  assert.equal(loaded.photos[0].visual, undefined);
+  assert.equal(loaded.photos[0].current, undefined);
+  assert.deepEqual(loaded.photos[0].labels, ["Ronald"]);
+  await saved.clear();
+});
 test("encrypted bytes do not contain searchable metadata and keys cannot be exported", async () => {
   const saved = store();
   await saved.save([fixture()], emptyFeedback());

@@ -533,6 +533,9 @@ enum ReviewedPhotosBackupPolicy {
           try self.startPhotosBackup(selection: nil, automatic: true)
           await self.backup.waitUntilSettled()
           try check()
+          try self.captureLocalAnnotations(derivedOnly: true)
+          await self.syncAnnotations(derivedOnly: true)
+          try check()
           if self.backup.status.phase == .failed { break }
         }
       } catch is CancellationError {
@@ -1102,11 +1105,16 @@ enum ReviewedPhotosBackupPolicy {
   func bindLocalSearch(_ search: LocalSearchStore) {
     localSearch = search
     search.onRecordChanged = { [weak self] record, labelsChanged in
-      try self?.captureLocalAnnotation(record, labelsChanged: labelsChanged)
+      guard let self else { return }
+      let derivedOnly = self.automaticSyncPreference.enabled && !labelsChanged
+      try self.captureLocalAnnotation(record, labelsChanged: labelsChanged, derivedOnly: derivedOnly)
+      if derivedOnly, self.automaticPhotoSyncAdmitted {
+        Task { [weak self] in await self?.syncAnnotations(derivedOnly: true) }
+      }
     }
     search.onSnapshotReady = { [weak self] in
       try self?.hydrateLocalAnnotations()
-      try self?.captureLocalAnnotations()
+      try self?.captureLocalAnnotations(derivedOnly: self?.automaticSyncPreference.enabled == true)
     }
   }
   private func reloadAnnotations() throws {
@@ -1166,8 +1174,10 @@ enum ReviewedPhotosBackupPolicy {
               parsed.scope.until.map({ date < $0 }) ?? true else { continue }
           }
           let value = try ledger.current(photo: photo, bundle: bundle, card: card)
+          let scenes = SearchVisualPolicy.validated(value?.visual).map(\.label)
           let terms = [photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + (value?.facts ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""]
-          if parsed.text.isEmpty || terms.contains(where: { SearchNormalization.text($0).contains(parsed.text) }) { matches.append(photo) }
+          if parsed.text.isEmpty || terms.contains(where: { SearchNormalization.text($0).contains(parsed.text) })
+            || scenes.contains(where: { SearchNormalization.text($0).hasPrefix(parsed.text) }) { matches.append(photo) }
         }
         guard page.count == 1000, let last = page.last else { break }
         after = last.id
@@ -1186,37 +1196,72 @@ enum ReviewedPhotosBackupPolicy {
   func matches(_ photo: LocalPhoto, query: String) -> Bool {
     guard !query.isEmpty else { return true }
     let value = photoAnnotations[photo.id]
-    return ([photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + (value?.facts ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""])
+    return SearchVisualPolicy.validated(value?.visual).contains { SearchNormalization.text($0.label).hasPrefix(SearchNormalization.text(query)) }
+      || ([photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + (value?.facts ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""])
       .contains { $0.localizedCaseInsensitiveContains(query) }
   }
-  private func captureLocalAnnotation(_ record: SearchRecord, labelsChanged: Bool, source knownSource: BackupSource? = nil, refreshSummary: Bool = true) throws {
+  private func automaticDerivedSourceCurrent(_ source: BackupSource) -> Bool {
+    #if DEBUG
+      if let snapshot = photosBackupSnapshot {
+        return (try? snapshot(.distantPast).contains(where: {
+          $0.id == source.id && $0.sourceRevision == source.sourceRevision && $0.skipReason == nil
+        })) == true
+      }
+    #endif
+    guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [source.id], options: nil).firstObject,
+      !asset.isHidden, asset.mediaType == .image, !asset.mediaSubtypes.contains(.photoLive) else { return false }
+    return RecentPhoto.sourceRevision(asset) == source.sourceRevision
+      && AnnotationSourceBinding.permitsAutomaticDerived(resourceTypes: PHAssetResource.assetResources(for: asset).map(\.type))
+  }
+  private func captureLocalAnnotation(_ record: SearchRecord, labelsChanged: Bool, source knownSource: BackupSource? = nil, refreshSummary: Bool = true, derivedOnly: Bool = false) throws {
     guard vault.isUnlocked, let account = session.accountId,
       let source = try knownSource ?? store.backupSources().first(where: { $0.id == record.id }),
       source.id == record.id,
       AnnotationSourceBinding.accepts(sourceRevision: source.sourceRevision, recordRevision: record.revision),
       let photo = try store.backupPhoto(source.photoId) else { return }
+    if derivedOnly, !automaticPhotoSyncAdmitted || !automaticDerivedSourceCurrent(source) { return }
     let bundle = try vault.requireBundle()
     let card = try session.requireCard(account)
     var value = try annotations.ledger.current(photo: photo, bundle: bundle, card: card) ?? PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
-    if labelsChanged || value.labels == nil { value.labels = record.labels }
-    if let caption = record.captions.first { value.caption = caption }
-    if !record.keywords.isEmpty { value.keywords = record.keywords }
-    if !record.facts.isEmpty { value.facts = record.facts }
-    value.favorite = record.favorite
-    if record.ocrStatus == .complete {
-      value.ocr = PhotoAnnotationsV1.OCR(text: record.ocrText, confidence: record.ocrConfidence, processor: record.processor)
+    var hasCompletedDerivedResult = false
+    if !derivedOnly {
+      if labelsChanged || value.labels == nil { value.labels = record.labels }
+      if let caption = record.captions.first { value.caption = caption }
+      if !record.keywords.isEmpty { value.keywords = record.keywords }
+      if !record.facts.isEmpty { value.facts = record.facts }
+      value.favorite = record.favorite
     }
+    let ocrStatus = record.syncedAccountId == nil ? record.ocrStatus : record.beforeSync?.ocrStatus
+    if ocrStatus == .complete, record.processor == "vision-text-v1",
+      RecentPhotosPolicy.canRead(automaticPhotosPermission), source.originalSha256 == photo.metadata.originalSha256 {
+      hasCompletedDerivedResult = true
+      value.ocr = PhotoAnnotationsV1.OCR(text: record.syncedAccountId == nil ? record.ocrText : record.beforeSync?.ocrText ?? "",
+        confidence: record.syncedAccountId == nil ? record.ocrConfidence : record.beforeSync?.ocrConfidence ?? 0, processor: record.processor)
+    }
+    // Cloud overlays are searchable but never become fresh on-device inference.
+    let visualStatus = record.syncedAccountId == nil ? record.visualStatus : record.beforeSync?.visualStatus
+    let visualProcessor = record.syncedAccountId == nil ? record.visualProcessor : record.beforeSync?.visualProcessor
+    let visualLabels = record.syncedAccountId == nil ? record.visualLabels : record.beforeSync?.visualLabels ?? []
+    if SearchVisualPolicy.publicationEnabled, visualStatus == .complete, visualProcessor == SearchVisualPolicy.processor,
+      RecentPhotosPolicy.canRead(automaticPhotosPermission), source.originalSha256 == photo.metadata.originalSha256 {
+      hasCompletedDerivedResult = true
+      value.visual = PhotoAnnotationsV1.Visual(processor: SearchVisualPolicy.processor,
+        labels: SearchVisualPolicy.validated(visualLabels, processor: SearchVisualPolicy.processor).map {
+          PhotoAnnotationsV1.Visual.Label(label: $0.label, identifier: $0.identifier, confidence: $0.confidence)
+        })
+    }
+    guard !derivedOnly || hasCompletedDerivedResult else { return }
     try annotations.ledger.edit(value, photo: photo, bundle: bundle, card: card)
     photoAnnotations[photo.id] = value
     if refreshSummary { refreshConsumerSyncSummary() }
   }
-  private func captureLocalAnnotations() throws {
+  private func captureLocalAnnotations(derivedOnly: Bool = false) throws {
     guard let localSearch, vault.isUnlocked else { return }
     let sources = try store.backupSources()
     defer { refreshConsumerSyncSummary() }
     for source in sources {
       if let record = try localSearch.record(source.id) {
-        try captureLocalAnnotation(record, labelsChanged: false, source: source, refreshSummary: false)
+        try captureLocalAnnotation(record, labelsChanged: false, source: source, refreshSummary: false, derivedOnly: derivedOnly)
       }
     }
   }
@@ -1230,17 +1275,28 @@ enum ReviewedPhotosBackupPolicy {
       try localSearch.applyAnnotations(value, source: source, accountId: account)
     }
   }
-  func syncAnnotations() async {
+  func syncAnnotations(derivedOnly: Bool = false) async {
     guard session.isSignedIn || session.fixture,
       (try? store.uploadsPaused()) == false, vault.isUnlocked,
       let account = session.accountId, let bundle = try? vault.requireBundle(),
-      let card = try? session.requireCard(account) else { return }
+      let card = try? session.requireCard(account), !derivedOnly || automaticPhotoSyncAdmitted else { return }
     let generation = vault.generation
     let catalog = store
     let worker = annotations
-    await worker.resume(bundle: bundle, card: card, valid: { [weak self] in
+    let origin = BackgroundUploadPolicy.origin(api.baseURL)
+    await worker.resume(bundle: bundle, card: card, derivedOnly: derivedOnly, eligible: { [weak self] photo in
+      guard derivedOnly else { return true }
+      guard let self, self.automaticPhotoSyncAdmitted,
+        let source = try? catalog.backupSources().first(where: { $0.photoId == photo.id }),
+        source.originalSha256 == photo.metadata.originalSha256,
+        let record = try? self.localSearch?.record(source.id),
+        AnnotationSourceBinding.accepts(sourceRevision: source.sourceRevision, recordRevision: record.revision) else { return false }
+      return self.automaticDerivedSourceCurrent(source)
+    }, valid: { [weak self] in
       guard let self else { return false }
       return (self.session.isSignedIn || self.session.fixture) && self.vault.isUnlocked && self.vault.generation == generation && self.session.accountId == account && self.store === catalog && (try? catalog.uploadsPaused()) == false
+        && BackgroundUploadPolicy.origin(self.api.baseURL) == origin && self.session.pinnedCards[account] == card
+        && (!derivedOnly || self.automaticPhotoSyncAdmitted)
     }, send: { signed in
       _ = try await self.api.request("/v1/photos/\(try Wire.decode(PhotoAnnotationsUpdateV1.self, Data(b64: signed.body)).photoId)/annotations", method: "PUT", body: Wire.encode(signed))
     })

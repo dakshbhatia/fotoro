@@ -65,3 +65,13 @@ test("private photo annotations preserve labels and bound OCR and update ciphert
   for (const revision of [0, 1.2, 2147483648]) assert.throws(() => validateWire("PhotoAnnotationsUpdateV1", {...update, revision}));
   assert.throws(() => validateWire("PhotoAnnotationsUpdateV1", {...update, encrypted: {...update.encrypted, ciphertext: "A".repeat(262145)}}));
 });
+test("optional scene annotations preserve old payloads and bound processor, category count and confidence", () => {
+  const old = {version: 1, photoId: "a1672cf8-cc9b-44a5-9992-5508a40b36bc", originalSha256: "A".repeat(43)};
+  assert.equal(validateWire("PhotoAnnotationsV1", old), old);
+  const visual = {processor: "vision-image-classification-r1-v1", labels: [{label: "beach", identifier: "beach", confidence: 0.9}]};
+  validateWire("PhotoAnnotationsV1", {...old, visual});
+  validateWire("PhotoAnnotationsV1", {...old, visual: {...visual, labels: []}});
+  for (const invalid of [null, {...visual, extra: true}, {...visual, labels: Array(7).fill(visual.labels[0])},
+    {...visual, processor: ""}, {...visual, labels: [{...visual.labels[0], confidence: 1.1}]},
+    {...visual, labels: [{...visual.labels[0], name: "Person"}]}]) assert.throws(() => validateWire("PhotoAnnotationsV1", {...old, visual: invalid}));
+});
