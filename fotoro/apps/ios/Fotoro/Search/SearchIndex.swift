@@ -120,15 +120,16 @@ final class SearchIndex: @unchecked Sendable {
   }
   func addingSemantic(_ vector: [Float], to base: SearchResponse, now: Date = Date()) throws -> SearchResponse {
     guard let normalized = SemanticVector.normalized(vector) else { return base }
-    return try database.read { db in
+    return try database.read { db -> SearchResponse in
       let (condition, args) = filter(base.scope)
-      let rows = try Row.fetchAll(db, sql: """
+      let vectorArguments: StatementArguments = [SemanticVector.data(normalized), SemanticVector.processor]
+      let rows: [Row] = try Row.fetchAll(db, sql: """
         SELECT r.id,r.preview,r.burst,semanticSimilarity(v.vector,?) similarity
         FROM searchVectors v JOIN searchRecords r ON r.id=v.photo
         WHERE v.processor=? AND v.revision=json_extract(r.value,'$.revision') AND \(condition)
           AND similarity>=0.20
         ORDER BY similarity DESC,r.favorite DESC,r.capture DESC,r.id LIMIT 100
-        """, arguments: StatementArguments([SemanticVector.data(normalized), SemanticVector.processor]) + args)
+        """, arguments: vectorArguments + args)
       var result = base
       var included = Set(base.results.flatMap { [$0.id] + $0.children })
       var bursts: [String: Int] = [:]
@@ -138,7 +139,8 @@ final class SearchIndex: @unchecked Sendable {
         let burst: String? = row["burst"]
         if let burst, let index = bursts[burst] { result.results[index].children.append(id); continue }
         if let burst { bursts[burst] = result.results.count }
-        result.results.append(SearchHit(id: id, evidenceClass: 6, reason: "Visual similarity", previewAvailable: row["preview"]))
+        let previewAvailable: Bool = row["preview"]
+        result.results.append(SearchHit(id: id, evidenceClass: 6, reason: "Visual similarity", previewAvailable: previewAvailable))
       }
       return result
     }
