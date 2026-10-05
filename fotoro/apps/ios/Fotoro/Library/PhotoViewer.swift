@@ -55,6 +55,7 @@ struct PhotoViewer: View {
             .tag(photo.id)
         }
       }.tabViewStyle(.page(indexDisplayMode: .never)).background(.black)
+        .ignoresSafeArea(.container)
         .overlay {
           if receivedUnavailable {
             VStack {

@@ -7,17 +7,17 @@ No speed, accuracy, cost or adoption claim is inferred from a passing smoke test
 
 ## Qualified source and live web
 
-[PR 41](https://github.com/dakshbhatia/fotoro/pull/41) merged as
-`c525cb335ee7cf5743a1931e3716e6984fe38ce4`. Its exact checked head was
-`3555490f073368a7b87f969ba6f174b4cb41ecff`; all 23 reported checks completed
+[PR 42](https://github.com/dakshbhatia/fotoro/pull/42) merged as
+`8c60066b81c9f7d33a12afdef7016c6707825f0b`. Its exact checked head was
+`ca1dab953252f59fd406126ad97a3ea5c2b7ef9f`; all 23 reported checks completed
 successfully or were skipped, including successful full/preview iOS and web/API
-jobs. [Fotoro run 37373598115](https://github.com/dakshbhatia/fotoro/actions/runs/37373598115)
+jobs. [Fotoro run 37380380467](https://github.com/dakshbhatia/fotoro/actions/runs/37380380467)
 contains native and web/API validation. The merged tree matches the qualified
 head, and all 69 native input hashes match the audited build 37 archive.
 Independent review found no remaining material issue.
 
-The active Worker is `f19242f0-7762-43a8-b66c-0be45c3f6cdf`, deployment
-`24ef3173-9176-4259-9965-79604f405647`, at 100%. All 35 non-HTML asset digests
+The active Worker is `e6a09961-6ddb-42c5-9fc0-fabaf195d9b0`, deployment
+`49a1d235-3bc4-499f-bc1b-e48955447078`, at 100%. All 35 non-HTML asset digests
 match the qualified production build. Photos and Saved HTML routes reference the
 expected entry assets. HTTPS service routes and the exact Apple app association
 pass readback. Fresh production browser checks pass entry, account focus and Back
@@ -94,7 +94,7 @@ These checks use headless Google Chrome, not Safari or a physical iPhone.
 PR 41 is merged and deployed. No distribution IPA, TestFlight upload or physical
 first-use/restore/share qualification is established by these checks.
 
-## Browser resilience verification
+## PR 42 browser resilience verification
 
 A connected browser whose API transport is unreachable can reopen the exact
 account's cached encrypted photos with its correct Fotoro password. This is local
@@ -128,6 +128,37 @@ inference-quality claim. Headless Google Chrome is used; Safari and physical
 system sharing remain unqualified. No native input or encryption protocol changes
 are introduced by this pass. Release evidence is preserved outside Git under
 `core-journey-2026-10-05` and its timestamped browser proof.
+
+## Photo canvas screen pass
+
+The native browse screen replaces its stacked custom header with the system
+scope/Sync toolbar and persistent bottom Search. Clearing Search retains editing;
+photo viewers use full-screen presentation. Account entry keeps a rejected
+password error inline without a second blocking Sync alert. Empty selection mode
+keeps its grid clear; actions appear after choosing a photo.
+
+The full app compiles and runs on the iOS 27 iPhone 18 Pro Simulator. Rendered
+public-fixture checks verify bottom Search visibility, text/date Search, Clear
+followed by further typing without refocus, full-screen viewer → Done with query
+retained, selection actions above Search, no tray for zero selection, and inline
+password failure. The viewer → Share continuation opens the system sheet with the
+chosen public PNG; no destination was selected and no send completion is claimed.
+Saved-viewer presentation/lifecycle changes have independent code review; a new
+physical-device or Safari qualification is not inferred from these checks.
+
+Browser selection controls now wrap only when needed. Headless Google Chrome
+checks show the normal phone tray shrinks from 111 to 62 CSS pixels at 320×568
+and 390×844, retaining 44-pixel action targets; desktop stays 66 pixels. At 200%
+tray text it wraps without overflow. Chosen Save → account entry → Back retains
+the exact two-photo selection, Clear remains reachable, and the sharing boundary
+receives both unchanged original files. The platform share call is intercepted;
+mobile soft-keyboard and OS send completion are not asserted.
+
+Local `pnpm check` passes with 431 web and 70 API tests and the production web
+build. Local preview verification executes 113 tests with one existing Vision
+inference-context skip and no failures. Protected rendered evidence lives under `screen-audit-2026-10-05` and its
+timestamped web capture. This screen pass changes native inputs, so build 37's
+archive does not qualify it for distribution.
 
 ## iPhone and distribution
 

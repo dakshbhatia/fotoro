@@ -15,12 +15,12 @@ Hono Worker with D1 and private R2. The upstream Ente application is a reference
 - Visual search runs locally. Model downloads contain public weights; private
   photos, queries and vectors are not sent to an inference provider.
 
-The last verified active Worker is `f19242f0-7762-43a8-b66c-0be45c3f6cdf`
-at 100%, deployment `24ef3173-9176-4259-9965-79604f405647` (2026-10-05,
-merged [PR 41](https://github.com/dakshbhatia/fotoro/pull/41)). All 35 non-HTML
+The last verified active Worker is `e6a09961-6ddb-42c5-9fc0-fabaf195d9b0`
+at 100%, deployment `49a1d235-3bc4-499f-bc1b-e48955447078` (2026-10-05,
+merged [PR 42](https://github.com/dakshbhatia/fotoro/pull/42)). All 35 non-HTML
 asset digests match the qualified build; Photos and Saved HTML routes reference
 the expected entry assets. The preceding qualified version is
-`a62846b6-f045-40e4-b809-acc6daaac32d`. Read the current deployment back before
+`f19242f0-7762-43a8-b66c-0be45c3f6cdf`. Read the current deployment back before
 changing traffic; preserve the preceding qualified version for rollback.
 
 Documentation-only edits do not change this runtime checkpoint and need no Worker
@@ -48,7 +48,7 @@ head before building release artifacts.
 Build production web assets from the qualified merged source with `pnpm build:web`.
 Development fixture settings belong to local processes and must not be exported
 into the production build. Keep the configured D1/R2 bindings and production
-origin unchanged. Apply migrations only when the qualified change requires them; PR 41 needs none.
+origin unchanged. Apply migrations only when the qualified change requires them; PR 42 needs none.
 
 Use Wrangler's existing OAuth session in the intended Cloudflare account. Do not
 copy credentials into chat, Git or release logs. From `services/api/`, prepare a

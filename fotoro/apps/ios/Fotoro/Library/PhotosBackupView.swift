@@ -215,7 +215,9 @@ struct PhotoSyncView: View {
         }
         .onChange(of: services.vault.generation) { password = nil }
         .onDisappear { cancelConsent(); password = nil }
-        .alert("Fotoro", isPresented: Binding(get: { services.error != nil }, set: { if !$0 { services.error = nil } })) {
+        .alert("Fotoro", isPresented: Binding(
+          get: { !openingAccount && services.error != nil },
+          set: { if !$0 && !openingAccount { services.error = nil } })) {
           Button("OK") { services.error = nil }
         } message: { Text(services.error ?? "") }
     }.preferredColorScheme(.dark)

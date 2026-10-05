@@ -30,7 +30,11 @@ organize the same photo separately in each.
 ## Native Liquid Glass and web surfaces
 
 The active iPhone app uses SwiftUI system glass controls on iOS 26+:
-GlassEffectContainer, glass search, glass/glassProminent actions and native sheets.
+native toolbars, a persistent bottom Search field, glass/glassProminent actions
+and native sheets. The browse toolbar contains the current photo scope and Sync;
+Settings stays inside the scope menu. Photo viewers open full screen, with Done
+and contextual controls; Info and sharing retain their own sheets. Selection
+actions appear after an actual selection, not as a disabled instruction panel.
 The active browser uses React/Vite, CSS translucent controls and its current viewer.
 The older Ente MUI/PhotoSwipe experiment is historical; it does not define this app.
 
@@ -55,6 +59,9 @@ not the photo canvas. Retain real failure evidence for diagnostics.
 Selection survives view, query and account navigation within the same verified
 source context. Withdrawn permissions or changed original revisions remove
 ineligible sources visibly. Suggestions never become a Save or sharing intent.
+Clearing Search keeps editing active. Compact selection controls wrap only when
+content needs the space; preserve full labels and touch targets at enlarged text.
+Account entry owns its inline error instead of also showing a Sync alert.
 Closing a viewer restores context; modal surfaces keep background interaction
 inert and restore focus when dismissed. These are behaviors to test, not an excuse
 to add another screen or gesture engine.
