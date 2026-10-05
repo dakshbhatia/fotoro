@@ -30,7 +30,7 @@ and automatic cleanup remain outside this build.
 ## Intelligence wiring — October 2026
 
 Find resolves eligible photos through the existing index. Best shots applies the
-versioned `moment-highlights-v2` policy to that matching subset before grouping
+versioned `moment-highlights-v3` policy to that matching subset before grouping
 capture-time moments and choosing diverse representatives. Suggestions carry
 measured reasons and never become a Save
 intent or replace a user's selection. Preview work is serial and cancellable;

@@ -27,7 +27,7 @@ struct AutomaticPhotoPickRecommendations: Sendable {
   var unassessed = 0
 }
 enum AutomaticPhotoPickPolicy {
-  static let processor = "moment-highlights-v2"
+  static let processor = "moment-highlights-v3"
   enum MeasurementError: Error { case unavailable }
   static func analyzePixels(width: Int, height: Int, rgba: [UInt8]) throws
     -> AutomaticPhotoPickSignals
@@ -175,12 +175,14 @@ enum AutomaticPhotoPickPolicy {
       let budget = min(6, max(1, Int(ceil(sqrt(Double(moment.count)) / 2))))
       let bestQuality = ranked.map { groups[$0].representative }.map { $0.score - ($0.photo.favorite ? 2 : 0) }.max() ?? 0
       var chosen: [Int] = []
+      var suggestions = 0
       for index in ranked {
         let candidate = groups[index].representative
         let favorite = candidate.photo.favorite
-        guard favorite || chosen.count < budget && candidate.score >= bestQuality * 0.65 else { continue }
+        guard favorite || suggestions < budget && candidate.score >= bestQuality * 0.65 else { continue }
         if !favorite, chosen.contains(where: { similar(groups[$0].representative, candidate) }) { continue }
         chosen.append(index)
+        if !favorite { suggestions += 1 }
       }
       for index in chosen {
         let group = groups[index], photo = group.representative.photo

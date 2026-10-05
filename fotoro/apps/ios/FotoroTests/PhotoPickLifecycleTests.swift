@@ -302,7 +302,7 @@ import XCTest
     XCTAssertEqual(review.snapshot?.recommendations.groupCount, 3)
     XCTAssertEqual(review.snapshot?.recommendations.reasons["photo-5"], ["Moment highlight"])
     XCTAssertEqual(review.snapshot?.candidates.map(\.id), matches.map(\.id))
-    XCTAssertEqual(AutomaticPhotoPickPolicy.processor, "moment-highlights-v2")
+    XCTAssertEqual(AutomaticPhotoPickPolicy.processor, "moment-highlights-v3")
     let unchanged = try await recent.snapshot(sources)
     XCTAssertEqual(unchanged.recommendations.ids, recentResult.recommendations.ids)
     XCTAssertEqual(recentReads, 20, "A Find review must not prune or replace the home Picks cache")

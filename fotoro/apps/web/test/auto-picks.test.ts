@@ -100,6 +100,26 @@ test("explicit favorites stay eligible even when a different photo is sharper", 
   assert.deepEqual([...result.ids],["19"]);
 });
 
+test("favorites do not crowd distinct strong moment highlights out of the suggestion budget", () => {
+  const photos = [
+    {...photo("favorite-a", "2026-10-01T12:00:00Z"), favorite: true},
+    {...photo("favorite-b", "2026-10-01T12:01:00Z"), favorite: true},
+    photo("clear", "2026-10-01T12:02:00Z"),
+    photo("soft", "2026-10-01T12:03:00Z"),
+  ];
+  const signals = new Map([
+    ["favorite-a", {...signal(0n), color: [30, 60, 90] as [number, number, number]}],
+    ["favorite-b", {...signal(0n), color: [90, 60, 30] as [number, number, number]}],
+    ["clear", {...signal(0n, .4), color: [230, 20, 50] as [number, number, number]}],
+    ["soft", signal(0n, .01)],
+  ]);
+  const result = recommendPhotos(photos, signals);
+  assert.deepEqual([...result.ids], ["favorite-a", "favorite-b", "clear"]);
+  assert.equal(result.groupCount, 4);
+  assert.equal(result.duplicateCount, 0);
+  assert.equal(photos.length, 4);
+});
+
 test("a dense capture burst has bounded comparison work instead of an all-pairs scan", () => {
   let reads=0;
   const photos=Array.from({length:1500},(_,i)=>photo(String(i),"2026-10-01T12:00:00Z"));

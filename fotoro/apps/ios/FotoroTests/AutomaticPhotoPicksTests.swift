@@ -64,6 +64,25 @@ final class AutomaticPhotoPicksTests: XCTestCase {
     XCTAssertTrue(result.reasons["19"]?.contains("Favorite") == true)
   }
 
+  func testFavoritesDoNotCrowdDistinctStrongMomentHighlightsOutOfSuggestionBudget() {
+    let photos = [
+      photo("favorite-a", seconds: 0, favorite: true),
+      photo("favorite-b", seconds: 60, favorite: true),
+      photo("clear", seconds: 120), photo("soft", seconds: 180),
+    ]
+    var first = signal(); first.color = [30, 60, 90]
+    var second = signal(); second.color = [90, 60, 30]
+    var clear = signal(sharpness: 0.4); clear.color = [230, 20, 50]
+    let result = AutomaticPhotoPickPolicy.recommend(photos, signals: [
+      "favorite-a": first, "favorite-b": second,
+      "clear": clear, "soft": signal(sharpness: 0.01),
+    ])
+    XCTAssertEqual(result.ids, ["favorite-a", "favorite-b", "clear"])
+    XCTAssertEqual(result.groupCount, 4)
+    XCTAssertEqual(result.duplicateCount, 0)
+    XCTAssertEqual(photos.count, 4)
+  }
+
   func testScreenshotsAreExcludedUnlessExplicitlyFavoritedWithoutRemovingTheSource() {
     let screenshot = photo("screen", screenshot: true)
     let result = AutomaticPhotoPickPolicy.recommend([screenshot], signals: ["screen": signal()])
