@@ -1,5 +1,13 @@
 # Fotoro consumer sync
 
+> **Historical record.** The dated evidence, contracts and task states below are
+> preserved from the earlier slice. They do not describe current release status
+> or an active work queue. Use [product](../../../fotoro/docs/product.md),
+> [the only active queue](../../../fotoro/docs/product-backlog.md),
+> [architecture](../../../fotoro/docs/foundation.md) and
+> [current evidence](../../../fotoro/docs/verification.md). Old unchecked tasks
+> and execution instructions require reconciliation with that queue before use.
+
 The user has authorized building a simple consumer flow now. Open Photos works without an account. Sync photos introduces an account and one recovery-code step; its status explains progress, pending work, and the next action.
 
 Account-private labels, captions, supplied facts and completed OCR travel with each original through a separate encrypted annotation record. This keeps media manifests immutable and personal annotations out of sharing grants. Search choices and pins stay local. Both clients verify the owner's signature, account, photo ID and original digest before displaying or indexing annotations.

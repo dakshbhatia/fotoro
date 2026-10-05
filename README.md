@@ -1,19 +1,20 @@
 # Fotoro
 
-Private photo library and exchange app. The active native SwiftUI, React web and
-Cloudflare API build lives in [fotoro/](fotoro/README.md). The web app and API are
-live at [fotoro.cloud](https://fotoro.cloud). This repository retains [Ente](https://github.com/ente/ente)
-as an attributed reference.
+Sync, Search and Share your photos. The active app is [fotoro/](fotoro/README.md):
+SwiftUI on iPhone, React on the web, and Cloudflare Workers with D1 and private R2.
+The web app and API are live at [fotoro.cloud](https://fotoro.cloud).
 
-- [Product direction and next work](docs/ai-photos/product.md)
-- [Run the local preview and native build](fotoro/README.md)
-- [Deployment plan](fotoro/docs/deployment.md)
-- [Verification and current limits](fotoro/docs/verification.md)
+- [Product and user journey](fotoro/docs/product.md)
+- [One active roadmap](fotoro/docs/product-backlog.md)
+- [Screens and interaction rules](fotoro/design/interaction-reference.md)
+- [Cloudflare path](fotoro/docs/cloudflare.md)
+- [Run and build](fotoro/README.md)
+- [Release status and verified limits](fotoro/docs/verification.md)
 
-The current build supports local photo browsing and search, encrypted original
-preservation, recovery, explicit two-person sharing, save/contribute and revocation.
-See the linked verification and release records for test evidence and open gates.
-Earlier Ente-based `/library` and `/intelligence` experiments remain reference work.
+Start with photos, opt into Sync once, find a moment and share it. Current behavior,
+open acceptance gates and distribution status are documented separately from the
+product ambition. Earlier Ente experiments and completed plans are historical.
+This repository retains [Ente](https://github.com/ente/ente) licensing and attribution.
 
 ## Upstream Ente documentation
 

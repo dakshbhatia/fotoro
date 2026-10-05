@@ -15,12 +15,16 @@ Hono Worker with D1 and private R2. The upstream Ente application is a reference
 - Visual search runs locally. Model downloads contain public weights; private
   photos, queries and vectors are not sent to an inference provider.
 
-The last verified active Worker is `b3088ca5-5904-4dd6-9539-7ea59adc210b`
-at 100%, deployment `b9389285-2daf-481a-8c17-dacce3adf95b` (2026-10-05,
-merged PR 35). Read back the latest deployment before changing traffic;
-deployment lists are chronological. Preserve the preceding version for rollback.
-The three-S simplification changes web assets and native presentation; there is
-no server migration or protocol change.
+The last verified active Worker is `a62846b6-f045-40e4-b809-acc6daaac32d`
+at 100%, deployment `76470ad4-8565-43d5-b302-94898074ddf6` (2026-10-05,
+merged [PR 39](https://github.com/dakshbhatia/fotoro/pull/39)). Its 36 web assets
+match the qualified build by digest. The preceding version is
+`b3088ca5-5904-4dd6-9539-7ea59adc210b`. Read the current deployment back before
+changing traffic; preserve the preceding qualified version for rollback.
+
+Documentation-only edits do not change this runtime checkpoint and need no Worker
+deployment or native archive. Current native distribution gates are recorded below;
+[verification](verification.md) owns detailed release evidence.
 
 ## Release checks
 
@@ -36,17 +40,20 @@ pnpm test:exchange:isolated
 The Fotoro GitHub workflow also compiles and tests both the full native app and
 its isolated local Photos preview. The pinned-model smoke cases exercise actual
 inference on a public photo; they do not establish held-out retrieval quality or
-physical-device performance. Fix failed checks before merging.
+physical-device performance. Fix failed checks before merging. Require successful checks for the exact PR head,
+then merge with a head-commit guard. Confirm the merged tree matches that qualified
+head before building release artifacts.
 
-Build production web assets from the merged source with `pnpm build:web`.
+Build production web assets from the qualified merged source with `pnpm build:web`.
 Development fixture settings belong to local processes and must not be exported
 into the production build. Keep the configured D1/R2 bindings and production
-origin unchanged. This release needs no new server migration.
+origin unchanged. Apply migrations only when the qualified change requires them; PR 39 needs none.
 
 Use Wrangler's existing OAuth session in the intended Cloudflare account. Do not
 copy credentials into chat, Git or release logs. From `services/api/`, prepare a
 version with `wrangler versions upload --env production`, inspect its bindings,
-then deploy the verified version with `wrangler versions deploy --env production`.
+then deploy the inspected version at 100% with
+`wrangler versions deploy VERSION_ID@100% --env production`.
 Publish assets and API together: media-aware clients require the server's
 `mediaVersion: 1` acknowledgement, and older readers exclude new media kinds.
 
@@ -86,5 +93,5 @@ team key with its issuer for automatic provisioning. Keep keys outside the repo.
 First App Store publication excludes France, as approved by the owner. Keep full
 app encryption and the distribution artifact's compliance declaration aligned;
 the local Photos preview is a separate target with a different encryption scope.
-See [verification](verification.md) for historical device and distribution proof.
+See [verification](verification.md) for current evidence and its historical appendix.
 Earlier deployment checkpoints remain available in Git history.

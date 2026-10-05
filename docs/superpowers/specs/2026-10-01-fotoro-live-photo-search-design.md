@@ -1,5 +1,13 @@
 # Fotoro: live search that presents one useful photo
 
+> **Historical record.** The dated evidence, contracts and task states below are
+> preserved from the earlier slice. They do not describe current release status
+> or an active work queue. Use [product](../../../fotoro/docs/product.md),
+> [the only active queue](../../../fotoro/docs/product-backlog.md),
+> [architecture](../../../fotoro/docs/foundation.md) and
+> [current evidence](../../../fotoro/docs/verification.md). Old unchecked tasks
+> and execution instructions require reconciliation with that queue before use.
+
 October 1, 2026. Written design for review. The user requested a cheap,
 optional, personally relevant photo search that updates through
 `R → Ro → Ron → Ronald`, then asked to solve it and verify the confidence.

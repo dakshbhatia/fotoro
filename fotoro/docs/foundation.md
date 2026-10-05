@@ -1,4 +1,8 @@
-# What Fotoro reuses
+# Fotoro foundation
+
+[Product](product.md) owns the user journey; [the backlog](product-backlog.md) owns
+the active queue. [Cloudflare path](cloudflare.md) describes infrastructure
+prerequisites. Build numbers and measured results belong in [verification](verification.md).
 
 The repository is an Ente fork. The active `fotoro/` application is a separate
 SwiftUI/React client and Hono service; it does not currently run Ente's backend,
@@ -21,11 +25,31 @@ and [Landmarks example](https://developer.apple.com/videos/play/wwdc2025/323/)
 provide the platform patterns. Glass belongs on controls over the photo content;
 the photo grid stays plain. We use system components before custom effects.
 
-The local browser and encrypted catalog remain separate stores. Opening account
-setup keeps the selected photos and uploads nothing; an explicit save starts the
-batch. Local OCR, metadata search and preview-based picks are implemented.
-Visual similarity uses local TinyCLIP inference. Named face recognition, trips
-and automatic cleanup remain outside this build.
+## One source and one journal for each job
+
+PhotoKit supplies permitted device photos; the account catalog supplies Saved.
+Browser files are explicit local sources. Saved is a read-only view of account
+originals, not an instruction to upload or to write into Apple Photos. Clients
+verify the decrypted original digest when restoring. Immutable encrypted media
+and revision-bound annotations carry account content; local search data is a
+rebuildable index, not a second source of originals.
+
+Native GRDB stores protected source checkpoints, catalog state and the transfer
+journal. Existing reservation, upload, commit and receipt reconciliation own
+retry behavior. Keep one queue and one revision-bound intelligence index. Do not
+add an alternative sync engine to fix presentation or a second index for a model.
+
+Browsing and account entry create no new upload intent. Account entry can continue
+an already chosen Save or Sync consent; explicit Save starts a chosen batch.
+Native automatic Sync starts after opt-in and prepares new originals while the
+app/account is open and unlocked; iOS can finish already scheduled ciphertext
+PUTs. Pause, sign-out, account/origin changes and permission withdrawal fence work.
+Browser uploads remain explicit. Private annotations use their existing encrypted
+outbox; AI suggestions never authorize Save or replace a user's selection.
+
+Photo GPS and confirmed Google Timeline imports support Places/Timeline locally.
+Raw imported location data and local vectors are not uploaded. Named people,
+automatically inferred trips and automatic cleanup remain open product work.
 
 ## Intelligence wiring — October 2026
 
@@ -57,9 +81,9 @@ revision `9463a9c508a344c837ffefe9d724f3827bf2dc79`, with one quantized graph.
 Pinned model/config/tokenizer files total 27,925,629 bytes. The separately loaded
 runtime adds 12,552,676 bytes on Safari or 22,867,301 bytes on other browsers.
 These are uncompressed asset sizes, excluding worker JavaScript and HTTP headers.
-The current local-browser static startup graph is 364,013 JavaScript bytes across
-three chunks; account crypto and semantic inference remain deferred. The startup
-test enforces a 500 KiB ceiling when build output is available.
+Account crypto and semantic inference remain deferred from browser startup. The
+startup test enforces a 500 KiB ceiling when build output is available; current
+measurements are recorded in [verification](verification.md).
 
 Native uses the [community TinyCLIP ViT-39M/16 Text-19M Core ML conversion](https://huggingface.co/nufrnd/lvc-tinyclip-coreml/tree/81f9cabad48edb0b78ac83e8ffb8039c9fda6cd1),
 revision `81f9cabad48edb0b78ac83e8ffb8039c9fda6cd1`. Its six package files total
@@ -79,4 +103,4 @@ pixels, queries or embeddings. Date, label and recognized-text search remains
 available if inference cannot prepare. A single public-image smoke test does not
 qualify held-out retrieval accuracy, memory, latency or thermal behavior on iPhone
 and Safari. Cloud inference still requires explicit opt-in and a spending bound;
-ordinary browsing and local intelligence upload nothing.
+local intelligence creates no upload intent; opted-in Sync can run during browsing.

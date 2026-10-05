@@ -1,5 +1,13 @@
 # Fotoro local search implementation plan
 
+> **Historical record.** The dated evidence, contracts and task states below are
+> preserved from the earlier slice. They do not describe current release status
+> or an active work queue. Use [product](../../../fotoro/docs/product.md),
+> [the only active queue](../../../fotoro/docs/product-backlog.md),
+> [architecture](../../../fotoro/docs/foundation.md) and
+> [current evidence](../../../fotoro/docs/verification.md). Old unchecked tasks
+> and execution instructions require reconciliation with that queue before use.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking. Native and browser implementation are independent domains assigned under the dispatching-parallel-agents skill; the primary agent integrates and verifies them. Existing user authorization to plan and build governs execution.
 
 **Goal:** Make supplied labels and text in local photos searchable through one leading result, with honest evidence and local persistence.
