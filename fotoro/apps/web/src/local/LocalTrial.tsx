@@ -76,7 +76,6 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, sync
     [committed, setCommitted] = useState<string>(), [navigation, setNavigation] = useState<SearchNavigation>(), [sourceGeneration, setSourceGeneration] = useState(0);
   const [reviewingPicks, setReviewingPicks] = useState(false);
   const [placesOpen, setPlacesOpen] = useState(false);
-  const [searchOpen, setSearchOpen] = useState(false);
   const [browseScope, setBrowseScope] = useState<"photos" | "picks">("photos"), [sharing, setSharing] = useState(false);
   const [chosenSavedIDs, setChosenSavedIDs] = useState(new Set<string>());
   const [preparingShare, setPreparingShare] = useState(false), [preparedShare, setPreparedShare] = useState<ChosenOriginalContext | null>(null);
@@ -89,7 +88,7 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, sync
   const currentPhotos = useRef(photos), currentOwnedPhotos = useRef(ownedPhotos);
   currentPhotos.current = photos;
   currentOwnedPhotos.current = ownedPhotos;
-  const input = useRef<HTMLInputElement>(null), searchInput = useRef<HTMLInputElement>(null), searchButton = useRef<HTMLButtonElement>(null), settingsPanel = useRef<HTMLElement>(null), generation = useRef(0),
+  const input = useRef<HTMLInputElement>(null), searchInput = useRef<HTMLInputElement>(null), settingsPanel = useRef<HTMLElement>(null), generation = useRef(0),
     importing = useRef<number | null>(null), alive = useRef(false), retainedRef = useRef(false), saveVersion = useRef(0),
     previous = useRef<SearchResult | undefined>(undefined), session = useRef(crypto.randomUUID());
   const [resources] = useState(() => new LocalResources()), [savedResources] = useState(() => new ConsumerPreviewResources()), [retention] = useState(() => new LocalRetention());
@@ -122,7 +121,6 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, sync
   const searchPhotos = useMemo(() => mergeConsumerSearchPhotos(photos, savedPhotos), [photos, savedPhotos]);
   const hasPhotos = searchPhotos.length > 0;
   useEffect(() => {if (!active) setPlacesOpen(false);}, [active]);
-  useEffect(() => {if (searchOpen && active) searchInput.current?.focus();}, [searchOpen]);
   const index = useMemo(() => new PhotoSearchIndex(photos.map(photo => photo.ocr && photo.ocr.processor !== OCR_PROCESSOR ? {...photo, ocr: undefined} : photo), feedback), [photos, feedback]);
   const localPredicted = useMemo(() => index.search(query, {scope, committedMeaning: committed, previous: previous.current}), [index, query, committed]);
   const savedIndex = useMemo(() => new PhotoSearchIndex(savedPhotos), [savedPhotos]);
@@ -370,13 +368,12 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, sync
         <div className="header-actions">
           {hasPhotos && <>
             {(photos.length > 0 || findMatches.length > 0) && <button disabled={shareBusy} aria-pressed={reviewingPicks} onClick={() => setReviewingPicks(!reviewingPicks)}>{reviewingPicks ? "Done" : "Select"}</button>}
-            <button className="menu-button" ref={searchButton} aria-label="Search photos" aria-expanded={searchOpen || !!normalizeSearch(query)} onClick={() => {setSearchOpen(true); searchInput.current?.focus();}}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><circle cx="10" cy="10" r="7" /><path d="m15 15 6 6" /></svg></button>
             <button className="menu-button" aria-label="Add photos" disabled={!!progress || !ready} onClick={() => input.current?.click()}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="M12 4v16M4 12h16" /></svg></button>
           </>}
           <button className="menu-button" aria-label="Settings" onClick={() => setSettings(true)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m10 3-1 3-3 1-2-1-2 4 2 2v3l-2 2 2 4 3-1 3 1 1 3h4l1-3 3-1 3 1 2-4-2-2v-3l2-2-2-4-3 1-3-1-1-3z" transform="translate(0 -1) scale(.9)"/><circle cx="12" cy="12" r="3" /></svg></button>
         </div>
       </header>
-      {hasPhotos && (searchOpen || !!normalizeSearch(query)) && <div className="consumer-search"><input ref={searchInput} aria-label="Search photos" placeholder="Search photos" value={query} onChange={event => changeQuery(event.target.value)} /><button aria-label={query ? "Clear search" : "Close search"} onClick={() => {if (query) {changeQuery(""); searchInput.current?.focus();} else {setSearchOpen(false); searchButton.current?.focus();}}}><Icon kind="close" /></button></div>}
+      {hasPhotos && <div className="consumer-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><circle cx="10" cy="10" r="7" /><path d="m15 15 6 6" /></svg><input ref={searchInput} aria-label="Search photos" placeholder="Search photos" value={query} onChange={event => changeQuery(event.target.value)} />{query && <button aria-label="Clear search" onClick={() => {changeQuery(""); searchInput.current?.focus();}}><Icon kind="close" /></button>}</div>}
       {normalizeSearch(query) && (findMatches.length > 0 || bestShots.active) && <FindBestShots total={findMatches.length} review={bestShots} onSelect={selectBestShots} disabled={shareBusy} />}
       {normalizeSearch(query) && searchPhotos.length ? <LocalSearch key={sourceGeneration} photos={searchPhotos} result={result} resources={result.photoId?.startsWith("saved:") ? savedResources : resources} committed={committed} pinned={pin} selection={reviewingPicks ? {ids: searchSelectionIDs, onChange: chooseSearchPhoto, eligible: id => photos.some(photo => photo.id === id) || (id.startsWith("saved:") && !!ownedPhotos?.current() && savedPhotos.some(photo => photo.id === id)), disabled: sharing} : undefined} reasons={bestShots.active ? bestShots.recommendations?.reasons : undefined} emptyMessage={bestShots.active ? bestShots.busy ? "Choosing best shots…" : "No best shots to suggest" : undefined} emptyHint={bestShots.active ? "All matches remain available. You choose what to Save or Share." : undefined} canCorrect={!!result.photoId && localPredicted.meaning?.id === result.meaning?.id && localPredicted.photoIds.includes(result.photoId)} coverage={coverage + (savedPhotos.length ? ` · ${savedPhotos.length} saved photos available` : "")} onAccept={accept} onNavigate={id => setNavigation({query, scope, meaningID: result.meaning!.id, photoID: id})} onOpen={id => id.startsWith("saved:") ? onOpenSaved?.(id.slice(6)) : setViewer(id)} onConfirm={id => confirm(id)} onPin={id => confirm(id, true)} onFailure={failure} />
         : !photos.length ? <section className="local-empty local-first-use"><div className="first-use-content"><div className="first-use-actions"><button className="open-photos" onClick={openBackup}>Open Saved photos</button><button className="text-button" disabled={!ready || !!progress} onClick={() => input.current?.click()}>Open photos from this device</button></div><p className="hint first-use-note">Photos opened here stay on this device until you choose Save.</p></div></section>

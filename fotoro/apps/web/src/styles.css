@@ -754,7 +754,7 @@ main.local-trial, main.cloud-library { position: relative; background: var(--pho
 .consumer-navigation .menu-button { width: 44px; height: 44px; padding: 11px; border: 0; background: transparent; }
 .consumer-search input { flex: 1 1 auto; min-width: 0; width: 100%; border: 0; background: transparent; font-size: 16px; color: var(--photo-text); padding: 8px 0; }
 .consumer-search input::placeholder { color: var(--photo-muted); }
-.consumer-search svg { width: 19px; height: 19px; color: var(--photo-muted); }
+.consumer-search svg { flex: 0 0 19px; margin-right: 10px; width: 19px; height: 19px; color: var(--photo-muted); }
 .consumer-search button { min-height: 44px; width: 44px; flex: 0 0 44px; padding: 10px; border: 0; background: transparent; color: var(--photo-muted); }
 .find-best-shots { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 0 24px 8px; }
 .find-best-shots button { flex: 0 0 auto; min-height: 44px; font-size: 13px; }

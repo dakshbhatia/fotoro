@@ -120,7 +120,6 @@ export default function CloudApp({
     [photos, setPhotos] = useState<Photo[]>([]),
     [received, setReceived] = useState<Photo[] | null>(null),
     [query, setQuery] = useState(""),
-    [searchOpen, setSearchOpen] = useState(false),
     [selected, setSelected] = useState(new Set<string>()),
     [viewer, setViewer] = useState<string | null>(null),
     [exchange, setExchange] = useState(false),
@@ -162,7 +161,7 @@ export default function CloudApp({
     intentVersion = useRef(0),
     uploadAbort = useRef<AbortController | null>(null),
     localSynced = useRef(new WeakMap<File, string>());
-  const input = useRef<HTMLInputElement>(null), searchInput = useRef<HTMLInputElement>(null), searchButton = useRef<HTMLButtonElement>(null), scopeSelector = useRef<HTMLSelectElement>(null);
+  const input = useRef<HTMLInputElement>(null), searchInput = useRef<HTMLInputElement>(null), scopeSelector = useRef<HTMLSelectElement>(null);
   const activeRef = useRef(active), saveIntentRef = useRef(saveIntent), incomingRef = useRef(incoming);
   activeRef.current = active; saveIntentRef.current = saveIntent; incomingRef.current = incoming;
   const backButton = useRef<HTMLButtonElement>(null), passwordPanel = useRef<HTMLElement>(null);
@@ -171,7 +170,6 @@ export default function CloudApp({
     const target = account ? scopeSelector.current : passwordPanel.current?.querySelector<HTMLInputElement>('input[name="password"]');
     target?.focus({preventScroll: true});
   }, [active, account, recoveryNew]);
-  useEffect(() => {if (searchOpen && activeRef.current) searchInput.current?.focus();}, [searchOpen]);
   const accountPanel = useRef<HTMLElement>(null);
   const closeAccountPanel = () => setMenu(false);
   useDialogFocus(accountPanel, closeAccountPanel, menu && active && !!account);
@@ -785,7 +783,6 @@ export default function CloudApp({
           {unlocked && (
             <>
             {!received && photos.length > 0 && <button aria-pressed={selecting} onClick={() => setSelecting(value => !value)}>{selecting ? "Done" : "Select"}</button>}
-            {(photos.length > 0 || !!received?.length || !!query) && <button className="menu-button" ref={searchButton} aria-label="Search photos" aria-expanded={searchOpen || !!query} onClick={() => {setSearchOpen(true); searchInput.current?.focus();}}><SearchIcon /></button>}
             {!received && <button className="menu-button" onClick={() => {setReselect(undefined); input.current?.click();}} aria-label="Add photos" disabled={busy || publicDemo}><PlusIcon /></button>}
             <button className="menu-button" aria-label="Settings" onClick={() => setMenu(!menu)}>
               <svg
@@ -866,9 +863,10 @@ export default function CloudApp({
                 Public test account · private uploads disabled.
               </p>
             )}
-            {(searchOpen || !!query) && <div className="consumer-search">
+            {(photos.length > 0 || !!received?.length || !!query) && <div className="consumer-search">
+              <SearchIcon />
               <input ref={searchInput} aria-label="Search photos" placeholder="Search photos" value={query} onChange={event => {setQuery(event.target.value); setCommittedMeaning(undefined);}} />
-              <button onClick={() => {if (query) {setQuery(""); setCommittedMeaning(undefined); searchInput.current?.focus();} else {setSearchOpen(false); searchButton.current?.focus();}}} aria-label={query ? "Clear search" : "Close search"}>×</button>
+              {query && <button onClick={() => {setQuery(""); setCommittedMeaning(undefined); searchInput.current?.focus();}} aria-label="Clear search">×</button>}
             </div>}
             {!received && (busy || localCount > 0 || summary.pending > 0 || summary.failed > 0 || needsAttention || annotationPending.length > 0) && <section className={"consumer-save-progress state-" + consumerSummary.state} aria-label="Save progress">
               <div><p role="status">{status || syncStateLabel[consumerSummary.state]}</p>{consumerSummary.detail && <p className="hint">{consumerSummary.detail}</p>}</div>
