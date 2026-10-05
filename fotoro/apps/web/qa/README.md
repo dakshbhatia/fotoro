@@ -1,6 +1,12 @@
-# Local OCR verification
+# Local search verification
 
-Start the normal web development server and open `/qa/ocr.html`. Select a public
+Use [verification](../../../docs/verification.md) for recorded evidence and
+[product backlog](../../../docs/product-backlog.md) for the sole active queue.
+See [product](../../../docs/product.md) for Sync, Search and Share and
+[foundation](../../../docs/foundation.md) for privacy boundaries. Browser uploads
+remain explicit; QA fixtures never authorize library uploads.
+
+Start `pnpm dev:web` from `fotoro/` and open `/qa/ocr.html`. Select a public
 PNG or JPEG fixture, then choose **Recognize selected fixture**. The harness
 scales its preview to at most 1600 pixels, displays the source digest and tagged
 OCR result, and keeps the fixture in memory only. **Recognize blank preview**
@@ -54,3 +60,18 @@ nonempty output wins within that OCR channel; output below the gate is failed
 with empty text, while an initially blank output completes empty. This gate is
 an engineering rule, not calibrated accuracy or intent confidence. Actual
 orientation behavior must still be verified with fixtures.
+
+Visual search is a separate local channel: browser TinyCLIP runs pinned ONNX
+weights through ONNX Runtime on bounded previews. Model/runtime GETs are allowlisted
+and hash checked; photo pixels, vectors and query text are never uploaded. Native
+uses its own pinned TinyCLIP Core ML conversion, so neither fixture scores nor
+model dimensions establish cross-device accuracy parity. OCR text remains separate
+from supplied labels and inferred scenes. Scene publication is disabled for reader
+compatibility; vectors stay local.
+
+Run `pnpm test:search:fixtures` for deterministic retrieval checks and
+`pnpm test:search:visual` for one real TinyCLIP inference over the checked-in public
+Singapore photo. The latter loads public model assets and compares fireworks, dog
+and cake prompts; it does not exercise browser worker behavior or measure user
+accuracy, Safari latency or device memory. `pnpm test:web` covers the web boundaries;
+actual OCR, browser network privacy and visual behavior still need rendered checks.

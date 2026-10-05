@@ -1,5 +1,13 @@
 # Fotoro first slice: a private two-person photo exchange
 
+> **Historical record.** The dated evidence, contracts and task states below are
+> preserved from the earlier slice. They do not describe current release status
+> or an active work queue. Use [product](../../../fotoro/docs/product.md),
+> [the only active queue](../../../fotoro/docs/product-backlog.md),
+> [architecture](../../../fotoro/docs/foundation.md) and
+> [current evidence](../../../fotoro/docs/verification.md). Old unchecked tasks
+> and execution instructions require reconciliation with that queue before use.
+
 October 1, 2026. Written design for user review. The approved conversational
 direction is native iOS + Safari, selective open-source reuse, and a simple
 photo experience independent of Ente as the application base. The user's

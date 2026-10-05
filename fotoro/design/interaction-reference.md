@@ -1,82 +1,69 @@
-# Photo-first interaction
+# Fotoro screen and interaction rules
 
-The library helps someone find and view a photo. Backup truth, sharing and
-duplicate review serve that job; managing a model does not.
+The job is to open, find and send a useful photo while opted-in sync keeps
+supported originals available. [Product](../docs/product.md) owns that loop;
+[verification](../docs/verification.md) distinguishes implemented behavior from
+physical acceptance. These rules guide iteration; they are not a claim that every
+accessibility or device case has passed.
 
-Visual references are `outputs/photo-library-concept.png` and
-`outputs/photo-viewer-concept.png` in the parent workspace. These are design
-references, not UI assets or a source of fake personal photos. Implementation
-uses the existing React app, CSS modules, MUI's setup dialog, and PhotoSwipe
-5.4.4 already used by Ente. It adds no second gesture engine.
+## Screen journey
 
-## System
+| Screen/state | Current main action | Presentation rule |
+| --- | --- | --- |
+| Fresh iPhone | Open Photos → system permission → personal library. Open Saved is available without a local grant. | Put personal photos ahead of storage setup. Ask for access at the action that uses it. |
+| Fresh browser | Open Saved photos, or open selected device files for local browsing. | The browser cannot enumerate the iPhone library. Local selection does not upload it. |
+| First Sync | Turn on sync → account entry if needed → retain the explicit choice. | Avoid a second enable choice after sign-in. New native accounts use Get started → Continue with password details disclosed. Web creation displays its password before Open Fotoro. |
+| Returning account | Remembered native access or Open Fotoro; use another account when needed. | Preserve the user’s pending action, exact sources and account identity. Honor manual lock and failed reauthentication. |
+| Library | Compact Photos/Picks/Saved menu, visible Search and contextual Sync/selection. | Photos dominate. Healthy sync stays quiet; incomplete sync has a clear route to its actual state. |
+| Search/Picks | Type, inspect a match, optionally review Best shots, choose a set. | Show evidence and useful alternatives only when relevant. Current-query results, unfinished indexing and unavailable sources have distinct states. |
+| Viewer | Swipe, zoom, Share; Info on request. | Keep the original uncropped and navigation in the opening result set. Omit inactive arrows and single-photo counts. Return to the prior context. |
+| Sync sheet | Pause/Resume or a useful recovery action; View synced photos. | Keep Pause accessible. Put format details and disable under How sync works. Never report complete when originals were skipped. |
+| System Share | Prepare the selected originals, then use the system handoff; browser downloads when file sharing is unavailable. | Preserve the exact set and respect the browser’s required user activation after async preparation. |
+| Private Fotoro Share | Choose an accepted person → prepare invitation → Send photos. | Once prepared, bind the recipient and photos. Choose another person explicitly resets preparation. Rare access/link controls sit under disclosures. |
+| Receiving | Accept a new sender’s identity → open photos → explicitly Save a copy. | Show ended access accurately. Recipient-owned saved copies survive later sender revocation. |
+| Another device | Open Saved with the same Fotoro password. | Read the verified catalog before showing originals; opening/refreshing does not upload unrelated pending work. |
 
-- White library canvas; near-black full-screen viewer. No tinted photo overlays.
-- System typography: 34px mobile / 44px desktop title, 16px search, 13px controls.
-- Three columns on mobile, more columns on wider screens. Three-pixel gutters
-  and four-pixel corners give the images space without framing every photo.
-- One floating search/import control: 58px high, 29px radius, maximum width
-  540px. Neutral translucent surface, white edge, soft shadow and 20px backdrop
-  blur. A solid readable fallback remains if backdrop filtering is unavailable.
-- Outlined 22px symbols; 44px minimum targets. Glass belongs on controls over
-  content, never on each photo. Safe-area insets protect the bottom controls.
-- 180ms opacity/transform feedback. Reduced motion removes animation;
-  reduced transparency uses opaque control surfaces.
+Photos is the browsing surface. Picks suggests highlights. Saved holds Fotoro
+originals for other-device access. They are views; the user should not need to
+organize the same photo separately in each.
 
-## States and purpose
+## Native Liquid Glass and web surfaces
 
-The empty library has a title and one add action. After import, images dominate
-and the floating search/import control becomes available. Duplicate review
-appears only if exact copies exist. It identifies copies; it does not delete
-original files or claim to reclaim device storage.
+The active iPhone app uses SwiftUI system glass controls on iOS 26+:
+GlassEffectContainer, glass search, glass/glassProminent actions and native sheets.
+The active browser uses React/Vite, CSS translucent controls and its current viewer.
+The older Ente MUI/PhotoSwipe experiment is historical; it does not define this app.
 
-Opening a photo keeps it uncropped in a full-screen viewer. Share appears only
-when the browser can share the original file. Previous/next operate within the
-current result set. Details are disclosed on demand. Closing restores the
-originating thumbnail's focus and leaves the library's scroll position intact.
+Keep the grid plain and let photos set the visual character. Glass belongs on
+navigation and contextual controls. Use system typography, clear contrast,
+safe-area spacing and large touch targets. Native actions are at least 44 pt;
+verify browser controls at least 44 CSS px. A primary action should stand out
+without a repeated title, subtitle, count and explanatory card around it.
 
-The session-only preview must state that it is not backed up. Developer cloud
-setup is reachable through `/intelligence?setup=1`, never the routine toolbar.
-Explicit opt-in starts indexing in the background; importing and browsing stay
-available. Pause, resume and error recovery remain visible when relevant.
+Reduced motion/transparency, Dynamic Type, VoiceOver, keyboard/focus and touch
+behavior are acceptance requirements to qualify. Use system support where
+available and opaque readable fallbacks for browser surfaces. Screenshots alone
+do not establish accessibility, scrolling smoothness or physical share completion.
 
-The generated reference uses example photography. QA uses repository images
-and synthetic files rather than private user photos. Different image counts,
-conditional sharing and truthful preview state are intentional differences.
+## Quiet, accurate states
 
-## Boundary
+Account setup belongs to the action requiring it. Healthy state needs no banner.
+A busy state shows relevant progress; an incomplete state shows one useful next
+action. Raw API codes, model identities and support references belong in Details,
+not the photo canvas. Retain real failure evidence for diagnostics.
 
-This design pass does not complete encrypted index persistence, account sync,
-passkey unlock, semantic search or trusted-contact grants. Those remain in the
-build plan. A clean screen cannot substitute for those working flows.
+Selection survives view, query and account navigation within the same verified
+source context. Withdrawn permissions or changed original revisions remove
+ineligible sources visibly. Suggestions never become a Save or sharing intent.
+Closing a viewer restores context; modal surfaces keep background interaction
+inert and restore focus when dismissed. These are behaviors to test, not an excuse
+to add another screen or gesture engine.
 
-## Twenty experience decisions
+## Qualify the whole loop
 
-These are implementation choices, not a claim that every physical-device case
-has passed. Browser and build evidence is recorded in `verification.md`.
-
-1. Photos occupy the primary canvas.
-2. One reachable control combines search and import.
-3. Empty state presents one next action.
-4. Duplicate review appears only when an exact copy exists.
-5. Thumbnail-to-viewer zoom preserves visual continuity.
-6. Original images remain uncropped in the viewer.
-7. Horizontal drag/swipe uses PhotoSwipe's existing gesture engine.
-8. Pinch and double-tap zoom use the same engine, without conflicting handlers.
-9. Vertical dismissal and Escape return to the library.
-10. Buttons and arrow keys offer alternatives to gestures.
-11. Viewer navigation stays in the opening result set; indexing cannot reorder it.
-12. Details open on demand and close when advancing to another image.
-13. Native file sharing is exposed only when supported, using the original file.
-14. Interactive targets are at least 44px.
-15. Focus stays in the viewer; background is inert and focus returns on close.
-16. Reduced motion disables animated transitions.
-17. Reduced transparency and missing backdrop support get opaque fallbacks.
-18. Safe-area insets protect fixed controls.
-19. Dynamic import and adjacent-image preload keep the main library light.
-20. Backup truth and explicit cloud consent stay honest; indexing does not block
-    import or browsing and stops on a failed paid request.
-
-References: [Apple Liquid Glass](https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass),
-[PhotoSwipe gestures and transitions](https://photoswipe.com/),
-[PhotoSwipe options](https://photoswipe.com/options/).
+Use public media and disposable accounts for automated QA. Test fresh and
+remembered entry, Photos denial/limited access, small/large text, reduced motion,
+search during indexing, selecting through sign-in, Pause/Resume, interrupted
+restore, system sharing, a private recipient and reopening. Record actual
+failures in the [active queue](../docs/product-backlog.md). UI fixtures are test
+data, never fake personal-library content in a release.

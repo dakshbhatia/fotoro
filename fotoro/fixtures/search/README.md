@@ -1,5 +1,9 @@
 # Local search checks
 
+These checks support [Search](../../docs/product.md). See
+[verification](../../docs/verification.md) for evidence and
+[product backlog](../../docs/product-backlog.md) for the sole active queue.
+
 `cases.json` freezes 19 synthetic records and 30 expected retrieval tasks before
 implementation measurements: 20 covered by supplied labels/metadata/text,
 5 visual concepts intentionally uncovered, and 5 absent terms. These are
@@ -16,7 +20,8 @@ scope/candidate limits, stability and permission withdrawal.
 those text terms. They are generated public test data and contain no personal
 documents. OCR success must come from their pixels, not injected search text.
 
-Regenerate the PNGs on macOS with:
+Run `pnpm test:search:fixtures` from `fotoro/` for the deterministic retrieval
+checks. Regenerate the PNGs from that same directory on macOS with:
 
 ```sh
 swift tools/create-search-fixtures.swift "$PWD/fixtures/search"
@@ -32,3 +37,11 @@ favorite, verified bursts, capture-date variety, unknown dates, unavailable
 previews and unsupported visual meaning. Its measurements are synthetic inputs;
 passing establishes policy composition, not real-photo ranking accuracy. Run
 `pnpm test:picks:fixtures`. A processor version change requires requalification.
+
+`pnpm test:search:visual` is a separate real-inference smoke check using the public
+`fixtures/media/singapore.jpg` and the pinned browser TinyCLIP ONNX model. It checks
+one fireworks prompt against dog/cake controls, not the five intentionally
+uncovered synthetic visual tasks. Native TinyCLIP Core ML and browser ONNX are
+separate model conversions; this command establishes neither parity nor held-out
+accuracy. It downloads public model assets, never personal images or local vectors.
+Use the [web QA guide](../../apps/web/qa/README.md) for pixel OCR and browser checks.

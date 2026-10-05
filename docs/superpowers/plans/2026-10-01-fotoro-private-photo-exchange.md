@@ -1,5 +1,13 @@
 # Fotoro Private Photo Exchange Implementation Plan
 
+> **Historical record.** The dated evidence, contracts and task states below are
+> preserved from the earlier slice. They do not describe current release status
+> or an active work queue. Use [product](../../../fotoro/docs/product.md),
+> [the only active queue](../../../fotoro/docs/product-backlog.md),
+> [architecture](../../../fotoro/docs/foundation.md) and
+> [current evidence](../../../fotoro/docs/verification.md). Old unchecked tasks
+> and execution instructions require reconciliation with that queue before use.
+
 Execution status, October 1: Tasks 1–5 have local development implementations,
 correctness tests and independent review. Task 6 has CI, local startup, isolated
 real D1/R2 encrypted exchange and restore verification. Physical-device/Safari

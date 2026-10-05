@@ -1,5 +1,11 @@
 # Private Fotoro service
 
+This service supports Sync, Search and Share. Product scope lives in
+[product](../../docs/product.md); [product backlog](../../docs/product-backlog.md)
+is the sole active queue. See [foundation](../../docs/foundation.md) for architecture,
+[Cloudflare](../../docs/cloudflare.md) for the platform path and
+[verification](../../docs/verification.md) for evidence.
+
 Run `pnpm seed:local` once, then `pnpm dev:api` at the Fotoro workspace root for
 127.0.0.1:8787. Browser origin is http://localhost:4310 or
 http://127.0.0.1:4310, RP localhost. The Worker always rejects fixture-account
@@ -25,7 +31,11 @@ JSON request bodies are capped at 2 MiB while annotation PUTs retain their 512 K
 cap. Both declared and streamed sizes are checked before parsing. Encrypted media
 uploads use the separately reserved ciphertext byte limit.
 
-Upload staging PUT is a session-and-capability-authorized Worker route. Its
+Ordinary upload staging PUT requires a session and a scoped capability. Native
+background PUT uses `/v1/background/uploads/:id/staging`: the already reserved,
+expiring capability permits only that ciphertext staging write, with no account
+credential supplied to the iOS daemon. Reservation, commit and catalog publishing
+still require an account session. Both routes use the same byte/digest checks.
 FixedLengthStream bounds bytes. Commit incrementally hashes the observed staging
 ETag and streams that version into a fresh conditional private final key. Final
 keys are never writable by a client. An ambiguous R2/D1 commit can be reconciled
@@ -44,7 +54,16 @@ an origin/client/account-bound one-use five-minute challenge; the secret never
 reaches the service. A recovered session may add a new passkey via register/options
 with its authenticated accountId and the same pinned enrollment card.
 
-Run `pnpm test:api` and `pnpm check:api`. Workerd tests exercise real local D1/R2,
+Current account entry creates a Fotoro password locally and uses signed start
+enrollment; that password unlocks the encrypted recovery bundle and proves the
+account signing key on another device. The server never receives the password.
+Passkeys and device approval remain supported foundations; Apple ID login is not
+delivered. Production auth/enrollment is rate limited. `GET /v1/storage` returns
+the account’s reserved/stored ciphertext allowance (10 GiB default), distinct
+from the client’s logical-original summary. Clients retain the 50 MiB complete
+original limit; the service caps each ciphertext reservation at 55 MiB.
+
+Run `pnpm test:api` and `pnpm check:api` from `fotoro/`. Workerd tests exercise real local D1/R2,
 WebCrypto verification against the frozen libsodium vector, HTTP share/save/revoke/
 contribute, replay, expiry and simulated ambiguous promotion. Browser/native
 clients remain responsible for pinning cards, decrypting records and confirming
@@ -69,3 +88,14 @@ Committed contribution retries reconcile even after grant revoke/expiry, while
 fresh or changed operations remain forbidden/conflicting. Recipient-owned saved
 photos can be contributed using their exact independently retained objects and
 original source AAD.
+
+For native integration, after `pnpm seed:local`, run
+`pnpm --filter @fotoro/api dev:native-test` on loopback 8787 and
+`pnpm dev:fixtures` on 8790. The native-test helper bundles the real Worker with
+`wrangler deploy --dry-run` and runs seeded local D1/R2 directly in Miniflare;
+it avoids the development proxy hop. It does not deploy remotely.
+
+Account-private annotations use signed, revision-checked encrypted updates and
+change pages. The server cannot search photo pixels, OCR text or local vectors.
+Production error diagnostics emit fixed phases/classes, status/code and UUID
+request references; invocation logging is disabled to avoid capability URLs.

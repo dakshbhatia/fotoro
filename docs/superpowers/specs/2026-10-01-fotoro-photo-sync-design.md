@@ -1,5 +1,13 @@
 # Fotoro Photos sync
 
+> **Historical record.** The dated evidence, contracts and task states below are
+> preserved from the earlier slice. They do not describe current release status
+> or an active work queue. Use [product](../../../fotoro/docs/product.md),
+> [the only active queue](../../../fotoro/docs/product-backlog.md),
+> [architecture](../../../fotoro/docs/foundation.md) and
+> [current evidence](../../../fotoro/docs/verification.md). Old unchecked tasks
+> and execution instructions require reconciliation with that queue before use.
+
 The user wants to open a simple iOS app, sync their recent Photos library, and see
 the same pictures in Safari with understandable setup, progress, quality and
 format behavior. This extends the existing encrypted catalog and resumable
