@@ -17,7 +17,11 @@ those failed suites, and the source is restored. The fixed media suite passes al
 113. Each retains one known Vision inference-context skip and has no failures.
 Core checks pass, and independent code review finds no remaining material issue.
 
-Build 35 contains the fix. Distribution signing and physical media/relaunch
+Build 35 archives with all 42 Swift sources and 69 native inputs verified,
+matching arm64 dSYM, production associations and unchanged full static encryption.
+The archive is development-signed. A fresh keychain check finds zero distribution
+identities; Apple still reports build 25 VALID / IN_BETA_TESTING.
+Distribution signing and physical media/relaunch
 acceptance remain open. Originals above 50 MiB are still excluded; encrypted
 uploads already scheduled may finish in the background, while preparation
 requires the app to be open and unlocked. Web/API behavior is unchanged.
