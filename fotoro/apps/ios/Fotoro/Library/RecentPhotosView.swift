@@ -198,6 +198,7 @@ private struct PhotoSyncPresentation: Identifiable {
   let services: AppServices
   let savedRefresh: SavedLibraryRefresh
   let requiresAuthentication: Bool
+  var startAutomaticSync = false
 }
 #endif
 
@@ -233,7 +234,7 @@ struct RecentPhotosView: View {
   @State private var services: AppServices?
   @State private var backupAccount: PhotosAccountPresentation?
   @State private var photoSyncPresentation: PhotoSyncPresentation?
-  @State private var pendingPhotoSync = false
+  @State private var pendingPhotoSync: Bool?
   @State private var searchHits: [ConsumerSearchHit] = []
   @State private var completedSearchID: ConsumerSearchPresentationID?
   @State private var savedResults: [String: LocalPhoto] = [:]
@@ -479,7 +480,8 @@ struct RecentPhotosView: View {
         LibraryView(services: $0.services, saveSelection: $0.selection, incomingLink: $0.incoming)
       }
       .sheet(item: $photoSyncPresentation) {
-        PhotoSyncView(services: $0.services, savedRefresh: $0.savedRefresh, requiresAuthentication: $0.requiresAuthentication)
+        PhotoSyncView(services: $0.services, savedRefresh: $0.savedRefresh, requiresAuthentication: $0.requiresAuthentication,
+          startAutomaticSync: $0.startAutomaticSync, openSaved: { query = ""; scope = .saved })
       }
       .onOpenURL { url in
         do {
@@ -551,7 +553,7 @@ struct RecentPhotosView: View {
         .sheet(isPresented: $settings, onDismiss: {
 #if !FOTORO_LOCAL_PREVIEW
           if pendingBackup { pendingBackup = false; openBackup() }
-          else if pendingPhotoSync { pendingPhotoSync = false; openPhotoSync() }
+          else if let start = pendingPhotoSync { pendingPhotoSync = nil; openPhotoSync(startAutomaticSync: start) }
 #endif
         }) { settingsView }
         .sheet(item: $places, onDismiss: openPendingPlace) { _ in
@@ -1188,19 +1190,19 @@ struct RecentPhotosView: View {
     }
     @ViewBuilder private var homeSyncButton: some View {
       if homeSyncNeedsAttention {
-        Button("Sync needs attention", systemImage: "exclamationmark.icloud", action: openPhotoSync)
+        Button("Sync needs attention", systemImage: "exclamationmark.icloud") { openPhotoSync() }
           .labelStyle(.iconOnly).font(.title3).buttonStyle(.glass).buttonBorderShape(.circle)
           .frame(width: 44, height: 44).accessibilityIdentifier("home.sync")
       } else if store.opened, RecentPhotosPolicy.canRead(store.status), services?.automaticPhotoSync.enabled == false,
         services.map({ $0.session.accountId == nil
           || NativeBackupPolicy.allowsPrivatePhotos(accountId: $0.session.accountId, fixture: $0.session.fixture) }) != false {
-        Button("Turn on sync", systemImage: "icloud.and.arrow.up", action: openPhotoSync)
+        Button("Turn on sync", systemImage: "icloud.and.arrow.up") { openPhotoSync(startAutomaticSync: true) }
           .font(.subheadline.weight(.semibold)).buttonStyle(.glassProminent)
           .frame(minHeight: 44).fixedSize(horizontal: false, vertical: true)
           .accessibilityHint("Choose to save your photos across your devices")
           .accessibilityIdentifier("home.sync")
       } else {
-        Button("Sync", systemImage: services?.automaticPhotoSync.enabled == true ? "icloud.fill" : "icloud", action: openPhotoSync)
+        Button("Sync", systemImage: services?.automaticPhotoSync.enabled == true ? "icloud.fill" : "icloud") { openPhotoSync() }
           .labelStyle(.iconOnly).font(.title3).buttonStyle(.glass).buttonBorderShape(.circle)
           .frame(width: 44, height: 44)
           .accessibilityIdentifier("home.sync")
@@ -1284,7 +1286,7 @@ struct RecentPhotosView: View {
             AccountIdentityView(session: services.session, unlocked: services.vault.isUnlocked)
           }
           Button(services?.automaticPhotoSync.enabled == true ? "Sync settings" : "Turn on sync", systemImage: "icloud.and.arrow.up") {
-            pendingPhotoSync = true; settings = false
+            pendingPhotoSync = services?.automaticPhotoSync.enabled != true; settings = false
           }.accessibilityIdentifier("settings.sync")
           Button("Saved photos") { pendingBackup = true; settings = false }
           if let services {
@@ -1395,7 +1397,7 @@ struct RecentPhotosView: View {
   private func openBackup() {
     presentAccount()
   }
-  private func openPhotoSync() {
+  private func openPhotoSync(startAutomaticSync: Bool = false) {
     queryFocused = false
     do {
       if services == nil { services = try AppServices() }
@@ -1408,7 +1410,7 @@ struct RecentPhotosView: View {
             hasAccountAccess: services.photoAccountAccess != nil, isSignedIn: services.session.isSignedIn,
             accountId: services.session.accountId, fixture: services.session.fixture, rejectedSession: false))
         photoSyncPresentation = PhotoSyncPresentation(services: services,
-          savedRefresh: savedRefresh, requiresAuthentication: requiresAuthentication)
+          savedRefresh: savedRefresh, requiresAuthentication: requiresAuthentication, startAutomaticSync: startAutomaticSync)
       }
     } catch { store.error = error.localizedDescription }
   }

@@ -15,11 +15,12 @@ Hono Worker with D1 and private R2. The upstream Ente application is a reference
 - Visual search runs locally. Model downloads contain public weights; private
   photos, queries and vectors are not sent to an inference provider.
 
-Before this foundation release, the verified active Worker is
-`2038bd0d-65bd-4fa2-ab1f-0c069cc7115c` at 100%, deployment
-`14c055ea-1d2b-4206-8938-4f37867183c2` (2026-10-04). Previous Worker
-`b1e70904-3b84-486a-a605-88fdd4630cf9` is the rollback target. Read back the
-latest deployment before changing traffic; deployment lists are chronological.
+The last verified active Worker is `b3088ca5-5904-4dd6-9539-7ea59adc210b`
+at 100%, deployment `b9389285-2daf-481a-8c17-dacce3adf95b` (2026-10-05,
+merged PR 35). Read back the latest deployment before changing traffic;
+deployment lists are chronological. Preserve the preceding version for rollback.
+The three-S simplification changes web assets and native presentation; there is
+no server migration or protocol change.
 
 ## Release checks
 
@@ -67,11 +68,11 @@ pass uses CI for native validation; no new IPA, phone install or TestFlight uplo
 is implied by web deployment. The owner reports Xcode already signed in; do not
 repeat historical account setup instructions.
 
-Build 34 is archived and audited with the partial-sync correction. Check release
+Build 36 is archived and audited with the three-S simplification. Check release
 credentials without archiving, exporting or uploading:
 
 ```sh
-FOTORO_DEVELOPMENT_TEAM=YOUR_TEAM node tools/build-testflight.mjs 34 --preflight
+FOTORO_DEVELOPMENT_TEAM=YOUR_TEAM node tools/build-testflight.mjs 36 --preflight
 ```
 
 The check reports credential type and local distribution identity count, without

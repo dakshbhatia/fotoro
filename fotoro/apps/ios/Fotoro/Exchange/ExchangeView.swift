@@ -108,7 +108,9 @@ struct ExchangeView: View {
                 }
               }.disabled(services.busy).accessibilityValue(recipient == card ? "Selected" : "")
             }
-            DisclosureGroup("Options") { Toggle("Access for 15 minutes", isOn: $temporary).disabled(services.busy) }
+            if recipient != nil, invitationURL == nil {
+              DisclosureGroup("Options") { Toggle("Access for 15 minutes", isOn: $temporary).disabled(services.busy) }
+            }
             if let recipient, invitationURL == nil {
               Button("Share with \(services.contactName(recipient.accountId))", systemImage: "square.and.arrow.up") {
                 perform {
@@ -121,8 +123,10 @@ struct ExchangeView: View {
               }.disabled(services.busy)
             }
             if let invitationURL {
-              ShareLink("Send invitation", item: invitationURL).accessibilityIdentifier("sharing.invitation")
-              Button("Show invitation code") { shareCode = ShareCodePresentation(url: invitationURL, title: "Photo invitation") }
+              ShareLink("Send photos", item: invitationURL).accessibilityIdentifier("sharing.invitation")
+              DisclosureGroup("More") {
+                Button("Show invitation code") { shareCode = ShareCodePresentation(url: invitationURL, title: "Photo invitation") }
+              }
             }
           }
           if let grant = services.selectedGrant, grant.role == "contributor", available(grant) {
@@ -196,12 +200,11 @@ struct ExchangeView: View {
             ShareLink("Share my contact link", item: url).accessibilityIdentifier("sharing.contact")
             Button("Show my contact code") { shareCode = ShareCodePresentation(url: url, title: "My contact link") }
           }
-          TextField("Paste a Fotoro contact or photo link", text: $link)
-            .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-            .focused($focusedField, equals: .link).submitLabel(.go).onSubmit(openLink)
-            .disabled(services.busy)
-          Button("Open link", action: openLink)
-            .disabled(link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || services.busy)
+          if !selected.isEmpty, !contacts.isEmpty {
+            DisclosureGroup("Add a person") { contactEntry }
+          } else {
+            contactEntry
+          }
           if selected.isEmpty {
             ForEach(contacts, id: \.accountId) { card in Text(services.contactName(card.accountId)) }
           }
@@ -243,6 +246,16 @@ struct ExchangeView: View {
         .alert("Fotoro", isPresented: Binding(get: { services.error != nil }, set: { if !$0 { services.error = nil } })) {
           Button("OK") { services.error = nil }
         } message: { Text(services.error ?? "") }
+    }
+  }
+  private var contactEntry: some View {
+    Group {
+      TextField("Paste a Fotoro link", text: $link)
+        .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+        .focused($focusedField, equals: .link).submitLabel(.go).onSubmit(openLink)
+        .disabled(services.busy)
+      Button("Open link", action: openLink)
+        .disabled(link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || services.busy)
     }
   }
   private var candidateIsMoment: Bool { if case .moment = candidate { return true }; return false }

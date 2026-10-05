@@ -297,6 +297,29 @@ final class RecentPhotosTests: XCTestCase {
     empty.authorize(access)
     XCTAssertNil(empty.consume(active: true, access: access))
   }
+  func testInitialSyncChoiceCannotFollowAnOriginChangeDuringAccountEntry() {
+    let catalog = NSObject()
+    let access = PhotoAccountAccess(account: "opened", vault: UUID(), catalog: ObjectIdentifier(catalog))
+    var consent = AutomaticPhotoSyncConsent(origin: "https://fotoro.cloud")
+    consent.authorize(nil, origin: "https://fotoro.cloud")
+    consent.authorize(access, origin: "https://other.example")
+    XCTAssertFalse(consent.consume(active: true, access: access, origin: "https://other.example"),
+      "Turn on sync grants consent for the service chosen before account entry")
+  }
+  func testInitialSyncChoiceWaitsForAccountAccessAndRemainsOneShot() {
+    let catalog = NSObject()
+    let access = PhotoAccountAccess(account: "opened", vault: UUID(), catalog: ObjectIdentifier(catalog))
+    var consent = AutomaticPhotoSyncConsent(origin: "https://fotoro.cloud")
+    consent.authorize(nil, origin: "https://fotoro.cloud")
+    XCTAssertFalse(consent.consume(active: true, access: nil, origin: "https://fotoro.cloud"))
+    consent.authorize(access, origin: "https://fotoro.cloud")
+    XCTAssertTrue(consent.consume(active: true, access: access, origin: "https://fotoro.cloud"))
+    XCTAssertFalse(consent.consume(active: true, access: access, origin: "https://fotoro.cloud"))
+    var dismissed = AutomaticPhotoSyncConsent(origin: "https://fotoro.cloud")
+    dismissed.cancel()
+    dismissed.authorize(access, origin: "https://fotoro.cloud")
+    XCTAssertFalse(dismissed.consume(active: true, access: access, origin: "https://fotoro.cloud"))
+  }
   func testAutomaticSyncConsentRequiresTheSameActivatedAccountOriginAndForeground() {
     let catalog = NSObject(), replacement = NSObject()
     let access = PhotoAccountAccess(account: "opened", vault: UUID(), catalog: ObjectIdentifier(catalog))

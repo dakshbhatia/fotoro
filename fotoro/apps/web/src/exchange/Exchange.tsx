@@ -158,20 +158,21 @@ export function Exchange({selection, incoming, onClose, onReceived, onRefresh, o
       {!candidateChecked && !busy && status && <button onClick={() => void run(() => loadExchangeContext(session, scope, applyContext, candidate), "Checking sender…")}>Try again</button>}
       {!isMoment && <button disabled={busy} onClick={() => setCandidate(undefined)}>Cancel</button>}
     </div> : !isMoment && <>
-      {count > 0 && <>
+      {count > 0 && !invitation && <>
         {people.length > 0 && <div className="share-recipients" role="group" aria-label="Choose a person"><h3>Choose a person</h3>{people.map(person => <button key={person.accountId} disabled={busy} aria-pressed={recipient?.accountId === person.accountId} onClick={() => setRecipient(person)}>{contactLabel(person.accountId)}{recipient?.accountId === person.accountId && <span aria-hidden="true"> ✓</span>}</button>)}</div>}
         <details open={people.length === 0}><summary>{people.length ? "Add a person" : "Connect with a person"}</summary><form onSubmit={event => {event.preventDefault(); void inspectLink();}}><p className="hint">Ask this person to open Shared and send you their contact link. After you connect, send them the photo invitation.</p><label>Recipient’s contact link<input type="url" autoComplete="off" value={linkInput} onChange={event => setLinkInput(event.target.value)} placeholder="https://fotoro.cloud/#contact=…" /></label><button disabled={busy || !linkInput.trim()}>Continue</button></form></details>
         <details><summary>Photo access</summary><label>Access<select value={access} disabled={busy} onChange={event => setAccess(event.target.value as "ongoing" | "temporary")}><option value="ongoing">Until I end access</option><option value="temporary">15 minutes</option></select></label></details>
         <button className="primary-action" disabled={busy || !recipient || count > 100} onClick={() => void run(async () => {
+          if (invitation) return;
           const grant = await sharePhotos(snapshot.photos, recipient!, access, scope);
           if (!current()) return;
-          setInvitation(grant); setOutputLink(createMomentLink(grant.grantId, session.card)); await reload(); setStatus("Invitation ready.");
+          setInvitation(grant); setOutputLink(""); await reload();
         }, "Creating invitation…")}>{busy && working === "Creating invitation…" ? "Creating invitation…" : "Share photos"}</button>
       </>}
-      {invitation && <div className="invitation-ready"><h3>Invitation ready</h3><p className="hint">Only this recipient can open these photos with their Fotoro password.</p><div className="actions"><button disabled={busy} className="primary-action" onClick={() => shareLink(createMomentLink(invitation.grantId, session.card))}>Share invitation</button><button disabled={busy} onClick={() => void copyLink(createMomentLink(invitation.grantId, session.card))}>Copy link</button></div></div>}
+      {invitation && <div className="invitation-ready"><h3>For {contactLabel(invitation.recipientAccountId)}</h3><div className="actions"><button disabled={busy} className="primary-action" onClick={() => shareLink(createMomentLink(invitation.grantId, session.card))}>Send photos</button><button disabled={busy} onClick={() => {setInvitation(undefined); setOutputLink(""); setRecipient(undefined); setStatus("");}}>Choose another person</button></div><details><summary>More</summary><button disabled={busy} onClick={() => void copyLink(createMomentLink(invitation.grantId, session.card))}>Copy link</button></details></div>}
       {!count && <div className="contact-link"><p className="hint">Your contact link lets someone invite you to photos.</p><div className="actions"><button disabled={busy} onClick={() => shareLink(ownLink)}>Share my contact link</button><button disabled={busy} onClick={() => void copyLink(ownLink)}>Copy my contact link</button></div></div>}
     </>}
-    {outputLink && <label className="copy-link">Link<input readOnly value={outputLink} onFocus={event => event.target.select()} /></label>}
+    {outputLink && <details className="copy-link"><summary>Link</summary><label>Photo link<input readOnly value={outputLink} onFocus={event => event.target.select()} /></label></details>}
     <p role="status" className="share-status">{busy ? working : status}</p>
     {isMoment && onRetryPassword && <button disabled={busy} onClick={onRetryPassword}>Use another Fotoro password</button>}
     {!isMoment && <details className="share-inbox" open={!count}><summary>{count ? "Shared moments" : "Received and sent"}</summary>
