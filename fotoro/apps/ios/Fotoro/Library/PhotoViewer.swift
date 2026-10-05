@@ -419,6 +419,13 @@ struct SavedPhotoDetails: View {
           }
         }
         if let caption = services.annotation(photo).caption { Section("Caption") { Text(caption) } }
+        if let location = services.annotation(photo).location {
+          Section("Location") {
+            Text(location.displayName).textSelection(.enabled)
+            if location.name != nil { Text(location.coordinates).foregroundStyle(.secondary) }
+            Text(location.provenance).font(.caption).foregroundStyle(.secondary)
+          }
+        }
         if let ocr = services.annotation(photo).ocr, !ocr.text.isEmpty {
           Section("Text in this photo") { Text(ocr.text).textSelection(.enabled) }
         }

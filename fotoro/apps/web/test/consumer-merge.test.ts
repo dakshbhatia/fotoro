@@ -5,6 +5,7 @@ import {savedSearchPhotos, combineConsumerSearch, type OwnedPhotoSnapshot} from 
 import {PhotoSearchIndex} from "../src/local/search";
 import type {LocalPhoto} from "../src/local/resources";
 import type {Photo} from "../src/library/catalog";
+import {withAnnotationLocation} from "@fotoro/contracts/location";
 
 test("combined canvas keeps local objects and source order when saved originals overlap", () => {
   const a = {id: "a", source: "local"}, b = {id: "b", source: "local"};
@@ -82,4 +83,23 @@ test("capture overlay rejects changed files, digests, invalid dates and unverifi
     assert.equal(merge([local], savedSearchPhotos({...snapshot, photos: [{...saved, metadata}]}, [local]))[0], local);
   }
   assert.equal(merge([local], [{...local, dateSource: "photos", date: saved.metadata.sourceDate}])[0], local);
+});
+
+test("matching saved location fills a selected original independently of date promotion and disappears on lock", () => {
+  const {local, saved, snapshot, invalidate} = matchingCapture();
+  const location = {latitude: 41.9028, longitude: 12.4964, source: "google-timeline" as const, name: "Rome"};
+  const source = {...local, dateSource: "exif" as const};
+  snapshot.photos = [{...saved, annotations: withAnnotationLocation(saved.annotations!, location)}];
+  const adapted = savedSearchPhotos(snapshot, [source]);
+  const displayed = merge([source], adapted)[0];
+  assert.deepEqual(displayed.location, location);
+  assert.equal(displayed.date, source.date);
+  assert.equal(source.location, undefined);
+  const gps = {...source, location: {...location, source: "exif" as const}};
+  assert.equal(merge([gps], adapted)[0].location, gps.location);
+  assert.equal(merge([{...source, file: new File(["changed"], "same.png")}], adapted)[0].location, undefined);
+  const index = new PhotoSearchIndex([displayed]);
+  assert.deepEqual(index.search("gps").photoIds, [source.id]);
+  invalidate(); assert.equal(merge([source], adapted)[0], source);
+  assert.deepEqual(index.search("gps").photoIds, [], "An already built location index cannot retain withdrawn account evidence");
 });

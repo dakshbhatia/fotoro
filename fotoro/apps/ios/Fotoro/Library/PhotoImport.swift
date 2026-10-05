@@ -19,12 +19,14 @@ actor PhotoImport {
   let crypto = CryptoAdapter()
   let sourceReader: (@Sendable (SelectedResource) async throws -> (Data, String, Bool))?
   private let sourceRevision: @Sendable (String) -> String?
+  private let sourceLocation: @Sendable (String) -> PhotoLocationV1?
   var failures: [ImportFailure] = []
   var notices: [String] = []
   init(
     store: LibraryStore,
     sourceReader: (@Sendable (SelectedResource) async throws -> (Data, String, Bool))? = nil,
-    sourceRevision: (@Sendable (String) -> String?)? = nil
+    sourceRevision: (@Sendable (String) -> String?)? = nil,
+    sourceLocation: (@Sendable (String) -> PhotoLocationV1?)? = nil
   ) {
     self.store = store
     self.sourceReader = sourceReader
@@ -32,6 +34,12 @@ actor PhotoImport {
       PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject.map {
         RecentPhoto.sourceRevision($0)
       }
+    }
+    self.sourceLocation = sourceLocation ?? { id in
+      guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+        let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject,
+        !asset.isHidden else { return nil }
+      return PhotoLocationV1.photos(asset.location)
     }
   }
   func importResources(
@@ -47,6 +55,7 @@ actor PhotoImport {
       try Task.checkCancellation()
       guard await valid() else { throw CancellationError() }
       do {
+        let revision = selection.origin == .photos ? sourceRevision(selection.resourceIdentifier) : nil
         let (bytes, filename, edited) = try await read(selection)
         guard await valid() else { throw CancellationError() }
         let photo = try await buildMedia(
@@ -59,7 +68,15 @@ actor PhotoImport {
           }
           throw CancellationError()
         }
-        try store.put(photo)
+        // Current Photos metadata may intentionally omit GPS retained by its original.
+        let location = selection.origin == .photos ? sourceLocation(selection.resourceIdentifier) : Self.location(bytes)
+        if let revision, sourceRevision(selection.resourceIdentifier) != revision {
+          for url in Array(photo.staged.values) + [photo.originalURL, photo.thumbnailURL, photo.previewURL].compactMap({ $0 }) {
+            try? FileManager.default.removeItem(at: url)
+          }
+          throw FotoroError("Photo changed during import. Try again.")
+        }
+        try persistLocation(location, photo: photo, accountId: accountId, bundle: bundle, insertPhoto: true)
         imported.append(photo)
         if edited {
           notices.append("Imported the unmodified original; Photos edits are not included.")
@@ -134,12 +151,12 @@ actor PhotoImport {
   ) async throws -> LocalPhoto {
     try Task.checkCancellation()
     guard await valid() else { throw CancellationError() }
-    if let existing = try store.backupPhoto(source.photoId) { return existing }
     func checkRevision() throws {
       guard let expected = source.sourceRevision else { return }
       guard sourceRevision(source.id) == expected else { throw FotoroError("Photo changed during sync. Try again.") }
     }
     try checkRevision()
+    if let existing = try store.backupPhoto(source.photoId) { return existing }
     try Task.checkCancellation()
     let selection = SelectedResource(
       id: source.id, origin: .photos, resourceIdentifier: source.id, fileURL: nil)
@@ -147,15 +164,19 @@ actor PhotoImport {
     guard await valid() else { throw CancellationError() }
     try checkRevision()
     try Task.checkCancellation()
+    let location = sourceLocation(source.id)
+    try checkRevision()
     if let reused = try store.ownedOriginal(digest: bytes.digest, accountId: accountId) {
       var checkpoint = source
       checkpoint.photoId = reused.photoId
+      checkpoint.originalSha256 = reused.metadata.originalSha256
       checkpoint.message = nil
       if ["committed", "saved"].contains(reused.transferState) {
         checkpoint.phase = .committed
         try store.putBackupSource(checkpoint)
+        try persistLocation(location, photo: reused, accountId: accountId, bundle: bundle)
       } else {
-        try store.stageBackup(reused, source: checkpoint)
+        try store.stageBackup(reused, source: checkpoint, location: location, bundle: bundle)
       }
       return reused
     }
@@ -166,7 +187,7 @@ actor PhotoImport {
       try checkRevision()
       try Task.checkCancellation()
       guard await valid() else { throw CancellationError() }
-      try store.stageBackup(photo, source: source)
+      try store.stageBackup(photo, source: source, location: location, bundle: bundle)
     } catch {
       for url in Array(photo.staged.values)
         + [photo.originalURL, photo.thumbnailURL, photo.previewURL].compactMap({ $0 })
@@ -176,6 +197,19 @@ actor PhotoImport {
       throw error
     }
     return photo
+  }
+  static func location(_ bytes: Data) -> PhotoLocationV1? {
+    if let pair = try? CameraMedia.decodeLivePhoto(bytes) { return PhotoLocationV1.exif(pair.still.bytes) }
+    return PhotoLocationV1.exif(bytes)
+  }
+  private func persistLocation(_ location: PhotoLocationV1?, photo: LocalPhoto, accountId: String,
+    bundle: AccountBundle, insertPhoto: Bool = false) throws {
+    // Keep GRDB's synchronous transaction here: intake fences stay current
+    // through the original and encrypted location write without a suspension.
+    try store.database.write { db in
+      if insertPhoto { try store.put(photo, db: db) }
+      try AnnotationLedger(store: store, accountId: accountId).seedLocation(location, photo: photo, bundle: bundle, db: db)
+    }
   }
   func buildMedia(
     bytes: Data, filename: String, accountId: String, bundle: AccountBundle,

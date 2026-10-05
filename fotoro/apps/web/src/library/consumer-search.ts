@@ -3,7 +3,8 @@ import {cloudSearchRecords} from "./search";
 import type {LocalPhoto} from "../local/resources";
 import {LocalResources, imageDimensions} from "../local/resources";
 import type {SearchResult, SearchMeaning} from "../local/search";
-const savedSources = new WeakMap<object, {snapshot: OwnedPhotoSnapshot; date: string; dateSource: LocalPhoto["dateSource"]; digest?: string; file?: File}>();
+import type {PhotoLocationV1} from "@fotoro/contracts";
+const savedSources = new WeakMap<object, {snapshot: OwnedPhotoSnapshot; date: string; dateSource: LocalPhoto["dateSource"]; digest?: string; file?: File; location?: PhotoLocationV1}>();
 export function mergeConsumerSearchPhotos<T extends {id: string}>(local: T[], saved: T[]): T[] {
   const localIDs = new Set(local.map(photo => photo.id));
   const currentSaved = saved.filter(photo => savedSources.get(photo)?.snapshot.current() ?? true);
@@ -11,10 +12,12 @@ export function mergeConsumerSearchPhotos<T extends {id: string}>(local: T[], sa
   const displayed = local.map(photo => {
     const savedPhoto = savedByID.get(photo.id), source = savedPhoto && savedSources.get(savedPhoto);
     const original = photo as T & Partial<LocalPhoto>;
-    if (!source || original.dateSource !== "selected" || !(original.file instanceof File) || original.file !== source.file
-      || !source.digest || comparableDigest(original) !== source.digest
-      || !["photos", "exif"].includes(source.dateSource) || !Number.isFinite(Date.parse(source.date))) return photo;
-    return {...photo, date: source.date, dateSource: source.dateSource, captureVerified: source.dateSource === "exif" ? true : original.captureVerified};
+    if (!source || !(original.file instanceof File) || original.file !== source.file || !source.digest || comparableDigest(original) !== source.digest) return photo;
+    const location = original.location ?? source.location;
+    const promoteDate = original.dateSource === "selected" && ["photos", "exif"].includes(source.dateSource) && Number.isFinite(Date.parse(source.date));
+    if (!promoteDate && location === original.location) return photo;
+    return {...photo, ...(promoteDate ? {date: source.date, dateSource: source.dateSource, captureVerified: source.dateSource === "exif" ? true : original.captureVerified} : {}), ...(location ? {location} : {}),
+      current: () => source.snapshot.current() && original.current?.() !== false && (savedPhoto as Partial<LocalPhoto>).current?.() !== false};
   });
   return [...displayed, ...currentSaved.filter(photo => !localIDs.has(photo.id))];
 }
@@ -24,7 +27,8 @@ export interface OwnedPhotoSnapshot {
   photos: Photo[];
   current: () => boolean;
   preview: (photo: Photo) => Promise<Blob>;
-  edit?: (photo: Photo, changes: {labels?: string[]; favorite?: boolean}) => Promise<void>;
+  edit?: (photo: Photo, changes: {labels?: string[]; favorite?: boolean; location?: PhotoLocationV1}) => Promise<void>;
+  locate?: (updates: readonly {photo: Photo; location: PhotoLocationV1}[]) => Promise<{applied: number; failed: number; updatedPhotoIDs: string[]}>;
 }
 export class ConsumerPreviewResources extends LocalResources {
   private sourceGeneration = 0;
@@ -70,7 +74,7 @@ export function savedSearchPhotos(snapshot: OwnedPhotoSnapshot | null, local: Lo
         if (!snapshot.current()) throw new Error("Your saved library is locked.");
         return blob;
       }};
-    savedSources.set(adapted, {snapshot, date: record.date, dateSource: record.dateSource, digest: record.digest, file: original?.file});
+    savedSources.set(adapted, {snapshot, date: record.date, dateSource: record.dateSource, digest: record.digest, file: original?.file, location: record.location});
     return adapted;
   });
 }

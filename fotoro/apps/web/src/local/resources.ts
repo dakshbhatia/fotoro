@@ -1,4 +1,5 @@
-import { captureDateFromFile } from "../library/exif";
+import { photoExifFromFile } from "../library/exif";
+import type {PhotoLocationV1} from "@fotoro/contracts";
 import {photoFormat, displayPhotoDimensions, safePhotoDimensions, boundedPhotoBitmap, photoPreview, PHOTO_HEADER_BYTES} from "../media/photo-source";
 export {imageDimensions} from "../media/photo-source";
 import type { SearchOcr, SearchPhoto } from "./search";
@@ -23,6 +24,8 @@ export interface LocalPhoto {
   date: string;
   dateSource: SearchPhoto["dateSource"];
   captureVerified?: true;
+  captureTimezoneVerified?: true;
+  location?: PhotoLocationV1;
   width?: number;
   height?: number;
 }
@@ -56,7 +59,7 @@ export async function localPhoto(file: File): Promise<LocalPhoto & { file: File 
         : "This photo’s dimensions could not be read safely. It was skipped.",
     );
   safePhotoDimensions(dimensions);
-  const captured = await captureDateFromFile(file, bytes);
+  const exif = await photoExifFromFile(file, bytes), captured = exif.date;
   if (format === "heic") {
     try {const bitmap = await boundedPhotoBitmap(file, dimensions, 256); bitmap.close();}
     catch {throw new Error("HEIC is not supported by this browser. Try Safari 17 or later, or choose a JPEG or PNG copy.");}
@@ -71,6 +74,8 @@ export async function localPhoto(file: File): Promise<LocalPhoto & { file: File 
     date: captured ?? new Date().toISOString(),
     dateSource: captured ? "exif" : "selected",
     captureVerified: captured ? true : undefined,
+    captureTimezoneVerified: exif.captureTimezoneVerified,
+    location: exif.location,
     ...dimensions,
   };
 }

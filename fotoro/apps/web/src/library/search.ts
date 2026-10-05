@@ -2,6 +2,7 @@ import type { Photo } from "./catalog";
 import type { SearchPhoto } from "../local/search";
 import {requireVault} from "../vault/vault";
 import {sameVault} from "../vault/scope";
+import {annotationLocation} from "@fotoro/contracts/location";
 /* Only owner annotations validated against immutable original identity enter account search. */
 export function cloudSearchRecords(photos: Photo[]): SearchPhoto[] {
   let session: ReturnType<typeof requireVault> | undefined;
@@ -24,6 +25,7 @@ export function cloudSearchRecords(photos: Photo[]): SearchPhoto[] {
       caption: annotation?.caption,
       keywords: annotation?.keywords,
       facts: annotation?.facts,
+      location: annotation ? annotationLocation(annotation) : undefined,
       favorite: annotation?.favorite,
       ocr: ocr ? {photoID: photo.manifest.photoId, revision: photo.metadata.originalSha256, status: "complete", ...ocr} : undefined,
       visual: annotation?.visual && current?.() ? {photoID: photo.manifest.photoId, revision: photo.metadata.originalSha256, status: "complete", ...annotation.visual} : undefined,

@@ -35,6 +35,8 @@ preview_sources=preview_files([
  'Fotoro/FotoroApp.swift',
  'Fotoro/Library/RecentPhotosStore.swift',
  'Fotoro/Library/PhotoBrowsing.swift',
+ 'Fotoro/Library/PhotoLocations.swift',
+ 'Fotoro/Library/PhotoPlacesView.swift',
  'Fotoro/Library/AutomaticPhotoPicks.swift',
  'Fotoro/Library/PhotoPickAnalyzer.swift',
  'Fotoro/Library/RecentPhotosView.swift',
@@ -56,6 +58,7 @@ preview_tests=preview_files([
  'FotoroTests/LocalPreviewIsolationTests.swift',
  'FotoroTests/AutomaticPhotoPicksTests.swift', 'FotoroTests/PhotoPickLifecycleTests.swift',
  'FotoroTests/PhotoBrowsingTests.swift',
+ 'FotoroTests/PhotoLocationsTests.swift',
 ], 'FotoroLocalPreviewTests')
 preview_test_resources=preview_files([
  'FotoroTests/search-cases.json', 'FotoroTests/neutral-a.png', 'FotoroTests/neutral-c.png',

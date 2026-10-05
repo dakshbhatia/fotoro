@@ -1369,7 +1369,7 @@ enum ReviewedPhotosBackupPolicy {
           }
           let value = try ledger.current(photo: photo, bundle: bundle, card: card)
           let scenes = SearchVisualPolicy.validated(value?.visual).map(\.label)
-          let terms = [photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + (value?.facts ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""]
+          let terms = [photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + PhotoLocationFacts.userFacts(value?.facts) + (value?.location?.searchTerms ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""]
           if parsed.text.isEmpty || terms.contains(where: { SearchNormalization.text($0).contains(parsed.text) })
             || scenes.contains(where: { SearchNormalization.text($0).hasPrefix(parsed.text) }) { matches.append(photo) }
         }
@@ -1391,7 +1391,7 @@ enum ReviewedPhotosBackupPolicy {
     guard !query.isEmpty else { return true }
     let value = photoAnnotations[photo.id]
     return SearchVisualPolicy.validated(value?.visual).contains { SearchNormalization.text($0.label).hasPrefix(SearchNormalization.text(query)) }
-      || ([photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + (value?.facts ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""])
+      || ([photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + PhotoLocationFacts.userFacts(value?.facts) + (value?.location?.searchTerms ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""])
       .contains { $0.localizedCaseInsensitiveContains(query) }
   }
   private func automaticDerivedSourceCurrent(_ source: BackupSource) -> Bool {
@@ -1407,6 +1407,19 @@ enum ReviewedPhotosBackupPolicy {
     return RecentPhoto.sourceRevision(asset) == source.sourceRevision
       && AnnotationSourceBinding.permitsAutomaticDerived(resourceTypes: PHAssetResource.assetResources(for: asset).map(\.type))
   }
+  private func automaticLocationSourceCurrent(_ source: BackupSource) -> Bool {
+    #if DEBUG
+      if let snapshot = photosBackupSnapshot {
+        return (try? snapshot(.distantPast).contains(where: {
+          $0.id == source.id && $0.sourceRevision == source.sourceRevision && $0.skipReason == nil
+        })) == true
+      }
+    #endif
+    guard RecentPhotosPolicy.canRead(automaticPhotosPermission),
+      let asset = PHAsset.fetchAssets(withLocalIdentifiers: [source.id], options: nil).firstObject,
+      !asset.isHidden, CameraMedia.sourceSkipReason(asset) == nil else { return false }
+    return source.sourceRevision != nil && RecentPhoto.sourceRevision(asset) == source.sourceRevision
+  }
   private func captureLocalAnnotation(_ record: SearchRecord, labelsChanged: Bool, source knownSource: BackupSource? = nil, refreshSummary: Bool = true, derivedOnly: Bool = false) throws {
     guard vault.isUnlocked, let account = session.accountId,
       let source = try knownSource ?? store.backupSources().first(where: { $0.id == record.id }),
@@ -1418,11 +1431,25 @@ enum ReviewedPhotosBackupPolicy {
     let card = try session.requireCard(account)
     var value = try annotations.ledger.current(photo: photo, bundle: bundle, card: card) ?? PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
     var hasCompletedDerivedResult = false
+    if value.location == nil, RecentPhotosPolicy.canRead(automaticPhotosPermission),
+      source.originalSha256 == photo.metadata.originalSha256,
+      let asset = PHAsset.fetchAssets(withLocalIdentifiers: [source.id], options: nil).firstObject,
+      !asset.isHidden, RecentPhoto.sourceRevision(asset) == source.sourceRevision,
+      let location = PhotoLocationV1.photos(asset.location) {
+      try value.setLocation(location)
+      hasCompletedDerivedResult = true
+    }
     if !derivedOnly {
       if labelsChanged || value.labels == nil { value.labels = record.labels }
       if let caption = record.captions.first { value.caption = caption }
       if !record.keywords.isEmpty { value.keywords = record.keywords }
-      if !record.facts.isEmpty { value.facts = record.facts }
+      // A hydrated index includes location search terms alongside supplied facts.
+      // Keep the encrypted facts exact instead of recapturing that search overlay.
+      if record.syncedAccountId == nil, !record.facts.isEmpty {
+        let location = value.location
+        value.facts = PhotoLocationFacts.userFacts(record.facts)
+        if let location { try value.setLocation(location) }
+      }
       value.favorite = record.favorite
     }
     let ocrStatus = record.syncedAccountId == nil ? record.ocrStatus : record.beforeSync?.ocrStatus
@@ -1482,8 +1509,10 @@ enum ReviewedPhotosBackupPolicy {
       guard derivedOnly else { return true }
       guard let self, self.automaticPhotoSyncAdmitted,
         let source = try? catalog.backupSources().first(where: { $0.photoId == photo.id }),
-        source.originalSha256 == photo.metadata.originalSha256,
-        let record = try? self.localSearch?.record(source.id),
+        source.originalSha256 == photo.metadata.originalSha256 else { return false }
+      if let location = try? worker.ledger.current(photo: photo, bundle: bundle, card: card)?.location,
+        ["photos", "exif"].contains(location.source), self.automaticLocationSourceCurrent(source) { return true }
+      guard let record = try? self.localSearch?.record(source.id),
         AnnotationSourceBinding.accepts(sourceRevision: source.sourceRevision, recordRevision: record.revision) else { return false }
       return self.automaticDerivedSourceCurrent(source)
     }, valid: { [weak self] in

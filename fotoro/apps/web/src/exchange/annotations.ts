@@ -1,4 +1,4 @@
-import type { PhotoAnnotationsV1, PhotoAnnotationsUpdateV1, PhotoAnnotationsReplyV1, SignedPayloadV1, WrappedKeyV1 } from "@fotoro/contracts";
+import type { PhotoAnnotationsV1, PhotoAnnotationsUpdateV1, PhotoAnnotationsReplyV1, PhotoLocationV1, SignedPayloadV1, WrappedKeyV1 } from "@fotoro/contracts";
 import { validateWire } from "@fotoro/contracts/validate";
 import { signPayload, verifyPayload, unb64, utf8 } from "@fotoro/crypto";
 import { requireVault, encryptPrivate, decryptPrivate, type UnlockedVault } from "../vault/vault";
@@ -8,6 +8,7 @@ import { api, ApiError, fixtureMode, isPublicDemoAccount } from "./api";
 import type { LocalPhoto } from "../local/resources";
 import { OCR_PROCESSOR } from "../local/ocr";
 import {VISUAL_PUBLICATION_ENABLED} from "@fotoro/contracts/visual";
+import {annotationLocation, withAnnotationLocation, validatedPhotoLocation} from "@fotoro/contracts/location";
 
 export interface AnnotationIdentity { ownerAccountId: string; photoId: string; originalSha256: string }
 export interface VerifiedAnnotations { signed: SignedPayloadV1; revision: number; value: PhotoAnnotationsV1 }
@@ -115,23 +116,55 @@ export async function cacheAnnotations(signed: SignedPayloadV1, photoId: string,
     assertVault(session);
   });
 }
+function assertAnnotationWriter(identity: AnnotationIdentity, session: UnlockedVault) {
+  assertVault(session);
+  if (identity.ownerAccountId !== session.accountId) throw new Error("ANNOTATION_IDENTITY_MISMATCH");
+  if (fixtureMode || isPublicDemoAccount(session.accountId)) throw new Error("PUBLIC_TEST_ACCOUNT_UPLOAD_DISABLED");
+}
+async function annotationWriteState(identity: AnnotationIdentity, session: UnlockedVault) {
+  const existing = await pendingOne(identity.photoId, session), remote = await cached(identity, session);
+  const projected = existing ? verifyAnnotations(existing.signed, identity, session) : remote;
+  return {existing, remote, projected};
+}
+// Call only while holding the per-vault writer. Location and general annotation
+// mutations share this core without entering the serial queue a second time.
+async function queueAnnotationChanges(identity: AnnotationIdentity, changes: AnnotationPatch, session: UnlockedVault,
+  state: Awaited<ReturnType<typeof annotationWriteState>>) {
+  const {existing, remote, projected} = state;
+  const currentLocation = projected && annotationLocation(projected.value), proposedLocation = annotationLocation(changes);
+  if (proposedLocation?.source === "google-timeline" && currentLocation && currentLocation.source !== "google-timeline")
+    changes = withAnnotationLocation(changes, currentLocation);
+  const patch: AnnotationPatch = {...existing?.patch};
+  for (const field of fields) if (Object.hasOwn(changes, field)) (patch as Record<string, unknown>)[field] = changes[field];
+  const value = {...(projected?.value ?? empty(identity)), ...patch};
+  const next: PendingAnnotation = {version: 1, photoId: identity.photoId, originalSha256: identity.originalSha256, base: existing?.base ?? remote?.value ?? empty(identity), patch, conflict: existing?.conflict ?? false, signed: createSigned(identity, value, projected?.revision ?? 1, session)};
+  if (!existing) next.signed = createSigned(identity, value, (remote?.revision ?? 0) + 1, session);
+  if (projected && same(value, projected.value)) return false;
+  await put("settings", outboxKey(session, identity.photoId), encryptPrivate(next));
+  assertVault(session);
+  return true;
+}
 export async function queueAnnotations(identity: AnnotationIdentity, changes: AnnotationPatch, session = requireVault()) {
   if (!VISUAL_PUBLICATION_ENABLED) {changes = {...changes}; delete changes.visual;}
   return serializeAnnotationWrites(session, async () => {
-    if (identity.ownerAccountId !== session.accountId) throw new Error("ANNOTATION_IDENTITY_MISMATCH");
-    if (fixtureMode || isPublicDemoAccount(session.accountId)) throw new Error("PUBLIC_TEST_ACCOUNT_UPLOAD_DISABLED");
+    assertAnnotationWriter(identity, session);
     if (!Object.keys(changes).length) return false;
-    const existing = await pendingOne(identity.photoId, session), remote = await cached(identity, session);
-    const projected = existing ? verifyAnnotations(existing.signed, identity, session) : remote;
-    const patch: AnnotationPatch = {...existing?.patch};
-    for (const field of fields) if (Object.hasOwn(changes, field)) (patch as Record<string, unknown>)[field] = changes[field];
-    const value = {...(projected?.value ?? empty(identity)), ...patch};
-    const next: PendingAnnotation = {version: 1, photoId: identity.photoId, originalSha256: identity.originalSha256, base: existing?.base ?? remote?.value ?? empty(identity), patch, conflict: existing?.conflict ?? false, signed: createSigned(identity, value, projected?.revision ?? 1, session)};
-    if (!existing) next.signed = createSigned(identity, value, (remote?.revision ?? 0) + 1, session);
-    if (projected && same(value, projected.value)) return false;
-    await put("settings", outboxKey(session, identity.photoId), encryptPrivate(next));
-    assertVault(session);
-    return true;
+    return queueAnnotationChanges(identity, changes, session, await annotationWriteState(identity, session));
+  });
+}
+/* A Timeline acknowledgement means these exact coordinates are retained. Merge
+   into the latest verified facts under the writer, preserving supplied text. */
+export async function queuePhotoLocation(identity: AnnotationIdentity, proposedLocation: PhotoLocationV1, session = requireVault()): Promise<boolean> {
+  const location = {...proposedLocation};
+  return serializeAnnotationWrites(session, async () => {
+    assertAnnotationWriter(identity, session);
+    if (!validatedPhotoLocation(location)) throw new Error("Invalid photo location");
+    const state = await annotationWriteState(identity, session);
+    const current = state.projected && annotationLocation(state.projected.value);
+    if (current) return same(current, location);
+    const {facts} = withAnnotationLocation({facts: state.projected?.value.facts}, location);
+    await queueAnnotationChanges(identity, {facts}, session, state);
+    return same(annotationLocation({facts}), location);
   });
 }
 export async function pendingAnnotations(session = requireVault()) {
@@ -242,17 +275,29 @@ function localFields(local: LocalPhoto): AnnotationPatch {
 /* Local source snapshots only detect later source edits; no choice history or pins enter account sync. */
 export async function queueLocalAnnotations(identity: AnnotationIdentity, local: LocalPhoto, session = requireVault(), initial = true) {
   if (localOriginalDigest(local) !== identity.originalSha256) return false;
-  const key = session.accountId + ":annotation-source:" + identity.photoId;
-  const stored = await get<WrappedKeyV1>("settings", key);
-  assertVault(session);
-  if (!stored && !initial) return false;
-  const previous = stored ? decryptPrivate<AnnotationPatch>(stored) : undefined;
-  const next = localFields(local), patch: AnnotationPatch = {};
-  for (const field of fields) if (Object.hasOwn(next, field) && (!previous || !same(previous[field], next[field]))) (patch as Record<string, unknown>)[field] = next[field];
-  if (!Object.keys(patch).length) return false;
-  const changed = await queueAnnotations(identity, patch, session);
-  assertVault(session);
-  await put("settings", key, encryptPrivate(next));
-  assertVault(session);
-  return changed;
+  return serializeAnnotationWrites(session, async () => {
+    assertAnnotationWriter(identity, session);
+    const key = session.accountId + ":annotation-source:" + identity.photoId;
+    const stored = await get<WrappedKeyV1>("settings", key);
+    assertVault(session);
+    if (!stored && !initial) return false;
+    const previous = stored ? decryptPrivate<AnnotationPatch & {location?: PhotoLocationV1}>(stored) : undefined;
+    const next = {...localFields(local), ...(local.location === undefined ? {} : {location: {...local.location}})}, patch: AnnotationPatch = {};
+    if (next.location !== undefined && !validatedPhotoLocation(next.location)) throw new Error("Invalid photo location");
+    for (const field of fields) if (Object.hasOwn(next, field) && (!previous || !same(previous[field], next[field]))) (patch as Record<string, unknown>)[field] = next[field];
+    const previousLocation = previous && (previous.location ?? annotationLocation(previous));
+    const locationChanged = next.location !== undefined && !same(previousLocation, next.location);
+    if (!Object.keys(patch).length && !locationChanged) return false;
+    const state = await annotationWriteState(identity, session);
+    const currentLocation = state.projected && annotationLocation(state.projected.value);
+    // Explicit supplied-fact edits retain existing GPS. A generated location
+    // delta merges into current facts instead of replacing account-only text.
+    if (Object.hasOwn(patch, "facts") && currentLocation) patch.facts = withAnnotationLocation({facts: patch.facts}, currentLocation).facts;
+    if (locationChanged && !currentLocation) patch.facts = withAnnotationLocation({facts: Object.hasOwn(patch, "facts") ? patch.facts : state.projected?.value.facts}, next.location).facts;
+    const changed = Object.keys(patch).length ? await queueAnnotationChanges(identity, patch, session, state) : false;
+    assertVault(session);
+    await put("settings", key, encryptPrivate(next));
+    assertVault(session);
+    return changed;
+  });
 }

@@ -8,6 +8,7 @@ import { all, clearAccount, get } from "../src/exchange/cache";
 import { applyChanges } from "../src/library/catalog";
 import * as annotations from "../src/exchange/annotations";
 import {VISUAL_PROCESSOR} from "@fotoro/contracts/visual";
+import {annotationLocation, withAnnotationLocation} from "@fotoro/contracts/location";
 
 const owner = "11111111-1111-4111-8111-111111111111";
 const other = "22222222-2222-4222-8222-222222222222";
@@ -26,6 +27,133 @@ function signed(revision: number, fields: object, signedOwner = owner, boundPhot
 }
 const reply = (value: unknown) => new Response(JSON.stringify(value), {status: 200});
 async function clean() {await clearAccount(owner); await clearAccount(other); lockVault();}
+
+test("local locations save only through encrypted facts and inferred Timeline cannot replace factual GPS", async () => {
+  await open(); const old = globalThis.fetch;
+  globalThis.fetch = (async () => {throw Error("Queue must stay offline");}) as any;
+  try {
+    const location = {latitude: 41.9028, longitude: 12.4964, source: "exif" as const};
+    const local = {id: "local", digest: originalSha256, filename: "sample.jpg", date: "2026-10-01T12:00:00Z", dateSource: "exif" as const, facts: ["My exact fact"], location};
+    await annotations.queueLocalAnnotations(identity, local);
+    const value = (await annotations.readAnnotations(identity))!.value;
+    assert.deepEqual(annotationLocation(value), location);
+    assert.equal(Object.hasOwn(value, "location"), false);
+    assert.equal(value.facts?.[0], "My exact fact");
+    assert.doesNotMatch(JSON.stringify(await all("settings")), /41\.9028|fotoro\.location/);
+    await annotations.queueAnnotations(identity, withAnnotationLocation({facts: ["Updated fact"]}, {...location, source: "google-timeline"}));
+    const updated = (await annotations.readAnnotations(identity))!.value;
+    assert.deepEqual(annotationLocation(updated), location); assert.equal(updated.facts?.[0], "Updated fact");
+  } finally {globalThis.fetch = old; await clean();}
+});
+
+test("a serialized location write preserves supplied facts queued after the rendered snapshot", async () => {
+  const session = await open();
+  let release!: () => void;
+  const barrier = new Promise<void>(resolve => {release = resolve;});
+  try {
+    await annotations.cacheAnnotations(signed(1, {facts: ["old fact"], labels: ["My EXACT label"]}), photoId);
+    const held = annotations.serializeAnnotationWrites(session, () => barrier);
+    const newest = ["Newest supplied fact", "A note about fotoro.location.v1: stays mine"];
+    const editing = annotations.queueAnnotations(identity, {facts: newest}, session);
+    const location = {latitude: 40.75, longitude: -73.98, source: "google-timeline" as const, name: "New York"};
+    const locating = annotations.queuePhotoLocation(identity, location, session);
+    release(); await held; await editing;
+    assert.equal(await locating, true);
+    const value = (await annotations.readAnnotations(identity, session))!.value;
+    assert.deepEqual(value.facts?.slice(0, 2), newest);
+    assert.deepEqual(value.labels, ["My EXACT label"]);
+    assert.deepEqual(annotationLocation(value), location);
+    assert.equal(Object.hasOwn(value, "location"), false);
+  } finally {release?.(); await clean();}
+});
+
+test("interleaved factual GPS rejects estimated acknowledgement and identical location retries remain exact", async () => {
+  const session = await open();
+  let release!: () => void;
+  const barrier = new Promise<void>(resolve => {release = resolve;});
+  try {
+    const held = annotations.serializeAnnotationWrites(session, () => barrier);
+    const factual = {latitude: 41.9028, longitude: 12.4964, source: "exif" as const};
+    const editing = annotations.queueAnnotations(identity, withAnnotationLocation({facts: ["Latest fact"]}, factual), session);
+    const locating = annotations.queuePhotoLocation(identity, {...factual, source: "google-timeline"}, session);
+    release(); await held; await editing;
+    assert.equal(await locating, false);
+    const before = (await annotations.pendingAnnotations(session))[0];
+    assert.deepEqual(annotationLocation((await annotations.readAnnotations(identity, session))!.value), factual);
+    assert.equal(await annotations.queuePhotoLocation(identity, factual, session), true);
+    assert.deepEqual((await annotations.pendingAnnotations(session))[0].signed, before.signed);
+    assert.equal(await annotations.queuePhotoLocation(identity, {...factual, source: "photos"}, session), false);
+    assert.equal((await annotations.readAnnotations(identity, session))?.value.facts?.[0], "Latest fact");
+  } finally {release?.(); await clean();}
+});
+
+test("location acknowledgement compares scalar values regardless of native or importer key order", async () => {
+  const session = await open();
+  try {
+    const proposal = {name: "My EXACT place", latitude: 41.9028, longitude: 12.4964, source: "google-timeline" as const, accuracyMeters: 12.5};
+    assert.equal(await annotations.queuePhotoLocation(identity, proposal, session), true);
+    const before = (await annotations.pendingAnnotations(session))[0];
+    const reordered = {accuracyMeters: 12.5, longitude: 12.4964, source: "google-timeline" as const, name: "My EXACT place", latitude: 41.9028};
+    assert.equal(await annotations.queuePhotoLocation(identity, reordered, session), true);
+    assert.deepEqual((await annotations.pendingAnnotations(session))[0].signed, before.signed);
+    assert.deepEqual(annotationLocation((await annotations.readAnnotations(identity, session))!.value), proposal);
+    assert.equal(await annotations.queuePhotoLocation(identity, {...reordered, accuracyMeters: 12.6}, session), false);
+  } finally {await clean();}
+});
+
+test("location fact capacity failure preserves the pending retry and releases serialization", async () => {
+  const session = await open();
+  try {
+    await annotations.queueAnnotations(identity, {facts: Array(63).fill("My supplied fact")}, session);
+    const before = (await annotations.pendingAnnotations(session))[0];
+    await assert.rejects(annotations.queuePhotoLocation(identity, {latitude: 0, longitude: 0, source: "google-timeline", name: "Place"}, session), /capacity|64/i);
+    assert.deepEqual((await annotations.pendingAnnotations(session))[0].signed, before.signed);
+    assert.equal(await annotations.queueAnnotations(identity, {favorite: true}, session), true);
+    assert.deepEqual((await annotations.readAnnotations(identity, session))?.value.facts, Array(63).fill("My supplied fact"));
+  } finally {await clean();}
+});
+
+test("a location write waiting behind serialization cannot enter a newly opened account", async () => {
+  const session = await open();
+  let release!: () => void, began!: () => void;
+  const barrier = new Promise<void>(resolve => {release = resolve;});
+  const entered = new Promise<void>(resolve => {began = resolve;});
+  const held = annotations.serializeAnnotationWrites(session, async () => {began(); await barrier;});
+  const locating = annotations.queuePhotoLocation(identity, {latitude: 0, longitude: 0, source: "google-timeline"}, session);
+  const rejected = assert.rejects(locating, /VAULT_LOCKED/);
+  try {
+    await entered; lockVault(); await open(other); release(); await held; await rejected;
+    assert.equal((await annotations.pendingAnnotations()).length, 0);
+  } finally {release?.(); await clean();}
+});
+
+test("a matching local location without supplied facts preserves newer account facts across later label edits", async () => {
+  const session = await open();
+  try {
+    await annotations.queueAnnotations(identity, {facts: ["Account-only supplied fact"], favorite: true}, session);
+    const location = {latitude: 40.75, longitude: -73.98, source: "google-timeline" as const};
+    const local = {id: "local", digest: originalSha256, filename: "sample.jpg", date: "2026-10-01T12:00:00Z", dateSource: "photos" as const, labels: ["local"], location};
+    assert.equal(await annotations.queueLocalAnnotations(identity, local, session), true);
+    let value = (await annotations.readAnnotations(identity, session))!.value;
+    assert.equal(value.facts?.[0], "Account-only supplied fact"); assert.deepEqual(annotationLocation(value), location);
+    await annotations.queueAnnotations(identity, {facts: withAnnotationLocation({facts: ["Newest account fact"]}, location).facts}, session);
+    assert.equal(await annotations.queueLocalAnnotations(identity, {...local, labels: ["Changed local label"]}, session, false), true);
+    value = (await annotations.readAnnotations(identity, session))!.value;
+    assert.equal(value.facts?.[0], "Newest account fact"); assert.deepEqual(value.labels, ["Changed local label"]);
+    assert.deepEqual(annotationLocation(value), location); assert.equal(value.favorite, true);
+  } finally {await clean();}
+});
+
+test("explicit local fact edits retain factual GPS when the local source proposes an estimate", async () => {
+  const session = await open();
+  try {
+    const gps = {latitude: 41.9028, longitude: 12.4964, source: "photos" as const};
+    await annotations.queueAnnotations(identity, withAnnotationLocation({facts: ["Old supplied fact"]}, gps), session);
+    await annotations.queueLocalAnnotations(identity, {id: "local", digest: originalSha256, filename: "sample.jpg", date: "2026-10-01T12:00:00Z", dateSource: "photos", facts: ["Exact changed fact"], location: {...gps, source: "google-timeline"}}, session);
+    const value = (await annotations.readAnnotations(identity, session))!.value;
+    assert.equal(value.facts?.[0], "Exact changed fact"); assert.deepEqual(annotationLocation(value), gps);
+  } finally {await clean();}
+});
 
 test("verified annotations reject a different owner, signed kind, photo identity, or original digest", async () => {
   await open();

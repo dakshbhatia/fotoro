@@ -1,0 +1,128 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "photoId",
+    "originalSha256"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "photoId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "originalSha256": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]*$",
+      "minLength": 43,
+      "maxLength": 43
+    },
+    "labels": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "maxLength": 120,
+        "minLength": 1
+      }
+    },
+    "caption": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "keywords": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "maxLength": 120,
+        "minLength": 1
+      }
+    },
+    "facts": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "maxLength": 240,
+        "minLength": 1
+      }
+    },
+    "favorite": {
+      "type": "boolean"
+    },
+    "ocr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "confidence",
+        "processor"
+      ],
+      "properties": {
+        "text": {
+          "type": "string",
+          "maxLength": 131072
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "processor": {
+          "type": "string",
+          "maxLength": 120,
+          "minLength": 1
+        }
+      }
+    },
+    "visual": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "processor",
+        "labels"
+      ],
+      "properties": {
+        "processor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "labels": {
+          "type": "array",
+          "maxItems": 6,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "label",
+              "identifier",
+              "confidence"
+            ],
+            "properties": {
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              },
+              "identifier": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              },
+              "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

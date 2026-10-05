@@ -7,6 +7,8 @@ import { atomic, get, put, cacheCipher, clearAccount } from "../src/exchange/cac
 import { validateSource, sourceMatches, stageImport, pendingImports, resumePendingImports, type PendingImport } from "../src/exchange/journal";
 import { digest } from "../src/library/catalog";
 import {configureVault, unlockVault, lockVault, requireVault, encryptPrivate} from "../src/vault/vault";
+import {readAnnotations, queueAnnotations} from "../src/exchange/annotations";
+import {annotationLocation} from "@fotoro/contracts/location";
 
 const owner = "55555555-5555-4555-8555-555555555555", other = "66666666-6666-4666-8666-666666666666";
 async function open(accountId = owner) {
@@ -144,4 +146,35 @@ test("quota failure cannot persist partial staging or a complete journal", async
   } finally {
     IDBObjectStore.prototype.put = original;
   }
+});
+
+test("committing a GPS original queues account-private location without placing it in the photo manifest", async () => {
+  const old = globalThis.fetch; await open();
+  try {
+    const bytes = new Uint8Array(64), pending = reselect(bytes);
+    const location = {latitude: 41.9028, longitude: 12.4964, source: "exif" as const};
+    pending.location = location;
+    pending.parts = (["original", "metadata"] as const).map(kind => {
+      const uploadId = crypto.randomUUID(), representationId = crypto.randomUUID();
+      return {binding: {version: 1 as const, photoId: pending.photoId, representationId, kind}, header: b64(bytes.subarray(0, 24)),
+        ciphertextBytes: 64, ciphertextSha256: digest(bytes), uploadOperation: crypto.randomUUID(),
+        reservation: {version: 1 as const, uploadId, photoId: pending.photoId, representationId, stagingUrl: "https://fotoro.cloud/fixture", expiresAt: "2099-01-01T00:00:00Z"},
+        commit: {version: 1 as const, uploadId, objectId: crypto.randomUUID(), ciphertextBytes: 64, ciphertextSha256: digest(bytes)}};
+    });
+    await put("journal", owner + ":" + pending.operationId, encryptPrivate(pending));
+    const identity = {ownerAccountId: owner, photoId: pending.photoId, originalSha256: pending.sourceDigest};
+    await queueAnnotations(identity, {facts: ["Previously supplied fact"]});
+    globalThis.fetch = (async (path, init) => {
+      assert.equal(path, "/v1/photos");
+      const manifest = new TextDecoder().decode(unb64(JSON.parse(init!.body as string).body));
+      assert.doesNotMatch(manifest, /latitude|41\.9028|fotoro\.location/);
+      await queueAnnotations(identity, {facts: ["Newest supplied fact"]});
+      return new Response(manifest);
+    }) as typeof fetch;
+    await resumePendingImports();
+    assert.equal((await pendingImports())[0].state, "committed");
+    const value = (await readAnnotations(identity))?.value;
+    assert.deepEqual(value && annotationLocation(value), location);
+    assert.equal(value?.facts?.[0], "Newest supplied fact");
+  } finally {globalThis.fetch = old; lockVault(); await clearAccount(owner);}
 });

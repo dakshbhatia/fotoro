@@ -1,5 +1,6 @@
 import type { LocalPhoto } from "./resources";
 import { emptyFeedback, type SearchFeedback } from "./search";
+import {validatedPhotoLocation} from "@fotoro/contracts/location";
 
 export const RETAINED_PREVIEW_BUDGET = 100 * 1024 * 1024;
 const CLEAR_CHANNEL = "fotoro-local-search-clear";
@@ -30,6 +31,8 @@ function validPhoto(value: any): value is LocalPhoto {
     (value.digest === undefined || (typeof value.digest === "string" && value.digest.length <= 128)) &&
     typeof value.date === "string" && Number.isFinite(Date.parse(value.date)) && ["exif", "selected"].includes(value.dateSource) &&
     (value.captureVerified === undefined || (value.captureVerified === true && value.dateSource === "exif")) &&
+    (value.captureTimezoneVerified === undefined || (value.captureTimezoneVerified === true && value.captureVerified === true && value.dateSource === "exif")) &&
+    (value.location === undefined || !!validatedPhotoLocation(value.location)) &&
     Array.isArray(value.labels) && value.labels.length <= 64 && value.labels.every((label: unknown) => typeof label === "string" && label.length <= 120) &&
     Number.isFinite(value.width) && value.width > 0 && Number.isFinite(value.height) && value.height > 0 &&
     (value.previewSize === undefined || (Number.isFinite(value.previewSize) && value.previewSize >= 0 && value.previewSize <= RETAINED_PREVIEW_BUDGET)) &&
@@ -160,7 +163,7 @@ export class LocalRetention {
             retained += size; keep.add(photo.id); sizes.set(photo.id, size);
             if (preview) previews.set(photo.id, await seal(key, await preview.arrayBuffer(), "preview:" + photo.id));
           }
-          const meta = { id: photo.id, digest: photo.digest, filename: photo.filename, labels: photo.labels ?? [], date: photo.date, dateSource: photo.dateSource, captureVerified: photo.captureVerified, width: photo.width, height: photo.height, originalSize: photo.originalSize ?? photo.file?.size, previewAvailable: hasPreview, previewSize: hasPreview ? size : 0, caption: photo.caption, keywords: photo.keywords, facts: photo.facts, favorite: photo.favorite, ocr: validOcr(photo.ocr, photo) ? photo.ocr : undefined };
+          const meta = { id: photo.id, digest: photo.digest, filename: photo.filename, labels: photo.labels ?? [], date: photo.date, dateSource: photo.dateSource, captureVerified: photo.captureVerified, captureTimezoneVerified: photo.captureTimezoneVerified, location: photo.location, width: photo.width, height: photo.height, originalSize: photo.originalSize ?? photo.file?.size, previewAvailable: hasPreview, previewSize: hasPreview ? size : 0, caption: photo.caption, keywords: photo.keywords, facts: photo.facts, favorite: photo.favorite, ocr: validOcr(photo.ocr, photo) ? photo.ocr : undefined };
           if (!validPhoto(meta)) throw new Error("Search metadata could not be retained.");
           records.push(["photo:" + photo.id, { meta: await seal(key, jsonBytes(meta), "photo:" + photo.id) }]);
         }

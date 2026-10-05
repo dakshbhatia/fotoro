@@ -30,11 +30,8 @@ struct RecentPhoto: Identifiable {
   var isScreenshot: Bool { asset.mediaSubtypes.contains(.photoScreenshot) }
   var isLivePhoto: Bool { asset.mediaSubtypes.contains(.photoLive) }
   var isVideo: Bool { asset.mediaType == .video }
-  var location: String? {
-    asset.location.map {
-      String(format: "%.4f, %.4f", $0.coordinate.latitude, $0.coordinate.longitude)
-    }
-  }
+  var photoLocation: PhotoLocationV1? { PhotoLocationV1.photos(asset.location) }
+  var location: String? { photoLocation?.coordinates }
   var searchText: String {
     RecentPhotoFacts(
       capturedAt: capturedAt, favorite: isFavorite, screenshot: isScreenshot,
@@ -237,7 +234,14 @@ struct PhotoViewerZoom {
     if let result = picksSnapshot, result.recommendations.unassessed == 0,
       result.matches(pickCandidates), PhotoPickAnalyzer.isCurrent(result.candidates) { return result }
     if analysisTask == nil { beginAnalysis() }
-    await analysisTask?.value
+    while let task = analysisTask {
+      let generation = analysisGeneration
+      await task.value
+      try Task.checkCancellation()
+      // A Photos refresh can replace the task while this caller is waiting.
+      // Finish its successor before validating the current snapshot.
+      if analysisGeneration == generation { break }
+    }
     try Task.checkCancellation()
     guard let result = picksSnapshot, result.matches(pickCandidates), PhotoPickAnalyzer.isCurrent(result.candidates) else {
       throw FotoroError("Your picks aren't ready. Open Photos and try again after analysis finishes.")

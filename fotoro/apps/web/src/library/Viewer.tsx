@@ -11,6 +11,8 @@ import {canShareOriginals, downloadOriginal, OriginalShareAttempt} from "./syste
 import {useDialogFocus} from "./dialog-focus";
 import {photoChangeState, type ConsumerPhotoChanges} from "./consumer-changes";
 import {failedViewerPreview, readViewerPreview, viewerPreviewSource, type ViewerPreview} from "./viewer-preview";
+import {annotationLocation} from "@fotoro/contracts/location";
+import {PhotoLocation} from "../local/PhotoLocation";
 export function viewerPhotoIndex(photos: Photo[], selected: string) {
   return Math.max(0, photos.findIndex(photo => photo.manifest.photoId === selected));
 }
@@ -293,6 +295,7 @@ export function Viewer({
               : "Capture date"}{" "}
             · {new Date(photo.metadata.sourceDate).toLocaleString()}
           </p>
+          {!photo.grantId && <PhotoLocation location={annotationLocation(photo.annotations ?? {})} />}
           {!photo.grantId && <>
             {(correction.pending || correction.error || editError) && <section className="viewer-changes" aria-label="Photo changes">
               <p role="status">{correction.error || editError || (correction.conflict ? "This photo changed on another device. Review before saving." : "Changes stay on this device until you Save changes.")}</p>

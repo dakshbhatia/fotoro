@@ -10,7 +10,8 @@
     "./auth": "./src/auth.ts",
     "./share-links": "./src/share-links.ts",
     "./visual": "./src/visual.ts",
-    "./camera-media": "./src/camera-media.ts"
+    "./camera-media": "./src/camera-media.ts",
+    "./location": "./src/location.ts"
   },
   "dependencies": {
     "ajv": "8.18.0",

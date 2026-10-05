@@ -80,6 +80,16 @@ validation accepts HEVC stills and simple grids, preserving the original bytes.
 Thumbnail/preview caches are bounded and generated sequentially; browser gallery
 thumbnails are 512 px and viewer previews are 1600 px.
 
+Places shows photo stops in capture-date order. Native Photos locations and JPEG/HEIC
+EXIF GPS from file originals travel in private encrypted annotations; released clients
+keep reading the same wire format. Photo details opens the coordinate in Maps on request.
+An optional browser import accepts supported Google Maps Timeline JSON exports,
+previews conservative matches for photos without GPS and applies them only on confirmation.
+Matching requires a verified capture instant, including an EXIF time-zone offset.
+Reopen the original when a saved file photo lacks that proof. Timeline history stays
+in browser memory; only confirmed photo locations are retained. Save photo changes
+publishes queued location edits to the same Fotoro on other devices.
+
 Browser imports automatically suggest diverse moment highlights using
 small local previews, clarity/exposure, favorites and verified capture-date variety.
 Only visually similar bursts with verified original capture times are grouped;
