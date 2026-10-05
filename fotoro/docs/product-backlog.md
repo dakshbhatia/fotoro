@@ -54,7 +54,11 @@ across devices remains open.
 
 The current source fixes Sync checkpoints for excluded changed Photos revisions, obsolete
 synced OCR evidence, browser expiration recovery for the same account and local
-browser clearing when server logout cannot finish. Full-app release audits now
+browser clearing when server logout cannot finish. Returning browsers can unlock
+cached encrypted photos through a genuine transport failure without claiming a
+server sign-in; failed visual checks no longer claim a successful empty result.
+Production browser-reader interruption/reopen tests now cover five media kinds,
+while physical qualification remains open. Full-app release audits now
 gate archive/export/upload. These changes and their local regression evidence
 are recorded in [verification](verification.md); they do not close the physical
 acceptance or distribution-signing gates above.

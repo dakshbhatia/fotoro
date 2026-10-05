@@ -6,6 +6,10 @@ import type { LocalOcrPhoto } from "./useLocalOcr";
 export function meaningRelation(meaning: SearchMeaning) {
   return meaning.kind === "visual" ? "Visual similarity" : meaning.kind === "label" ? "Supplied label" : meaning.kind === "date" ? "Date" : "Text mention";
 }
+export function visualSearchFeedback(result: SearchResult) {
+  return result.visualStatus === "unavailable" ? "Visual search is unavailable."
+    : result.visualStatus === "incomplete" ? "Some photos couldn’t be checked visually." : undefined;
+}
 function evidence(photo: LocalOcrPhoto, meaning: SearchMeaning) {
   const source = meaning.evidence[photo.id] ?? meaning.kind;
   if (source === "visual") return "Visual similarity";
@@ -83,6 +87,7 @@ export function LocalSearch({photos, result, resources, committed, pinned, canCo
       {reasons?.get(photo.id)?.length ? <p className="find-shot-reason">{reasons.get(photo.id)!.join(" · ")}</p> : null}
       {result.meanings.some(value => value.id !== meaning.id && value.photoIds.some(id => !meaning.photoIds.includes(id))) && <div className="local-alternatives" aria-label="Other matches"><span>Also try</span>{result.meanings.filter(value => value.id !== meaning.id && value.photoIds.some(id => !meaning.photoIds.includes(id))).slice(0, 3).map(value => <button key={value.id} onClick={() => onAccept(value)}>{value.term}</button>)}</div>}
       {details && <SearchMatchDetails photo={photo} meaning={meaning} coverage={coverage} committed={committed} pinned={pinned} canCorrect={canCorrect} onAccept={onAccept} onConfirm={onConfirm} onPin={onPin} />}
-    </> : <div className="empty"><p role={result.searching ? "status" : undefined}>{result.searching ? "Searching photos…" : emptyMessage ?? "No matching photos"}</p>{!result.searching && <p className="hint">{emptyHint ?? "Try a label, a date or words in the photo."}</p>}{details && <p className="hint">{coverage}. Text is searchable after it has been read on this device.</p>}</div>}
+      {visualSearchFeedback(result) && <p className="hint" role="status">{visualSearchFeedback(result)}</p>}
+    </> : <div className="empty"><p role={result.searching || result.visualStatus ? "status" : undefined}>{result.searching ? "Searching photos…" : visualSearchFeedback(result) ?? emptyMessage ?? "No matching photos"}</p>{!result.searching && <p className="hint">{emptyHint ?? "Try a label, a date or words in the photo."}</p>}{details && <p className="hint">{coverage}. Text is searchable after it has been read on this device.</p>}</div>}
   </section>;
 }

@@ -7,18 +7,22 @@ No speed, accuracy, cost or adoption claim is inferred from a passing smoke test
 
 ## Qualified source and live web
 
-[PR 39](https://github.com/dakshbhatia/fotoro/pull/39) merged as
-`bf86e7c3a3519e2f66bd20ad130ef735d18183ab`. Its exact checked head was
-`fa608d11fba4e66efc6db8d1b22008bcb7676913`; [CI run 37343396881](https://github.com/dakshbhatia/fotoro/actions/runs/37343396881)
-completed with all 23 reported checks successful or skipped, including successful
-Fotoro web/API and full/preview iOS jobs. Independent review found no material issue.
+[PR 41](https://github.com/dakshbhatia/fotoro/pull/41) merged as
+`c525cb335ee7cf5743a1931e3716e6984fe38ce4`. Its exact checked head was
+`3555490f073368a7b87f969ba6f174b4cb41ecff`; all 23 reported checks completed
+successfully or were skipped, including successful full/preview iOS and web/API
+jobs. [Fotoro run 37373598115](https://github.com/dakshbhatia/fotoro/actions/runs/37373598115)
+contains native and web/API validation. The merged tree matches the qualified
+head, and all 69 native input hashes match the audited build 37 archive.
+Independent review found no remaining material issue.
 
-The active Worker is `a62846b6-f045-40e4-b809-acc6daaac32d`, deployment
-`76470ad4-8565-43d5-b302-94898074ddf6`, at 100%. All 36 served asset digests match
-the qualified production build. HTTPS service routes and the exact Apple app
-association pass readback. A fresh production browser check passes the 390-pixel
-entry, account focus and Back path without unexpected JavaScript errors or
-production account writes. [Deployment](deployment.md) owns release commands.
+The active Worker is `f19242f0-7762-43a8-b66c-0be45c3f6cdf`, deployment
+`24ef3173-9176-4259-9965-79604f405647`, at 100%. All 35 non-HTML asset digests
+match the qualified production build. Photos and Saved HTML routes reference the
+expected entry assets. HTTPS service routes and the exact Apple app association
+pass readback. Fresh production browser checks pass entry, account focus and Back
+at 320×568, 390×844 and 1280×720 without overflow, unexpected JavaScript errors
+or API writes. [Deployment](deployment.md) owns release commands.
 Documentation-only changes leave this runtime checkpoint unchanged.
 
 ## PR 39 verification
@@ -52,9 +56,9 @@ below the 500 KiB budget. Account crypto and visual inference remain deferred.
 Pinned-model public-image smoke checks exercise real inference; they do not
 establish held-out search quality or physical-device latency, memory or battery use.
 
-## Current source checks — in progress
+## PR 41 verification
 
-The current working source closes these reproduced correctness gaps:
+The qualified PR 41 source closes these reproduced correctness gaps:
 
 - A changed Photos revision excluded by resource admission now has its own
   incomplete checkpoint. The earlier saved original remains available; admission
@@ -77,14 +81,57 @@ executes 367 tests with one existing Vision inference-context skip and no
 failures, including real loopback authentication integration. The pinned-model
 visual smoke passes. Preview verification executes 113 tests with the same
 known Vision skip and no failures; isolated encrypted exchange passes all five
-tests. These source checks do not establish a new commit, merge, deployment,
-exported IPA, TestFlight upload or physical-device qualification.
-The qualified PR 39 and live Worker records remain the deployed release
-checkpoints.
+tests. The browser startup graph measures 393,790 JavaScript bytes across four
+chunks, below the 500 KiB budget.
+
+Eight rendered loopback checks use disposable private accounts and real encrypted
+storage: chosen-file Save through expiration and explicit retry; selected Saved
+originals through reauthentication; Clear during a delayed catalog refresh;
+two-person invitation opening and recipient-owned Save; failed and offline logout
+with independent local clearing; entry health; and no unexpected browser errors.
+These checks use headless Google Chrome, not Safari or a physical iPhone.
+
+PR 41 is merged and deployed. No distribution IPA, TestFlight upload or physical
+first-use/restore/share qualification is established by these checks.
+
+## Browser resilience verification
+
+A connected browser whose API transport is unreachable can reopen the exact
+account's cached encrypted photos with its correct Fotoro password. This is local
+access, not a new server sign-in or successful Sync check. HTTP rejection, invalid
+response data, a wrong password, missing cache, cancellation and account changes
+cannot use that fallback.
+
+Visual Search now distinguishes unavailable or partially checked photos from a
+successful empty result. Existing lexical matches and successful visual matches
+remain visible. Worker crashes during preview loading or between cached batches
+also report unavailable; query replacement, lock and cancellation cannot publish
+stale feedback. Healthy searches add no status text.
+
+Local full checks pass, including 431 web tests after the final search-race fix,
+70 API tests, typechecks and the production web build. The five isolated real
+D1/R2 encrypted-exchange tests pass, including HEIC and complete Live originals.
+Additional production browser-reader tests cover JPEG, PNG, HEIC, MOV and Live
+resources after an interrupted HTTP body, fresh same-account vault unlock and
+offline reopen, checking exact bytes, names, types and digests. Those reader tests
+use real crypto and fake IndexedDB with HTTP responses mocked; they do not prove
+physical-device restoration or a browser-process restart.
+
+Ten rendered loopback checks pass the existing chosen Save, selection,
+expiration, private invitation and recipient Save journeys plus cached access
+while `navigator.onLine` is true and transport is unreachable. Cached access
+reports the unavailable connection accurately; an uncached browser remains at
+sign-in. Two additional
+rendered checks confirm Photos and Saved show visual-search failure instead of a
+false empty result. The latter inject a failing worker boundary and make no
+inference-quality claim. Headless Google Chrome is used; Safari and physical
+system sharing remain unqualified. No native input or encryption protocol changes
+are introduced by this pass. Release evidence is preserved outside Git under
+`core-journey-2026-10-05` and its timestamped browser proof.
 
 ## iPhone and distribution
 
-Build 37 archives the current working source and passes the full archive audit.
+Build 37 archives the qualified PR 41 source and passes the full archive audit.
 All 69 native input hashes remain unchanged across the archive. It is
 development-signed; no IPA was exported and no TestFlight upload occurred.
 The archive and its proof are preserved outside Git under `core-gaps-build37`.
@@ -101,7 +148,7 @@ Individual API access is verified for build metadata; provisioning/signing and a
 fresh TestFlight install remain open. No external TestFlight invitation is qualified.
 First App Store publication excludes France, as approved by the owner.
 
-Release proof is kept outside Git under the protected `three-s-simple-d32e490`
+Latest release proof is kept outside Git under the protected `core-gaps-build37`
 record: source inputs, archive audit, exact-head CI, merge proof, asset digests,
 Worker traffic readback and browser/service checks. Credentials and private account
 data are excluded from repository documentation.

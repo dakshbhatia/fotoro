@@ -24,6 +24,7 @@ import {
   fixtureMode,
   isPublicDemoAccount,
   ApiError,
+  ApiTransportError,
 } from "./exchange/api";
 import { Exchange } from "./exchange/Exchange";
 import {ExpiredSavedSelection, IncomingShareIntent, grantState, ShareSelection} from "./exchange/sharing";
@@ -47,6 +48,7 @@ import {
 import { syncSelectedSequential } from "./exchange/selected";
 import { localOriginalDigest, queueAnnotations, queuePhotoLocation, queueLocalAnnotations, pendingAnnotations, resolveAnnotationConflict, type PendingAnnotation } from "./exchange/annotations";
 import {useSemanticFind} from "./local/useSemanticFind";
+import {visualSearchFeedback} from "./local/LocalSearch";
 import { PhotoSearchIndex, normalizeSearch } from "./local/search";
 import type { LocalPhoto } from "./local/resources";
 import { cloudSearchRecords } from "./library/search";
@@ -374,8 +376,10 @@ export default function CloudApp({
       try {await fn();}
       catch (error) {request?.finishAuthentication(ticket, undefined, error); shareRequest?.finishAuthentication(shareTicket); throw error;}
       if (!activeRef.current || authIntent.current !== version) {request?.cancel(); shareRequest?.cancel(); return;}
+      let opened: {session: UnlockedVault; generation: number; origin: string};
       try {
         const session = requireVault();
+        opened = {session, generation: vaultGeneration(), origin: location.origin};
         request?.finishAuthentication(ticket, {session, generation: vaultGeneration(), current: () => sameVault(session)});
         shareRequest?.finishAuthentication(shareTicket, session, vaultGeneration());
         setAccount(session.accountId);
@@ -389,7 +393,19 @@ export default function CloudApp({
         return;
       }
       await restorePause();
-      await refresh();
+      const current = () => activeRef.current && authIntent.current === version &&
+        vaultGeneration() === opened.generation && location.origin === opened.origin && sameVault(opened.session);
+      try {await refresh(false, current);}
+      catch (error) {
+        if (!current()) return;
+        if (!(error instanceof ApiTransportError)) throw error;
+        let cached;
+        try {cached = await cachedSync(opened.session);}
+        catch (cacheError) {if (!current()) return; throw cacheError;}
+        if (!current()) return;
+        setStatus(cached.photos.length ? "Couldn’t connect. Showing saved photos." : "Couldn’t connect. Try again when you’re online.");
+        setNeedsAttention(true);
+      }
     }, true);
   };
   useEffect(() => {
@@ -913,6 +929,8 @@ export default function CloudApp({
             )}
             {normalizeSearch(query) && !received && (findMatches.length > 0 || bestShots.active) && <FindBestShots total={findMatches.length} review={bestShots} showCount onSelect={selectBestShots} disabled={preparingOriginals || sharingOriginals} />}
             {shown.length ? (
+              <>
+              {normalizeSearch(query) && visualSearchFeedback(searchResult) && <p className="hint" role="status">{visualSearchFeedback(searchResult)}</p>}
               <Library
                 active={active}
                 photos={shown}
@@ -922,14 +940,15 @@ export default function CloudApp({
                 onSelect={toggleSelection}
                 onOpen={id => selecting && !received ? toggleSelection(id) : setViewer(id)}
               />
+              </>
             ) : (
               <div className="empty" aria-busy={searchResult.searching || undefined}>
-                <p role={searchResult.searching ? "status" : undefined}>
-                  {searchResult.searching ? "Searching photos…" : bestShots.active ? bestShots.busy ? "Choosing best shots…" : "No best shots to suggest" : query
+                <p role={searchResult.searching || searchResult.visualStatus ? "status" : undefined}>
+                  {searchResult.searching ? "Searching photos…" : visualSearchFeedback(searchResult) ?? (bestShots.active ? bestShots.busy ? "Choosing best shots…" : "No best shots to suggest" : query
                     ? "No matching photos"
                     : received
                       ? "No received photos"
-                      : "Your Saved photos will appear here"}
+                      : "Your Saved photos will appear here")}
                 </p>
                 {bestShots.active && <p className="hint">All matches remain available. You choose what to Share.</p>}
                 {!query && !received && <button onClick={onBack}>Choose photos to Save</button>}

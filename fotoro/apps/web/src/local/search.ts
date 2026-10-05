@@ -53,6 +53,7 @@ export interface SearchResult {
   photoIds: string[];
   photoId?: string;
   searching?: boolean;
+  visualStatus?: "unavailable" | "incomplete";
 }
 interface IndexedMeaning {
   id: string;

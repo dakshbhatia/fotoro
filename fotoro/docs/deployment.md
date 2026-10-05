@@ -15,11 +15,12 @@ Hono Worker with D1 and private R2. The upstream Ente application is a reference
 - Visual search runs locally. Model downloads contain public weights; private
   photos, queries and vectors are not sent to an inference provider.
 
-The last verified active Worker is `a62846b6-f045-40e4-b809-acc6daaac32d`
-at 100%, deployment `76470ad4-8565-43d5-b302-94898074ddf6` (2026-10-05,
-merged [PR 39](https://github.com/dakshbhatia/fotoro/pull/39)). Its 36 web assets
-match the qualified build by digest. The preceding version is
-`b3088ca5-5904-4dd6-9539-7ea59adc210b`. Read the current deployment back before
+The last verified active Worker is `f19242f0-7762-43a8-b66c-0be45c3f6cdf`
+at 100%, deployment `24ef3173-9176-4259-9965-79604f405647` (2026-10-05,
+merged [PR 41](https://github.com/dakshbhatia/fotoro/pull/41)). All 35 non-HTML
+asset digests match the qualified build; Photos and Saved HTML routes reference
+the expected entry assets. The preceding qualified version is
+`a62846b6-f045-40e4-b809-acc6daaac32d`. Read the current deployment back before
 changing traffic; preserve the preceding qualified version for rollback.
 
 Documentation-only edits do not change this runtime checkpoint and need no Worker
@@ -47,7 +48,7 @@ head before building release artifacts.
 Build production web assets from the qualified merged source with `pnpm build:web`.
 Development fixture settings belong to local processes and must not be exported
 into the production build. Keep the configured D1/R2 bindings and production
-origin unchanged. Apply migrations only when the qualified change requires them; PR 39 needs none.
+origin unchanged. Apply migrations only when the qualified change requires them; PR 41 needs none.
 
 Use Wrangler's existing OAuth session in the intended Cloudflare account. Do not
 copy credentials into chat, Git or release logs. From `services/api/`, prepare a
@@ -75,7 +76,7 @@ pass uses CI for native validation; no new IPA, phone install or TestFlight uplo
 is implied by web deployment. The owner reports Xcode already signed in; do not
 repeat historical account setup instructions.
 
-Build 37 archives the current working source and passes the full archive audit
+Build 37 archives the qualified PR 41 source and passes the full archive audit
 with all 69 native input hashes unchanged. It is development-signed; no IPA was
 exported and no TestFlight upload occurred. Build 36 remains the earlier archive
 of the qualified three-S source. Check release

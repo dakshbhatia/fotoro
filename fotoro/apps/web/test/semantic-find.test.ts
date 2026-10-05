@@ -25,6 +25,108 @@ class FakeWorker {
 }
 const resources = () => ({loads: 0, cleared: 0, async load(value: LocalPhoto) {this.loads++; return {blob: value.preview!, url: "", bytes: 1, decoded: 1, width: 1, height: 1, used: 0};}, clear() {this.cleared++;}});
 
+test("failed previews and image inference cannot complete as a successful empty visual search", async () => {
+  for (const failure of ["preview", "image"] as const) {
+    const worker = new FakeWorker((message, own) => {
+      if (message.kind !== "cancel") queueMicrotask(() => own.reply(message.id,
+        message.kind === "image" ? {error: true} : vector()));
+    });
+    const raster = resources();
+    if (failure === "preview") raster.load = async () => {throw new Error("Preview unavailable");};
+    const engine = new SemanticFindSession(() => worker as unknown as Worker, raster);
+    try {
+      const scores: ReadonlyMap<string, number>[] = [];
+      assert.equal(await engine.search([photo("one")], "fireworks", () => true, value => scores.push(value)), "unavailable", failure);
+      assert.equal(scores.at(-1)?.size, 0);
+    } finally {engine.clear();}
+  }
+});
+
+test("mixed visual checks retain successful matches and distinguish incomplete results from genuine empty results", async () => {
+  const worker = new FakeWorker((message, own) => {
+    if (message.kind === "cancel") return;
+    const value = vector();
+    if (message.kind === "text" && message.text === "unrelated") {value[0] = 0; value[1] = 1;}
+    queueMicrotask(() => own.reply(message.id, value));
+  }), raster = resources();
+  raster.load = async value => {if (value.id === "missing") throw new Error("Preview unavailable"); return {blob: value.preview!, url: "", bytes: 1, decoded: 1, width: 1, height: 1, used: 0};};
+  const engine = new SemanticFindSession(() => worker as unknown as Worker, raster);
+  try {
+    let scores: ReadonlyMap<string, number> = new Map();
+    assert.equal(await engine.search([photo("one"), photo("missing")], "fireworks", () => true, value => {scores = value;}), "incomplete");
+    const base = new PhotoSearchIndex([{...photo("label"), labels: ["fireworks"]}]).search("fireworks");
+    assert.deepEqual(addSemanticMatches(base, scores, new Set(["one", "label"])).photoIds, ["label", "one"]);
+    assert.equal(await engine.search([photo("one")], "unrelated", () => true, value => {scores = value;}), undefined);
+    const empty = new PhotoSearchIndex([photo("one")]).search("unrelated");
+    assert.deepEqual(addSemanticMatches(empty, scores, new Set(["one"])).photoIds, []);
+  } finally {engine.clear();}
+});
+
+test("unavailable visual search never claims no matches and still shows lexical results", () => {
+  const render = (status: "unavailable" | "incomplete", withLabel = false) => {
+    const photos = [{...photo("one"), labels: withLabel ? ["fireworks"] : []}];
+    const result = {...new PhotoSearchIndex(photos).search("fireworks"), visualStatus: status};
+    return renderToStaticMarkup(createElement(LocalSearch, {photos, result, resources: new LocalResources(), coverage: "1 photo", onAccept() {}, onNavigate() {}, onOpen() {}, onConfirm() {}, onPin() {}, onFailure() {}}));
+  };
+  for (const status of ["unavailable", "incomplete"] as const) {
+    const empty = render(status);
+    assert.doesNotMatch(empty, /No matching photos|Searching photos…|aria-busy="true"/);
+    assert.match(empty, status === "unavailable" ? /Visual search is unavailable/ : /Some photos couldn’t be checked visually/);
+    const lexical = render(status, true);
+    assert.match(lexical, /aria-label="Open one.jpg"/);
+    assert.match(lexical, status === "unavailable" ? /Visual search is unavailable/ : /Some photos couldn’t be checked visually/);
+  }
+});
+
+test("a worker failure between requests remains unavailable when its pending preview finishes", async () => {
+  const worker = new FakeWorker(), loading = deferred<void>(), finish = deferred<void>();
+  const raster = resources(), p = photo("one");
+  raster.load = async () => {loading.resolve(); await finish.promise; return {blob: p.preview!, url: "", bytes: 1, decoded: 1, width: 1, height: 1, used: 0};};
+  const engine = new SemanticFindSession(() => worker as unknown as Worker, raster);
+  let published = 0;
+  try {
+    const pending = engine.search([p], "fireworks", () => true, () => {published++;});
+    const rejected = assert.rejects(pending, /Visual search is unavailable/);
+    await loading.promise;
+    worker.onerror?.call(worker as unknown as Worker, {} as ErrorEvent);
+    finish.resolve();
+    await rejected;
+    assert.equal(published, 0);
+    assert.equal(worker.terminated, true);
+  } finally {engine.clear();}
+});
+
+test("caller cancellation while a preview loads does not publish a visual failure or late match", async () => {
+  const worker = new FakeWorker(), loading = deferred<void>(), finish = deferred<void>(), raster = resources(), p = photo("one");
+  raster.load = async () => {loading.resolve(); await finish.promise; return {blob: p.preview!, url: "", bytes: 1, decoded: 1, width: 1, height: 1, used: 0};};
+  const engine = new SemanticFindSession(() => worker as unknown as Worker, raster);
+  let published = 0;
+  try {
+    const pending = engine.search([p], "fireworks", () => true, () => {published++;});
+    await loading.promise; engine.cancel(); finish.resolve();
+    assert.equal(await pending, undefined);
+    assert.equal(published, 0);
+  } finally {engine.clear();}
+});
+
+test("a worker crash between cached batches cannot finish as a complete visual search", async () => {
+  const worker = new FakeWorker(), engine = new SemanticFindSession(() => worker as unknown as Worker, resources());
+  const photos = Array.from({length: 64}, (_, index) => photo("cached-" + index));
+  let scheduled = false, crashed = false;
+  try {
+    await engine.search(photos, "city", () => true, () => {});
+    await assert.rejects(engine.search(photos, "fireworks", () => true, () => {
+      assert.equal(crashed, false, "A failed worker cannot publish another batch");
+      if (!scheduled) {
+        scheduled = true;
+        queueMicrotask(() => {crashed = true; worker.onerror?.call(worker as unknown as Worker, {} as ErrorEvent);});
+      }
+    }), /Visual search is unavailable/);
+    assert.equal(crashed, true);
+    assert.equal(worker.terminated, true);
+  } finally {engine.clear();}
+});
+
 test("the initial semantic search render is busy without a false empty result, while lexical matches stay visible", () => {
   const render = (photos: LocalPhoto[], query: string, active = true, committed?: string) => {
     function InitialSearch() {

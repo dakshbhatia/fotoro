@@ -8,7 +8,7 @@ export function useSemanticFind(photos: LocalPhoto[], base: SearchResult, active
   const input = useMemo(() => ({photos, base, active, source, committedMeaning, foreground}), [photos, base, active, source, committedMeaning, foreground]);
   const latest = useRef(input); latest.current = input;
   const invalidated = useRef(false);
-  const [result, setResult] = useState<{input: typeof input; scores?: ReadonlyMap<string, number>; pending: boolean} | undefined>();
+  const [result, setResult] = useState<{input: typeof input; scores?: ReadonlyMap<string, number>; pending: boolean; visualStatus?: SearchResult["visualStatus"]} | undefined>();
   const canSearch = active && !invalidated.current && (typeof document === "undefined" || document.visibilityState !== "hidden")
     && !committedMeaning && eligibleSemanticPhotos(photos, base.query).length > 0;
   useLayoutEffect(() => {
@@ -29,8 +29,9 @@ export function useSemanticFind(photos: LocalPhoto[], base: SearchResult, active
     const engine = session.current ??= new SemanticFindSession();
     const timer = setTimeout(() => {
       const valid = () => current && latest.current === input && !invalidated.current && document.visibilityState !== "hidden";
-      void engine.search(photos, base.query, valid, scores => {if (valid()) setResult({input, scores, pending: true});}).catch(() => {})
-        .finally(() => {if (valid()) setResult(previous => previous?.input === input ? {...previous, pending: false} : {input, pending: false});});
+      void engine.search(photos, base.query, valid, scores => {if (valid()) setResult({input, scores, pending: true});})
+        .then(visualStatus => {if (valid()) setResult(previous => ({...previous, input, pending: false, visualStatus}));})
+        .catch(() => {if (valid()) setResult(previous => ({...previous, input, pending: false, visualStatus: "unavailable"}));});
     }, 250);
     return () => {current = false; clearTimeout(timer); engine.cancel();};
   }, [input]);
@@ -38,6 +39,7 @@ export function useSemanticFind(photos: LocalPhoto[], base: SearchResult, active
     const current = result?.input === input;
     const matched = canSearch && current && result.scores ? addSemanticMatches(base, result.scores,
       new Set(photos.filter(photo => photo.current?.() !== false).map(photo => photo.id)), committedMeaning) : base;
-    return canSearch && (!current || result.pending) ? {...matched, searching: true} : matched;
+    return canSearch && (!current || result.pending) ? {...matched, searching: true}
+      : canSearch && current && result.visualStatus ? {...matched, visualStatus: result.visualStatus} : matched;
   }, [result, input, canSearch, base, photos, committedMeaning]);
 }
