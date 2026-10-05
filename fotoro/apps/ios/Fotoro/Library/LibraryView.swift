@@ -475,6 +475,7 @@ struct ConsumerSaveStatus: View {
       case .permissionRequired: return "Photos access needed"
       case .background: return "Sync resumes when you open Fotoro"
       case .ready: return "Sync on"
+      case .partial: return "Some originals weren't synced"
       case .needsAttention: return "Sync needs attention"
       case .off, .syncing: break
       }
@@ -513,7 +514,8 @@ struct ConsumerSaveStatus: View {
             }.font(.footnote).frame(minHeight: 44).disabled(services.busy)
           }
         }
-        if services.automaticPhotoSync.enabled && services.automaticPhotoSync.phase == .needsAttention {
+        if services.automaticPhotoSync.enabled &&
+          [.needsAttention, .partial].contains(services.automaticPhotoSync.phase) {
           Text(services.automaticPhotoSync.detail).font(.caption).foregroundStyle(.secondary)
         } else if !services.automaticPhotoSync.enabled, summary.state == .needsAttention, let detail = summary.detail {
           Text(detail).font(.caption).foregroundStyle(.secondary)
@@ -618,6 +620,7 @@ func savedLibraryEmptyMessage(sync: AutomaticPhotoSyncStatus, favoritesOnly: Boo
     case .locked: return "Open Fotoro to resume sync."
     case .permissionRequired: return "Allow Photos access in Settings to sync your photos."
     case .needsAttention: return "Open Sync to review what needs attention."
+    case .partial: return "Some originals couldn't sync. Open Sync for details."
     case .background: return "Open Fotoro to continue syncing your photos."
     case .syncing: return "Photos appear here as they sync. Keep Fotoro open."
     case .ready: return "No photos saved yet. Sync is on for the photos you allow."

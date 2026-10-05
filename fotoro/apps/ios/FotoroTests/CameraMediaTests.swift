@@ -125,7 +125,9 @@ final class CameraMediaTests: XCTestCase {
     XCTAssertEqual(try services.store.backupSource("other").phase, .committed)
     XCTAssertEqual(try services.consumerSavedPhoto(old.id)?.metadata.originalSha256, old.metadata.originalSha256)
     XCTAssertEqual(try Data(contentsOf: XCTUnwrap(old.originalURL)), oldBytes)
-    XCTAssertEqual(services.automaticPhotoSync.phase, .ready)
+    XCTAssertEqual(services.automaticPhotoSync.phase, .partial,
+      "A skipped original must remain visible instead of reporting healthy completion")
+    XCTAssertTrue(services.automaticPhotoSync.detail.contains("1 original"))
   }
 }
 

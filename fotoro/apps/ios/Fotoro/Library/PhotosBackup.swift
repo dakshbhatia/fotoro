@@ -18,7 +18,7 @@ struct AutomaticPhotoSyncPreference: Codable, Equatable {
 }
 
 struct AutomaticPhotoSyncStatus {
-  enum Phase { case off, paused, locked, permissionRequired, background, ready, syncing, needsAttention }
+  enum Phase { case off, paused, locked, permissionRequired, background, ready, syncing, partial, needsAttention }
   var enabled: Bool
   var paused: Bool
   var phase: Phase

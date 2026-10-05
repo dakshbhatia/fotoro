@@ -1184,6 +1184,7 @@ struct RecentPhotosView: View {
       savedRefresh.error != nil || services.map { savedRefresh.requiresAuthentication($0) } == true
         || services?.consumerSyncSummary.state == .needsAttention
         || services?.automaticPhotoSync.phase == .needsAttention
+        || services?.automaticPhotoSync.phase == .partial
     }
     @ViewBuilder private var homeSyncButton: some View {
       if homeSyncNeedsAttention {
