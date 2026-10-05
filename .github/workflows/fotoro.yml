@@ -52,7 +52,7 @@ jobs:
         working-directory: fotoro
         run: |
           pnpm seed:local
-          pnpm dev:api > /tmp/fotoro-api.log 2>&1 &
+          pnpm --filter @fotoro/api dev:native-test > /tmp/fotoro-api.log 2>&1 &
           api_pid=$!
           pnpm dev:fixtures > /tmp/fotoro-fixtures.log 2>&1 &
           fixture_pid=$!
