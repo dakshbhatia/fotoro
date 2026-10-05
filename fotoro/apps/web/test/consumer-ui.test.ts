@@ -3,9 +3,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {createElement} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
-import {LocalSearch} from "../src/local/LocalSearch";
+import {LocalSearch, SearchMatchDetails} from "../src/local/LocalSearch";
 import {LocalResources, type LocalPhoto} from "../src/local/resources";
 import {PhotoSearchIndex} from "../src/local/search";
+import {addSemanticMatches} from "../src/local/semantic-find";
 import accounts from "../../../fixtures/accounts.json";
 import {ready, unb64} from "@fotoro/crypto";
 import {configureVault, unlockVault, lockVault} from "../src/vault/vault";
@@ -18,6 +19,23 @@ test("matching photos open without acceptance or correction controls in the main
   assert.match(markup, /aria-label="Open receipt.png"/);
   assert.match(markup, /aria-label="Search details"/);
   assert.doesNotMatch(markup, /predicted|accepted|This is the photo|Pin for|Supplied label/);
+});
+
+test("visual-only match details preserve evidence without unsupported acceptance or preference actions", () => {
+  const photo: LocalPhoto = {id: "a", filename: "city.png", date: "2026-10-01", preview: new Blob(["preview"])};
+  const base = new PhotoSearchIndex([photo]).search("fireworks");
+  const visual = addSemanticMatches(base, new Map([[photo.id, .4]]), new Set([photo.id]));
+  const props = {photo, coverage: "1 photo", canCorrect: true, onAccept() {assert.fail("No unsupported acceptance");}, onConfirm() {}, onPin() {}};
+  const markup = renderToStaticMarkup(createElement(SearchMatchDetails, {...props, meaning: visual.meaning!}));
+  assert.match(markup, /Visual similarity/); assert.match(markup, /About this match/);
+  assert.doesNotMatch(markup, /Search this|Adjust future|This is the photo|Prefer this photo|<button/);
+  const labeled = {...photo, labels: ["fireworks"]};
+  const mixed = addSemanticMatches(new PhotoSearchIndex([labeled]).search("fireworks"), new Map([["visual", .4]]), new Set(["a", "visual"]));
+  const labelMarkup = renderToStaticMarkup(createElement(SearchMatchDetails, {...props, meaning: mixed.meaning!, committed: mixed.meaning!.id}));
+  assert.match(labelMarkup, /Supplied label · fireworks/); assert.match(labelMarkup, /aria-pressed="true"[^>]*>Search this label/);
+  assert.match(labelMarkup, /This is the photo/); assert.match(labelMarkup, /Prefer this photo/);
+  const visualMember = renderToStaticMarkup(createElement(SearchMatchDetails, {...props, photo: {...photo, id: "visual"}, meaning: mixed.meaning!}));
+  assert.match(visualMember, /Visual similarity/); assert.match(visualMember, /Search this label/);
 });
 
 const facts = {unlocked: true, paused: false, online: true, preparing: false, busy: false, needsAttention: false, committedPhotos: 3, queuedPhotos: 2, failedPhotos: 0, skippedPhotos: 0, pendingEdits: 0, conflictingEdits: 0, localPhotos: 0, lastCheckedAt: "2026-10-01T12:00:00Z"};

@@ -719,7 +719,7 @@ final class PhotosBackupTests: XCTestCase {
 }
 
 final class AutomaticPhotoSyncTests: XCTestCase {
-  @MainActor func testEmptyAutomaticScanKeepsFailedReadVisibleUntilExplicitRetryReadsAgain() async throws {
+  @MainActor func testAutomaticPreflightKeepsFailedReadsVisibleUntilVerifiedRetrySucceeds() async throws {
     let context = try PausedUploadContext()
     defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
     let services = try await context.enroll()
@@ -728,18 +728,18 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     services.photosBackupSnapshot = { _ in [] }
     try services.enableAutomaticPhotoSync()
     await services.waitForAutomaticPhotoSync()
-    PausedUploadProtocol.server.failCatalogReads(1)
+    PausedUploadProtocol.server.failCatalogReads(2)
     do { try await services.sync(); XCTFail("The controlled catalog read must fail") }
     catch { XCTAssertTrue(error is URLError) }
     XCTAssertEqual(services.automaticPhotoSync.phase, .needsAttention)
     let reads = PausedUploadProtocol.server.requests.filter { $0.path == "/v1/changes" }.count
     services.kickAutomaticPhotoSync()
     await services.waitForAutomaticPhotoSync()
-    XCTAssertEqual(PausedUploadProtocol.server.requests.filter { $0.path == "/v1/changes" }.count, reads)
-    XCTAssertEqual(services.automaticPhotoSync.phase, .needsAttention, "A no-work scan cannot pretend a failed read recovered")
+    XCTAssertEqual(PausedUploadProtocol.server.requests.filter { $0.path == "/v1/changes" }.count, reads + 1)
+    XCTAssertEqual(services.automaticPhotoSync.phase, .needsAttention, "A failed preflight cannot proceed or claim recovery")
     try await services.retryAutomaticPhotoSync()
     await services.waitForAutomaticPhotoSync()
-    XCTAssertEqual(PausedUploadProtocol.server.requests.filter { $0.path == "/v1/changes" }.count, reads + 1)
+    XCTAssertEqual(PausedUploadProtocol.server.requests.filter { $0.path == "/v1/changes" }.count, reads + 3)
     XCTAssertEqual(services.automaticPhotoSync.phase, .ready)
     XCTAssertTrue(PausedUploadProtocol.server.requests.allSatisfy { $0.method == "GET" }, "Empty retry never publishes an edit or original")
   }
@@ -784,10 +784,11 @@ final class AutomaticPhotoSyncTests: XCTestCase {
       XCTAssertEqual(services.automaticPhotoSync.phase, .ready)
       XCTAssertEqual(services.backup.status.pending, 0)
       XCTAssertEqual(services.backup.status.failed, 0)
-      let requests = PausedUploadProtocol.server.requests.count
+      let writes = PausedUploadProtocol.server.requests.filter { $0.method != "GET" }.count
       services.kickAutomaticPhotoSync()
       await services.waitForAutomaticPhotoSync()
-      XCTAssertEqual(PausedUploadProtocol.server.requests.count, requests, "A retained earlier copy cannot trigger automatic retries")
+      XCTAssertEqual(PausedUploadProtocol.server.requests.filter { $0.method != "GET" }.count, writes,
+        "Catalog reconciliation cannot retry a retained earlier original")
       if changedDigest {
         XCTAssertNotEqual(current.photoId, queued.photoId)
         XCTAssertEqual(try services.journal.entries().map { $0.photo.id }, [queued.photoId])
@@ -890,13 +891,14 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     XCTAssertEqual(Set(try services.store.backupSources().filter { $0.phase == .committed }.map(\.photoId)).count, 1)
     let photo = try XCTUnwrap(services.store.photos().first)
     try services.setLabels(["  My exact label  "], photo: photo)
-    let requests = PausedUploadProtocol.server.requests.count
+    let writes = PausedUploadProtocol.server.requests.filter { $0.method != "GET" }.count
     services.kickAutomaticPhotoSync()
     services.kickAutomaticPhotoSync()
     await services.waitForAutomaticPhotoSync()
     let secondReads = await reads.values()
     XCTAssertEqual(secondReads.count, 3)
-    XCTAssertEqual(PausedUploadProtocol.server.requests.count, requests, "Unchanged idle scans need no HTTP")
+    XCTAssertEqual(PausedUploadProtocol.server.requests.filter { $0.method != "GET" }.count, writes,
+      "An unchanged scan may reconcile the catalog but cannot upload again")
     XCTAssertEqual(try services.annotations.ledger.pendingIDs(), [photo.id], "Photo opt-in cannot publish unsaved annotation edits")
     XCTAssertEqual(services.annotation(photo).labels, ["  My exact label  "])
   }
@@ -969,11 +971,12 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     XCTAssertEqual(try services.annotations.ledger.state(photo.id)?.accepted, failedRequest)
     XCTAssertTrue(services.annotations.errors.isEmpty)
     XCTAssertEqual(services.automaticPhotoSync.phase, .ready, "A successful retry clears the attention state")
-    let requests = PausedUploadProtocol.server.requests.count
+    let writes = PausedUploadProtocol.server.requests.filter { $0.method != "GET" }.count
     services.kickAutomaticPhotoSync()
     await services.waitForAutomaticPhotoSync()
     await services.syncAnnotations(derivedOnly: true)
-    XCTAssertEqual(PausedUploadProtocol.server.requests.count, requests, "Completed unchanged analysis never needs another write")
+    XCTAssertEqual(PausedUploadProtocol.server.requests.filter { $0.method != "GET" }.count, writes,
+      "Completed unchanged analysis never needs another write")
   }
 
   @MainActor func testPauseSurvivesReopenAndExplicitOptInResumesOnlyAfterConsent() async throws {
@@ -996,7 +999,8 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     XCTAssertTrue(try services.store.automaticPhotoSyncPreference().enabled)
     XCTAssertTrue(try services.store.automaticPhotoSyncPreference().paused)
     XCTAssertTrue(try services.store.photos().isEmpty)
-    XCTAssertTrue(PausedUploadProtocol.server.requests.isEmpty)
+    let pausedReads = PausedUploadProtocol.server.requests.count
+    XCTAssertTrue(PausedUploadProtocol.server.requests.allSatisfy { $0.method == "GET" })
     try context.persistSession(services)
     let reopened = try context.restoredServices()
     defer { reopened.vault.lock() }
@@ -1009,7 +1013,7 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     await reopened.waitForAutomaticPhotoSync()
     XCTAssertEqual(reopened.automaticPhotoSync.phase, .paused)
     XCTAssertEqual(scans, 0)
-    XCTAssertTrue(PausedUploadProtocol.server.requests.isEmpty)
+    XCTAssertEqual(PausedUploadProtocol.server.requests.count, pausedReads, "Restoring paused consent cannot reconcile or upload")
     // Account activation owns a new importer; install the public synthetic source afterward.
     reopened.importer = PhotoImport(store: reopened.store, sourceReader: { _ in (bytes, "public-sample.jpg", false) }, sourceRevision: { _ in "current" })
     try reopened.enableAutomaticPhotoSync()
@@ -1075,16 +1079,34 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     services.automaticPhotosAuthorization = { .denied }
     XCTAssertThrowsError(try services.enableAutomaticPhotoSync())
     XCTAssertFalse(try services.store.automaticPhotoSyncPreference().enabled)
+    XCTAssertTrue(PausedUploadProtocol.server.requests.isEmpty, "Denied Photos consent cannot reconcile or upload")
     services.automaticPhotosAuthorization = { .authorized }
     try services.enableAutomaticPhotoSync()
     await services.waitForAutomaticPhotoSync()
+    let permittedRequests = PausedUploadProtocol.server.requests
+    XCTAssertFalse(permittedRequests.isEmpty, "An admitted account must reconcile verified saved originals before staging")
+    XCTAssertTrue(permittedRequests.allSatisfy {
+      $0.method == "GET" && $0.host == "pause-sync.test"
+        && ["/v1/changes", "/v1/grants"].contains($0.path)
+    }, "An empty Photos snapshot can read its consented account catalog without sending photos or annotations")
+    let account = try XCTUnwrap(services.session.accountId)
+    services.session.accountId = Wire.id()
+    services.kickAutomaticPhotoSync()
+    await services.waitForAutomaticPhotoSync()
+    XCTAssertEqual(services.automaticPhotoSync.phase, .locked)
+    XCTAssertEqual(PausedUploadProtocol.server.requests.count, permittedRequests.count,
+      "Changing accounts without activation cannot reuse another account's consent")
+    services.session.accountId = account
     services.api.baseURL = URL(string: "https://other.test")!
     services.kickAutomaticPhotoSync()
     await services.waitForAutomaticPhotoSync()
     XCTAssertEqual(services.automaticPhotoSync.phase, .off)
+    XCTAssertEqual(PausedUploadProtocol.server.requests.count, permittedRequests.count,
+      "A different origin cannot reuse the original sync consent")
     services.session.fixture = true
     XCTAssertThrowsError(try services.enableAutomaticPhotoSync())
-    XCTAssertTrue(PausedUploadProtocol.server.requests.isEmpty)
+    XCTAssertEqual(PausedUploadProtocol.server.requests.count, permittedRequests.count,
+      "Public fixture mode cannot start private Photos reconciliation or uploads")
   }
 
   @MainActor func testOptedAccountColdRestorationStartsOnlyWhenForegroundPermitted() async throws {
@@ -1111,7 +1133,8 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     await reopened.waitForAutomaticPhotoSync()
     XCTAssertGreaterThan(scans, 0)
     XCTAssertEqual(reopened.automaticPhotoSync.phase, .ready)
-    XCTAssertTrue(PausedUploadProtocol.server.requests.isEmpty)
+    XCTAssertTrue(PausedUploadProtocol.server.requests.contains { $0.path == "/v1/changes" })
+    XCTAssertTrue(PausedUploadProtocol.server.requests.allSatisfy { $0.method == "GET" }, "A foreground preflight cannot send originals from an empty scan")
   }
 }
 
@@ -1135,7 +1158,7 @@ private actor AutomaticSourceReads {
   }
 }
 
-@MainActor private final class PausedUploadContext {
+@MainActor final class PausedUploadContext {
   let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
   let sample = Bundle.main.url(forResource: "singapore", withExtension: "jpg")!
   private let accounts: FixtureAccounts
@@ -1190,6 +1213,7 @@ private final class PausedUploadServer: @unchecked Sendable {
   struct Request {
     var method: String
     var path: String
+    var host: String
   }
   private let lock = NSLock()
   private var recorded: [Request] = []
@@ -1222,11 +1246,11 @@ private final class PausedUploadServer: @unchecked Sendable {
     lock.lock()
     defer { lock.unlock() }
     let path = request.url!.path
-    recorded.append(Request(method: request.httpMethod ?? "GET", path: path))
+    recorded.append(Request(method: request.httpMethod ?? "GET", path: path, host: request.url?.host ?? ""))
     switch path {
     case "/v1/changes":
       if catalogFailures > 0 { catalogFailures -= 1; throw URLError(.notConnectedToInternet) }
-      return try Wire.encode(ChangePageV1(version: 1, changes: [], nextCursor: nil, hasMore: false))
+      return try Wire.encode(ChangePageV1(version: 1, mediaVersion: 1, changes: [], nextCursor: nil, hasMore: false))
     case "/v1/grants":
       return try Wire.encode(GrantInboxV1(version: 1, grants: []))
     case "/v1/uploads/reserve":
@@ -1269,7 +1293,9 @@ private final class PausedUploadServer: @unchecked Sendable {
 
 private final class PausedUploadProtocol: URLProtocol, @unchecked Sendable {
   static let server = PausedUploadServer()
-  override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "pause-sync.test" }
+  override class func canInit(with request: URLRequest) -> Bool {
+    request.url?.host == "pause-sync.test" || request.url?.host == "other.test"
+  }
   override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
   override func startLoading() {
     do {

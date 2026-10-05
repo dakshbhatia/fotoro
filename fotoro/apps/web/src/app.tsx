@@ -32,6 +32,7 @@ export default function App() {
     [savedViewer, setSavedViewer] = useState<string | null>(null),
     [saveIntent, setSaveIntent] = useState<ChosenSaveIntent | null>(null),
     [sharePhotos, setSharePhotos] = useState<Photo[] | null>(null);
+  const [shareKind, setShareKind] = useState<"fotoro" | "originals">("fotoro");
   const [rememberedAccount, setRememberedAccount] = useState(false);
   const [photoChanges, setPhotoChanges] = useState<ConsumerPhotoChanges | null>(null);
   useEffect(() => {
@@ -109,7 +110,13 @@ export default function App() {
             if (!ownedPhotos?.current() || !photos.length || photos.some(photo => !ownedPhotos.photos.includes(photo) || photo.grantId || photo.manifest.ownerAccountId !== ownedPhotos.accountId)) return;
             cancelSave();
             syncOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-            setSharePhotos([...photos]); setOpened(true); setCloud(true);
+            setShareKind("fotoro"); setSharePhotos([...photos]); setOpened(true); setCloud(true);
+          }}
+          onShareSavedOriginals={photos => {
+            if (!ownedPhotos?.current() || !photos.length || photos.some(photo => !ownedPhotos.photos.includes(photo) || photo.grantId || photo.manifest.ownerAccountId !== ownedPhotos.accountId)) return;
+            cancelSave();
+            syncOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+            setShareKind("originals"); setSharePhotos([...photos]); setOpened(true); setCloud(true);
           }}
           onCancelSave={cancelSave}
           onSave={photos => {
@@ -140,6 +147,7 @@ export default function App() {
               incomingError={incomingError}
               onIncomingDone={cancelIncoming}
               sharePhotos={sharePhotos}
+              shareKind={shareKind}
               onShareDone={() => setSharePhotos(null)}
               localPhotos={localPhotos}
               onSyncSummary={setSyncSummary}
@@ -158,7 +166,7 @@ export default function App() {
         return ownedPhotos.edit?.(photo, {favorite});
       } : undefined} onShare={photo => {
         if (!ownedPhotos.current() || !ownedPhotos.photos.includes(photo)) return;
-        setSavedViewer(null); setSharePhotos([photo]); setOpened(true); setCloud(true);
+        setSavedViewer(null); setShareKind("fotoro"); setSharePhotos([photo]); setOpened(true); setCloud(true);
       }} onClose={closeSavedPhoto} /></Suspense>}
     </>
   );

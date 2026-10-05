@@ -126,6 +126,11 @@ struct TransferEntry: Codable {
         do {
           try fence()
           guard e.photo.manifest.ownerAccountId == account else { throw CancellationError() }
+          if CameraMedia.isMotion(e.photo.metadata.mediaType) {
+            let page: ChangePageV1 = try await api.get("/v1/changes?limit=1&media=1")
+            try fence()
+            guard page.mediaVersion == 1 else { throw FotoroError("Update the Fotoro service before syncing video or Live Photos") }
+          }
           for rep in e.photo.manifest.representations + [e.photo.manifest.metadataRepresentation] {
             try fence()
             let id = rep.binding.representationId
@@ -198,7 +203,7 @@ struct TransferEntry: Codable {
           e.photo.manifest.metadataRepresentation.objectId =
             e.commits[e.photo.manifest.metadataRepresentation.binding.representationId]!.objectId
           let signed = try CryptoAdapter().sign(
-            e.photo.manifest, kind: "photo-manifest", accountId: e.photo.manifest.ownerAccountId,
+            e.photo.manifest, kind: CameraMedia.manifestKind(for: e.photo.metadata.mediaType), accountId: e.photo.manifest.ownerAccountId,
             secret: Data(b64: vault.requireBundle().signingSecretKey))
           try fence()
           let _: PhotoManifestV1 = try await api.post("/v1/photos", signed)

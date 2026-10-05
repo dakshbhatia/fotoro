@@ -13,6 +13,14 @@ struct LocalPhoto: Codable, Identifiable, Sendable {
   var staged: [String: URL] = [:]
 }
 final class LibraryStore: @unchecked Sendable {
+  static let ownedOriginalQuery = """
+    SELECT value FROM photos
+    WHERE json_extract(CAST(value AS TEXT),'$.manifest.ownerAccountId')=?
+      AND json_extract(CAST(value AS TEXT),'$.metadata.originalSha256')=?
+      AND json_extract(CAST(value AS TEXT),'$.transferState') IN ('pending','committed','saved')
+    ORDER BY CASE json_extract(CAST(value AS TEXT),'$.transferState') WHEN 'pending' THEN 1 ELSE 0 END,id
+    LIMIT 1
+    """
   let database: DatabaseQueue
   let root: URL
   private var ownedRoots: Set<String> = []
@@ -27,6 +35,19 @@ final class LibraryStore: @unchecked Sendable {
         sql:
           "CREATE TABLE IF NOT EXISTS annotations (id TEXT PRIMARY KEY, value BLOB NOT NULL); CREATE TABLE IF NOT EXISTS backupSources (id TEXT PRIMARY KEY, value BLOB NOT NULL); CREATE TABLE IF NOT EXISTS photos (id TEXT PRIMARY KEY, sourceDate TEXT NOT NULL, value BLOB NOT NULL); CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT); CREATE TABLE IF NOT EXISTS transfers (id TEXT PRIMARY KEY, value BLOB NOT NULL); CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, value BLOB NOT NULL)"
       )
+      // Existing catalogs are indexed on opening; SQLite maintains the index for every write path.
+      try db.execute(sql: """
+        CREATE INDEX IF NOT EXISTS photos_owned_original ON photos(
+          json_extract(CAST(value AS TEXT),'$.manifest.ownerAccountId'),
+          json_extract(CAST(value AS TEXT),'$.metadata.originalSha256'),
+          json_extract(CAST(value AS TEXT),'$.transferState'))
+        """)
+      // Legacy change feeds hid unsupported media while advancing the same cursor.
+      // Re-read once with this reader's capability; the marker and cursor reset commit together.
+      if try String.fetchOne(db, sql: "SELECT value FROM state WHERE key='mediaCatalogVersion'") != "1" {
+        try db.execute(sql: "DELETE FROM state WHERE key='cursor'")
+        try db.execute(sql: "INSERT INTO state(key,value) VALUES('mediaCatalogVersion','1') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      }
     }
     let history = try database.read { db -> [String] in
       guard
@@ -123,16 +144,9 @@ final class LibraryStore: @unchecked Sendable {
   }
   func ownedOriginal(digest: String, accountId: String) throws -> LocalPhoto? {
     try database.read { db in
-      let cursor = try Row.fetchCursor(db, sql: "SELECT value FROM photos")
-      while let row = try cursor.next() {
-        let photo = try Wire.decode(LocalPhoto.self, row["value"] as Data)
-        if photo.manifest.ownerAccountId == accountId, photo.metadata.originalSha256 == digest,
-          ["pending", "committed", "saved"].contains(photo.transferState)
-        {
-          return rebased(photo)
-        }
-      }
-      return nil
+      guard let bytes = try Data.fetchOne(db, sql: Self.ownedOriginalQuery,
+        arguments: [accountId, digest]) else { return nil }
+      return rebased(try Wire.decode(LocalPhoto.self, bytes))
     }
   }
   func cursor() throws -> String? {
@@ -180,8 +194,18 @@ final class LibraryStore: @unchecked Sendable {
           try db.execute(sql: "DELETE FROM photos WHERE id=?", arguments: [change.entityId])
           try db.execute(sql: "DELETE FROM annotations WHERE id=?", arguments: [change.entityId])
         } else {
-          guard let photo = verified[change.entityId], photo.photoId == change.entityId else {
+          guard var photo = verified[change.entityId], photo.photoId == change.entityId else {
             throw FotoroError("Unverified catalog change")
+          }
+          if let bytes = try Data.fetchOne(db, sql: "SELECT value FROM photos WHERE id=?", arguments: [photo.id]),
+            let previous = try? Wire.decode(LocalPhoto.self, bytes),
+            previous.manifest == photo.manifest, previous.metadata == photo.metadata {
+            // A verified rescan changes neither the original nor its local immutable copies.
+            let cached = rebased(previous)
+            photo.originalURL = photo.originalURL ?? cached.originalURL
+            photo.thumbnailURL = photo.thumbnailURL ?? cached.thumbnailURL
+            photo.previewURL = photo.previewURL ?? cached.previewURL
+            photo.staged = cached.staged.merging(photo.staged) { _, current in current }
           }
           try put(photo, db: db)
         }

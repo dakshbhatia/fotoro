@@ -17,7 +17,7 @@ import type {LocalPhoto} from "../src/local/resources";
 const owner="55555555-5555-4555-8555-555555555555", other="66666666-6666-4666-8666-666666666666";
 const secret=accounts.testSecrets[0];
 const response=(value:unknown,status=200)=>new Response(JSON.stringify(value),{status});
-const page=()=>({version:1,changes:[],nextCursor:"1",hasMore:false});
+const page=()=>({version:1,mediaVersion:1,changes:[],nextCursor:"1",hasMore:false});
 const sessionResponse=()=>({version:1,accountId:owner,deviceId:crypto.randomUUID(),expiresAt:new Date(Date.now()+300_000).toISOString()});
 const vault=()=>({version:1,accountCard:{...accounts.accounts[0],accountId:owner},wrappers:[{version:1,wrapperId:crypto.randomUUID(),kind:"recovery",credentialId:null,prfSalt:null,verified:true,wrappedBundle:secret.encryptedBundle}]});
 const photo=(name="chosen.jpg"):LocalPhoto=>({id:name,file:new File([new Uint8Array([1,2,3,4])],name,{type:"image/jpeg"}),filename:name,date:"2026-10-02",dateSource:"selected",labels:["chosen"]});

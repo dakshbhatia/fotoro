@@ -1,3 +1,4 @@
+import {acceptedPhotoManifestKind, LIVE_PHOTO_TYPE} from "@fotoro/contracts/camera-media";
 import type {
   PhotoManifestV1,
   PhotoMetadataV1,
@@ -17,6 +18,7 @@ import {
   sodium,
   decryptMedia,
   verifyPayload,
+  decodeLivePhoto,
 } from "@fotoro/crypto";
 import { api, fetchCipher } from "../exchange/api";
 import { get, all, atomic, cacheCipher } from "../exchange/cache";
@@ -113,6 +115,7 @@ export async function photoBytes(
   signal?: AbortSignal,
 ) {
   signal?.throwIfAborted();
+  const session = requireVault();
   const rep =
     photo.manifest.representations.find((r) => r.binding.kind === kind) ??
     photo.manifest.representations.find((r) => r.binding.kind === "original")!;
@@ -129,6 +132,10 @@ export async function photoBytes(
     bytes.fill(0);
     throw new Error("ORIGINAL_DIGEST_MISMATCH");
   }
+  try {
+    if (rep.binding.kind === "original" && photo.metadata.mediaType === LIVE_PHOTO_TYPE) await decodeLivePhoto(bytes);
+    assertVault(session); signal?.throwIfAborted();
+  } catch (error) {bytes.fill(0); throw error;}
   return bytes;
 }
 export async function applyChanges(
@@ -156,8 +163,7 @@ export async function applyChanges(
       else {
         const payload = change.payload!;
         if (payload.accountId !== v.accountId) continue;
-        if (payload.kind !== "photo-manifest")
-          throw new Error("CATALOG_IDENTITY_MISMATCH");
+        acceptedPhotoManifestKind(payload.kind);
         const manifest = validateWire<PhotoManifestV1>(
           "PhotoManifestV1",
           JSON.parse(
@@ -186,11 +192,12 @@ export async function applyChanges(
 export async function syncCatalog(signal?: AbortSignal) {
   const session = requireVault();
   const id = session.accountId;
-  let cursor = await get<WrappedKeyV1>("settings", id + ":cursor");
+  const capability = await get<WrappedKeyV1>("settings", id + ":media-reader-v1");
+  let cursor = capability ? await get<WrappedKeyV1>("settings", id + ":cursor") : undefined;
   do {
     if (requireVault() !== session) throw new Error("VAULT_LOCKED");
     const page = await api<ChangePageV1>(
-      "/v1/changes?limit=100" +
+      "/v1/changes?limit=100&media=1" +
         (cursor && decryptPrivate<string | null>(cursor)
           ? "&cursor=" + encodeURIComponent(decryptPrivate<string>(cursor))
           : ""),
@@ -199,7 +206,12 @@ export async function syncCatalog(signal?: AbortSignal) {
       "GET",
       signal,
     );
+    assertVault(session);
+    if (page.mediaVersion !== 1) throw new Error("MEDIA_READER_UPDATE_REQUIRED");
     await applyChanges(page, session);
+    if (requireVault() !== session) throw new Error("VAULT_LOCKED");
+    await atomic([{store: "settings", key: id + ":media-reader-v1", value: encryptPrivate(true)}]);
+    if (requireVault() !== session) throw new Error("VAULT_LOCKED");
     if (!page.hasMore) break;
     cursor = await get("settings", id + ":cursor");
   } while (true);
@@ -220,7 +232,7 @@ export async function cachedCatalog() {
         ),
       ),
     );
-    if (signed.accountId !== v.accountId || signed.kind !== "photo-manifest" || manifest.ownerAccountId !== v.accountId || id !== v.accountId + ":" + manifest.photoId)
+    if (signed.accountId !== v.accountId || !["photo-manifest", "photo-media-manifest-v1"].includes(signed.kind) || manifest.ownerAccountId !== v.accountId || id !== v.accountId + ":" + manifest.photoId)
       throw new Error("CATALOG_BINDING_MISMATCH");
     const photo = await readPhoto(manifest);
     const annotation = await readAnnotations({ownerAccountId: manifest.ownerAccountId, photoId: manifest.photoId, originalSha256: photo.metadata.originalSha256}, v);

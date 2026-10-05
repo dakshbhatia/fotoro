@@ -201,6 +201,7 @@ app.get("/v1/changes", async (c) =>
       c.get("actor"),
       c.req.query("cursor") || null,
       Number(c.req.query("limit") || 100),
+      c.req.query("media") === "1",
     ),
   ),
 );
@@ -228,7 +229,7 @@ app.get("/v1/grants", async (c) =>
   c.json(await grants.inbox(c.env, c.get("actor"))),
 );
 app.get("/v1/grants/:id", async (c) =>
-  c.json(await grants.detail(c.env, c.get("actor"), c.req.param("id"))),
+  c.json(await grants.detail(c.env, c.get("actor"), c.req.param("id"), c.req.query("media") === "1")),
 );
 app.delete("/v1/grants/:id", async (c) =>
   c.json(await grants.revoke(c.env, c.get("actor"), c.req.param("id"))),

@@ -4,10 +4,11 @@ import { type LocalPhoto, LocalResources } from "./resources";
 import { normalizeSearch, type SearchResult, type SearchMeaning } from "./search";
 import type { LocalOcrPhoto } from "./useLocalOcr";
 export function meaningRelation(meaning: SearchMeaning) {
-  return meaning.kind === "label" ? "Supplied label" : meaning.kind === "date" ? "Date" : "Text mention";
+  return meaning.kind === "visual" ? "Visual similarity" : meaning.kind === "label" ? "Supplied label" : meaning.kind === "date" ? "Date" : "Text mention";
 }
 function evidence(photo: LocalOcrPhoto, meaning: SearchMeaning) {
   const source = meaning.evidence[photo.id] ?? meaning.kind;
+  if (source === "visual") return "Visual similarity";
   if (source === "label") return "Supplied label · " + meaning.term;
   if (source === "date") return photo.dateSource === "photos" ? "Date from Photos" : photo.dateSource === "exif" ? "Date from the photo" : "Date selected · capture date unavailable";
   const term = normalizeSearch(meaning.term), extra = photo as LocalOcrPhoto & {caption?: string; keywords?: string[]; facts?: string[]};
@@ -20,6 +21,18 @@ function evidence(photo: LocalOcrPhoto, meaning: SearchMeaning) {
     if (line) return "Text in photo · " + line.slice(0, 180);
   }
   return (source === "fact" ? "Source fact · " : "Text mention · ") + meaning.term;
+}
+export function SearchMatchDetails({photo, meaning, coverage, committed, pinned, canCorrect, onAccept, onConfirm, onPin}: {
+  photo: LocalPhoto; meaning: SearchMeaning; coverage: string; committed?: string; pinned?: string; canCorrect: boolean;
+  onAccept: (meaning: SearchMeaning) => void; onConfirm: (id: string) => void; onPin: (id: string) => void;
+}) {
+  return <aside className="search-info" aria-label="About this match">
+    <p className="hint">{coverage}</p><p className="local-evidence">{evidence(photo as LocalOcrPhoto, meaning)}</p>
+    {meaning.kind !== "visual" && <>
+      <button aria-pressed={committed === meaning.id} onClick={() => onAccept(meaning)}>Search this {meaning.kind === "label" ? "label" : meaning.kind === "date" ? "date" : "text"}</button>
+      {canCorrect && <details><summary>Adjust future matches</summary><p className="hint">These choices stay on this device.</p><div className="actions"><button onClick={() => onConfirm(photo.id)}>This is the photo</button><button aria-pressed={pinned === photo.id} onClick={() => onPin(photo.id)}>{pinned === photo.id ? "Preferred photo" : "Prefer this photo"}</button></div></details>}
+    </>}
+  </aside>;
 }
 export function LocalSearch({photos, result, resources, committed, pinned, canCorrect = true, coverage, onAccept, onNavigate, onOpen, onConfirm, onPin, onFailure, selection, reasons, emptyMessage, emptyHint}: {
   photos: LocalPhoto[]; result: SearchResult; resources: LocalResources; committed?: string; pinned?: string;
@@ -48,7 +61,7 @@ export function LocalSearch({photos, result, resources, committed, pinned, canCo
     if (id) onNavigate(id);
   };
   const selecting = !!photo && !!selection?.eligible(photo.id);
-  return <section className="local-search" aria-label="Search result">
+  return <section className="local-search" aria-label="Search result" aria-busy={result.searching || undefined}>
     <div className="search-caption">{result.photoIds.length > 1 && <p className="local-coverage" role="status">{result.photoIds.length} matches</p>}<button className="text-button" aria-label="Search details" aria-expanded={details} onClick={() => setDetails(!details)}><Icon kind="info" /></button></div>
     {photo && meaning ? <>
       <button className="local-leading" id={"local-photo-" + photo.id} aria-label={(selecting ? "Select " : "Open ") + photo.filename} aria-pressed={selecting ? selection!.ids.has(photo.id) : undefined} disabled={selecting && selection!.disabled}
@@ -69,11 +82,7 @@ export function LocalSearch({photos, result, resources, committed, pinned, canCo
       </div>}
       {reasons?.get(photo.id)?.length ? <p className="find-shot-reason">{reasons.get(photo.id)!.join(" · ")}</p> : null}
       {result.meanings.some(value => value.id !== meaning.id && value.photoIds.some(id => !meaning.photoIds.includes(id))) && <div className="local-alternatives" aria-label="Other matches"><span>Also try</span>{result.meanings.filter(value => value.id !== meaning.id && value.photoIds.some(id => !meaning.photoIds.includes(id))).slice(0, 3).map(value => <button key={value.id} onClick={() => onAccept(value)}>{value.term}</button>)}</div>}
-      {details && <aside className="search-info" aria-label="About this match">
-        <p className="hint">{coverage}</p><p className="local-evidence">{evidence(photo, meaning)}</p>
-        <button aria-pressed={committed === meaning.id} onClick={() => onAccept(meaning)}>Search this {meaning.kind === "label" ? "label" : meaning.kind === "date" ? "date" : "text"}</button>
-        {canCorrect && <details><summary>Adjust future matches</summary><p className="hint">These choices stay on this device.</p><div className="actions"><button onClick={() => onConfirm(photo.id)}>This is the photo</button><button aria-pressed={pinned === photo.id} onClick={() => onPin(photo.id)}>{pinned === photo.id ? "Preferred photo" : "Prefer this photo"}</button></div></details>}
-      </aside>}
-    </> : <div className="empty"><p>{emptyMessage ?? "No matching photos"}</p><p className="hint">{emptyHint ?? "Try a label, a date or words in the photo."}</p>{details && <p className="hint">{coverage}. Text is searchable after it has been read on this device.</p>}</div>}
+      {details && <SearchMatchDetails photo={photo} meaning={meaning} coverage={coverage} committed={committed} pinned={pinned} canCorrect={canCorrect} onAccept={onAccept} onConfirm={onConfirm} onPin={onPin} />}
+    </> : <div className="empty"><p role={result.searching ? "status" : undefined}>{result.searching ? "Searching photos…" : emptyMessage ?? "No matching photos"}</p>{!result.searching && <p className="hint">{emptyHint ?? "Try a label, a date or words in the photo."}</p>}{details && <p className="hint">{coverage}. Text is searchable after it has been read on this device.</p>}</div>}
   </section>;
 }

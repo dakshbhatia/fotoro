@@ -24,7 +24,7 @@ import {
   isPublicDemoAccount,
 } from "./exchange/api";
 import { Exchange } from "./exchange/Exchange";
-import {IncomingShareIntent, grantState} from "./exchange/sharing";
+import {IncomingShareIntent, grantState, ShareSelection} from "./exchange/sharing";
 import {ReceivedAccessRefresh} from "./exchange/received-access";
 import {
   stageImport,
@@ -45,6 +45,7 @@ import {
 import { syncSelectedSequential } from "./exchange/selected";
 import { clearAccount } from "./exchange/cache";
 import { localOriginalDigest, queueAnnotations, queueLocalAnnotations, pendingAnnotations, resolveAnnotationConflict, type PendingAnnotation } from "./exchange/annotations";
+import {useSemanticFind} from "./local/useSemanticFind";
 import { PhotoSearchIndex, normalizeSearch } from "./local/search";
 import type { LocalPhoto } from "./local/resources";
 import { cloudSearchRecords } from "./library/search";
@@ -62,6 +63,9 @@ import type {UnlockedVault} from "./vault/vault";
 import {subscribeSavedRefresh} from "./library/consumer-refresh";
 import {saveQueuedAnnotations} from "./library/consumer-annotation-save";
 import type {ConsumerPhotoChanges} from "./library/consumer-changes";
+import {canShareOriginals, downloadOriginal, OriginalShareAttempt, prepareSavedOriginals, savedOriginalSelectionCurrent} from "./library/system-share";
+import {cameraOriginalFiles} from "./media/camera-original";
+interface SelectedOriginalContext {snapshot: ShareSelection; session: UnlockedVault; controller: AbortController;}
 const noLocalPhotos: LocalPhoto[] = [];
 const SearchIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -86,6 +90,7 @@ export default function CloudApp({
   incomingError = "",
   onIncomingDone,
   sharePhotos = null,
+  shareKind = "fotoro",
   onShareDone,
 }: {
   onBack: () => void;
@@ -99,6 +104,7 @@ export default function CloudApp({
   incomingError?: string;
   onIncomingDone?: () => void;
   sharePhotos?: Photo[] | null;
+  shareKind?: "fotoro" | "originals";
   onShareDone?: () => void;
 }) {
   const [account, setAccount] = useState(() => {
@@ -123,6 +129,10 @@ export default function CloudApp({
     [recovery, setRecovery] = useState(""),
     [pending, setPending] = useState<PendingImport[]>([]);
   const [receivedContext, setReceivedContext] = useState<{grant: GrantV1; sender: string} | null>(null);
+  const [preparingOriginals, setPreparingOriginals] = useState(false), [sharingOriginals, setSharingOriginals] = useState(false);
+  const [preparedOriginals, setPreparedOriginals] = useState<{files: File[]; context: SelectedOriginalContext} | null>(null);
+  const [originalShareAttempt] = useState(() => new OriginalShareAttempt());
+  const originalContext = useRef<SelectedOriginalContext | null>(null), originalPanel = useRef<HTMLElement>(null), originalButton = useRef<HTMLButtonElement>(null), hadOriginalOptions = useRef(false);
   const [receivedNow, setReceivedNow] = useState(Date.now);
   const [receivedAccessRefresh] = useState(() => new ReceivedAccessRefresh());
   const [annotationError, setAnnotationError] = useState<{message: string; photoId?: string; originalSha256?: string} | null>(null);
@@ -169,6 +179,31 @@ export default function CloudApp({
   localPhotosRef.current = localPhotos;
   const currentCatalog = useRef(photos);
   currentCatalog.current = photos;
+  const currentSelection = useRef(selected), currentReceived = useRef(received);
+  currentSelection.current = selected; currentReceived.current = received;
+  const originalsCurrent = (context: SelectedOriginalContext) => originalContext.current === context && context.snapshot.current && activeRef.current &&
+    document.visibilityState !== "hidden" && !currentReceived.current && sameVault(context.session) &&
+    savedOriginalSelectionCurrent(context.snapshot.photos, currentCatalog.current, currentSelection.current, context.session.accountId);
+  const cancelOriginals = () => {
+    const context = originalContext.current;
+    originalContext.current = null;
+    context?.controller.abort(); context?.snapshot.dispose();
+    setPreparedOriginals(null); setPreparingOriginals(false);
+  };
+  useDialogFocus(originalPanel, cancelOriginals, !!preparedOriginals);
+  useEffect(() => {
+    if (preparedOriginals) {hadOriginalOptions.current = true; return;}
+    if (!hadOriginalOptions.current) return;
+    hadOriginalOptions.current = false;
+    const frame = requestAnimationFrame(() => originalButton.current?.focus({preventScroll: true}));
+    return () => cancelAnimationFrame(frame);
+  }, [preparedOriginals]);
+  useEffect(() => {if (originalContext.current && !originalsCurrent(originalContext.current)) cancelOriginals();}, [photos, selected, active, account, received]);
+  useEffect(() => {
+    const hide = () => {if (document.visibilityState === "hidden") cancelOriginals();};
+    document.addEventListener("visibilitychange", hide); window.addEventListener("pagehide", cancelOriginals);
+    return () => {document.removeEventListener("visibilitychange", hide); window.removeEventListener("pagehide", cancelOriginals); cancelOriginals();};
+  }, []);
   const allLocalFiles = [...new Set([...(saveIntent?.pending ? saveIntent.snapshot.files : []), ...pickedFiles])];
   const catalogDigests = new Set(photos.map(photo => photo.metadata.originalSha256));
   const localSources = new Map(localPhotos.flatMap(photo => photo.file ? [[photo.file, photo] as const] : []));
@@ -180,6 +215,7 @@ export default function CloudApp({
   const accountReference = account ? account.slice(0, 8) + "…" + account.slice(-4) : "";
   const publicDemo = fixtureMode || isPublicDemoAccount(account);
   const clear = () => {
+    cancelOriginals();
     for (const photo of [...photos, ...(received ?? [])])
       photo.metadataKey.fill(0);
     setAccount("");
@@ -544,8 +580,9 @@ export default function CloudApp({
   useEffect(() => {onPhotoChanges?.(photoChanges);}, [photoChanges, onPhotoChanges]);
   const searchable = received ?? photos;
   const index = useMemo(() => new PhotoSearchIndex(cloudSearchRecords(searchable)), [searchable]);
-  const searchResult = useMemo(() => index.search(query, {scope: "account:" + account, committedMeaning}), [index, query, account, committedMeaning]);
+  const lexicalSearchResult = useMemo(() => index.search(query, {scope: "account:" + account, committedMeaning}), [index, query, account, committedMeaning]);
   const findPhotos = useMemo(() => savedSearchPhotos(ownedSnapshot, []).map(photo => ({...photo, id: photo.id.slice(6)})), [ownedSnapshot]);
+  const searchResult = useSemanticFind(findPhotos, lexicalSearchResult, active && unlocked && !received, ownedSnapshot?.token, committedMeaning);
   const findMatches = useMemo(() => findMatchPhotos(findPhotos, searchResult), [findPhotos, searchResult]);
   const bestShots = useFindBestShots(findMatches, normalizeSearch(query) && !received ? JSON.stringify([query, searchResult.scope, searchResult.meaning?.id]) : "", ownedSnapshot,
     () => activeRef.current && !!ownedSnapshot?.current(), active && unlocked && !received);
@@ -624,6 +661,35 @@ export default function CloudApp({
     });
   }, [photos]);
   const chosen = photos.filter((p) => selected.has(p.manifest.photoId));
+  const prepareSelectedOriginals = async (items = chosen) => {
+    if (originalContext.current || originalShareAttempt.pending || !items.length || received || !activeRef.current || document.visibilityState === "hidden") return;
+    const session = requireVault(), ids = new Set(items.map(photo => photo.manifest.photoId));
+    if (!savedOriginalSelectionCurrent(items, currentCatalog.current, ids, session.accountId)) return;
+    currentSelection.current = ids; setSelected(ids);
+    const context = {snapshot: new ShareSelection(items), session, controller: new AbortController()};
+    originalContext.current = context;
+    setPreparingOriginals(true); setStatus("");
+    try {
+      const files = await prepareSavedOriginals(context.snapshot.photos, context.controller.signal, () => originalsCurrent(context), photoBytes, (bytes, photo) => cameraOriginalFiles(bytes, photo.metadata));
+      if (originalsCurrent(context)) setPreparedOriginals({files, context});
+    } catch (error) {
+      if (originalsCurrent(context) && (error as Error).name !== "AbortError") setStatus("Photos could not be prepared. Check your connection and try again.");
+      if (originalContext.current === context) cancelOriginals();
+    } finally {if (originalContext.current === context) setPreparingOriginals(false);}
+  };
+  const sendSelectedOriginals = (prepared: NonNullable<typeof preparedOriginals>, download = false) => {
+    if (originalShareAttempt.pending || sharingOriginals || !originalsCurrent(prepared.context)) return;
+    const current = () => originalsCurrent(prepared.context);
+    setSharingOriginals(true); setStatus("");
+    const result = download ? originalShareAttempt.runFiles(prepared.files, current, {canShare: () => false, download: downloadOriginal})
+      : originalShareAttempt.runFiles(prepared.files, current);
+    void result.then(outcome => {
+      if (current() && outcome !== "cancelled" && outcome !== "busy") {
+        cancelOriginals(); if (outcome === "downloaded") setStatus("Original downloads started.");
+      }
+    }).catch(() => {if (current()) setStatus("Sharing could not finish. You can download the originals instead.");})
+      .finally(() => setSharingOriginals(false));
+  };
   const toggleSelection = (id: string) => setSelected(previous => {
     const next = new Set(previous);
     next.has(id) ? next.delete(id) : next.add(id);
@@ -640,11 +706,16 @@ export default function CloudApp({
     if (incoming.current(session)) openSharing();
   }, [active, account, incoming]);
   useEffect(() => {
-    if (active && account && sharePhotos?.length) openSharing(sharePhotos);
-  }, [active, account, sharePhotos]);
+    if (!active || !account || !sharePhotos?.length) return;
+    if (shareKind === "originals") {
+      if (received) {setReceived(null); setReceivedContext(null); return;}
+      void prepareSelectedOriginals(sharePhotos); onShareDone?.();
+    }
+    else openSharing(sharePhotos);
+  }, [active, account, sharePhotos, shareKind, received]);
   return (
     <>
-      <main className={"cloud-library" + (selecting ? " exchange-selection" : "")} inert={viewing || exchange || menu ? true : undefined}>
+      <main className={"cloud-library" + (selecting ? " exchange-selection" : "")} aria-busy={searchResult.searching || undefined} inert={viewing || exchange || menu || preparedOriginals ? true : undefined}>
         <header className="consumer-navigation">
           {unlocked ? <nav className="consumer-scope-menu" aria-label="Photo library"><select ref={scopeSelector} aria-label="Photo library" value={received ? "shared" : "saved"} onChange={event => {
             if (event.target.value === "photos") onBack();
@@ -793,9 +864,9 @@ export default function CloudApp({
                 onOpen={id => selecting && !received ? toggleSelection(id) : setViewer(id)}
               />
             ) : (
-              <div className="empty">
-                <p>
-                  {bestShots.active ? bestShots.busy ? "Choosing best shots…" : "No best shots to suggest" : query
+              <div className="empty" aria-busy={searchResult.searching || undefined}>
+                <p role={searchResult.searching ? "status" : undefined}>
+                  {searchResult.searching ? "Searching photos…" : bestShots.active ? bestShots.busy ? "Choosing best shots…" : "No best shots to suggest" : query
                     ? "No matching photos"
                     : received
                       ? "No received photos"
@@ -810,8 +881,9 @@ export default function CloudApp({
             )}
             {!received && selected.size > 0 && <div className="consumer-selection glass" aria-label="Selected photos">
               <span role="status">{selected.size} selected</span>
-              <button onClick={() => setSelected(new Set())}>Clear</button>
-              <button className="primary-action" onClick={() => openSharing(chosen)}>Share in Fotoro</button>
+              <button disabled={sharingOriginals} onClick={() => setSelected(new Set())}>Clear</button>
+              <button ref={originalButton} className="primary-action" disabled={preparingOriginals || sharingOriginals} onClick={() => void prepareSelectedOriginals()}>{preparingOriginals ? "Preparing…" : "Share"}</button>
+              <button disabled={preparingOriginals || sharingOriginals} onClick={() => openSharing(chosen)}>Share in Fotoro</button>
             </div>}
             <input
               ref={input}
@@ -952,6 +1024,14 @@ export default function CloudApp({
             </details>
           </aside>
         )}
+      {active && preparedOriginals && originalsCurrent(preparedOriginals.context) && <aside className="original-share saved-original-share" ref={originalPanel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Share selected photos">
+        <button className="close" aria-label="Close share options" disabled={sharingOriginals} onClick={cancelOriginals}>Close</button>
+        <h2>Share {preparedOriginals.context.snapshot.photos.length} {preparedOriginals.context.snapshot.photos.length === 1 ? "photo" : "photos"}</h2>
+        <div className="actions">
+          {canShareOriginals(preparedOriginals.files) && <button className="primary-action" disabled={sharingOriginals} onClick={() => sendSelectedOriginals(preparedOriginals)}>{sharingOriginals ? "Sharing…" : "Share photos"}</button>}
+          <button disabled={sharingOriginals} onClick={() => sendSelectedOriginals(preparedOriginals, true)}>Download originals</button>
+        </div>
+      </aside>}
       {active && exchange && unlocked && (
         <Exchange
           key={exchangeVersion}

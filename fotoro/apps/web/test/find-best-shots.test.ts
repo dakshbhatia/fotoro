@@ -13,9 +13,9 @@ const photo = (id: string, label = "trip", date = "2026-09-01T12:00:00Z"): Local
   date, dateSource: "exif", captureVerified: true, width: 800, height: 600, labels: [label], file: new File([id], id + ".png")});
 const signal = (sharpness = .1): PhotoSignals => ({hash: 0n, luminance: .5, contrast: .15, sharpness, color: [120, 120, 120]});
 
-test("a small date-and-label Find gets its own quality quota instead of intersecting home Picks", () => {
+test("a date-and-label Find chooses highlights within its matches without inheriting home selection", () => {
   const matches = [photo("soft", "trip"), photo("clear", "trip", "2026-09-01T12:02:00Z"), photo("middle", "trip", "2026-09-01T12:04:00Z")];
-  const outside = Array.from({length: 100}, (_, i) => ({...photo("other" + i, "other", "2026-10-01T12:00:00Z"), favorite: true}));
+  const outside = Array.from({length: 100}, (_, i) => ({...photo("other" + i, "other", "2026-09-01T12:00:00Z"), favorite: true}));
   const photos = [...matches, ...outside], sources = [...photos], selected = new Set(["soft", "other1"]);
   const result = new PhotoSearchIndex(photos).search("trip September 2026");
   const signals = new Map(photos.map(value => [value.id, signal(value.id === "clear" ? .4 : .01)]));
@@ -44,7 +44,7 @@ test("verified similar-shot groups are anchored within the matched subset and do
   const review = recommendPhotos(subset, new Map(photos.map(value => [value.id, signal(value.id === "clear" ? .4 : .01)])));
   assert.equal(review.groupCount, 2); assert.equal(review.duplicateCount, 1);
   assert.deepEqual([...review.ids], ["clear"]);
-  assert.deepEqual(review.reasons.get("clear"), ["Clarity and exposure", "Representative of 2 similar photos"]);
+  assert.deepEqual(review.reasons.get("clear"), ["Moment highlight", "Representative of 2 similar photos"]);
   const unverified = subset.map(value => ({...value, captureVerified: undefined}));
   assert.equal(recommendPhotos(unverified, new Map(unverified.map(value => [value.id, signal()]))).groupCount, 3);
 });

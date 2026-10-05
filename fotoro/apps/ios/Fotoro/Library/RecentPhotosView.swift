@@ -2,6 +2,9 @@ import Photos
 import PhotosUI
 import SwiftUI
 import UIKit
+#if !FOTORO_LOCAL_PREVIEW
+import AVKit
+#endif
 
 struct PhotosImage: View {
   let photo: RecentPhoto
@@ -117,7 +120,15 @@ struct RecentPhotoViewer: View {
         ForEach(photos) { photo in
           Group {
             if shouldLoad(photo) {
+              #if !FOTORO_LOCAL_PREVIEW
+              if photo.isVideo || photo.isLivePhoto {
+                RecentMotionPhotoPage(photo: photo, store: store, isCurrent: photo.id == selected)
+              } else {
+                PhotosImage(photo: photo, store: store, large: true).scaledToFit()
+              }
+              #else
               PhotosImage(photo: photo, store: store, large: true).scaledToFit()
+              #endif
             } else {
               Color.black
             }
@@ -232,7 +243,12 @@ struct RecentPhotosView: View {
   @State private var homeAuthenticationTask: Task<Void, Never>?
   @State private var selectedSavedPhotos = SavedPhotoSelection()
   @State private var sharedSavedPhotos: SharedPhotosPresentation?
+  @State private var savedShareSources: [LocalPhoto] = []
+  @State private var savedShareBinding: SavedLibraryOpenBinding?
+  @State private var savedShareExports: [URL] = []
+  @State private var deviceShareExports: [URL] = []
   @State private var savedRefresh = SavedLibraryRefresh()
+  @State private var savedHasMore = true
   @State private var savedFavoritesOnly = false
   @State private var savedScrollID: String?
 #endif
@@ -266,6 +282,7 @@ struct RecentPhotosView: View {
     if selecting || selectedCount > 0 { return true }
     #if !FOTORO_LOCAL_PREVIEW
       if query.isEmpty, scope == .saved { return !ownedPhotos.isEmpty }
+      if query.isEmpty, allPhotos { return !timelineGroups.isEmpty }
       if !savedPhotos.isEmpty { return true }
     #endif
     return !visible.isEmpty
@@ -340,11 +357,31 @@ struct RecentPhotosView: View {
     Set(selected.map(ConsumerPhotoReference.device) + selectedSavedPhotos.ids.map(ConsumerPhotoReference.saved))
   }
   private var ownedPhotos: [LocalPhoto] {
+    allOwnedPhotos.filter { !savedFavoritesOnly || services?.annotation($0).favorite == true }
+  }
+  private var allOwnedPhotos: [LocalPhoto] {
     guard let services, services.photoAccountAccess != nil else { return [] }
     return services.photos.filter {
       $0.manifest.ownerAccountId == services.session.accountId && ["committed", "saved"].contains($0.transferState)
-        && (!savedFavoritesOnly || services.annotation($0).favorite == true)
     }
+  }
+  private var timelineGroups: [PhotoBrowseGroup] {
+    let device = baseHomePhotos.map { photo in
+      PhotoBrowseItem(source: RecentPhotoSource(photo), facts: RecentPhotoFacts(
+        capturedAt: photo.capturedAt, favorite: photo.isFavorite, screenshot: photo.isScreenshot,
+        livePhoto: photo.isLivePhoto, location: photo.location))
+    }
+    let saved = allOwnedPhotos.map { photo in
+      let annotation = services?.annotation(photo)
+      return PhotoTimelineSavedItem(photo: photo, facts: RecentPhotoFacts(
+        capturedAt: Wire.parseDate(photo.metadata.sourceDate), favorite: annotation?.favorite == true,
+        screenshot: annotation?.facts?.contains("screenshot") == true,
+        livePhoto: photo.metadata.mediaType == CameraMedia.liveType, location: nil))
+    }
+    return PhotoTimelinePolicy.groups(device: device, saved: saved,
+      sources: (try? services?.store.backupSources()) ?? [],
+      account: services?.photoAccountAccess?.account, filter: browseFilter,
+      grouping: groupMoments ? .moments : .days)
   }
   private var savedDays: [(String, [LocalPhoto])] {
     let groups = Dictionary(grouping: ownedPhotos) { photo in
@@ -414,11 +451,6 @@ struct RecentPhotosView: View {
       current.metadata == photo.metadata, current.manifest == photo.manifest else { return }
     selectedSavedPhotos.toggle(photo)
   }
-  private func shareSelectedSavedPhotos() {
-    guard let services else { return }
-    do { sharedSavedPhotos = SharedPhotosPresentation(photos: try selectedSavedPhotos.resolve(using: services.consumerSavedPhoto)) }
-    catch { validateSavedPresentation(); store.error = error.localizedDescription }
-  }
   private var searchTaskID: ConsumerSearchPresentationID {
     ConsumerSearchPresentationID(query: query, library: search.libraryGeneration,
       results: search.response.results, indexed: search.response.indexed,
@@ -461,15 +493,23 @@ struct RecentPhotosView: View {
         } catch { store.error = error.localizedDescription }
       }
       .task(id: searchTaskID) { await updateSearch() }
-      .onChange(of: services?.consumerCatalogGeneration) { cancelBestShots(); validateSavedPresentation() }
-      .onChange(of: services?.session.accountId) { cancelBestShots() }
+      .onChange(of: services?.consumerCatalogGeneration) {
+        savedHasMore = true
+        cancelBestShots(); validateSavedPresentation()
+      }
+      .onChange(of: services?.session.accountId) {
+        cancelBestShots()
+        if !savedShareSources.isEmpty { shareTask?.cancel(); cleanupShare() }
+      }
       .onChange(of: searchHits) { cancelBestShots() }
       .onChange(of: services?.vault.generation) {
+        savedHasMore = true
         cancelBestShots()
         store.restartAnalysis()
         savedViewer = nil
         selectedSavedPhotos.removeAll()
         sharedSavedPhotos = nil
+        if !savedShareSources.isEmpty { shareTask?.cancel(); cleanupShare() }
         searchHits.removeAll { if case .saved = $0.photo { return true }; return false }
         savedResults = [:]
       }
@@ -522,7 +562,7 @@ struct RecentPhotosView: View {
           cancelBestShots()
           queryFocused = false
           #if !FOTORO_LOCAL_PREVIEW
-            if scope != .saved { homeAuthenticationTask?.cancel(); homeAuthenticationTask = nil; savedRefresh.cancel() }
+            homeAuthenticationTask?.cancel(); homeAuthenticationTask = nil; savedRefresh.cancel()
           #endif
         }
         .onChange(of: search.libraryGeneration) {
@@ -547,6 +587,7 @@ struct RecentPhotosView: View {
 #if !FOTORO_LOCAL_PREVIEW
             services?.setPhotoSyncForeground(false)
             if scenePhase == .background {
+              shareTask?.cancel(); cleanupShare()
               savedPassword = nil
               homeAuthenticationTask?.cancel()
               homeAuthenticationTask = nil
@@ -592,7 +633,7 @@ struct RecentPhotosView: View {
     #endif
   }
   @ViewBuilder private var deviceContent: some View {
-    let mode = RecentPhotosContentMode.select(query: query, opened: store.opened, status: store.status)
+    let mode = contentMode
     if mode == .openPhotos {
       VStack(spacing: 18) {
         Image(systemName: "photo.on.rectangle").font(.system(size: 44))
@@ -656,13 +697,16 @@ struct RecentPhotosView: View {
             choseAlternative: { queryFocused = false })
 #endif
         } else {
+          #if !FOTORO_LOCAL_PREVIEW
+            if allPhotos { timelineFeedback }
+          #endif
           if !allPhotos, store.picksSnapshot == nil || (store.picksSnapshot?.recommendations.unassessed ?? 0) > 0 {
             galleryHeader
           }
           gallery
-          if store.photos.isEmpty && !(allPhotos && store.hasMorePhotos) {
+          if browseLibraryIsEmpty && !hasMoreBrowsePhotos {
             ContentUnavailableView("No photos", systemImage: "photo", description: Text("Choose photos Fotoro may access in Settings."))
-          } else if browseFilter != .all, homePhotos.isEmpty, !(allPhotos && store.hasMorePhotos) {
+          } else if browseFilter != .all, browseGalleryIsEmpty, !hasMoreBrowsePhotos {
             ContentUnavailableView("No matching photos", systemImage: "line.3.horizontal.decrease",
               description: Text("Change the filter to see more photos."))
           } else if !allPhotos, store.picksSnapshot != nil, homePhotos.isEmpty {
@@ -675,8 +719,70 @@ struct RecentPhotosView: View {
         }
       }
       .scrollPosition(id: browseScrollBinding, anchor: .top).scrollDismissesKeyboard(.interactively)
+      #if !FOTORO_LOCAL_PREVIEW
+        .refreshable {
+          if allPhotos, let services { await savedRefresh.refresh(services) }
+        }
+        .task(id: timelineReadPresentation) {
+          guard allPhotos, query.isEmpty, scenePhase == .active, let services,
+            services.photoAccountAccess != nil else { return }
+          await savedRefresh.open(services, recheck: true)
+        }
+      #endif
     }
   }
+  private var contentMode: RecentPhotosContentMode {
+    #if !FOTORO_LOCAL_PREVIEW
+      if query.isEmpty, allPhotos, services?.photoAccountAccess != nil { return .gallery }
+    #endif
+    return RecentPhotosContentMode.select(query: query, opened: store.opened, status: store.status)
+  }
+  private var browseLibraryIsEmpty: Bool {
+    #if !FOTORO_LOCAL_PREVIEW
+      if allPhotos { return store.photos.isEmpty && allOwnedPhotos.isEmpty && !savedRefresh.isRefreshing }
+    #endif
+    return store.photos.isEmpty
+  }
+  private var browseGalleryIsEmpty: Bool {
+    #if !FOTORO_LOCAL_PREVIEW
+      if allPhotos { return timelineGroups.isEmpty }
+    #endif
+      return homePhotos.isEmpty
+  }
+  private var hasMoreBrowsePhotos: Bool {
+    guard allPhotos else { return false }
+    #if !FOTORO_LOCAL_PREVIEW
+      return store.hasMorePhotos || (savedHasMore && services?.photoAccountAccess != nil)
+    #else
+      return store.hasMorePhotos
+    #endif
+  }
+  #if !FOTORO_LOCAL_PREVIEW
+    private var timelineReadPresentation: SavedLibraryReadPresentation? {
+      guard let services, services.photoAccountAccess != nil else { return nil }
+      return SavedLibraryReadPresentation(services, isActive: allPhotos && query.isEmpty && scenePhase == .active)
+    }
+    @ViewBuilder private var timelineFeedback: some View {
+      if !RecentPhotosPolicy.canRead(store.status) {
+        HStack {
+          Text("Add photos from this iPhone").font(.footnote).foregroundStyle(.secondary)
+          Spacer()
+          if store.status == .notDetermined {
+            Button("Open Photos") { Task { await store.open(); search.open(status: store.status) } }
+          } else {
+            Button("Open Settings", action: openSettings)
+          }
+        }.padding(.horizontal, 16).padding(.vertical, 10)
+      }
+      if savedRefresh.isRefreshing { ProgressView("Loading photos…").font(.footnote).padding() }
+      if let error = savedRefresh.error {
+        VStack(spacing: 8) {
+          Text(error).font(.footnote).foregroundStyle(.secondary)
+          if let services { Button("Try again") { Task { await savedRefresh.refresh(services) } } }
+        }.padding()
+      }
+    }
+  #endif
   private var browseScrollBinding: Binding<String?> {
     Binding(get: { query.isEmpty ? browseScrollIDs[scope] : nil }, set: {
       if query.isEmpty { browseScrollIDs[scope] = $0 }
@@ -757,7 +863,9 @@ struct RecentPhotosView: View {
               guard let originalServices, let catalog,
                 let shown = savedResults[id], let current = try originalServices.consumerSavedPhoto(id),
                 shown.metadata == current.metadata, shown.manifest == current.manifest else { throw CancellationError() }
-              let preview = try await cachedBestShotsPreview(current, root: catalog.root)
+              try await originalServices.ensurePreview(current)
+              guard let withPreview = try originalServices.consumerSavedPhoto(id) else { throw CancellationError() }
+              let preview = try await cachedBestShotsPreview(withPreview, root: catalog.root)
               try Task.checkCancellation()
               guard valid() else { throw CancellationError() }
               let annotations = originalServices.annotation(current)
@@ -863,7 +971,14 @@ struct RecentPhotosView: View {
       .frame(minHeight: 44).disabled(preparingShare)
       .accessibilityIdentifier("gallery.select")
   }
-  private var gallery: some View {
+  @ViewBuilder private var gallery: some View {
+    #if !FOTORO_LOCAL_PREVIEW
+      if allPhotos { timelineGallery } else { deviceGallery }
+    #else
+      deviceGallery
+    #endif
+  }
+  private var deviceGallery: some View {
     let current = Dictionary(baseHomePhotos.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
     return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 2), spacing: 3) {
       ForEach(homeGroups) { group in
@@ -898,6 +1013,64 @@ struct RecentPhotosView: View {
       }
     }.scrollTargetLayout()
   }
+#if !FOTORO_LOCAL_PREVIEW
+  private var timelineGallery: some View {
+    let device = Dictionary(baseHomePhotos.map { (ConsumerPhotoReference.device($0.id).id, $0) }, uniquingKeysWith: { _, last in last })
+    let saved = Dictionary(allOwnedPhotos.map { (ConsumerPhotoReference.saved($0.id).id, $0) }, uniquingKeysWith: { _, last in last })
+    return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 2), spacing: 3) {
+      ForEach(timelineGroups) { group in
+        Section {
+          ForEach(group.sources, id: \.id) { source in
+            if let photo = device[source.id], photo.sourceRevision == source.revision {
+              RecentPhotoCell(photo: photo, store: store, selected: selected.contains(photo.id), open: {
+                if selecting { toggleSelection(photo) } else { openViewer(photo) }
+              }, toggle: { toggleSelection(photo) })
+                .id(source.id).onAppear { loadMoreDevicePhotos(after: photo.id) }
+            } else if let photo = saved[source.id] {
+              LibraryPhotoCell(photo: photo, isSelected: selectedSavedPhotos.contains(photo.id), open: {
+                if selecting { toggleSavedSelection(photo) }
+                else { savedViewer = SavedPhotoViewerPresentation(initial: photo, photos: allOwnedPhotos) }
+              }, toggleSelection: { toggleSavedSelection(photo) }, appeared: {})
+                .id(source.id)
+            }
+          }
+        } header: {
+          HStack {
+            Text(group.start?.formatted(date: .abbreviated, time: .omitted) ?? "Date unavailable")
+            if groupMoments, let start = group.start {
+              Text(start.formatted(date: .omitted, time: .shortened)).foregroundStyle(.secondary)
+            }
+            Spacer()
+          }.font(.subheadline).padding(.horizontal).padding(.vertical, 12)
+        }
+      }
+      if store.hasMorePhotos {
+        Section {} footer: {
+          ProgressView(browseFilter == .all ? "Loading photos…" : "Looking for matching photos…")
+            .font(.footnote).padding().frame(maxWidth: .infinity)
+            .task(id: PhotoBrowseContinuation(page: store.browsePage, filter: browseFilter, isActive: scenePhase == .active)) {
+              guard scenePhase == .active else { return }
+              await store.loadMorePhotos(matching: browseFilter, whileActive: { scenePhase == .active })
+            }
+        }
+      }
+      if savedHasMore, let services, services.photoAccountAccess != nil {
+        Section {} footer: {
+          ProgressView("Loading photos…").font(.footnote).padding().frame(maxWidth: .infinity)
+            .task(id: SavedTimelinePage(count: services.photos.count, binding: SavedLibraryOpenBinding(services),
+              filter: browseFilter, isActive: scenePhase == .active)) {
+              guard !Task.isCancelled, scenePhase == .active, services.photoAccountAccess != nil else { return }
+              do {
+                let count = services.photos.count
+                try services.loadMore()
+                savedHasMore = services.photos.count > count
+              } catch { savedHasMore = false; store.error = error.localizedDescription }
+            }
+        }
+      }
+    }.scrollTargetLayout()
+  }
+#endif
   @ViewBuilder private var homeHeader: some View {
     if showsHomeNavigation {
       VStack(spacing: 10) {
@@ -1048,18 +1221,9 @@ struct RecentPhotosView: View {
       reviewSave(selectedPhotos.values.map(\.source).sorted { $0.id < $1.id })
     }.buttonStyle(.borderedProminent).fixedSize(horizontal: true, vertical: false).accessibilityIdentifier("selection.save")
       .disabled(selected.isEmpty || preparingShare || showShare)
-    if selectedSavedPhotos.count > 0 && !selected.isEmpty {
-      Menu("Share", systemImage: "square.and.arrow.up") {
-        Button("Share \(selected.count) originals") { shareSelectedDevicePhotos() }
-        Button("Share \(selectedSavedPhotos.count) in Fotoro") { shareSelectedSavedPhotos() }
-      }.buttonStyle(.bordered).fixedSize(horizontal: true, vertical: false).disabled(preparingShare || showShare)
-    } else if selectedSavedPhotos.count > 0 {
-      Button("Share", systemImage: "square.and.arrow.up", action: shareSelectedSavedPhotos)
-        .buttonStyle(.bordered).fixedSize(horizontal: true, vertical: false).disabled(preparingShare || showShare)
-    } else {
-      Button("Share", systemImage: "square.and.arrow.up", action: shareSelectedDevicePhotos)
-        .buttonStyle(.bordered).fixedSize(horizontal: true, vertical: false).disabled(selected.isEmpty || preparingShare || showShare)
-    }
+    Button("Share", systemImage: "square.and.arrow.up", action: shareSelectedOriginals)
+      .buttonStyle(.bordered).fixedSize(horizontal: true, vertical: false)
+      .disabled(selectedCount == 0 || preparingShare || showShare)
     #else
     Button("Share", systemImage: "square.and.arrow.up", action: shareSelectedDevicePhotos)
       .buttonStyle(.bordered).fixedSize(horizontal: true, vertical: false).disabled(selected.isEmpty || preparingShare || showShare)
@@ -1163,7 +1327,7 @@ struct RecentPhotosView: View {
     if previousCount > selectedPhotos.count {
       store.error = "Some selected photos changed or are no longer available."
     }
-    if !validation.shareIsCurrent {
+    if validation.withdrawsDeviceShare(shareSources + pending) {
       pendingShare = nil
       shareTask?.cancel()
       cleanupShare()
@@ -1192,6 +1356,13 @@ struct RecentPhotosView: View {
       selectedSavedPhotos.removeWithdrawn(using: services.consumerSavedPhoto)
       if services.vault.isUnlocked, previousCount > selectedSavedPhotos.count {
         store.error = "Some selected photos changed or are no longer available."
+      }
+    }
+    if !savedShareSources.isEmpty {
+      guard let services, services.photoAccountAccess != nil,
+        SavedLibraryOpenBinding(services) == savedShareBinding,
+        SavedPhotoSelection.isCurrent(savedShareSources, lookup: services.consumerSavedPhoto) else {
+        shareTask?.cancel(); cleanupShare(); savedViewer = nil; return
       }
     }
     guard let presentation = savedViewer else { return }
@@ -1278,6 +1449,9 @@ struct RecentPhotosView: View {
     } else { restorePhotos() }
   }
   private func share(_ photos: [RecentPhoto]) {
+    #if !FOTORO_LOCAL_PREVIEW
+    shareOriginals(device: photos, saved: [])
+    #else
     guard !preparingShare, !showShare, !photos.isEmpty else { return }
     preparingShare = true
     let sources = photos.map(RecentPhotoSource.init)
@@ -1296,23 +1470,278 @@ struct RecentPhotosView: View {
       } catch is CancellationError { removeShareFiles(exported) }
       catch { removeShareFiles(exported); store.error = error.localizedDescription }
     }
+    #endif
   }
   private func removeShareFiles(_ urls: [URL]) {
-    for root in Set(urls.map { $0.deletingLastPathComponent().deletingLastPathComponent() }) {
-      try? FileManager.default.removeItem(at: root)
-    }
+    RecentShareExports.remove(urls)
   }
   private func cleanupShare() {
+    #if !FOTORO_LOCAL_PREVIEW
+    removeShareFiles(deviceShareExports)
+    ConsumerShareExports.remove(savedShareExports)
+    deviceShareExports = []
+    savedShareExports = []
+    savedShareSources = []
+    savedShareBinding = nil
+    #else
     removeShareFiles(sharing)
+    #endif
     sharing = []
     showShare = false
     shareMeaning = nil
     sharedPhotoIDs = []
     shareSources = []
   }
+#if !FOTORO_LOCAL_PREVIEW
+  private func shareSelectedOriginals() {
+    do {
+      let saved = try selectedSavedPhotos.resolve(using: { id in try services?.consumerSavedPhoto(id) })
+      shareOriginals(device: selectedPhotos.values.map(\.photo).sorted {
+        ($0.capturedAt ?? .distantPast) > ($1.capturedAt ?? .distantPast)
+      }, saved: saved)
+    } catch { validateSavedPresentation(); store.error = error.localizedDescription }
+  }
+  private func shareOriginals(device: [RecentPhoto], saved: [LocalPhoto]) {
+    guard !preparingShare, !showShare, !device.isEmpty || !saved.isEmpty else { return }
+    let sources = device.map(RecentPhotoSource.init)
+    let services = services
+    let binding = services.map(SavedLibraryOpenBinding.init)
+    func check() throws {
+      try Task.checkCancellation()
+      if !sources.isEmpty,
+        !store.validatePresentation(viewer: [], selection: [], share: sources).shareIsCurrent { throw CancellationError() }
+      if !saved.isEmpty {
+        guard let services, services.photoAccountAccess != nil, SavedLibraryOpenBinding(services) == binding,
+          SavedPhotoSelection.isCurrent(saved, lookup: services.consumerSavedPhoto) else { throw CancellationError() }
+      }
+    }
+    preparingShare = true
+    shareSources = sources
+    savedShareSources = saved
+    savedShareBinding = saved.isEmpty ? nil : binding
+    shareTask = Task {
+      defer {
+        preparingShare = false; shareTask = nil
+        if !showShare { shareSources = []; savedShareSources = []; savedShareBinding = nil }
+      }
+      var pending: PhotoOriginalShareBatch.Exports?
+      do {
+        pending = try await PhotoOriginalShareBatch.prepare(device: sources, saved: saved, valid: check,
+          exportDevice: { _ in try await store.shareOriginals(device) },
+          exportSaved: { photo in
+            guard let services else { throw CancellationError() }
+            return try await services.consumerShareOriginal(photo)
+          }, expandSaved: { url, photo in
+            if photo.metadata.mediaType == CameraMedia.liveType {
+              let metadata = photo.metadata, directory = url.deletingLastPathComponent()
+              let work = Task.detached(priority: .userInitiated) {
+                try Task.checkCancellation()
+                let bytes = try Data(contentsOf: url)
+                try Task.checkCancellation()
+                let urls = try CameraMedia.exportOriginals(bytes, metadata: metadata, directory: directory)
+                try Task.checkCancellation()
+                return urls
+              }
+              return try await withTaskCancellationHandler { try await work.value } onCancel: { work.cancel() }
+            }
+            return [url]
+          }, removeDevice: removeShareFiles, removeSaved: ConsumerShareExports.remove)
+        try check()
+        guard let completed = pending else { return }
+        deviceShareExports = completed.device
+        savedShareExports = completed.saved
+        sharing = completed.urls
+        shareMeaning = query.isEmpty ? nil : search.response.meaning?.id
+        sharedPhotoIDs = device.map(\.id)
+        showShare = true
+        pending = nil
+      } catch is CancellationError {
+        if let pending { removeShareFiles(pending.device); ConsumerShareExports.remove(pending.saved) }
+      } catch {
+        if let pending { removeShareFiles(pending.device); ConsumerShareExports.remove(pending.saved) }
+        store.error = error.localizedDescription
+      }
+    }
+  }
+#endif
+}
+
+extension RecentPhotosPresentationValidation {
+  func withdrawsDeviceShare(_ sources: [RecentPhotoSource]) -> Bool {
+    !sources.isEmpty && !shareIsCurrent
+  }
 }
 
 #if !FOTORO_LOCAL_PREVIEW
+private struct RecentMotionPhotoPage: View {
+  let photo: RecentPhoto
+  let store: RecentPhotosStore
+  let isCurrent: Bool
+  @State private var player: AVPlayer?
+  @State private var livePhoto: PHLivePhoto?
+  @State private var request: PHImageRequestID?
+  @State private var generation = UUID()
+  @State private var loading = false
+  @State private var failed = false
+  @Environment(\.scenePhase) private var scenePhase
+  var body: some View {
+    Group {
+      if let player { VideoPlayer(player: player) }
+      else if let livePhoto { RecentLivePhotoPlayer(photo: livePhoto) }
+      else {
+        PhotosImage(photo: photo, store: store, large: true).scaledToFit().overlay {
+          VStack(spacing: 12) {
+            if loading { ProgressView("Loading original…") }
+            else {
+              Button(failed ? "Try again" : "Play", systemImage: "play.circle.fill", action: play)
+                .font(.title2).buttonStyle(.borderedProminent).disabled(!isCurrent)
+            }
+            if failed { Text("The original could not be opened. Check your connection and try again.").font(.footnote) }
+          }.padding().background(.regularMaterial, in: .rect(cornerRadius: 16))
+        }
+      }
+    }
+    .onChange(of: isCurrent) { if !isCurrent { stop() } }
+    .onChange(of: scenePhase) { if scenePhase == .background { stop() } }
+    .onDisappear { stop() }
+  }
+  private func play() {
+    guard isCurrent, !loading,
+      store.validatePresentation(viewer: [RecentPhotoSource(photo)], selection: [], share: []).viewerIsCurrent else { return }
+    stop()
+    let token = UUID()
+    generation = token
+    loading = true; failed = false
+    if photo.isVideo {
+      let options = PHVideoRequestOptions()
+      options.isNetworkAccessAllowed = true
+      request = store.images.requestPlayerItem(forVideo: photo.asset, options: options) { item, info in
+        guard (info?[PHImageCancelledKey] as? Bool) != true else { return }
+        Task { @MainActor in
+          guard generation == token, isCurrent, scenePhase != .background,
+            store.validatePresentation(viewer: [RecentPhotoSource(photo)], selection: [], share: []).viewerIsCurrent else { return }
+          loading = false
+          if let item { player = AVPlayer(playerItem: item); player?.play() }
+          else { failed = true }
+        }
+      }
+    } else {
+      let options = PHLivePhotoRequestOptions()
+      options.isNetworkAccessAllowed = true
+      options.deliveryMode = .highQualityFormat
+      request = store.images.requestLivePhoto(for: photo.asset, targetSize: CGSize(width: 1600, height: 1600),
+        contentMode: .aspectFit, options: options) { value, info in
+        guard (info?[PHImageCancelledKey] as? Bool) != true,
+          (info?[PHImageResultIsDegradedKey] as? Bool) != true else { return }
+        Task { @MainActor in
+          guard generation == token, isCurrent, scenePhase != .background,
+            store.validatePresentation(viewer: [RecentPhotoSource(photo)], selection: [], share: []).viewerIsCurrent else { return }
+          loading = false
+          livePhoto = value
+          failed = value == nil
+        }
+      }
+    }
+  }
+  private func stop() {
+    generation = UUID()
+    if let request { store.images.cancelImageRequest(request) }
+    request = nil
+    player?.pause(); player = nil; livePhoto = nil; loading = false
+  }
+}
+
+private struct RecentLivePhotoPlayer: UIViewRepresentable {
+  let photo: PHLivePhoto
+  func makeUIView(context: Context) -> PHLivePhotoView {
+    let view = PHLivePhotoView()
+    view.contentMode = .scaleAspectFit
+    view.livePhoto = photo
+    view.startPlayback(with: .full)
+    return view
+  }
+  func updateUIView(_ view: PHLivePhotoView, context: Context) {
+    if view.livePhoto !== photo { view.livePhoto = photo; view.startPlayback(with: .full) }
+  }
+  static func dismantleUIView(_ view: PHLivePhotoView, coordinator: ()) { view.stopPlayback() }
+}
+
+@MainActor enum PhotoOriginalShareBatch {
+  struct Exports {
+    var device: [URL]
+    var saved: [URL]
+    var photoCount: Int
+    var urls: [URL] { device + saved }
+  }
+  static func prepare(device: [RecentPhotoSource], saved: [LocalPhoto], valid: () throws -> Void,
+    exportDevice: ([RecentPhotoSource]) async throws -> [URL], exportSaved: (LocalPhoto) async throws -> URL,
+    expandSaved: (URL, LocalPhoto) async throws -> [URL], removeDevice: ([URL]) -> Void,
+    removeSaved: ([URL]) -> Void) async throws -> Exports {
+    var deviceURLs: [URL] = [], savedURLs: [URL] = [], pendingSaved: [URL] = []
+    do {
+      try Task.checkCancellation(); try valid()
+      if !device.isEmpty {
+        deviceURLs = try await exportDevice(device)
+        try Task.checkCancellation(); try valid()
+        guard deviceURLs.count >= device.count else { throw FotoroError("Some originals are unavailable. Nothing was shared.") }
+      }
+      for photo in saved {
+        try Task.checkCancellation(); try valid()
+        let original = try await exportSaved(photo)
+        pendingSaved.append(original)
+        try Task.checkCancellation(); try valid()
+        let resources = try await expandSaved(original, photo)
+        guard !resources.isEmpty else { throw FotoroError("The complete original is unavailable. Nothing was shared.") }
+        savedURLs += resources
+        try Task.checkCancellation(); try valid()
+      }
+      return Exports(device: deviceURLs, saved: savedURLs, photoCount: device.count + saved.count)
+    } catch {
+      removeDevice(deviceURLs)
+      removeSaved(pendingSaved + savedURLs)
+      throw error
+    }
+  }
+}
+
+struct PhotoTimelineSavedItem {
+  let photo: LocalPhoto
+  let facts: RecentPhotoFacts
+}
+
+private struct SavedTimelinePage: Equatable {
+  let count: Int
+  let binding: SavedLibraryOpenBinding
+  let filter: PhotoBrowseFilter
+  let isActive: Bool
+}
+
+enum PhotoTimelinePolicy {
+  static func groups(device: [PhotoBrowseItem], saved: [PhotoTimelineSavedItem], sources: [BackupSource],
+    account: String?, filter: PhotoBrowseFilter = .all, grouping: PhotoBrowseGrouping = .days,
+    calendar: Calendar = .current) -> [PhotoBrowseGroup] {
+    // Only current, permitted device revisions can hide their verified saved copy.
+    // A saved favorite still appears when its device counterpart fails this filter.
+    let records = Dictionary(device.filter { filter.includes($0.facts) }.map {
+      ($0.source.id, SearchRecord(id: $0.source.id, revision: $0.source.revision))
+    }, uniquingKeysWith: { _, current in current })
+    let copies = ConsumerSearchBinding.verifiedCopies(sources: sources, records: records)
+    var items = device.map { item in
+      PhotoBrowseItem(source: RecentPhotoSource(id: ConsumerPhotoReference.device(item.source.id).id,
+        revision: item.source.revision), facts: item.facts)
+    }
+    for item in saved {
+      let photo = item.photo
+      guard let account, photo.manifest.ownerAccountId == account,
+        photo.manifest.photoId == photo.id, ["committed", "saved"].contains(photo.transferState),
+        !ConsumerSearchBinding.duplicate(saved: photo, copies: copies) else { continue }
+      items.append(PhotoBrowseItem(source: RecentPhotoSource(id: ConsumerPhotoReference.saved(photo.id).id,
+        revision: photo.metadata.originalSha256 + "|" + photo.manifest.metadataRepresentation.ciphertextSha256), facts: item.facts))
+    }
+    return PhotoBrowsing.groups(items, filter: filter, grouping: grouping, calendar: calendar)
+  }
+}
+
 enum SavedPhotosPresentationPolicy {
   static func isCurrent(_ photos: [LocalPhoto], lookup: (String) throws -> LocalPhoto?) -> Bool {
     photos.allSatisfy { photo in
@@ -1351,6 +1780,10 @@ private struct RecentPhotoCell: View {
         PhotosImage(photo: photo, store: store).scaledToFill()
           .frame(width: geometry.size.width, height: geometry.size.height).clipped()
       }.aspectRatio(1, contentMode: .fit)
+        .overlay(alignment: .bottomLeading) {
+          if photo.isVideo { Image(systemName: "play.fill").padding(8).accessibilityLabel("Video") }
+          else if photo.isLivePhoto { Image(systemName: "livephoto").padding(8).accessibilityLabel("Live Photo") }
+        }
         .overlay(alignment: .bottomTrailing) {
           if selected { Image(systemName: "checkmark.circle.fill").padding(8) }
         }

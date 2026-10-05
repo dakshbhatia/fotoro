@@ -24,7 +24,7 @@ test("snapshot changes and signed crypto fixtures conform", async () => {
     }),
   );
 });
-test("still original metadata accepts HEIC and PhotoKit dates without allowing video or empty originals", () => {
+test("bounded original metadata accepts camera media and PhotoKit dates without allowing unknown formats or empty originals", () => {
   const metadata = {
     version: 1,
     filename: "IMG_0001.HEIC",
@@ -36,10 +36,10 @@ test("still original metadata accepts HEIC and PhotoKit dates without allowing v
     representationKeys: {},
   };
   assert.equal(validateWire("PhotoMetadataV1", metadata), metadata);
-  for (const mediaType of ["image/jpeg", "image/png", "image/heic"]) {
+  for (const mediaType of ["image/jpeg", "image/png", "image/heic", "video/mp4", "video/quicktime", "application/vnd.fotoro.live-photo"]) {
     validateWire("PhotoMetadataV1", { ...metadata, mediaType });
   }
-  for (const mediaType of ["video/quicktime", "image/gif", "image/heif"]) {
+  for (const mediaType of ["video/avi", "image/gif", "image/heif"]) {
     assert.throws(() =>
       validateWire("PhotoMetadataV1", { ...metadata, mediaType }),
     );

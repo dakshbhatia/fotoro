@@ -18,6 +18,7 @@ import {shareSelectedOriginals} from "./selection-share";
 import type {Photo} from "../library/catalog";
 import {ownedPhotoForLocal, selectedOwnedPhotos} from "./selection";
 import {findMatchPhotos, shortlistSearchResult} from "./find-best-shots";
+import {useSemanticFind} from "./useSemanticFind";
 import {useFindBestShots} from "./useFindBestShots";
 import {FindBestShots} from "./FindBestShots";
 export function selectedOriginals(photos: LocalPhoto[], selected?: ReadonlySet<string>): File[] {
@@ -42,7 +43,7 @@ export function displaySearchResult(predicted: SearchResult, navigation?: Search
     return {...predicted, photoId: navigation.photoID};
   return predicted;
 }
-export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, syncSummary, ownedPhotos = null, onOpenSaved, onShareSaved, active = true, rememberedAccount = false}: {onBackup: () => void; onSave?: (photos: LocalPhoto[]) => void; onCancelSave?: () => void; onPhotosChange?: (photos: LocalPhoto[]) => void; syncSummary?: ConsumerSyncSummary; ownedPhotos?: OwnedPhotoSnapshot | null; onOpenSaved?: (id: string) => void; onShareSaved?: (photos: Photo[]) => void; active?: boolean; rememberedAccount?: boolean}) {
+export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, syncSummary, ownedPhotos = null, onOpenSaved, onShareSaved, onShareSavedOriginals, active = true, rememberedAccount = false}: {onBackup: () => void; onSave?: (photos: LocalPhoto[]) => void; onCancelSave?: () => void; onPhotosChange?: (photos: LocalPhoto[]) => void; syncSummary?: ConsumerSyncSummary; ownedPhotos?: OwnedPhotoSnapshot | null; onOpenSaved?: (id: string) => void; onShareSaved?: (photos: Photo[]) => void; onShareSavedOriginals?: (photos: Photo[]) => void; active?: boolean; rememberedAccount?: boolean}) {
   const [photos, setPhotos] = useState<LocalOcrPhoto[]>([]), [query, setQuery] = useState(""),
     [viewer, setViewer] = useState<string | null>(null), [settings, setSettings] = useState(false),
     [last30, setLast30] = useState(false), [status, setStatus] = useState(""), [progress, setProgress] = useState(""),
@@ -87,7 +88,8 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, sync
   const localPredicted = useMemo(() => index.search(query, {scope, committedMeaning: committed, previous: previous.current}), [index, query, committed]);
   const savedIndex = useMemo(() => new PhotoSearchIndex(savedPhotos), [savedPhotos]);
   const savedPredicted = useMemo(() => savedIndex.search(query, {scope: "saved:" + (ownedPhotos?.accountId ?? ""), committedMeaning: committed}), [savedIndex, query, ownedPhotos?.accountId, committed]);
-  const predicted = useMemo(() => combineConsumerSearch(localPredicted, savedPredicted, committed), [localPredicted, savedPredicted, committed]);
+  const lexicalPredicted = useMemo(() => combineConsumerSearch(localPredicted, savedPredicted, committed), [localPredicted, savedPredicted, committed]);
+  const predicted = useSemanticFind(searchPhotos, lexicalPredicted, active && ready && !progress, ownedPhotos?.token, committed);
   const findMatches = useMemo(() => findMatchPhotos(searchPhotos, predicted), [searchPhotos, predicted]);
   const findSource = useMemo(() => ({sourceGeneration, token: ownedPhotos?.token, photos: ownedPhotos?.photos}), [sourceGeneration, ownedPhotos?.token, ownedPhotos?.photos]);
   const bestShots = useFindBestShots(findMatches, normalizeSearch(query) ? JSON.stringify([query, predicted.scope, predicted.meaning?.id]) : "", findSource,
@@ -206,9 +208,9 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, sync
   };
   const readyOriginals = selectedOriginals(photos, picks.ids).length;
   const selectedCount = picks.ids.size + chosenSaved.length;
-  const shareSaved = () => {
+  const shareSaved = (share = onShareSaved) => {
     if (!ownedPhotos?.current() || !chosenSaved.length || chosenSaved.some(photo => !ownedPhotos.photos.includes(photo) || photo.grantId || photo.manifest.ownerAccountId !== ownedPhotos.accountId)) return;
-    onShareSaved?.([...chosenSaved]);
+    share?.([...chosenSaved]);
   };
   const editLocalPhoto = (id: string, changes: {labels?: string[]; favorite?: boolean}) => {
     const local = currentPhotos.current.find(photo => photo.id === id);
@@ -239,7 +241,7 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, sync
         : !photos.length ? <section className="local-empty local-first-use"><div className="first-use-content"><div className="first-use-actions"><button className="open-photos" onClick={openBackup}>Open Saved photos</button><button className="text-button" disabled={!ready || !!progress} onClick={() => input.current?.click()}>Open photos from this device</button></div><p className="hint first-use-note">Photos opened here stay on this device until you choose Save.</p></div></section>
         : scoped.length ? <LocalLibrary key={sourceGeneration} active={active} photos={scoped} resources={resources} onOpen={setViewer} onFailure={failure} selection={{ids: picks.ids, editing: reviewingPicks, disabled: sharing, onChange: picks.choose}} />
         : <section className="empty"><p>{browseScope === "picks" ? picks.busy ? "Choosing your picks…" : "No picks yet" : "No photos in this date range"}</p><button onClick={() => {setBrowseScope("photos"); setLast30(false);}}>Show all photos</button></section>}
-      {selectedCount > 0 && <section className="consumer-selection" data-mixed={picks.ids.size > 0 && chosenSaved.length > 0 ? true : undefined} aria-label="Chosen photos"><p role="status">{selectedCount} selected</p><button disabled={sharing} onClick={() => {picks.clearSelection(); setChosenSavedIDs(new Set());}}>Clear</button>{onSave && picks.ids.size > 0 && <button className="primary-action" disabled={readyOriginals !== picks.ids.size || sharing} onClick={() => onSave(reviewedPhotos)}>Save</button>}{picks.ids.size > 0 && <button disabled={readyOriginals !== picks.ids.size || sharing} onClick={shareSelection}>{sharing ? "Sharing…" : "Share originals"}</button>}{chosenSaved.length > 0 && onShareSaved && <button disabled={sharing} onClick={shareSaved}>Share in Fotoro</button>}{readyOriginals < picks.ids.size && <small>Reselect {picks.ids.size - readyOriginals} {picks.ids.size - readyOriginals === 1 ? "original" : "originals"} to Save or Share.</small>}</section>}
+      {selectedCount > 0 && <section className="consumer-selection" data-mixed={picks.ids.size > 0 && chosenSaved.length > 0 ? true : undefined} aria-label="Chosen photos"><p role="status">{selectedCount} selected</p><button disabled={sharing} onClick={() => {picks.clearSelection(); setChosenSavedIDs(new Set());}}>Clear</button>{onSave && picks.ids.size > 0 && <button className="primary-action" disabled={readyOriginals !== picks.ids.size || sharing} onClick={() => onSave(reviewedPhotos)}>Save</button>}{picks.ids.size > 0 && <button disabled={readyOriginals !== picks.ids.size || sharing} onClick={shareSelection}>{sharing ? "Sharing…" : "Share originals"}</button>}{chosenSaved.length > 0 && onShareSavedOriginals && <button className="primary-action" disabled={sharing} onClick={() => shareSaved(onShareSavedOriginals)}>{picks.ids.size ? "Share saved photos" : "Share"}</button>}{chosenSaved.length > 0 && onShareSaved && <button disabled={sharing} onClick={() => shareSaved()}>Share in Fotoro</button>}{readyOriginals < picks.ids.size && <small>Reselect {picks.ids.size - readyOriginals} {picks.ids.size - readyOriginals === 1 ? "original" : "originals"} to Save or Share.</small>}</section>}
       {last30 && photos.length > 0 && !normalizeSearch(query) && <button className="local-filter" onClick={() => setLast30(false)}>Last 10 days ×</button>}
       {(progress || ocrProgress || (saving && !saving.startsWith("Saved locally ·")) || (browseScope === "picks" && picks.busy)) && <p className="local-progress" role="status">{progress || ocrProgress || (saving.startsWith("Saved locally ·") ? "" : saving) || "Choosing picks…"}</p>}
       {status && <div className="status" role="status">{status}<button aria-label="Dismiss message" onClick={() => setStatus("")}><Icon kind="close" /></button></div>}
@@ -256,7 +258,7 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, sync
       <p className="hint">{picks.ids.size} of {photos.length} selected.</p>
       <div className="photo-pick-actions">
         <button disabled={!photos.length} onClick={() => {closeSettings(); editSelection();}}>Edit selection</button>
-        <button disabled={!photos.length || picks.busy} onClick={picks.suggested}>Suggested 10%</button>
+        <button disabled={!photos.length || picks.busy} onClick={picks.suggested}>Highlights</button>
         <button disabled={!photos.length} onClick={picks.chooseAll}>Select all</button>
       </div>
       {(picks.recommendations?.unassessed ?? 0) > 0 && <p className="hint">{picks.recommendations!.unassessed} could not be assessed. You can still select them.</p>}

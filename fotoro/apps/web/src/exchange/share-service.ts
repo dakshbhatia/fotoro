@@ -1,3 +1,4 @@
+import {acceptedPhotoManifestKind, photoManifestKind} from "@fotoro/contracts/camera-media";
 import type {AccountCardV1, GrantV1, GrantDetailV1, PhotoManifestV1, SavedPhotoV1, SaveRequestV1, ContributionV1, WrappedKeyV1} from "@fotoro/contracts";
 import {validatePublicAccountCard} from "@fotoro/contracts/share-links";
 import {validateWire} from "@fotoro/contracts/validate";
@@ -41,7 +42,7 @@ const orderedJSON = (value: unknown): unknown => Array.isArray(value) ? value.ma
   : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, nested]) => [key, orderedJSON(nested)])) : value;
 const sameJSON = (left: unknown, right: unknown) => JSON.stringify(orderedJSON(left)) === JSON.stringify(orderedJSON(right));
 function verifyOwnedSave(save: SavedPhotoV1, session: UnlockedVault) {
-  if (save.signedPayload.kind !== "photo-manifest" || save.signedPayload.accountId !== session.accountId ||
+  if (!["photo-manifest", "photo-media-manifest-v1"].includes(save.signedPayload.kind) || save.signedPayload.accountId !== session.accountId ||
       save.manifest.ownerAccountId !== session.accountId || save.photoId !== save.manifest.photoId) throw new Error("SAVE_RECEIPT_MISMATCH");
   try {
     const plain = verifyPayload(save.signedPayload, unb64(session.card.signingPublicKey));
@@ -145,7 +146,7 @@ export async function receive(grantId: string, scope: ShareScope = {}, expectedS
 async function receiveWithAuthority(grantId: string, authorization: SharingAuthority, expectedSender?: AccountCardV1) {
   const {session, scope} = authorization;
   if (expectedSender && !sameIdentity(await captureCard(expectedSender.accountId, authorization), expectedSender)) throw new Error("ACCOUNT_KEYS_CHANGED_RENEW_TRUST");
-  const detail = await api<GrantDetailV1>("/v1/grants/" + grantId, undefined, "GrantDetailV1", "GET", scope.signal); checkAuthority(authorization);
+  const detail = await api<GrantDetailV1>("/v1/grants/" + grantId + "?media=1", undefined, "GrantDetailV1", "GET", scope.signal); checkAuthority(authorization);
   if (detail.grant.grantId !== grantId) throw new Error("GRANT_BINDING_MISMATCH");
   if (detail.grant.ownerAccountId !== session.accountId && detail.grant.recipientAccountId !== session.accountId) throw new Error("INVITATION_RECIPIENT_MISMATCH");
   if (expectedSender && detail.grant.recipientAccountId !== session.accountId) throw new Error("INVITATION_RECIPIENT_MISMATCH");
@@ -165,7 +166,7 @@ async function receiveWithAuthority(grantId: string, authorization: SharingAutho
       const supplied = detail.cards.find(candidate => candidate.accountId === card.accountId);
       if (!supplied || !sameIdentity(supplied, card)) throw new Error("ACCOUNT_KEYS_CHANGED_RENEW_TRUST");
       if (expectedSender && card.accountId === expectedSender.accountId && !sameIdentity(card, expectedSender)) throw new Error("INVITATION_SENDER_MISMATCH");
-      if (payload.kind !== "photo-manifest") throw new Error("INVALID_MANIFEST_KIND");
+      acceptedPhotoManifestKind(payload.kind);
       const manifest = validateWire<PhotoManifestV1>("PhotoManifestV1", JSON.parse(new TextDecoder().decode(verifyPayload(payload, unb64(card.signingPublicKey)))));
       if (manifest.ownerAccountId !== card.accountId) throw new Error("MANIFEST_OWNER_MISMATCH");
       const envelope = detail.envelopes.find(item => item.photoId === manifest.photoId && item.recipientAccountId === session.accountId);
@@ -191,7 +192,7 @@ export async function saveReceivedPhoto(grantId: string, photoId: string, scope:
       if (!photo) throw new Error("PHOTO_NOT_GRANTED");
       const original = await photoBytes(photo, "original", scope.signal); original.fill(0); await checkTrust(authorization);
       const manifest: PhotoManifestV1 = {...photo.manifest, photoId: crypto.randomUUID(), ownerAccountId: session.accountId, ownerWrappedMetadataKey: wrapKey(photo.metadataKey, session.vaultKey)};
-      const save: SavedPhotoV1 = {version: 1, operationId: crypto.randomUUID(), photoId: manifest.photoId, sourceGrantId: grantId, sourcePhotoId: photoId, manifest, signedPayload: signPayload("photo-manifest", session.accountId, utf8(manifest), session.signingSecretKey)};
+      const save: SavedPhotoV1 = {version: 1, operationId: crypto.randomUUID(), photoId: manifest.photoId, sourceGrantId: grantId, sourcePhotoId: photoId, manifest, signedPayload: signPayload(photoManifestKind(photo.metadata), session.accountId, utf8(manifest), session.signingSecretKey)};
       request = {version: 1, expectedGrantVersion: received.grant.version, save};
       request = await saveRequestOnce(key, request, session, scope);
     } finally {for (const photo of received.photos) photo.metadataKey.fill(0);}
@@ -213,7 +214,7 @@ export async function contribute(grant: GrantV1, photos: Photo[], scope: ShareSc
   const recipient = await captureCard(recipientId, authorization);
   const key = session.accountId + ":contribution:" + grant.grantId + ":" + photos.map(photo => photo.manifest.photoId).sort().join(",");
   const stored = await get<WrappedKeyV1>("saves", key); await checkTrust(authorization);
-  const request = validateWire<ContributionV1>("ContributionV1", stored ? decrypt(stored, session) : {version: 1, operationId: crypto.randomUUID(), expectedGrantVersion: grant.version, manifests: photos.map(photo => signPayload("photo-manifest", session.accountId, utf8(photo.manifest), session.signingSecretKey)), envelopes: photos.map(photo => sealShareKey(photo.metadataKey, recipient, {version: 1, grantId: grant.grantId, photoId: photo.manifest.photoId, senderAccountId: session.accountId, recipientAccountId: recipient.accountId}, session.signingSecretKey))});
+  const request = validateWire<ContributionV1>("ContributionV1", stored ? decrypt(stored, session) : {version: 1, operationId: crypto.randomUUID(), expectedGrantVersion: grant.version, manifests: photos.map(photo => signPayload(photoManifestKind(photo.metadata), session.accountId, utf8(photo.manifest), session.signingSecretKey)), envelopes: photos.map(photo => sealShareKey(photo.metadataKey, recipient, {version: 1, grantId: grant.grantId, photoId: photo.manifest.photoId, senderAccountId: session.accountId, recipientAccountId: recipient.accountId}, session.signingSecretKey))});
   if (request.envelopes.some(envelope => envelope.grantId !== grant.grantId || envelope.senderAccountId !== session.accountId || envelope.recipientAccountId !== recipientId) ||
       request.manifests.some(manifest => manifest.accountId !== session.accountId)) throw new Error("GRANT_BINDING_MISMATCH");
   if (!stored) {await scopedPut("saves", key, encrypt(request, session), session, scope);}

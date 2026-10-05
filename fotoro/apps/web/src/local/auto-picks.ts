@@ -1,5 +1,5 @@
 import type {LocalPhoto} from "./resources";
-export const PICK_PROCESSOR = "quality-picks-v1";
+export const PICK_PROCESSOR = "moment-highlights-v2";
 export interface PhotoSignals {
   hash: bigint;
   luminance: number;
@@ -104,28 +104,40 @@ function* recommendationSteps(photos: LocalPhoto[], signals: ReadonlyMap<string,
     }
     if ((index + 1) % PICK_WORK_BATCH === 0) yield;
   }
-  const buckets = new Map<string, Group[]>();
+  const moments: Group[][] = [];
+  const unknown: Group[] = [];
+  let start: number | undefined, day: number | undefined;
   for (let index = 0; index < groups.length; index++) {
-    const group = groups[index];
-    const day = group.best.time === undefined ? "unknown" : new Date(group.best.time).toISOString().slice(0, 10);
-    const values = buckets.get(day); values ? values.push(group) : buckets.set(day, [group]);
+    const group = groups[index], time = group.best.time;
+    if (time === undefined) unknown.push(group);
+    else {
+      const captureDay = Math.floor(time / 86400000);
+      if (start !== undefined && day === captureDay && time - start <= 2 * 3600000)
+        moments[moments.length - 1].push(group);
+      else {moments.push([group]); start = time; day = captureDay;}
+    }
     if ((index + 1) % PICK_WORK_BATCH === 0) yield;
   }
+  if (unknown.length) moments.push(unknown);
   const compare = (a: Group, b: Group) => b.best.score - a.best.score || a.best.order - b.best.order;
-  const queues = [...buckets.values()].map(values => values.sort(compare)).sort((a, b) => compare(a[0], b[0]));
-  const ids = new Set<string>(), reasons = new Map<string, string[]>(), target = Math.ceil(groups.length * .1);
+  const ids = new Set<string>(), reasons = new Map<string, string[]>();
   let reviewed = 0;
-  for (let round = 0; ids.size < target; round++) {
-    let added = false;
-    for (const queue of queues) {
+  for (const moment of moments) {
+    const budget = Math.min(6, Math.max(1, Math.ceil(Math.sqrt(moment.length) / 2)));
+    const bestQuality = moment.reduce((best, group) => Math.max(best, group.best.score - (group.best.photo.favorite ? 2 : 0)), -Infinity);
+    const chosen: Group[] = [];
+    for (const group of moment.sort(compare)) {
       if (++reviewed % PICK_WORK_BATCH === 0) yield;
-      const group = queue[round]; if (!group || ids.size === target) continue;
-      ids.add(group.best.photo.id); added = true;
-      reasons.set(group.best.photo.id, [group.best.photo.favorite ? "Favorite" : "Clarity and exposure",
-        ...(group.count > 1 ? [`Representative of ${group.count} similar photos`] : []),
-        ...(queues.length > 1 && group.best.time !== undefined ? ["Variety across capture dates"] : [])]);
+      if (!group.best.photo.favorite && (group.best.score < bestQuality * .65 || chosen.length >= budget || chosen.some(previous =>
+        similar(previous.best.photo, group.best.photo, previous.best.signal, group.best.signal)))) continue;
+      chosen.push(group);
     }
-    if (!added) break;
+    for (const group of chosen) {
+      ids.add(group.best.photo.id);
+      reasons.set(group.best.photo.id, [group.best.photo.favorite ? "Favorite" : "Moment highlight",
+        ...(group.count > 1 ? [`Representative of ${group.count} similar photos`] : []),
+        ...(moments.length > 1 && group.best.time !== undefined ? ["Variety across moments"] : [])]);
+    }
   }
   return {ids, reasons, groupCount: groups.length, duplicateCount: candidates.length - groups.length, unassessed};
 }

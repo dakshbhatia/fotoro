@@ -49,9 +49,9 @@ actor PhotoImport {
       do {
         let (bytes, filename, edited) = try await read(selection)
         guard await valid() else { throw CancellationError() }
-        let photo = try build(
+        let photo = try await buildMedia(
           bytes: bytes, filename: filename, accountId: accountId, bundle: bundle)
-        guard await valid() else {
+        guard !Task.isCancelled, await valid() else {
           for url in Array(photo.staged.values)
             + [photo.originalURL, photo.thumbnailURL, photo.previewURL].compactMap({ $0 })
           {
@@ -99,6 +99,9 @@ actor PhotoImport {
     switch mediaType {
     case "image/png": return "png"
     case "image/heic": return "heic"
+    case "video/mp4": return "mp4"
+    case "video/quicktime": return "mov"
+    case CameraMedia.liveType: return "fotoro-live"
     default: return "jpg"
     }
   }
@@ -116,60 +119,14 @@ actor PhotoImport {
       guard size <= 50 * 1024 * 1024 else { throw FotoroError("Original exceeds 50 MiB") }
       return (try Data(contentsOf: url), url.lastPathComponent, false)
     case .photos:
-      guard
-        let asset = PHAsset.fetchAssets(
-          withLocalIdentifiers: [selected.resourceIdentifier], options: nil
-        ).firstObject
-      else { throw FotoroError("Selected Photos resource is unavailable; allow access and retry") }
-      guard asset.mediaType == .image, !asset.mediaSubtypes.contains(.photoLive) else {
-        throw FotoroError(
-          "Live Photo pairs and video are not supported; original was not converted")
-      }
-      let resources = PHAssetResource.assetResources(for: asset)
-      guard let original = resources.first(where: { $0.type == .photo }),
-        [UTType.jpeg.identifier, UTType.png.identifier, UTType.heic.identifier].contains(
-          original.uniformTypeIdentifier)
-      else {
-        throw FotoroError(
-          "This original is not JPEG, PNG or HEIC. A transcoded JPEG is not imported as an original."
-        )
-      }
-      let directory = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
-      try FileManager.default.createDirectory(
-        at: directory, withIntermediateDirectories: true,
-        attributes: [.protectionKey: FileProtectionType.complete])
-      let temporary = directory.appendingPathComponent("original")
-      defer { try? FileManager.default.removeItem(at: directory) }
-      let options = PHAssetResourceRequestOptions()
-      options.isNetworkAccessAllowed = true
-      try await withCheckedThrowingContinuation {
-        (continuation: CheckedContinuation<Void, Error>) in
-        PHAssetResourceManager.default().writeData(
-          for: original, toFile: temporary, options: options
-        ) { error in
-          if let error {
-            continuation.resume(
-              throwing: FotoroError(
-                "Original download failed: \(error.localizedDescription). Retry when iCloud is available."
-              ))
-          } else {
-            continuation.resume()
-          }
-        }
-      }
-      try Task.checkCancellation()
-      try FileManager.default.setAttributes(
-        [.protectionKey: FileProtectionType.complete], ofItemAtPath: temporary.path)
-      let size = try temporary.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-      guard size <= 50 * 1024 * 1024 else { throw FotoroError("Original exceeds 50 MiB") }
-      return (
-        try Data(contentsOf: temporary), original.originalFilename,
-        resources.contains(where: { $0.type == .adjustmentData })
-      )
+      return try await CameraMedia.readPhotosOriginal(id: selected.resourceIdentifier, revision: sourceRevision(selected.resourceIdentifier))
+
     }
   }
   func sourceDigest(_ id: String) async throws -> String {
-    try await read(SelectedResource(id: id, origin: .photos, resourceIdentifier: id, fileURL: nil)).0.digest
+    let bytes = try await read(SelectedResource(id: id, origin: .photos, resourceIdentifier: id, fileURL: nil)).0
+    try CameraMedia.validateSize(bytes.count)
+    return bytes.digest
   }
   func stageBackup(
     _ source: BackupSource, accountId: String, bundle: AccountBundle, capturedAt: Date? = nil,
@@ -202,10 +159,11 @@ actor PhotoImport {
       }
       return reused
     }
-    let photo = try build(
+    let photo = try await buildMedia(
       bytes: bytes, filename: filename, accountId: accountId, bundle: bundle,
       photoId: source.photoId, backup: true, capturedAt: capturedAt)
     do {
+      try checkRevision()
       try Task.checkCancellation()
       guard await valid() else { throw CancellationError() }
       try store.stageBackup(photo, source: source)
@@ -219,13 +177,46 @@ actor PhotoImport {
     }
     return photo
   }
+  func buildMedia(
+    bytes: Data, filename: String, accountId: String, bundle: AccountBundle,
+    photoId: String = Wire.id(), backup: Bool = false, capturedAt: Date? = nil
+  ) async throws -> LocalPhoto {
+    try CameraMedia.validateSize(bytes.count)
+    let ext = URL(fileURLWithPath: filename).pathExtension.lowercased()
+    if ext == "fotoro-live" {
+      let pair = try CameraMedia.decodeLivePhoto(bytes)
+      guard try Self.validate(pair.still.bytes, filename: pair.still.filename) == pair.still.mediaType,
+        try CameraMedia.videoType(filename: pair.motion.filename, bytes: pair.motion.bytes) == pair.motion.mediaType else {
+        throw FotoroError("Live Photo original types do not match")
+      }
+      _ = try await CameraMedia.videoPoster(bytes: pair.motion.bytes, filename: pair.motion.filename)
+      return try buildOriginal(bytes: bytes, filename: filename, accountId: accountId, bundle: bundle,
+        photoId: photoId, backup: backup, capturedAt: capturedAt,
+        mediaType: CameraMedia.liveType, posterBytes: pair.still.bytes)
+    }
+    if ["mov", "mp4", "m4v"].contains(ext) {
+      let media = try CameraMedia.videoType(filename: filename, bytes: bytes)
+      let poster = try await CameraMedia.videoPoster(bytes: bytes, filename: filename)
+      return try buildOriginal(bytes: bytes, filename: filename, accountId: accountId, bundle: bundle,
+        photoId: photoId, backup: backup, capturedAt: capturedAt, mediaType: media, posterBytes: poster)
+    }
+    return try build(bytes: bytes, filename: filename, accountId: accountId, bundle: bundle,
+      photoId: photoId, backup: backup, capturedAt: capturedAt)
+  }
   func build(
     bytes: Data, filename: String, accountId: String, bundle: AccountBundle,
     photoId: String = Wire.id(), backup: Bool = false, capturedAt: Date? = nil
-  ) throws
-    -> LocalPhoto
-  {
-    let media = try Self.validate(bytes, filename: filename)
+  ) throws -> LocalPhoto {
+    try buildOriginal(bytes: bytes, filename: filename, accountId: accountId, bundle: bundle,
+      photoId: photoId, backup: backup, capturedAt: capturedAt,
+      mediaType: Self.validate(bytes, filename: filename))
+  }
+  private func buildOriginal(
+    bytes: Data, filename: String, accountId: String, bundle: AccountBundle,
+    photoId: String, backup: Bool, capturedAt: Date?,
+    mediaType: String, posterBytes: Data? = nil
+  ) throws -> LocalPhoto {
+    let media = mediaType
     let metadataKey = crypto.randomKey()
     let vault = try Data(b64: bundle.vaultKey)
     var reps: [RepresentationV1] = []
@@ -241,7 +232,7 @@ actor PhotoImport {
         }
       }
     }
-    let source = CGImageSourceCreateWithData(bytes as CFData, nil)!
+    guard let source = CGImageSourceCreateWithData((posterBytes ?? bytes) as CFData, nil) else { throw FotoroError("Cannot decode original preview") }
     var sourceDate = capturedAt.map(Wire.date) ?? Wire.date()
     var provenance = capturedAt == nil ? "import" : "photos"
     if let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],

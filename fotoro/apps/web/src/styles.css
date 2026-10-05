@@ -627,6 +627,7 @@ h1 { font-size: 32px; letter-spacing: -1.3px; font-weight: 650; }
 .account-sheet > .actions { margin: 18px 0 22px; }
 .account-sheet { outline: none; }
 .original-share { position: absolute; z-index: 3; bottom: calc(98px + env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); background: #252723f5; border: 1px solid #60655c; border-radius: 20px; padding: 20px; width: min(380px,calc(100vw - 32px)); }
+.saved-original-share { position: fixed; z-index: 12; bottom: calc(18px + env(safe-area-inset-bottom)); }
 .original-share h2 { font-size: 20px; margin: 6px 0 10px; }
 .original-share .hint { color: #bbbfb4; overflow-wrap: anywhere; }
 .original-share button { border: 1px solid #6d7266; border-radius: 22px; }

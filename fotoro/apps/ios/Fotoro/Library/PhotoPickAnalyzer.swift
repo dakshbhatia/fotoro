@@ -3,6 +3,7 @@ import ImageIO
 import Observation
 import Photos
 import UIKit
+import Vision
 
 struct PhotoPicksSnapshot: Sendable {
   let candidates: [AutomaticPhotoPickCandidate]
@@ -116,7 +117,7 @@ struct PhotoPicksSnapshot: Sendable {
     let image: UIImage? = try await withTaskCancellationHandler {
       try await withCheckedThrowingContinuation { continuation in
         request.begin(continuation)
-        let id = manager.requestImage(for: asset, targetSize: CGSize(width: 64, height: 64), contentMode: .aspectFit, options: options) { image, info in
+        let id = manager.requestImage(for: asset, targetSize: CGSize(width: 256, height: 256), contentMode: .aspectFit, options: options) { image, info in
           if (info?[PHImageResultIsDegradedKey] as? Bool) == true { return }
           request.finish(image, cancelled: (info?[PHImageCancelledKey] as? Bool) == true)
         }
@@ -129,13 +130,33 @@ struct PhotoPicksSnapshot: Sendable {
     let format = UIGraphicsImageRendererFormat()
     format.scale = 1
     format.opaque = true
-    let upright = UIGraphicsImageRenderer(size: CGSize(width: 64, height: 64), format: format).image { context in
+    let upright = UIGraphicsImageRenderer(size: CGSize(width: 256, height: 256), format: format).image { context in
       UIColor.white.setFill()
-      context.fill(CGRect(x: 0, y: 0, width: 64, height: 64))
-      image.draw(in: CGRect(x: 0, y: 0, width: 64, height: 64))
+      context.fill(CGRect(x: 0, y: 0, width: 256, height: 256))
+      image.draw(in: CGRect(x: 0, y: 0, width: 256, height: 256))
     }
     guard let cgImage = upright.cgImage else { return nil }
-    return try measure(cgImage)
+    let worker = Task.detached(priority: .utility) { try enrichedSignals(cgImage) }
+    return try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
+  }
+  nonisolated static func enrichedSignals(_ image: CGImage) throws -> AutomaticPhotoPickSignals? {
+    try Task.checkCancellation()
+    guard var signals = try measure(image) else { return nil }
+    let aesthetics = VNCalculateImageAestheticsScoresRequest()
+    let faces = VNDetectFaceCaptureQualityRequest()
+    // Runtime/model availability never turns a good preview into a failed pick.
+    if (try? VNImageRequestHandler(cgImage: image).perform([aesthetics])) != nil,
+      let result = aesthetics.results?.first {
+      signals.aesthetics = Double(result.overallScore)
+      signals.utility = result.isUtility
+    }
+    try Task.checkCancellation()
+    if (try? VNImageRequestHandler(cgImage: image).perform([faces])) != nil {
+      let qualities = (faces.results ?? []).compactMap { $0.faceCaptureQuality.map(Double.init) }
+      if !qualities.isEmpty { signals.faceQuality = qualities.min() }
+    }
+    try Task.checkCancellation()
+    return signals
   }
   nonisolated static func measure(_ cgImage: CGImage) throws -> AutomaticPhotoPickSignals? {
     var pixels = [UInt8](repeating: 0, count: 64 * 64 * 4)
@@ -247,11 +268,11 @@ struct FindBestShotsCachedPreview: Sendable {
         let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
           kCGImageSourceCreateThumbnailFromImageAlways: true,
           kCGImageSourceCreateThumbnailWithTransform: true,
-          kCGImageSourceThumbnailMaxPixelSize: 64,
+          kCGImageSourceThumbnailMaxPixelSize: 256,
           kCGImageSourceShouldCacheImmediately: true,
         ] as CFDictionary) else { return nil }
       try Task.checkCancellation()
-      let signals = try PhotoPickAnalyzer.measure(image)
+      let signals = try PhotoPickAnalyzer.enrichedSignals(image)
       guard isCurrent else { throw CancellationError() }
       return signals
     }

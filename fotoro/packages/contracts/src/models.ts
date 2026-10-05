@@ -22,7 +22,7 @@ export interface RepresentationV1 {
 export interface PhotoMetadataV1 {
   version: 1;
   filename: string;
-  mediaType: "image/jpeg" | "image/png" | "image/heic";
+  mediaType: "image/jpeg" | "image/png" | "image/heic" | "video/mp4" | "video/quicktime" | "application/vnd.fotoro.live-photo";
   sourceDate: string;
   dateSource: "exif" | "photos" | "import";
   originalBytes: number;
@@ -130,6 +130,7 @@ export interface ChangeV1 {
 }
 export interface ChangePageV1 {
   version: 1;
+  mediaVersion?: 1;
   changes: ChangeV1[];
   nextCursor: string | null;
   hasMore: boolean;

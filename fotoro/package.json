@@ -16,6 +16,7 @@
     "test:crypto": "tsx --test tests/crypto.test.ts",
     "test:fixtures": "tsx --test tests/fixture.test.ts",
     "test:search:fixtures": "tsx tools/evaluate-local-search.ts --require-covered",
+    "test:search:visual": "node apps/web/tools/evaluate-semantic-find.mjs",
     "test:picks:fixtures": "tsx tools/evaluate-moment-picks.ts",
     "test:api": "pnpm --filter @fotoro/api test",
     "test:web": "pnpm --filter @fotoro/web test",

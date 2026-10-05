@@ -18,6 +18,7 @@ struct ExchangeView: View {
   @Bindable var services: AppServices
   let selected: [LocalPhoto]
   var incoming: FotoroShareLink? = nil
+  var onRetryPassword: ((FotoroShareLink) -> Void)? = nil
   @State private var temporary = false
   @State private var link = ""
   @State private var candidate: FotoroShareLink?
@@ -76,6 +77,12 @@ struct ExchangeView: View {
                 feedback = openingPhotos ? "Photos opened." : "Contact added."
               }
             }.disabled(services.busy || name.count > 80)
+            if candidateIsMoment, let candidate, let onRetryPassword {
+              Button("Use another Fotoro password") {
+                focusedField = nil
+                onRetryPassword(candidate)
+              }.disabled(services.busy || operation != nil)
+            }
             Button("Cancel", role: .cancel) { focusedField = nil; candidate = nil; link = ""; name = "" }
           }
         }

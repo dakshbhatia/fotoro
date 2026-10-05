@@ -5,16 +5,20 @@ The default screen is a private local photo browser. The Ente tree at repository
 root remains a reference; the new app lives here. See [what we reuse](docs/foundation.md).
 The complete implementation and acceptance list is in [product work](docs/product-backlog.md).
 
-On iOS, Open Photos requests access and pages permitted still photos using PhotoKit and
-Apple's thumbnail cache. HEIC and Live Photo still previews use the system decoder.
+On iOS, Open Photos requests access and pages permitted photos and videos using PhotoKit and
+Apple's thumbnail cache. The Photos timeline combines permitted device media with
+the unlocked account's saved originals in capture-time order. Only an exact verified
+source revision and original digest hide a saved duplicate; edited renditions stay distinct.
+HEIC and Live Photo previews use the system decoder.
 Dates, favorites, screenshots and GPS coordinates come from the Photos library.
 Browsing does not initialize an account or upload photos. Sharing explicitly
-exports the still original through the system share sheet.
+exports selected originals through the system share sheet, including both resources of a Live Photo.
 
-The native home suggests roughly 10% of viable recent photo groups from small
-on-device previews. Clarity, exposure, favorites and capture-date variety guide
-the picks; similar shots within a short verified capture window share a
-representative. All Photos and search still include the originals. Favorites,
+Highlights choose a small, diverse set from each bounded capture-time moment,
+using local previews. Clarity, exposure, favorites and capture-date variety guide
+the picks; native Vision aesthetics and face capture quality provide additional
+quality signals. Similar shots within a short verified capture window share a
+representative. Photos and search still include the originals. Favorites,
 screenshots and location filters use the library's existing facts. All Photos can
 group by day or bounded capture-time moments; filters preserve reviewed selections.
 Saved photos
@@ -24,7 +28,10 @@ password entry completes the same Save if needed. Sync offers one explicit
 Turn on sync choice. It remembers this account and service, then saves permitted
 supported photos of any age and new photos while Fotoro is open. Pause persists
 across reopening; Resume is explicit. Turn off stops automatic work without
-deleting originals or photos already saved.
+deleting originals or photos already saved. Each automatic batch first reconciles
+the account catalog, then uses an indexed digest lookup before staging a new upload.
+This prevents sequential fresh-device reuploads; simultaneous first uploads can
+still create duplicate catalog entries.
 
 One Fotoro password opens the same saved photos on iPhone and the web. New Fotoro
 creates that password; Open Fotoro opens the account. The iPhone keeps it in
@@ -44,8 +51,12 @@ English text using Vision on one bounded local preview at a time. Local Vision
 classification adds conservative scene categories with separate “Inferred scene”
 evidence. Date searches include today, yesterday, last week and explicit date
 ranges, with calendar/timezone boundaries. Scene classification failures preserve
-text search; this is category matching, not unrestricted semantic search or named
-person recognition. Indexing does
+text search. Visual similarity uses a pinned MIT-licensed TinyCLIP ViT-39M/16
+Text-19M Core ML conversion on bounded device and saved previews. Its public model
+packages download once, about 112.9 MiB before compilation; queries, photo pixels
+and vectors stay on the device. Dates, labels and
+recognized text continue working while the model prepares. Explicitly chosen
+search meanings are preserved. This does not establish named person identity. Indexing does
 not download iCloud originals. Local search lives in a protected database excluded
 from device backup. Labels and completed recognized text attached to synced
 originals also travel encrypted through the account. Search choices and pins stay
@@ -69,7 +80,7 @@ validation accepts HEVC stills and simple grids, preserving the original bytes.
 Thumbnail/preview caches are bounded and generated sequentially; browser gallery
 thumbnails are 512 px and viewer previews are 1600 px.
 
-Browser imports automatically suggest roughly 10% of viable unique groups using
+Browser imports automatically suggest diverse moment highlights using
 small local previews, clarity/exposure, favorites and verified capture-date variety.
 Only visually similar bursts with verified original capture times are grouped;
 ambiguous dates stay separate. Review lets you change picks, select all or restore
@@ -79,6 +90,20 @@ opening Saved does not upload it. Picks are session-only, and retained
 previews require reselecting the original before upload. This selector is currently
 implemented in both the browser and native app. Both support a reviewed subset;
 native selection can also save older permitted search results from their viewer.
+
+Browser visual similarity runs MIT-licensed TinyCLIP ViT-8M/16 Text-3M with a
+quantized ONNX graph in a lazy worker. Pinned model and tokenizer files total
+26.6 MiB, plus 12.0 MiB of runtime files on Safari or 21.8 MiB on other browsers.
+These cold downloads are separate from local browsing startup: the current build's
+static JavaScript graph is 364,013 bytes across three chunks, within the 500 KiB
+guard. Model downloads are cached; private photo pixels and
+queries are never uploaded. Vectors are session-only and cleared when access locks.
+Native and browser vectors use separate model identities and are never compared
+across processors. The native Core ML conversion is a community artifact with
+pinned source hashes; its conversion has not been independently reproduced.
+See [model provenance and licenses](docs/foundation.md).
+The real-model smoke check verifies one public scene against contrasting queries;
+held-out retrieval accuracy and device latency still need measurement.
 
 Search shows one photo with its source evidence and alternative meanings. Add
 labels in Photo details. Choosing a meaning, confirming a photo and pinning its
@@ -105,14 +130,18 @@ Concurrent edits preserve changes to
 different fields; a conflicting field waits for an explicit choice. Private
 annotations are absent from shared grants.
 
-Native imports preserve JPEG/PNG/HEIC originals byte for byte, up to 50 MiB.
+Native imports preserve JPEG/PNG/HEIC, MP4/MOV originals, and complete Live Photo
+still/MOV pairs byte for byte, up to 50 MiB per logical original. A signed media
+manifest kind keeps new media out of legacy readers; new readers explicitly opt
+in and require the server's media-version acknowledgment before advancing their cursor.
 Native browsing copies are JPEG thumbnails at 320 px and previews at 1600 px, quality
 82%; they never replace the original. Safari displays HEIC through those copies
 and downloads the untouched HEIC. Browser imports accept JPEG/PNG and supported
 HEIC stills when the native browser decoder is available. HEIC capture-time
 extraction is not implemented in browser intake, so those imports are excluded
-from capture-date searches until a verified capture date is available. Live Photo
-motion pairs and videos are visibly skipped by backup.
+from capture-date searches until a verified capture date is available. Larger
+camera originals remain visible skips. Saved video and Live Photo motion can be
+played after verification; Save to Photos restores their original resources.
 
 Production limits each account to 10 GiB of allocated ciphertext by default.
 Reservations consume headroom atomically; unused leases expire, while writes
@@ -121,7 +150,9 @@ staging and final copies, so this is an allocation limit rather than an exact
 R2 billing total. Auth and enrollment limits return a timed retry. Object
 collection and full disaster-restore qualification remain unfinished.
 
-Select saved photos → Share in Fotoro chooses an accepted contact. Public contact
+Selected photos open the standard system share sheet after originals are verified.
+Browser sharing prepares the originals first, then uses a fresh user click; platforms
+without file sharing offer explicit downloads. Share in Fotoro chooses an accepted contact. Public contact
 links replace account-card JSON; optional contact names are encrypted locally.
 Photo invitations open in the browser or app, with explicit identity acceptance
 after password entry. Native contact and invitation QR codes carry the same public
@@ -183,5 +214,5 @@ and the [product roadmap](../docs/ai-photos/roadmap.md).
 The web app and API are live at [fotoro.cloud](https://fotoro.cloud). Validate
 personal sync and original restore on a signed physical iPhone and Safari,
 then measure the large-library targets.
-Live Photo motion preservation, semantic search, faces, cleanup, optional
-AI enrichment, video and nearby transport remain planned work.
+Named people, cleanup, optional remote AI enrichment, nearby transport, large-video
+uploads and full-library scale qualification remain planned work.

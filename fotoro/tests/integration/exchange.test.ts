@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import accounts from "../../fixtures/accounts.json";
 import { formatFotoroPassword, parseFotoroPassword } from "../../apps/web/src/vault/password.js";
 import { validateWire } from "../../packages/contracts/src/validate.js";
+import {CAMERA_ORIGINAL_LIMIT, LIVE_PHOTO_TYPE, MEDIA_MANIFEST_KIND, photoManifestKind} from "../../packages/contracts/src/camera-media.js";
 import type {
   PhotoManifestV1,
   RepresentationV1,
@@ -38,6 +39,8 @@ import {
   verifyPayload,
   sealShareKey,
   openShareKey,
+  encodeLivePhoto,
+  decodeLivePhoto,
 } from "../../packages/crypto/src/index.js";
 
 const base = new URL(process.env.FOTORO_API_URL ?? "http://127.0.0.1:8787");
@@ -203,7 +206,8 @@ async function authenticateCompactPassword(password: string): Promise<Client> {
     return {card, secrets, token: session.token};
   } finally {secret.fill(0);}
 }
-async function upload(client: Client, filename = "singapore.jpg", background = false) {
+async function upload(client: Client, filename = "singapore.jpg", background = false,
+  media?: {original: Uint8Array; mediaType: PhotoMetadataV1["mediaType"]}) {
   const photoId = randomUUID(),
     metadataKey = sodium.randombytes_buf(32),
     keys: Record<string, string> = {};
@@ -258,7 +262,7 @@ async function upload(client: Client, filename = "singapore.jpg", background = f
       ciphertextSha256: sha(ciphertext),
     } satisfies RepresentationV1;
   }
-  const original = await readFile(
+  const original = media?.original ?? await readFile(
     new URL(`../../fixtures/media/${filename}`, import.meta.url),
   );
   const reps: RepresentationV1[] = [];
@@ -283,9 +287,9 @@ async function upload(client: Client, filename = "singapore.jpg", background = f
   const metadata: PhotoMetadataV1 = {
     version: 1,
     filename,
-    mediaType: filename.endsWith(".heic") ? "image/heic" : "image/jpeg",
+    mediaType: media?.mediaType ?? (filename.endsWith(".heic") ? "image/heic" : "image/jpeg"),
     sourceDate: new Date().toISOString(),
-    dateSource: filename.endsWith(".heic") ? "photos" : "import",
+    dateSource: media || filename.endsWith(".heic") ? "photos" : "import",
     originalBytes: original.length,
     originalSha256: sha(original),
     representationKeys: keys,
@@ -306,7 +310,7 @@ async function upload(client: Client, filename = "singapore.jpg", background = f
     ),
   };
   const signed = signPayload(
-    "photo-manifest",
+    photoManifestKind(metadata),
     client.card.accountId,
     utf8(manifest),
     unb64(client.secrets.signingSecretKey),
@@ -598,4 +602,45 @@ test("real local D1/R2: HEIC still bytes survive upload and same-account restore
   const restored = await restore(freshSession, manifest);
   assert.equal(Buffer.from(restored).equals(original), true);
   assert.equal(sha(restored), sha(original));
+});
+
+test("real local D1/R2: media-aware fresh session restores a complete Live original while legacy feed remains readable", async () => {
+  await ready;
+  const still = await readFile(new URL("../../fixtures/media/singapore.jpg", import.meta.url));
+  const motion = new Uint8Array(await readFile(new URL("../../apps/ios/FotoroTests/camera-motion.mov", import.meta.url)));
+  const archive = await encodeLivePhoto(
+    {filename: "Singapore.JPG", mediaType: "image/jpeg", bytes: still},
+    {filename: "Singapore.MOV", mediaType: "video/quicktime", bytes: motion},
+  );
+  assert.ok(archive.length < CAMERA_ORIGINAL_LIMIT);
+  const password = await createCompactPassword(), owner = await authenticateCompactPassword(password);
+  const image = await upload(owner);
+  const media = await upload(owner, "Singapore.fotoro-live", false, {original: archive, mediaType: LIVE_PHOTO_TYPE});
+  assert.equal(media.signed.kind, MEDIA_MANIFEST_KIND);
+  await api("/v1/auth/logout", owner.token, {});
+  assert.equal((await request("/v1/vault", owner.token)).status, 401);
+  const fresh = await authenticateCompactPassword(password);
+  assert.notEqual(fresh.token, owner.token);
+  type Page = {mediaVersion?: number; changes: {entity: string; entityId: string; payload: SignedPayloadV1 | null}[]};
+  const legacy = await api<Page>("/v1/changes?limit=100", fresh.token);
+  assert.equal(legacy.mediaVersion, undefined);
+  assert.deepEqual(legacy.changes.filter(change => change.entity === "photo").map(change => change.entityId), [image.manifest.photoId]);
+  assert.equal(legacy.changes.some(change => change.entityId === media.manifest.photoId), false);
+  const current = await api<Page>("/v1/changes?limit=100&media=1", fresh.token);
+  assert.equal(current.mediaVersion, 1, "A media-aware reader must receive the protocol acknowledgment");
+  assert.deepEqual(current.changes.filter(change => change.entity === "photo").map(change => change.entityId), [image.manifest.photoId, media.manifest.photoId]);
+  const signed = validateWire<SignedPayloadV1>("SignedPayloadV1", current.changes.find(change => change.entityId === media.manifest.photoId)!.payload);
+  assert.equal(signed.kind, MEDIA_MANIFEST_KIND);
+  assert.equal(signed.accountId, fresh.card.accountId);
+  const manifest = validateWire<PhotoManifestV1>("PhotoManifestV1", JSON.parse(
+    new TextDecoder().decode(verifyPayload(signed, unb64(fresh.card.signingPublicKey))),
+  ));
+  assert.equal(manifest.ownerAccountId, fresh.card.accountId);
+  const restored = await restore(fresh, manifest);
+  assert.deepEqual(restored, archive, "Restore must retain the complete original archive rather than its JPEG preview");
+  const pair = await decodeLivePhoto(restored);
+  assert.deepEqual(Buffer.from(pair.still), still);
+  assert.deepEqual(pair.motion, motion);
+  assert.deepEqual([pair.metadata.still.filename, pair.metadata.motion.filename], ["Singapore.JPG", "Singapore.MOV"]);
+  assert.deepEqual([pair.metadata.still.sha256, pair.metadata.motion.sha256], [sha(still), sha(motion)]);
 });

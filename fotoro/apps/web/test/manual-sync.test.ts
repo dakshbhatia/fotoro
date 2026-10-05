@@ -14,7 +14,7 @@ import {loadUploadPause, saveUploadPause} from "../src/library/consumer-preferen
 const owner = "55555555-5555-4555-8555-555555555555", other = "66666666-6666-4666-8666-666666666666";
 const identity = { ownerAccountId: owner, photoId: "77777777-7777-4777-8777-777777777777", originalSha256: "A".repeat(43) };
 const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
-const page = (nextCursor = "1") => ({ version: 1, changes: [], nextCursor, hasMore: false });
+const page = (nextCursor = "1") => ({ version: 1, mediaVersion: 1, changes: [], nextCursor, hasMore: false });
 async function open(accountId = owner) {
   await ready;
   const secret = accounts.testSecrets[0];

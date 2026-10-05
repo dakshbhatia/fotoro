@@ -1,3 +1,4 @@
+import {acceptedPhotoManifestKind} from "@fotoro/contracts/camera-media";
 import { validateWire } from "@fotoro/contracts/validate";
 import {
   type Env,
@@ -22,13 +23,16 @@ export async function savePhoto(env: Env, a: Actor, i: any) {
   }
   const g = await active(env, a, s.sourceGrantId, i.expectedGrantVersion);
   const source = await env.DB.prepare(
-    "SELECT p.manifest,gp.envelope FROM grant_photos gp JOIN photos p ON p.id=gp.photo_id WHERE gp.grant_id=? AND gp.photo_id=?",
+    "SELECT p.manifest,p.signed,gp.envelope FROM grant_photos gp JOIN photos p ON p.id=gp.photo_id WHERE gp.grant_id=? AND gp.photo_id=?",
   )
     .bind(s.sourceGrantId, s.sourcePhotoId)
     .first<any>();
   if (!source || JSON.parse(source.envelope).recipientAccountId !== a.accountId)
     fail("FORBIDDEN", 403);
   const original = JSON.parse(source.manifest);
+  let kind: string;
+  try { kind = acceptedPhotoManifestKind(s.signedPayload.kind); } catch { fail("INVALID_WIRE"); }
+  if (JSON.parse(source.signed).kind !== kind!) fail("SOURCE_MISMATCH");
   if (
     s.photoId !== s.manifest.photoId ||
     s.manifest.ownerAccountId !== a.accountId ||
@@ -41,7 +45,7 @@ export async function savePhoto(env: Env, a: Actor, i: any) {
     env,
     a,
     s.signedPayload,
-    "photo-manifest",
+    kind!,
     "PhotoManifestV1",
   );
   if (json(body) !== json(s.manifest)) fail("BODY_MISMATCH");
