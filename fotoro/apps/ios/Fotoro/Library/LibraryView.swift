@@ -196,7 +196,7 @@ struct LibraryView: View {
           ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
         }
         .overlay { if services.busy { ProgressView().padding().glassEffect() } }
-        .sheet(item: $viewer, onDismiss: { viewer = nil }) { presentation in
+        .fullScreenCover(item: $viewer, onDismiss: { viewer = nil }) { presentation in
           PhotoViewer(
             services: services, initialID: presentation.initial.id, displayedPhotos: presentation.photos)
         }

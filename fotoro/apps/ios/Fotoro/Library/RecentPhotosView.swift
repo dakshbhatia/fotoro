@@ -141,6 +141,7 @@ struct RecentPhotoViewer: View {
           .onTapGesture { controlsVisible.toggle() }.tag(photo.id)
         }
       }.tabViewStyle(.page(indexDisplayMode: .never)).background(.black)
+        .ignoresSafeArea(.container)
         .onChange(of: selected) { zoom.reset() }
         .toolbar {
           ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() } }
@@ -470,7 +471,7 @@ struct RecentPhotosView: View {
 #if !FOTORO_LOCAL_PREVIEW
   private var accountHome: some View {
     sharedHome
-      .sheet(item: $savedViewer) { presentation in
+      .fullScreenCover(item: $savedViewer) { presentation in
         if let services { PhotoViewer(services: services, initialID: presentation.initial.id, displayedPhotos: presentation.photos) }
       }
       .sheet(item: $sharedSavedPhotos) { presentation in
@@ -518,16 +519,25 @@ struct RecentPhotosView: View {
   }
 #endif
   private var sharedHome: some View {
-    VStack(spacing: 0) {
-      homeHeader
-      content
-    }.background(.black).preferredColorScheme(.dark)
-        .toolbar(.hidden, for: .navigationBar)
-        .safeAreaInset(edge: .bottom) { if selecting || selectedCount > 0 { selectionTray } }
+    homeSearchContent.background(.black).preferredColorScheme(.dark)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarVisibility(showsHomeNavigation ? .visible : .hidden, for: .navigationBar)
+        .toolbar {
+          if showsHomeNavigation {
+            ToolbarItem(placement: .topBarLeading) { homeScopeMenu }
+            #if !FOTORO_LOCAL_PREVIEW
+              ToolbarItem(placement: .topBarTrailing) { homeSyncButton }
+            #endif
+          }
+          if canSearch || !query.isEmpty {
+            DefaultToolbarItem(kind: .search, placement: .bottomBar)
+          }
+        }
+        .safeAreaInset(edge: .bottom) { if selectedCount > 0 { selectionTray } }
         .overlay {
           if preparingShare { ProgressView("Preparing original…").padding().glassEffect() }
         }
-        .sheet(item: $viewer, onDismiss: {
+        .fullScreenCover(item: $viewer, onDismiss: {
           if let photo = pendingShare { pendingShare = nil; share([photo]) }
 #if !FOTORO_LOCAL_PREVIEW
           if let photo = pendingSavePhoto {
@@ -1087,43 +1097,16 @@ struct RecentPhotosView: View {
     }.scrollTargetLayout()
   }
 #endif
-  @ViewBuilder private var homeHeader: some View {
-    if showsHomeNavigation {
-      VStack(spacing: 10) {
-        GlassEffectContainer(spacing: 8) {
-          VStack(spacing: 10) {
-            ViewThatFits(in: .horizontal) {
-              HStack(spacing: 12) {
-                homeScopeMenu.fixedSize(horizontal: true, vertical: false)
-                Spacer(minLength: 0)
-                #if !FOTORO_LOCAL_PREVIEW
-                  homeSyncButton.fixedSize(horizontal: true, vertical: false)
-                #endif
-              }
-              VStack(alignment: .leading, spacing: 8) {
-                homeScopeMenu
-                #if !FOTORO_LOCAL_PREVIEW
-                  homeSyncButton.frame(maxWidth: .infinity, alignment: .trailing)
-                #endif
-              }
-            }
-            if canSearch || !query.isEmpty {
-              HStack(spacing: 12) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Search photos", text: $query).focused($queryFocused)
-                  .submitLabel(.search).onSubmit { queryFocused = false }
-                  .accessibilityIdentifier("find.query")
-                  .accessibilityHint("Find labels, dates and words in your photos")
-                if !query.isEmpty {
-                  Button("Clear search", systemImage: "xmark.circle.fill") { query = ""; queryFocused = false }
-                    .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
-                }
-              }.padding(.leading, 16).padding(.trailing, 8).frame(minHeight: 48)
-                .glassEffect(.regular, in: .capsule)
-            }
-          }
-        }
-      }.padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 12)
+  @ViewBuilder private var homeSearchContent: some View {
+    if canSearch || !query.isEmpty {
+      content
+        .searchable(text: $query, placement: .toolbar, prompt: "Search photos")
+        .searchFocused($queryFocused)
+        .searchToolbarBehavior(.automatic)
+        .searchPresentationToolbarBehavior(.avoidHidingContent)
+        .onSubmit(of: .search) { queryFocused = false }
+    } else {
+      content
     }
   }
   private var showsHomeNavigation: Bool {
@@ -1167,7 +1150,6 @@ struct RecentPhotosView: View {
         Image(systemName: "chevron.down").font(.caption.weight(.semibold))
       }.frame(minHeight: 44).fixedSize(horizontal: false, vertical: true)
     }.accessibilityLabel("Photo library").accessibilityValue(scope.rawValue)
-      .buttonStyle(.glass)
       .accessibilityIdentifier("home.scope")
   }
   private var deviceBrowseOptions: some View {
@@ -1191,19 +1173,19 @@ struct RecentPhotosView: View {
     @ViewBuilder private var homeSyncButton: some View {
       if homeSyncNeedsAttention {
         Button("Sync needs attention", systemImage: "exclamationmark.icloud") { openPhotoSync() }
-          .labelStyle(.iconOnly).font(.title3).buttonStyle(.glass).buttonBorderShape(.circle)
+          .labelStyle(.iconOnly).font(.title3)
           .frame(width: 44, height: 44).accessibilityIdentifier("home.sync")
       } else if store.opened, RecentPhotosPolicy.canRead(store.status), services?.automaticPhotoSync.enabled == false,
         services.map({ $0.session.accountId == nil
           || NativeBackupPolicy.allowsPrivatePhotos(accountId: $0.session.accountId, fixture: $0.session.fixture) }) != false {
         Button("Turn on sync", systemImage: "icloud.and.arrow.up") { openPhotoSync(startAutomaticSync: true) }
-          .font(.subheadline.weight(.semibold)).buttonStyle(.glassProminent)
+          .font(.subheadline.weight(.semibold)).buttonStyle(.borderedProminent)
           .frame(minHeight: 44).fixedSize(horizontal: false, vertical: true)
           .accessibilityHint("Choose to save your photos across your devices")
           .accessibilityIdentifier("home.sync")
       } else {
         Button("Sync", systemImage: services?.automaticPhotoSync.enabled == true ? "icloud.fill" : "icloud") { openPhotoSync() }
-          .labelStyle(.iconOnly).font(.title3).buttonStyle(.glass).buttonBorderShape(.circle)
+          .labelStyle(.iconOnly).font(.title3)
           .frame(width: 44, height: 44)
           .accessibilityIdentifier("home.sync")
       }
