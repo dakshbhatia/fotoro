@@ -54,6 +54,7 @@ export class SemanticFindSession {
   private requests = new Map<number, {resolve: (value: Float32Array) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>}>();
   private sequence = 0;
   private generation = 0;
+  private failedGeneration?: number;
   private vectors = new Map<string, {source: WeakRef<object>; digest?: string; vector: Float32Array}>();
   constructor(private createWorker = () => new Worker(new URL("./semantic-worker.ts", import.meta.url), {type: "module"}),
     private resources: Pick<ConsumerPreviewResources, "load" | "clear"> = new ConsumerPreviewResources(), private requestTimeout = 90000) {}
@@ -78,26 +79,31 @@ export class SemanticFindSession {
         if (event.data.error) request.reject(new Error("Visual search is unavailable."));
         else {try {request.resolve(normalizeVector(event.data.vector));} catch (error) {request.reject(error as Error);}}
       };
-      worker.onerror = () => {if (this.worker === worker) this.clear();};
+      worker.onerror = () => {if (this.worker === worker) this.fail();};
     }
     const id = ++this.sequence;
     return new Promise<Float32Array>((resolve, reject) => {
-      const timer = setTimeout(() => this.clear(), this.requestTimeout);
+      const timer = setTimeout(() => this.fail(), this.requestTimeout);
       this.requests.set(id, {resolve, reject, timer});
-      try {this.worker!.postMessage({id, ...payload});} catch {this.clear();}
+      try {this.worker!.postMessage({id, ...payload});} catch {this.fail();}
     });
   }
   async search(photos: LocalPhoto[], query: string, current: () => boolean,
-    progress: (scores: ReadonlyMap<string, number>) => void) {
+    progress: (scores: ReadonlyMap<string, number>) => void): Promise<SearchResult["visualStatus"]> {
     this.cancel();
     const token = this.generation;
-    const valid = () => token === this.generation && current();
+    const valid = () => {
+      if (!current()) return false;
+      if (token === this.failedGeneration) throw new Error("Visual search is unavailable.");
+      return token === this.generation;
+    };
     const selected = eligibleSemanticPhotos(photos, query);
     if (!selected.length || !valid()) return;
     this.reconcile(photos);
     const text = await this.request({kind: "text", text: parseNaturalDateQuery(query).text});
     if (!valid()) return;
     const scores = new Map<string, number>();
+    let failed = 0;
     const selectedByID = new Map(selected.map(photo => [photo.id, photo]));
     const emit = () => {if (valid()) progress(new Map([...scores].filter(([id]) => selectedByID.get(id)?.current?.() !== false)));};
     for (let index = 0; index < selected.length; index++) {
@@ -105,13 +111,18 @@ export class SemanticFindSession {
       if (!valid()) return;
       if (photo.current?.() === false) continue;
       const source = photo.file ?? photo.preview ?? photo.previewLoader;
-      if (!source) continue;
+      if (!source) {failed++; continue;}
       let cached = this.vectors.get(photo.id);
       if (!cached || (cached.digest ? cached.digest !== photo.digest : cached.source.deref() !== source)) {
         let blob: Blob | undefined;
-        try {blob = (await this.resources.load(photo, "thumbnail")).blob;} catch {continue;}
+        try {blob = (await this.resources.load(photo, "thumbnail")).blob;} catch {
+          if (!valid()) return;
+          if (photo.current?.() !== false) failed++;
+          continue;
+        }
         if (!valid()) return;
-        if (!blob || photo.current?.() === false) continue;
+        if (photo.current?.() === false) continue;
+        if (!blob) {failed++; continue;}
         try {
           const vector = await this.request({kind: "image", blob});
           if (!valid()) return;
@@ -120,7 +131,7 @@ export class SemanticFindSession {
           if (this.vectors.size > 4096) {
             const oldest = this.vectors.entries().next().value!; oldest[1].vector.fill(0); this.vectors.delete(oldest[0]);
           }
-        } catch {if (!valid()) return; continue;}
+        } catch (error) {if (!valid()) throw error; if (photo.current?.() !== false) failed++; continue;}
       }
       scores.set(photo.id, cosine(text, cached.vector));
       if ((index + 1) % 8 === 0) emit();
@@ -129,6 +140,11 @@ export class SemanticFindSession {
       if ((index + 1) % 32 === 0 && index + 1 < selected.length) await new Promise(resolve => setTimeout(resolve, 0));
     }
     emit();
+    if (valid() && failed) return [...scores.keys()].some(id => selectedByID.get(id)?.current?.() !== false) ? "incomplete" : "unavailable";
+  }
+  private fail() {
+    this.failedGeneration = this.generation;
+    this.clear();
   }
   cancel() {
     this.generation++;

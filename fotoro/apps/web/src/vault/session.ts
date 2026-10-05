@@ -17,7 +17,7 @@ import {
   signPayload,
   utf8,
 } from "@fotoro/crypto";
-import { api, ApiError, setFixtureAccount, fixtureMode } from "../exchange/api";
+import { api, ApiError, ApiTransportError, setFixtureAccount, fixtureMode } from "../exchange/api";
 import { get, put, clearAccount } from "../exchange/cache";
 import {
   configureVault,
@@ -145,24 +145,39 @@ export async function recover(code: string, current = () => true) {
   setFixtureAccount();
   const { accountId, secret } = parseFotoroPassword(code);
   try {
-    if (!navigator.onLine) {
+    const openCached = async (required = false) => {
+      checkCurrent();
       const cached = await get<VaultV1>("settings", accountId + ":vault");
       checkCurrent();
-      if (!cached) throw new Error("NO_CACHED_VAULT");
+      if (!cached) {
+        if (required) throw new Error("NO_CACHED_VAULT");
+        return false;
+      }
       if (cached.accountCard.accountId !== accountId) throw new Error("PASSWORD_ACCOUNT_MISMATCH");
       configureVault(cached);
       opened = await unlockVault({ kind: "recovery", secret });
       checkUnlock();
+      return true;
+    };
+    if (!navigator.onLine) {
+      await openCached(true);
       return;
     }
-    const options = await api<RecoveryOptionsV1>(
-      "/v1/auth/recovery/options",
-      { version: 1, accountId, client: "web" },
-      "RecoveryOptionsV1",
-    ).catch(error => {
+    let options: RecoveryOptionsV1;
+    try {
+      options = await api<RecoveryOptionsV1>(
+        "/v1/auth/recovery/options",
+        { version: 1, accountId, client: "web" },
+        "RecoveryOptionsV1",
+      );
+    } catch (error) {
+      checkCurrent();
+      // A connected network is not proof the service is reachable. Only a failed
+      // fetch can use the already protected cache; server/data rejection cannot.
+      if (error instanceof ApiTransportError && await openCached()) return;
       if (error instanceof ApiError && error.code === "NOT_FOUND") throw new Error("FOTORO_PASSWORD_NOT_FOUND");
       throw error;
-    });
+    }
     checkCurrent();
     if (options.vault.accountCard.accountId !== accountId) throw new Error("PASSWORD_ACCOUNT_MISMATCH");
     configureVault(options.vault);

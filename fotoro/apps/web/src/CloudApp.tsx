@@ -47,6 +47,7 @@ import {
 import { syncSelectedSequential } from "./exchange/selected";
 import { localOriginalDigest, queueAnnotations, queuePhotoLocation, queueLocalAnnotations, pendingAnnotations, resolveAnnotationConflict, type PendingAnnotation } from "./exchange/annotations";
 import {useSemanticFind} from "./local/useSemanticFind";
+import {visualSearchFeedback} from "./local/LocalSearch";
 import { PhotoSearchIndex, normalizeSearch } from "./local/search";
 import type { LocalPhoto } from "./local/resources";
 import { cloudSearchRecords } from "./library/search";
@@ -913,6 +914,8 @@ export default function CloudApp({
             )}
             {normalizeSearch(query) && !received && (findMatches.length > 0 || bestShots.active) && <FindBestShots total={findMatches.length} review={bestShots} showCount onSelect={selectBestShots} disabled={preparingOriginals || sharingOriginals} />}
             {shown.length ? (
+              <>
+              {normalizeSearch(query) && visualSearchFeedback(searchResult) && <p className="hint" role="status">{visualSearchFeedback(searchResult)}</p>}
               <Library
                 active={active}
                 photos={shown}
@@ -922,14 +925,15 @@ export default function CloudApp({
                 onSelect={toggleSelection}
                 onOpen={id => selecting && !received ? toggleSelection(id) : setViewer(id)}
               />
+              </>
             ) : (
               <div className="empty" aria-busy={searchResult.searching || undefined}>
-                <p role={searchResult.searching ? "status" : undefined}>
-                  {searchResult.searching ? "Searching photos…" : bestShots.active ? bestShots.busy ? "Choosing best shots…" : "No best shots to suggest" : query
+                <p role={searchResult.searching || searchResult.visualStatus ? "status" : undefined}>
+                  {searchResult.searching ? "Searching photos…" : visualSearchFeedback(searchResult) ?? (bestShots.active ? bestShots.busy ? "Choosing best shots…" : "No best shots to suggest" : query
                     ? "No matching photos"
                     : received
                       ? "No received photos"
-                      : "Your Saved photos will appear here"}
+                      : "Your Saved photos will appear here")}
                 </p>
                 {bestShots.active && <p className="hint">All matches remain available. You choose what to Share.</p>}
                 {!query && !received && <button onClick={onBack}>Choose photos to Save</button>}

@@ -40,6 +40,9 @@ export function setFixtureAccount(id?: string) {
   fixtureAccount = id;
 }
 export {ApiError, accountLimitMessage} from "./api-errors";
+export class ApiTransportError extends Error {
+  constructor(cause: TypeError) {super(cause.message, {cause}); this.name = "ApiTransportError";}
+}
 interface RequestSession {vault: UnlockedVault; generation: number; origin?: string;}
 function requestSession(path: string): RequestSession | undefined {
   // Password verification runs after local unlock and must handle its own rejection.
@@ -80,6 +83,10 @@ export async function api<T>(
         : {}),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
+  }).catch(error => {
+    signal?.throwIfAborted();
+    if (error instanceof TypeError) throw new ApiTransportError(error);
+    throw error;
   });
   signal?.throwIfAborted();
   if (!response.ok) {
