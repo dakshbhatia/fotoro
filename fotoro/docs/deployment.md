@@ -67,6 +67,21 @@ pass uses CI for native validation; no new IPA, phone install or TestFlight uplo
 is implied by web deployment. The owner reports Xcode already signed in; do not
 repeat historical account setup instructions.
 
+Build 33 is archived and audited from the merged PR 35 source. Check release
+credentials without archiving, exporting or uploading:
+
+```sh
+FOTORO_DEVELOPMENT_TEAM=YOUR_TEAM node tools/build-testflight.mjs 33 --preflight
+```
+
+The check reports credential type and local distribution identity count, without
+printing key IDs, paths, certificates or tokens. It does not verify an Xcode
+account or claim the build is upload-ready. An individual API key uses
+`ASC_KEY_SUBJECT=user` and no issuer; this access is verified for build metadata.
+[Individual keys cannot use Apple's provisioning endpoints](https://developer.apple.com/documentation/appstoreconnectapi/creating-api-keys-for-app-store-connect-api). Signing needs an
+available distribution identity/profile, a usable signed-in Xcode account, or a
+team key with its issuer for automatic provisioning. Keep keys outside the repo.
+
 First App Store publication excludes France, as approved by the owner. Keep full
 app encryption and the distribution artifact's compliance declaration aligned;
 the local Photos preview is a separate target with a different encryption scope.
