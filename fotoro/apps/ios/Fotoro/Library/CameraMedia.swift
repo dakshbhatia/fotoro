@@ -89,7 +89,7 @@ enum CameraMedia {
       guard let still = resources.first(where: { $0.type == .photo }),
         let motion = resources.first(where: { $0.type == .pairedVideo }) else { throw FotoroError("Both unmodified Live Photo resources are required") }
       let stillBytes = try await readResource(still)
-      let motionBytes = try await readResource(motion)
+      let motionBytes = try await readResource(motion, maximumBytes: maximumOriginalBytes - stillBytes.count)
       let imageType = try PhotoImport.validate(stillBytes, filename: still.originalFilename)
       let movieType = try videoType(filename: motion.originalFilename, bytes: motionBytes)
       let bytes = try encodeLivePhoto(still: LivePhotoOriginalPart(filename: still.originalFilename, mediaType: imageType, bytes: stillBytes),
@@ -112,25 +112,15 @@ enum CameraMedia {
     if ["mp4", "mov", "m4v"].contains(ext) { return try videoType(filename: filename, bytes: bytes) }
     return try PhotoImport.validate(bytes, filename: filename)
   }
-  private static func readResource(_ original: PHAssetResource) async throws -> Data {
-    try Task.checkCancellation()
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
-      attributes: [.protectionKey: FileProtectionType.complete])
-    defer { try? FileManager.default.removeItem(at: directory) }
-    let url = directory.appendingPathComponent("original")
+  private static func readResource(_ original: PHAssetResource, maximumBytes: Int = maximumOriginalBytes) async throws -> Data {
+    let manager = PHAssetResourceManager.default()
     let options = PHAssetResourceRequestOptions()
     options.isNetworkAccessAllowed = true
-    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-      PHAssetResourceManager.default().writeData(for: original, toFile: url, options: options) { error in
-        if let error { continuation.resume(throwing: FotoroError("Original download failed: \(error.localizedDescription). Retry when iCloud is available.")) }
-        else { continuation.resume() }
+    return try await PhotosOriginalReader.read(maximumBytes: maximumBytes, start: { receive, finish in
+      manager.requestData(for: original, options: options, dataReceivedHandler: receive) { error in
+        finish(error.map { FotoroError("Original download failed: \($0.localizedDescription). Retry when iCloud is available.") })
       }
-    }
-    try Task.checkCancellation()
-    try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: url.path)
-    try validateSize(try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
-    return try Data(contentsOf: url)
+    }, cancel: { manager.cancelDataRequest($0) })
   }
 
   private struct Resource: Codable {
@@ -263,5 +253,113 @@ enum CameraMedia {
         request.addResource(with: type, fileURL: url, options: options)
       }
     }
+  }
+}
+
+// PhotoKit may deliver a callback before requestData returns its cancellable ID.
+// Keep the provider boundary injectable so those races can be reproduced without iCloud.
+enum PhotosOriginalReader {
+  static func read(maximumBytes: Int = CameraMedia.maximumOriginalBytes,
+    temporaryRoot: URL = FileManager.default.temporaryDirectory,
+    removeTemporary: @escaping @Sendable (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) },
+    start: @escaping @Sendable (@escaping @Sendable (Data) -> Void, @escaping @Sendable (Error?) -> Void) -> PHAssetResourceDataRequestID,
+    cancel: @escaping @Sendable (PHAssetResourceDataRequestID) -> Void) async throws -> Data {
+    try Task.checkCancellation()
+    guard maximumBytes > 0 else { throw CameraMediaAdmissionError.originalTooLarge }
+    let request = try OriginalResourceRead(maximumBytes: maximumBytes, temporaryRoot: temporaryRoot, removeTemporary: removeTemporary, cancel: cancel)
+    let bytes = try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { continuation in
+        guard request.install(continuation) else { return }
+        let id = start({ request.receive($0) }, { request.complete($0) })
+        request.install(id)
+      }
+    } onCancel: { request.cancel() }
+    try Task.checkCancellation()
+    return bytes
+  }
+}
+
+private final class OriginalResourceRead: @unchecked Sendable {
+  private let lock = NSLock()
+  private let maximumBytes: Int
+  private let directory: URL
+  private let url: URL
+  private let removeTemporary: @Sendable (URL) throws -> Void
+  private let cancelProvider: @Sendable (PHAssetResourceDataRequestID) -> Void
+  private var file: FileHandle?
+  private var byteCount = 0
+  private var continuation: CheckedContinuation<Data, Error>?
+  private var result: Result<Data, Error>?
+  private var requestID: PHAssetResourceDataRequestID?
+  private var needsCancellation = false
+
+  init(maximumBytes: Int, temporaryRoot: URL,
+    removeTemporary: @escaping @Sendable (URL) throws -> Void,
+    cancel: @escaping @Sendable (PHAssetResourceDataRequestID) -> Void) throws {
+    self.maximumBytes = maximumBytes; self.cancelProvider = cancel; self.removeTemporary = removeTemporary
+    directory = temporaryRoot.appendingPathComponent(Wire.id(), isDirectory: true)
+    url = directory.appendingPathComponent("original")
+    do {
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+        attributes: [.protectionKey: FileProtectionType.complete, .posixPermissions: 0o700])
+      guard FileManager.default.createFile(atPath: url.path, contents: nil,
+        attributes: [.protectionKey: FileProtectionType.complete, .posixPermissions: 0o600]) else {
+        throw FotoroError("Cannot prepare the original download")
+      }
+      file = try FileHandle(forWritingTo: url)
+    } catch { try? FileManager.default.removeItem(at: directory); throw error }
+  }
+  func install(_ continuation: CheckedContinuation<Data, Error>) -> Bool {
+    lock.lock()
+    if let result { lock.unlock(); continuation.resume(with: result); return false }
+    self.continuation = continuation
+    lock.unlock(); return true
+  }
+  func install(_ id: PHAssetResourceDataRequestID) {
+    lock.lock()
+    let shouldCancel = needsCancellation
+    if result == nil { requestID = id }
+    lock.unlock()
+    if shouldCancel { cancelProvider(id) }
+  }
+  func receive(_ bytes: Data) {
+    lock.lock()
+    guard result == nil else { lock.unlock(); return }
+    guard bytes.count <= maximumBytes - byteCount else {
+      finishLocked(.failure(CameraMediaAdmissionError.originalTooLarge), cancelProvider: true); return
+    }
+    do { try file?.write(contentsOf: bytes); byteCount += bytes.count; lock.unlock() }
+    catch { finishLocked(.failure(error), cancelProvider: true) }
+  }
+  func complete(_ error: Error?) {
+    lock.lock()
+    guard result == nil else { lock.unlock(); return }
+    if let error { finishLocked(.failure(error)); return }
+    do {
+      guard byteCount > 0 else { throw FotoroError("The original is empty") }
+      finishLocked(.success(try Data(contentsOf: url)))
+    } catch { finishLocked(.failure(error)) }
+  }
+  func cancel() {
+    lock.lock()
+    guard result == nil else { lock.unlock(); return }
+    finishLocked(.failure(CancellationError()), cancelProvider: true)
+  }
+  // Caller holds the lock. Cleanup precedes publishing any outcome, and provider
+  // cancellation happens after unlocking because it can synchronously call back.
+  private func finishLocked(_ outcome: Result<Data, Error>, cancelProvider shouldCancel: Bool = false) {
+    var finalOutcome = outcome
+    // Truncate before unlinking: if directory removal fails, it must not retain
+    // the downloaded plaintext. A cleanup failure cannot publish a saved original.
+    try? file?.truncate(atOffset: 0)
+    try? file?.close(); file = nil
+    do { try removeTemporary(directory) }
+    catch { finalOutcome = .failure(FotoroError("Cannot clear the temporary original. Retry sync.")) }
+    result = finalOutcome; needsCancellation = shouldCancel
+    let waiting = continuation; continuation = nil
+    let id = shouldCancel ? requestID : nil; requestID = nil
+    lock.unlock()
+    if let id { cancelProvider(id) }
+    waiting?.resume(with: finalOutcome)
   }
 }
