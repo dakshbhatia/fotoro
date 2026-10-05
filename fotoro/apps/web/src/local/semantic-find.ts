@@ -124,7 +124,9 @@ export class SemanticFindSession {
       }
       scores.set(photo.id, cosine(text, cached.vector));
       if ((index + 1) % 8 === 0) emit();
-      await new Promise(resolve => setTimeout(resolve, 0));
+      // Cached vectors need only a dot product; yield in bounded batches rather than
+      // paying a timer turn per photo. Uncached inference already yields to the worker.
+      if ((index + 1) % 32 === 0 && index + 1 < selected.length) await new Promise(resolve => setTimeout(resolve, 0));
     }
     emit();
   }

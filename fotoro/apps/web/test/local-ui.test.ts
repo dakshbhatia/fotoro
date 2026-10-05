@@ -6,9 +6,16 @@ import {LocalViewer} from '../src/local/LocalViewer';
 import {LocalResources,type LocalPhoto} from '../src/local/resources';
 import {mergeSelectedPhotos,selectedOriginals} from '../src/local/LocalTrial';
 const photo=(id:string):LocalPhoto=>({id,digest:id,filename:'same.png',date:'2026-10-01',dateSource:'selected',width:100,height:100,labels:['Ronald']});
-test('retained preview viewer gates original download until a live original is reselected',()=>{
+test('retained preview viewer gates Share until a live original is reselected',()=>{
  const markup=renderToStaticMarkup(createElement(LocalViewer,{photos:[photo('a')],initial:'a',resources:new LocalResources(),onClose:()=>{}}));
- assert.match(markup,/disabled=""[^>]*>Download/);assert.match(markup,/Reselect the original/);
+ assert.match(markup,/disabled=""[^>]*>Share/);assert.match(markup,/Reselect the original/);
+ assert.match(markup,/aria-label="More photo options"/); assert.doesNotMatch(markup,/>Download original</);
+});
+test('local original viewer keeps one primary Share and a separate manual Save',()=>{
+ const original={...photo('a'),file:new File(['exact original'],'same.png')};
+ const markup=renderToStaticMarkup(createElement(LocalViewer,{photos:[original],initial:'a',resources:new LocalResources(),onClose:()=>{},onSave:()=>{}}));
+ assert.match(markup,/>Save</); assert.match(markup,/class="primary-action"[^>]*>Share</);
+ assert.doesNotMatch(markup,/>Zoom</); assert.doesNotMatch(markup,/>Download original</);
 });
 test('digest-based reselection reconnects labels without trusting an equal filename',()=>{
  const original=new File(['matching original'],'same.png');

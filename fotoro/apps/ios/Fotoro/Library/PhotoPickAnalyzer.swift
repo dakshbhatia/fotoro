@@ -183,12 +183,22 @@ struct PhotoPicksSnapshot: Sendable {
   private(set) var analyzer: PhotoPickAnalyzer?
   @ObservationIgnored private var generation = UUID()
   @ObservationIgnored private var task: Task<Void, Never>?
+  @ObservationIgnored private var selectionIsCurrent: @MainActor ([AutomaticPhotoPickCandidate]) -> Bool = { _ in false }
 
   func showAll() {
     generation = UUID()
     task?.cancel(); task = nil
     analyzer?.invalidate(); analyzer = nil
     snapshot = nil; reviewing = false; showing = false; error = nil
+    selectionIsCurrent = { _ in false }
+  }
+
+  func selectionCandidates() -> [AutomaticPhotoPickCandidate] {
+    guard showing, !reviewing, let snapshot else { return [] }
+    let recommended = Set(snapshot.recommendations.ids)
+    let candidates = snapshot.candidates.filter { recommended.contains($0.id) }
+    if selectionIsCurrent(candidates) { return candidates }
+    return candidates.filter { selectionIsCurrent([$0]) }
   }
 
   func start(_ candidates: [AutomaticPhotoPickCandidate], matchCount: Int,
@@ -208,6 +218,7 @@ struct PhotoPicksSnapshot: Sendable {
     self.matchCount = max(matchCount, bounded.count)
     let analyzer = PhotoPickAnalyzer(preview: preview, isCurrent: isCurrent)
     self.analyzer = analyzer
+    selectionIsCurrent = { sources in valid() && isCurrent(sources) }
     showing = true; reviewing = true
     task = Task { [weak self] in
       guard let self else { return }

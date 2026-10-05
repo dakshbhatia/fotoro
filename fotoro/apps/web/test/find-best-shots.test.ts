@@ -8,10 +8,33 @@ import {savedSearchPhotos, type OwnedPhotoSnapshot} from "../src/library/consume
 import type {Photo} from "../src/library/catalog";
 import {setFlagsFromString} from "node:v8";
 import {runInNewContext} from "node:vm";
+import {createElement} from "react";
+import {renderToStaticMarkup} from "react-dom/server";
+import {FindBestShots, selectionCandidates} from "../src/local/FindBestShots";
 
 const photo = (id: string, label = "trip", date = "2026-09-01T12:00:00Z"): LocalPhoto => ({id, filename: id + ".png", digest: id,
   date, dateSource: "exif", captureVerified: true, width: 800, height: 600, labels: [label], file: new File([id], id + ".png")});
 const signal = (sharpness = .1): PhotoSignals => ({hash: 0n, luminance: .5, contrast: .15, sharpness, color: [120, 120, 120]});
+
+test("best-shot selection exposes only current matches and preserves the user's existing choices", () => {
+  const matches = [photo("a"), photo("b"), {...photo("withdrawn"), current: () => false}];
+  const recommendations = recommendPhotos(matches, new Map(matches.map(value => [value.id, signal()])));
+  recommendations.ids = new Set(["b", "withdrawn", "outside"]);
+  const selected = new Set(["manual", "a"]), candidates = selectionCandidates(matches, recommendations);
+  assert.deepEqual(candidates.map(value => value.id), ["b"]);
+  assert.deepEqual([...selected], ["manual", "a"]);
+  assert.deepEqual([...new Set([...selected, ...candidates.map(value => value.id)])], ["manual", "a", "b"]);
+});
+
+test("Select best shots is explicit and appears only after the current review has completed", () => {
+  const recommendations = recommendPhotos([photo("a")], new Map([["a", signal()]]));
+  const review = {active: true, busy: false, done: 1, recommendations, toggle() {}};
+  const markup = (value = review) => renderToStaticMarkup(createElement(FindBestShots, {total: 1, review: value, onSelect() {}}));
+  assert.match(markup(), />Select best shots</);
+  assert.doesNotMatch(markup({...review, busy: true}), />Select best shots</);
+  assert.doesNotMatch(markup({...review, active: false}), />Select best shots</);
+  assert.doesNotMatch(markup({...review, recommendations: {...recommendations, ids: new Set()}}), />Select best shots</);
+});
 
 test("a date-and-label Find chooses highlights within its matches without inheriting home selection", () => {
   const matches = [photo("soft", "trip"), photo("clear", "trip", "2026-09-01T12:02:00Z"), photo("middle", "trip", "2026-09-01T12:04:00Z")];

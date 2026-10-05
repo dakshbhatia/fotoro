@@ -147,9 +147,9 @@ in and require the server's media-version acknowledgment before advancing their 
 Native browsing copies are JPEG thumbnails at 320 px and previews at 1600 px, quality
 82%; they never replace the original. Safari displays HEIC through those copies
 and downloads the untouched HEIC. Browser imports accept JPEG/PNG and supported
-HEIC stills when the native browser decoder is available. HEIC capture-time
-extraction is not implemented in browser intake, so those imports are excluded
-from capture-date searches until a verified capture date is available. Larger
+HEIC stills when the native browser decoder is available. Verified primary-image
+EXIF capture dates support grouping and search; Timeline matching additionally
+requires a verified time-zone offset. Larger
 camera originals remain visible skips. Saved video and Live Photo motion can be
 played after verification; Save to Photos restores their original resources.
 

@@ -42,6 +42,7 @@ struct LibraryView: View {
   @State private var searchAttempt: UInt64 = 0
   @State private var selection = SavedPhotoSelection()
   @State private var catalogRefresh = SavedLibraryRefresh()
+  @State private var reopeningAccount = false
   @State private var viewer: SavedPhotoViewerPresentation?
   @Environment(\.scenePhase) private var scenePhase
   @Environment(\.dismiss) private var dismiss
@@ -83,7 +84,7 @@ struct LibraryView: View {
   var body: some View {
     NavigationStack {
       Group {
-        if invitationPasswordRetry?.awaitingPassword == true || services.auth.startPassword != nil || services.photoAccountAccess == nil {
+        if reopeningAccount || invitationPasswordRetry?.awaitingPassword == true || services.auth.startPassword != nil || services.photoAccountAccess == nil {
           VStack(alignment: .leading, spacing: 0) {
             if let saveSelection {
               Text("Open Fotoro to save \(saveSelection.count) \(saveSelection.count == 1 ? "photo" : "photos")")
@@ -92,7 +93,8 @@ struct LibraryView: View {
             if invitationPasswordRetry?.awaitingPassword == true {
               Text("Open the Fotoro this invitation was sent to.").font(.headline).padding(.horizontal).padding(.top)
             }
-            AccountView(services: services, enterPassword: invitationPasswordRetry?.awaitingPassword == true, onSignedIn: openedAccount,
+            AccountView(services: services, enterPassword: invitationPasswordRetry?.awaitingPassword == true,
+              reauthenticate: catalogRefresh.requiresAuthentication(services), diagnosticDetail: catalogRefresh.authenticationFailure(services), onSignedIn: openedAccount,
               onAuthenticationTask: { authenticationTask = $0 })
           }
         } else if authenticationTask != nil {
@@ -273,6 +275,7 @@ struct LibraryView: View {
   }
 
   private func openedAccount() {
+    reopeningAccount = false
     if invitationPasswordRetry != nil {
       invitationPasswordRetry?.authorize(services.photoAccountAccess, origin: services.api.origin)
       openIncomingLink()
@@ -347,13 +350,12 @@ struct LibraryView: View {
   @ViewBuilder private var catalogFeedback: some View {
     if catalogRefresh.isRefreshing {
       ProgressView("Loading saved photos…").padding()
-    } else if let error = catalogRefresh.error {
-      VStack(alignment: .leading, spacing: 8) {
-        Text(error).font(.footnote).foregroundStyle(.secondary)
-        Button("Try again", systemImage: "arrow.clockwise") {
-          Task { await catalogRefresh.refresh(services) }
-        }
-      }.frame(maxWidth: .infinity, alignment: .leading).padding()
+    } else if catalogRefresh.requiresAuthentication(services) {
+      Button("Open Fotoro", systemImage: "person.crop.circle") { reopeningAccount = true }.padding()
+    } else if catalogRefresh.error != nil {
+      Button("Try again", systemImage: "arrow.clockwise") {
+        Task { await catalogRefresh.refresh(services) }
+      }.padding()
     }
   }
   @ViewBuilder private var searchFeedback: some View {
@@ -525,6 +527,7 @@ struct ConsumerSaveStatus: View {
   private(set) var isRefreshing = false
   private(set) var error: String?
   @ObservationIgnored private var openedBinding: SavedLibraryOpenBinding?
+  @ObservationIgnored private var rejectedSession: (binding: SavedLibraryOpenBinding, detail: String)?
   @ObservationIgnored private var operation: UUID?
   @ObservationIgnored private var task: Task<Void, Never>?
   func open(_ services: AppServices, recheck: Bool = false) async {
@@ -534,12 +537,23 @@ struct ConsumerSaveStatus: View {
     guard services.photoAccountAccess != nil else { return }
     if openedBinding == binding && (isRefreshing || !recheck) { return }
     if isRefreshing { cancel() }
-    openedBinding = binding
     await refresh(services)
   }
+  func requiresAuthentication(_ services: AppServices) -> Bool {
+    rejectedSession?.binding == SavedLibraryOpenBinding(services)
+  }
+  func authenticationFailure(_ services: AppServices) -> String? {
+    requiresAuthentication(services) ? rejectedSession?.detail : nil
+  }
+  func failureDetails(_ services: AppServices) -> String? {
+    if let rejected = authenticationFailure(services) { return rejected }
+    return openedBinding == SavedLibraryOpenBinding(services) ? error : nil
+  }
   func refresh(_ services: AppServices) async {
-    guard !Task.isCancelled, !isRefreshing, services.photoAccountAccess != nil else { return }
+    guard !Task.isCancelled, !isRefreshing, services.photoAccountAccess != nil,
+      !requiresAuthentication(services) else { return }
     openedBinding = SavedLibraryOpenBinding(services)
+    rejectedSession = nil
     let token = UUID(), account = services.session.accountId, generation = services.vault.generation
     let catalog = services.store
     operation = token
@@ -552,6 +566,9 @@ struct ConsumerSaveStatus: View {
         guard !Task.isCancelled, self.operation == token, services.session.accountId == account,
           services.vault.generation == generation, services.store === catalog else { return }
         self.error = error.localizedDescription
+        if (error as? FotoroError)?.message == "UNAUTHENTICATED" {
+          self.rejectedSession = (SavedLibraryOpenBinding(services), error.localizedDescription)
+        }
       }
     }
     task = loading

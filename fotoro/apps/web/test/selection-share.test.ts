@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {shareSelectedOriginals} from "../src/local/selection-share";
 import {captureGroup} from "../src/local/capture-groups";
 import type {LocalPhoto} from "../src/local/resources";
-import {ownedPhotoForLocal, selectedOwnedPhotos} from "../src/local/selection";
+import {availablePhotoSelection, ownedPhotoForLocal, selectedOwnedPhotos, reconcileSavedSelection} from "../src/local/selection";
 import type {OwnedPhotoSnapshot} from "../src/library/consumer-search";
 import type {Photo} from "../src/library/catalog";
 
@@ -65,4 +65,51 @@ test("local corrections resolve the verified original digest, never equal filena
   assert.equal(ownedPhotoForLocal(snapshot,{...local,file:undefined}),undefined);
   assert.equal(ownedPhotoForLocal({...snapshot,current:()=>false},local),undefined);
   assert.equal(ownedPhotoForLocal({...snapshot,photos:[unrelated,received,other]},local),undefined);
+});
+
+test("a selected saved photo keeps one selection when its identical local original is imported", () => {
+  const token = {}, local = {...photo("local"), digest: "00".repeat(32)};
+  const saved = {manifest: {photoId: "saved", ownerAccountId: "owner"}, metadata: {filename: "original.png", sourceDate: local.date, dateSource: "import", originalSha256: "A".repeat(43)}} as Photo;
+  const snapshot = {accountId: "owner", token, current: () => true, photos: [saved], preview: async () => new Blob()} satisfies OwnedPhotoSnapshot;
+  const ids = new Set(["saved"]), before = reconcileSavedSelection(snapshot, token, ids, []);
+  assert.deepEqual([...before.savedIDs], ["saved"]); assert.equal(before.localIDs.size, 0);
+  const imported = reconcileSavedSelection(snapshot, token, ids, [local]);
+  assert.equal(imported.savedIDs.size, 0); assert.deepEqual([...imported.localIDs], [local.id]);
+  const selected = new Set(["manual", ...imported.localIDs]);
+  const files: File[] = [];
+  const pending = shareSelectedOriginals([local].filter(photo => selected.has(photo.id)), () => true,
+    {canShare: () => false, download: file => {files.push(file);}});
+  assert.deepEqual(files, [local.file], "The original is exported exactly once");
+  assert.deepEqual([...selected], ["manual", "local"]); assert.deepEqual([...ids], ["saved"], "Reconciliation does not mutate the original selection");
+  return pending;
+});
+
+test("photo availability pruning retains a choice queued after the import render", () => {
+  const manual = photo("manual"), imported = photo("imported"), photos = [manual, imported];
+  const renderedSelection = new Set([manual.id]);
+  const queuedSelection = new Set([...renderedSelection, imported.id]);
+  const pruned = availablePhotoSelection(queuedSelection, photos);
+  assert.deepEqual([...pruned], ["manual", "imported"], "Pruning uses current choices, not the earlier render's IDs");
+  assert.equal(pruned, queuedSelection, "An unchanged choice must not enqueue another state update");
+  assert.deepEqual([...availablePhotoSelection(pruned, [manual])], ["manual"], "Removing a source still removes its choice");
+  assert.deepEqual([...availablePhotoSelection(pruned, [manual, {...imported, current: () => false}])], ["manual"]);
+});
+
+test("saved selection cannot transfer after account loss, source withdrawal, or a digest mismatch", () => {
+  const token = {}, local = {...photo("local"), digest: "00".repeat(32)};
+  const record = (id: string, digest = "A".repeat(43), owner = "owner", grantId?: string) => ({manifest: {photoId: id, ownerAccountId: owner},
+    metadata: {filename: local.filename, sourceDate: local.date, dateSource: "import", originalSha256: digest}, grantId} as Photo);
+  const own = record("own"), otherOriginal = record("distinct", "B".repeat(43));
+  const snapshot = {accountId: "owner", token, current: () => true, photos: [own, otherOriginal, record("received", undefined, "owner", "grant"), record("other", undefined, "other")], preview: async () => new Blob()} satisfies OwnedPhotoSnapshot;
+  const ids = new Set(["own", "distinct", "received", "other", "withdrawn"]);
+  const current = reconcileSavedSelection(snapshot, token, ids, [local]);
+  assert.deepEqual([...current.localIDs], ["local"]); assert.deepEqual([...current.savedIDs], ["distinct"]);
+  for (const invalid of [null, {...snapshot, current: () => false}, {...snapshot, token: {}}, {...snapshot, accountId: "new-account"}, {...snapshot, photos: []}]) {
+    const result = reconcileSavedSelection(invalid, token, ids, [local]);
+    assert.equal(result.localIDs.size, 0); assert.equal(result.savedIDs.size, 0);
+  }
+  for (const unavailable of [{...local, current: () => false}, {...local, file: undefined, preview: new Blob(["preview"])}, {...local, digest: undefined}, {...local, digest: "11".repeat(32)}]) {
+    const result = reconcileSavedSelection(snapshot, token, ids, [unavailable]);
+    assert.equal(result.localIDs.size, 0); assert.deepEqual([...result.savedIDs], ["own", "distinct"]);
+  }
 });

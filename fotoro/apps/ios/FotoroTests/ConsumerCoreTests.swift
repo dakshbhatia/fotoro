@@ -258,6 +258,68 @@ final class ConsumerCoreTests: XCTestCase {
     XCTAssertEqual(limited.errorDescription, "Too many attempts. Wait a minute and try again.")
     XCTAssertTrue(limited.retryable)
   }
+  func testSyncOpeningRequiresAPrivateCurrentAccountEvenWhenLocalCatalogIsReadable() {
+    let privateAccount = "11111111-1111-4111-8111-111111111111"
+    XCTAssertFalse(PhotoSyncAccountPolicy.requiresAuthentication(hasAccountAccess: true, isSignedIn: true,
+      accountId: privateAccount, fixture: false, rejectedSession: false))
+    for (account, fixture, signedIn, rejected) in [
+      (privateAccount, true, true, false),
+      ("00000000-0000-4000-8000-000000000001", false, true, false),
+      (privateAccount, false, false, false),
+      (privateAccount, false, true, true),
+    ] {
+      XCTAssertTrue(PhotoSyncAccountPolicy.requiresAuthentication(hasAccountAccess: true, isSignedIn: signedIn,
+        accountId: account, fixture: fixture, rejectedSession: rejected))
+    }
+    XCTAssertTrue(PhotoSyncAccountPolicy.requiresAuthentication(hasAccountAccess: false, isSignedIn: true,
+      accountId: privateAccount, fixture: false, rejectedSession: false))
+  }
+  func testAccountEntryKeepsPrivateRememberedRecoveryOneTapAndExcludesPublicAccounts() {
+    let privateAccount = "11111111-1111-4111-8111-111111111111"
+    XCTAssertEqual(AccountEntryPolicy.initialPage(accountId: privateAccount, fixture: false,
+      hasRememberedPassword: true, isSignedIn: true, canUnlockLocally: true,
+      enterPassword: false, reauthenticate: true), .remembered)
+    for (account, fixture) in [(privateAccount, true), ("00000000-0000-4000-8000-000000000001", false)] {
+      XCTAssertEqual(AccountEntryPolicy.initialPage(accountId: account, fixture: fixture,
+        hasRememberedPassword: true, isSignedIn: true, canUnlockLocally: true,
+        enterPassword: false, reauthenticate: true), .welcome)
+    }
+    XCTAssertEqual(AccountEntryPolicy.initialPage(accountId: nil, fixture: false,
+      hasRememberedPassword: false, isSignedIn: false, canUnlockLocally: false,
+      enterPassword: false, reauthenticate: false), .welcome)
+    XCTAssertEqual(AccountEntryPolicy.initialPage(accountId: privateAccount, fixture: false,
+      hasRememberedPassword: false, isSignedIn: true, canUnlockLocally: true,
+      enterPassword: false, reauthenticate: true), .welcome)
+    XCTAssertEqual(AccountEntryPolicy.initialPage(accountId: privateAccount, fixture: false,
+      hasRememberedPassword: true, isSignedIn: true, canUnlockLocally: true,
+      enterPassword: true, reauthenticate: false), .password)
+  }
+  @MainActor func testChoosingPrivateAuthenticationFromFixtureKeepsAccountCatalogAndQueuedPhotos() async throws {
+    try await withSavedLibrary { services, server in
+      let previousFixture = UserDefaults.standard.object(forKey: "fotoro.fixtureAccount")
+      defer {
+        if let previousFixture { UserDefaults.standard.set(previousFixture, forKey: "fotoro.fixtureAccount") }
+        else { UserDefaults.standard.removeObject(forKey: "fotoro.fixtureAccount") }
+      }
+      let account = try XCTUnwrap(services.session.accountId), catalog = services.store
+      var photo = try self.samplePhoto()
+      photo.manifest.ownerAccountId = account
+      photo.transferState = "pending"
+      try catalog.put(photo)
+      try services.journal.enqueue(photo, publicSample: true)
+      UserDefaults.standard.set(account, forKey: "fotoro.fixtureAccount")
+      try AccountEntryPolicy.preparePrivateAuthentication(services)
+      XCTAssertFalse(services.session.fixture)
+      XCTAssertEqual(services.api.baseURL, APIURLPolicy.canonical)
+      XCTAssertEqual(services.session.accountId, account)
+      XCTAssertTrue(services.store === catalog)
+      XCTAssertNotNil(try catalog.backupPhoto(photo.id))
+      XCTAssertEqual(try services.journal.entries().map { $0.photo.id }, [photo.id])
+      XCTAssertNil(UserDefaults.standard.object(forKey: "fotoro.fixtureAccount"))
+      XCTAssertFalse(services.automaticPhotoSync.enabled)
+      XCTAssertTrue(server.requests.isEmpty)
+    }
+  }
   func testUnknownTotalsAreOmittedAndQueuedPhotosDoNotCountAsCompleted() {
     var facts = ConsumerSyncFacts()
     facts.unlocked = true
@@ -1064,17 +1126,59 @@ extension ConsumerCoreTests {
   }
   @MainActor func testSavedLibraryRefreshShowsFailureAndRetriesOnlyReadOnlyCatalogWork() async throws {
     try await withSavedLibrary(failFirst: true) { services, server in
+      var queued = try self.samplePhoto()
+      queued.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+      queued.transferState = "pending"
+      try services.store.put(queued)
+      try services.journal.enqueue(queued, publicSample: true)
       let refresh = SavedLibraryRefresh()
       await refresh.open(services)
       XCTAssertFalse(refresh.isRefreshing)
       XCTAssertEqual(refresh.error, "CONTROLLED_CATALOG_UNAVAILABLE")
+      XCTAssertEqual(refresh.failureDetails(services), "CONTROLLED_CATALOG_UNAVAILABLE")
+      XCTAssertFalse(refresh.requiresAuthentication(services))
       XCTAssertNil(try services.consumerSavedPhoto(server.photoID))
       await refresh.refresh(services)
       XCTAssertFalse(refresh.isRefreshing)
       XCTAssertNil(refresh.error)
+      XCTAssertNil(refresh.failureDetails(services), "Successful read-only retry clears stale Sync details")
       XCTAssertNotNil(try services.consumerSavedPhoto(server.photoID))
+      XCTAssertEqual(try services.journal.entries().map { $0.photo.id }, [queued.id])
+      XCTAssertFalse(services.automaticPhotoSync.enabled, "Catalog retry does not opt into automatic uploads")
       XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" })
       XCTAssertEqual(server.requests.filter { $0.path == "/v1/changes" }.count, 2)
+    }
+  }
+  @MainActor func testRejectedSavedSessionNeedsExplicitAccountOpeningWithoutDiscardingLocalPhotos() async throws {
+    try await withSavedLibrary(failFirst: true, failureCode: "UNAUTHENTICATED") { services, server in
+      var cached = try self.samplePhoto()
+      cached.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+      try services.store.put(cached)
+      try services.reload()
+      let account = services.session.accountId, vault = services.vault.generation
+      let catalog = services.store
+      let refresh = SavedLibraryRefresh()
+      await refresh.open(services)
+      XCTAssertTrue(refresh.requiresAuthentication(services))
+      XCTAssertEqual(refresh.error, "UNAUTHENTICATED")
+      await refresh.refresh(services)
+      XCTAssertEqual(server.requests.count, 1, "A rejected session needs account opening, not another identical request")
+      XCTAssertEqual(services.session.accountId, account)
+      XCTAssertEqual(services.vault.generation, vault)
+      XCTAssertTrue(services.store === catalog)
+      XCTAssertNotNil(try services.consumerSavedPhoto(cached.id))
+      XCTAssertFalse(services.automaticPhotoSync.enabled)
+      refresh.cancel()
+      XCTAssertTrue(refresh.requiresAuthentication(services), "Navigation cannot erase the recovery route")
+      XCTAssertEqual(refresh.authenticationFailure(services), "UNAUTHENTICATED", "Sync details retain the rejected-session failure")
+      try services.activateAccount()
+      XCTAssertFalse(refresh.requiresAuthentication(services), "Account opening creates a fresh catalog binding")
+      await refresh.open(services)
+      XCTAssertNil(refresh.error)
+      XCTAssertNotNil(try services.consumerSavedPhoto(cached.id))
+      XCTAssertNotNil(try services.consumerSavedPhoto(server.photoID))
+      XCTAssertFalse(services.automaticPhotoSync.enabled, "Account recovery does not consent to automatic uploads")
+      XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" })
     }
   }
   @MainActor func testSavedLibrarySelectionSharesBothSearchChoicesAndRejectsChangedOrWithdrawnSources() async throws {
@@ -1211,6 +1315,7 @@ extension ConsumerCoreTests {
     }
   }
   @MainActor private func withSavedLibrary(gate: SavedLibraryRequestGate? = nil, failFirst: Bool = false,
+    failureCode: String = "CONTROLLED_CATALOG_UNAVAILABLE",
     original: Data? = nil, mediaVersion: Int? = 1,
     check: @MainActor (AppServices, SavedLibraryServer) async throws -> Void) async throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
@@ -1219,7 +1324,7 @@ extension ConsumerCoreTests {
     var card = accounts.accounts[0]; card.accountId = Wire.id()
     let secret = accounts.testSecrets[0]
     let server = try SavedLibraryServer(card: card, secret: secret, gate: gate, failFirst: failFirst,
-      original: original ?? Data("jpg".utf8), mediaVersion: mediaVersion)
+      failureCode: failureCode, original: original ?? Data("jpg".utf8), mediaVersion: mediaVersion)
     SavedLibraryProtocol.server = server
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [SavedLibraryProtocol.self]
@@ -1285,11 +1390,13 @@ private final class SavedLibraryServer: @unchecked Sendable {
   private var recorded: [Request] = []
   private let gate: SavedLibraryRequestGate?
   private var failFirst: Bool
+  private let failureCode: String
   private let page: Data
   private let metadata: Data
   init(card: AccountCardV1, secret: FixtureSecrets, gate: SavedLibraryRequestGate?, failFirst: Bool,
-    original: Data, mediaVersion: Int?) throws {
+    failureCode: String, original: Data, mediaVersion: Int?) throws {
     self.gate = gate; self.failFirst = failFirst
+    self.failureCode = failureCode
     let crypto = CryptoAdapter(), key = crypto.randomKey()
     let binding = MediaBinding(photoId: photoID, representationId: Wire.id(), kind: "metadata")
     let value = PhotoMetadataV1(filename: "remote-receipt.jpg", mediaType: "image/jpeg", sourceDate: Wire.date(),
@@ -1313,7 +1420,10 @@ private final class SavedLibraryServer: @unchecked Sendable {
     lock.lock(); recorded.append(Request(method: "GET", path: path, mediaAware: mediaAware)); let first = recorded.count == 1
     let fail = failFirst && path == "/v1/changes"; if fail { failFirst = false }; lock.unlock()
     if first, let gate { gate.started.fulfill(); _ = gate.release.wait(timeout: .now() + 5) }
-    if fail { return (503, Data(#"{"code":"CONTROLLED_CATALOG_UNAVAILABLE","retryable":true}"#.utf8)) }
+    if fail {
+      return (failureCode == "UNAUTHENTICATED" ? 401 : 503,
+        try JSONSerialization.data(withJSONObject: ["code": failureCode, "retryable": true]))
+    }
     if path == "/v1/changes" { return (200, page) }
     if path == "/v1/objects/" + objectID { return (200, metadata) }
     if path == "/v1/grants" { return (200, try Wire.encode(GrantInboxV1(version: 1, grants: []))) }

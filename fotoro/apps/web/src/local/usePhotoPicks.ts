@@ -1,6 +1,7 @@
 import {useCallback, useEffect, useMemo, useState} from "react";
 import {analyzePixels, PickAnalyzer, type PhotoRecommendations} from "./auto-picks";
 import {LocalResources, type LocalPhoto} from "./resources";
+import {availablePhotoSelection} from "./selection";
 
 export async function readPickSignals(photo: LocalPhoto, resources: LocalResources) {
   const thumbnail = await resources.load(photo, "thumbnail");
@@ -36,8 +37,8 @@ export function usePhotoPicks(photos: LocalPhoto[], resources: LocalResources, e
       .then(result => {if (alive && result) {setRecommendations(result); setBusy(false);}});
     return () => {alive = false; analyzer.cancel();};
   }, [photos, resources, analyzer, enabled, clear, sourceGeneration]);
-  const ids = useMemo(() => new Set(photos.filter(photo => selection.has(photo.id)).map(photo => photo.id)), [photos, selection]);
-  useEffect(() => {setSelection(current => current.size === ids.size ? current : new Set(ids));}, [ids]);
+  const ids = useMemo(() => availablePhotoSelection(selection, photos), [photos, selection]);
+  useEffect(() => {setSelection(current => availablePhotoSelection(current, photos));}, [photos, selection]);
   const choose = (id: string, checked: boolean) => setSelection(current => {
     const next = new Set(current);
     checked ? next.add(id) : next.delete(id);
