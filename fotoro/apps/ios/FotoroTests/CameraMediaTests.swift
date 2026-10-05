@@ -1,9 +1,144 @@
 import ImageIO
+import Photos
 import XCTest
 
 @testable import Fotoro
 
 final class CameraMediaTests: XCTestCase {
+  private func readRoot() throws -> URL {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    return root
+  }
+  func testOriginalStreamPreservesEveryByteAndRemovesTemporaryPlaintext() async throws {
+    let root = try readRoot(), request = ControlledOriginalRequest()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let task = Task { try await PhotosOriginalReader.read(maximumBytes: 5, temporaryRoot: root,
+      start: { request.start($0, $1) }, cancel: { request.cancel($0) }) }
+    while !request.started { await Task.yield() }
+    request.receive(Data([1, 2])); request.receive(Data([3, 4, 5])); request.finish(nil)
+    let bytes = try await task.value
+    XCTAssertEqual(bytes, Data([1, 2, 3, 4, 5]))
+    XCTAssertTrue(request.cancelledIDs.isEmpty)
+    XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+  }
+  func testOversizedStreamStopsBeforeProviderCompletionAndCannotRetainPartialBytes() async throws {
+    let root = try readRoot()
+    let cancelled = expectation(description: "Oversized request cancelled before completion")
+    let request = ControlledOriginalRequest(onCancel: { cancelled.fulfill() })
+    defer { try? FileManager.default.removeItem(at: root) }
+    let task = Task { try await PhotosOriginalReader.read(maximumBytes: 5, temporaryRoot: root,
+      start: { request.start($0, $1) }, cancel: { request.cancel($0) }) }
+    while !request.started { await Task.yield() }
+    request.receive(Data([1, 2, 3])); request.receive(Data([4, 5, 6]))
+    await fulfillment(of: [cancelled], timeout: 2)
+    XCTAssertEqual(request.cancelledIDs, [7], "Stop before the remaining iCloud bytes arrive")
+    XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+    request.finish(nil)
+    do { _ = try await task.value; XCTFail("Oversized resource must not be returned") }
+    catch { XCTAssertTrue(error is CameraMediaAdmissionError) }
+  }
+  func testPausedReadCancelsPhotosRequestAndIgnoresLateChunksAndCompletion() async throws {
+    let root = try readRoot()
+    let cancelled = expectation(description: "Paused request cancelled before completion")
+    let request = ControlledOriginalRequest(onCancel: { cancelled.fulfill() })
+    defer { try? FileManager.default.removeItem(at: root) }
+    let task = Task { try await PhotosOriginalReader.read(maximumBytes: 5, temporaryRoot: root,
+      start: { request.start($0, $1) }, cancel: { request.cancel($0) }) }
+    while !request.started { await Task.yield() }
+    request.receive(Data([1, 2, 3]))
+    task.cancel()
+    await fulfillment(of: [cancelled], timeout: 2)
+    XCTAssertEqual(request.cancelledIDs, [7])
+    XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+    request.receive(Data([4, 5])); request.finish(nil); request.finish(nil)
+    do { _ = try await task.value; XCTFail("Paused read must not publish an original") }
+    catch { XCTAssertTrue(error is CancellationError) }
+    XCTAssertEqual(request.cancelledIDs, [7], "Late callbacks cannot cancel or complete a second time")
+  }
+  func testPauseBeforeRequestIDReturnsCancelsExactlyOnce() async throws {
+    let root = try readRoot(), request = ControlledOriginalRequest()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let task = Task {
+      try await PhotosOriginalReader.read(maximumBytes: 5, temporaryRoot: root,
+        start: { receive, finish in
+          withUnsafeCurrentTask { $0?.cancel() }
+          receive(Data([1, 2, 3])); finish(nil)
+          return 7
+        }, cancel: { request.cancel($0) })
+    }
+    do { _ = try await task.value; XCTFail("Pause must win over late successful completion") }
+    catch { XCTAssertTrue(error is CancellationError) }
+    XCTAssertEqual(request.cancelledIDs, [7])
+    XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+  }
+  func testEmptyResourceCannotBecomeAnOriginal() async throws {
+    let root = try readRoot(), request = ControlledOriginalRequest()
+    defer { try? FileManager.default.removeItem(at: root) }
+    do {
+      _ = try await PhotosOriginalReader.read(maximumBytes: 5, temporaryRoot: root,
+        start: { _, finish in finish(nil); return 7 }, cancel: { request.cancel($0) })
+      XCTFail("An empty resource is not a saved original")
+    } catch { XCTAssertTrue(error is FotoroError) }
+    XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+  }
+  func testOversizedCallbackBeforeRequestIDReturnsStillCancelsExactlyOnce() async throws {
+    let root = try readRoot(), request = ControlledOriginalRequest()
+    defer { try? FileManager.default.removeItem(at: root) }
+    do {
+      _ = try await PhotosOriginalReader.read(maximumBytes: 5, temporaryRoot: root,
+        start: { receive, finish in
+          receive(Data([1, 2, 3, 4, 5, 6])); finish(nil)
+          return 7
+        }, cancel: { request.cancel($0) })
+      XCTFail("A synchronous oversized callback must not return an original")
+    } catch { XCTAssertTrue(error is CameraMediaAdmissionError) }
+    XCTAssertEqual(request.cancelledIDs, [7])
+    XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+  }
+  func testFailedResourceRetryStartsWithNoEarlierPartialBytes() async throws {
+    let root = try readRoot(), request = ControlledOriginalRequest()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let task = Task { try await PhotosOriginalReader.read(maximumBytes: 5, temporaryRoot: root,
+      start: { request.start($0, $1) }, cancel: { request.cancel($0) }) }
+    while !request.started { await Task.yield() }
+    request.receive(Data([9, 9])); request.finish(FotoroError("Controlled source interruption"))
+    do { _ = try await task.value; XCTFail("Interrupted resource must fail") }
+    catch { XCTAssertTrue(error is FotoroError) }
+    XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+    let bytes = try await PhotosOriginalReader.read(maximumBytes: 5, temporaryRoot: root,
+      start: { receive, finish in receive(Data([1, 2, 3])); finish(nil); return 8 }, cancel: { request.cancel($0) })
+    XCTAssertEqual(bytes, Data([1, 2, 3]))
+    XCTAssertTrue(request.cancelledIDs.isEmpty)
+  }
+  func testCleanupFailureCannotPublishOriginalAndLeavesNoSpoolContents() async throws {
+    let root = try readRoot(), request = ControlledOriginalRequest()
+    defer { try? FileManager.default.removeItem(at: root) }
+    do {
+      _ = try await PhotosOriginalReader.read(maximumBytes: 5, temporaryRoot: root,
+        removeTemporary: { _ in throw FotoroError("Controlled deletion failure") },
+        start: { receive, finish in receive(Data([1, 2, 3])); finish(nil); return 7 },
+        cancel: { request.cancel($0) })
+      XCTFail("Cleanup failure cannot return a saved original")
+    } catch { XCTAssertEqual(error.localizedDescription, "Cannot clear the temporary original. Retry sync.") }
+    let directory = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil).first)
+    XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("original")).count, 0)
+  }
+  func testCancellationCanReenterProviderCompletionWithoutDeadlocking() async throws {
+    let root = try readRoot(), request = ControlledOriginalRequest()
+    defer { try? FileManager.default.removeItem(at: root) }
+    do {
+      _ = try await PhotosOriginalReader.read(maximumBytes: 5, temporaryRoot: root,
+        start: { receive, finish in
+          _ = request.start(receive, finish)
+          receive(Data([1, 2, 3, 4, 5, 6]))
+          return 7
+        }, cancel: { id in request.cancel(id); request.finish(CancellationError()) })
+      XCTFail("Oversized original must fail")
+    } catch { XCTAssertTrue(error is CameraMediaAdmissionError) }
+    XCTAssertEqual(request.cancelledIDs, [7])
+    XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+  }
   private func resource(_ name: String, _ ext: String) throws -> Data {
     try Data(contentsOf: XCTUnwrap(Bundle(for: Self.self).url(forResource: name, withExtension: ext)))
   }
@@ -129,6 +264,25 @@ final class CameraMediaTests: XCTestCase {
       "A skipped original must remain visible instead of reporting healthy completion")
     XCTAssertTrue(services.automaticPhotoSync.detail.contains("1 original"))
   }
+}
+
+private final class ControlledOriginalRequest: @unchecked Sendable {
+  private let lock = NSLock()
+  private var receiveHandler: (@Sendable (Data) -> Void)?
+  private var finishHandler: (@Sendable (Error?) -> Void)?
+  private var cancelled: [PHAssetResourceDataRequestID] = []
+  private let onCancel: @Sendable () -> Void
+  init(onCancel: @escaping @Sendable () -> Void = {}) { self.onCancel = onCancel }
+  var started: Bool { lock.lock(); defer { lock.unlock() }; return receiveHandler != nil }
+  var cancelledIDs: [PHAssetResourceDataRequestID] { lock.lock(); defer { lock.unlock() }; return cancelled }
+  func start(_ receive: @escaping @Sendable (Data) -> Void,
+    _ finish: @escaping @Sendable (Error?) -> Void) -> PHAssetResourceDataRequestID {
+    lock.lock(); receiveHandler = receive; finishHandler = finish; lock.unlock()
+    return 7
+  }
+  func cancel(_ id: PHAssetResourceDataRequestID) { lock.lock(); cancelled.append(id); lock.unlock(); onCancel() }
+  func receive(_ bytes: Data) { lock.lock(); let callback = receiveHandler; lock.unlock(); callback?(bytes) }
+  func finish(_ error: Error?) { lock.lock(); let callback = finishHandler; lock.unlock(); callback?(error) }
 }
 
 private actor MediaReadGate {

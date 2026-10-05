@@ -1,4 +1,28 @@
-# Verification — October 4, 2026
+# Verification — October 5, 2026
+
+The original-download recovery pass replaces PhotoKit's uncancellable full-file
+write with a cancellable resource request and a protected temporary spool.
+Pause cancels the provider request before it finishes. Oversized resources stop
+as soon as a chunk exceeds the remaining 50 MiB budget; Live Photo motion shares
+the budget already used by its still. Complete pair encoding retains the exact
+logical-original limit. No partial original is published.
+
+Nine new controlled-provider regressions cover byte preservation, early size
+rejection, pause, synchronous callbacks before request-ID return, empty resources,
+failure followed by retry, cleanup failure and reentrant cancellation. Removing
+the cancellation and receive-limit guards produces eight expected assertion
+failures in the two interruption tests; the Simulator runner then times out after
+those failed suites, and the source is restored. The fixed media suite passes all
+15 tests. Full native verification passes 362 of 363 tests; preview passes 112 of
+113. Each retains one known Vision inference-context skip and has no failures.
+Core checks pass, and independent code review finds no remaining material issue.
+
+Build 35 contains the fix. Distribution signing and physical media/relaunch
+acceptance remain open. Originals above 50 MiB are still excluded; encrypted
+uploads already scheduled may finish in the background, while preparation
+requires the app to be open and unlocked. Web/API behavior is unchanged.
+
+## Previous viewer and incoming-moment recovery
 
 The recovery pass gives failed Saved previews a retry on iPhone and web. Web
 retry retains the selected photo and edits; source, account and access changes

@@ -21,7 +21,9 @@ Sync, Search and Share are the core. Their current source has public-fixture
 acceptance evidence; personal-library acceptance and physical performance remain
 open. Web/API are live at merged PR 35, with simpler account entry, complete
 selection sharing, private photo locations, Places and confirmed Google Timeline import.
-Build 34 is archived and audited. Sync now reports skipped originals as partial,
+Build 34 is archived and audited; build 35 adds cancellable, bounded Photos
+original downloads. Pause stops the resource request, oversize stops before the
+remaining download, and retries discard partial bytes. Sync reports skipped originals as partial,
 with their count, rather than hiding them behind a healthy state. Individual App Store Connect API access is verified;
 distribution signing remains unavailable. The individual key cannot provision signing.
 Build 25 remains the latest verified internal TestFlight build
