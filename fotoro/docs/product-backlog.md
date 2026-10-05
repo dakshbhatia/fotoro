@@ -17,17 +17,18 @@ opens the saved library on iPhone and web. Picks are suggestions;
 they never replace the full Photos library. Saved is the other-device library,
 not a second selection to manage.
 
-Sync, Search and Share are the core. Their current source has public-fixture
-acceptance evidence; personal-library acceptance and physical performance remain
-open. Web/API are live at merged PR 35, with simpler account entry, complete
-selection sharing, private photo locations, Places and confirmed Google Timeline import.
-Build 35 is archived and audited, with cancellable, bounded Photos
-original downloads. Pause stops the resource request, oversize stops before the
-remaining download, and retries discard partial bytes. Sync reports skipped originals as partial,
-with their count, rather than hiding them behind a healthy state. Individual App Store Connect API access is verified;
-distribution signing remains unavailable. The individual key cannot provision signing.
-Build 25 remains the latest verified internal TestFlight build
-(`VALID`, `IN_BETA_TESTING` in Fotoro Internal).
+Sync, Search and Share are the core. Turn on sync now retains the chosen action
+through account entry; opening status does not enable it. View synced photos goes
+directly to Saved. Web search stays visible, and prepared sharing has one Send
+photos action with the chosen recipient. Rare controls stay under disclosures.
+Public-fixture acceptance passes; personal-library acceptance and physical
+performance remain open. Web/API are currently live at merged PR 35; the current
+simplification still requires exact-head CI and production asset readback.
+Build 36 is archived and audited, including the prior cancellable, bounded
+original-download and partial-sync corrections. Individual App Store Connect
+API access is verified; distribution signing remains unavailable. The individual
+key cannot provision signing. Build 25 remains the latest verified internal
+TestFlight build (`VALID`, `IN_BETA_TESTING` in Fotoro Internal).
 
 Completed on-device text analysis follows opted-in sync through the encrypted
 annotation journal; supplied edits still need Save. Scene readers are prepared,

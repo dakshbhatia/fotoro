@@ -1,5 +1,40 @@
 # Verification — October 5, 2026
 
+The three-S simplification preserves the explicit Turn on sync choice through
+account entry, bound to the selected service, account and unlocked catalog.
+Opening Sync status alone remains read-only. Healthy Sync omits repeated detail,
+provides View synced photos, and keeps Pause reachable. Rare disable and sharing
+options stay under disclosures. Web search stays visible; Clear retains focus.
+A prepared invitation presents Send photos for its fixed recipient and selection;
+Choose another person explicitly resets the invitation before a new grant.
+
+The new consent regression fails when authorization overwrites the service chosen
+before sign-in, then passes with the origin fence. Full native verification passes
+364 of 365 tests; preview passes 112 of 113, each with the existing Vision
+inference-context skip and no failures. Core/release checks, all 70 API and 397
+web tests, typechecks and the production build pass. Independent review finds
+no material issue. No backend, account protocol or model changes are introduced.
+
+Rendered web verification uses the existing Playwright runtime with ephemeral
+headless Google Chrome because the Browser plugin is unavailable. Two disposable
+loopback accounts and a public Singapore photo exercise real encrypted D1/R2
+storage. Local and Saved search stay visible and retain focus after Clear.
+Saved fits 320×568, 390×844 and 1280×720 without horizontal overflow. Prepared
+sharing hides creation controls, retains the recipient, resets deliberately and
+creates a new grant only after another explicit Share choice. Send photos invokes
+browser sharing with the prepared link. No unexpected page or console errors
+occur; completion of the OS share sheet is not asserted.
+
+Build 36 archives with all 42 Swift sources and 69 native inputs verified,
+matching arm64 dSYM, production associations and unchanged full static encryption.
+It is development-signed; exact committed-head CI and production asset readback
+must qualify rollout. Distribution signing and physical-device acceptance remain
+open. Build 25 remains the latest verified internal TestFlight build. This pass
+does not remove the 50 MiB logical-original limit or the foreground preparation
+requirement.
+
+## Previous original-download recovery
+
 The original-download recovery pass replaces PhotoKit's uncancellable full-file
 write with a cancellable resource request and a protected temporary spool.
 Pause cancels the provider request before it finishes. Oversized resources stop
