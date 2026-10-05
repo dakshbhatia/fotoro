@@ -62,6 +62,29 @@ export class ShareSelection {
   dispose() {if (!this.disposed) {this.disposed = true; for (const photo of this.photos) photo.metadataKey.fill(0);}}
 }
 
+export class ExpiredSavedSelection {
+  private manifests: Map<string, string>;
+  private files: readonly File[];
+  constructor(private readonly accountId: string, photos: readonly Photo[], selected: ReadonlySet<string>, files: readonly File[] = []) {
+    // Keep only original bindings, never plaintext keys or prepared share files.
+    this.manifests = new Map(photos.filter(photo => selected.has(photo.manifest.photoId) &&
+      !photo.grantId && photo.manifest.ownerAccountId === accountId).map(photo => [photo.manifest.photoId, manifestIdentity(photo.manifest)]));
+    this.files = Object.freeze([...files]);
+  }
+  filesFor(accountId: string): File[] {return accountId === this.accountId ? [...this.files] : [];}
+  restore(photos: readonly Photo[], accountId: string, current?: ReadonlySet<string>): Set<string> {
+    if (accountId !== this.accountId) return new Set();
+    const eligible = photos.filter(photo => !photo.grantId && photo.manifest.ownerAccountId === accountId);
+    const identical = new Set(eligible.filter(photo => this.manifests.get(photo.manifest.photoId) === manifestIdentity(photo.manifest)).map(photo => photo.manifest.photoId));
+    // A later catalog read may withdraw old sources, but cannot replay an old choice.
+    return current ? new Set(eligible.filter(photo => current.has(photo.manifest.photoId) &&
+      (!this.manifests.has(photo.manifest.photoId) || identical.has(photo.manifest.photoId))).map(photo => photo.manifest.photoId)) : identical;
+  }
+}
+const orderedManifest = (value: unknown): unknown => Array.isArray(value) ? value.map(orderedManifest)
+  : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, child]) => [key, orderedManifest(child)])) : value;
+const manifestIdentity = (value: Photo["manifest"]) => JSON.stringify(orderedManifest(value));
+
 // Public links survive only their own password unlock; acceptance stays explicit.
 export class IncomingShareIntent {
   readonly link: FotoroShareLink;
@@ -69,6 +92,7 @@ export class IncomingShareIntent {
   private session?: object;
   private authentication?: {generation: number};
   private retryLock = false;
+  private expiredAccount?: string;
   constructor(link: FotoroShareLink, session?: object) {this.link = freezePublic(structuredClone(link)); this.session = session;}
   get pending() {return !this.cancelled;}
   bindInitialVault(session: object) {if (this.pending && !this.session && !this.authentication) this.session = session;}
@@ -78,10 +102,17 @@ export class IncomingShareIntent {
     if (!ticket || ticket !== this.authentication) return;
     this.authentication = undefined;
     if (!session) return;
-    if (!this.pending || generation !== ticket.generation + 1) {this.cancel(); return;}
+    if (!this.pending || generation !== ticket.generation + 1 ||
+        this.expiredAccount && (session as {accountId?: string}).accountId !== this.expiredAccount) {this.cancel(); return;}
     this.session = session;
+    this.expiredAccount = undefined;
   }
-  retryPassword() {if (this.pending) {this.session = undefined; this.retryLock = true; this.authentication = undefined;}}
-  vaultLocked() {if (this.retryLock) {this.retryLock = false; return;} if (this.session || !this.authentication) this.cancel();}
+  retryPassword() {if (this.pending) {this.session = undefined; this.expiredAccount = undefined; this.retryLock = true; this.authentication = undefined;}}
+  vaultLocked(reason = "manual", accountId?: string) {
+    if (reason === "expired" && this.pending && this.session && accountId) {
+      this.expiredAccount = accountId; this.session = undefined; this.authentication = undefined; return;
+    }
+    if (this.retryLock) {this.retryLock = false; return;} if (this.session || !this.authentication) this.cancel();
+  }
   cancel() {this.cancelled = true; this.session = undefined; this.authentication = undefined;}
 }

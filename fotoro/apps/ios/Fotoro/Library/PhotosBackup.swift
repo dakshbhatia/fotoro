@@ -252,12 +252,21 @@ struct BackupStatus: Codable {
             source.sourceRevision = candidate.sourceRevision
             try store.putBackupSource(source)
           }
-          if let reason = candidate.skipReason, source.phase == .pending || source.phase == .failed
-          {
-            source.phase = .skipped
-            source.message = reason
-            source.skipProcessor = "camera-original-v1"
-            try store.putBackupSource(source)
+          if let reason = candidate.skipReason {
+            if source.phase == .committed, source.sourceRevision != candidate.sourceRevision {
+              // The saved original remains in the catalog; this checkpoint tracks
+              // the current Photos revision, including its incomplete resources.
+              source = BackupSource(id: source.id, photoId: Wire.id(), sourceRevision: candidate.sourceRevision)
+            }
+            if source.phase == .pending || source.phase == .failed || source.phase == .skipped {
+              source.phase = .skipped
+              source.sourceRevision = candidate.sourceRevision
+              source.message = reason
+              // Snapshot admission can recover without an asset revision change.
+              // Only size failures cache the unchanged original's download result.
+              source.skipProcessor = "camera-source-v1"
+              try store.putBackupSource(source)
+            }
           }
         }
         // Sources already queued survive aging out of the current Photos selection.

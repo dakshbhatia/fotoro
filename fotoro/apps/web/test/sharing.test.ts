@@ -11,7 +11,7 @@ import {configureVault, unlockVault, lockVault, vaultGeneration} from "../src/va
 import {clearAccount, get, put, all} from "../src/exchange/cache";
 import {collect, source, type Photo} from "../src/library/catalog";
 import {contribute, contacts, contactNames, saveContactName, pinCard, receive, saveReceivedPhoto, sharePhotos, trustedCard} from "../src/exchange/share-service";
-import {grantState, IncomingShareIntent, readableShareError, ShareSelection} from "../src/exchange/sharing";
+import {ExpiredSavedSelection, grantState, IncomingShareIntent, readableShareError, ShareSelection} from "../src/exchange/sharing";
 import {Exchange, loadExchangeContext} from "../src/exchange/Exchange";
 type ExchangeUpdate = Parameters<Parameters<typeof loadExchangeContext>[2]>[0];
 const response = (value: unknown) => new Response(JSON.stringify(value));
@@ -67,6 +67,48 @@ test("Share holds immutable photo/key snapshots and disposal cannot wipe the lib
   photo.metadata.filename = "changed.png"; photo.manifest.representations.length = 0;
   assert.equal(snapshot.photos[0].metadata.filename, "photo.png"); assert.equal(snapshot.photos[0].manifest.representations.length, 1);
   snapshot.dispose(); assert.equal(snapshot.current, false); assert.deepEqual(snapshot.photos[0].metadataKey, new Uint8Array(32)); assert.deepEqual(photo.metadataKey, originalKey);
+}));
+
+test("expiration preserves the incoming invitation only for reauthentication to the same account", async () => scoped(async () => {
+  for (const account of [0, 1]) {
+    const session = await open(0), intent = new IncomingShareIntent(parseShareLink(createMomentLink(crypto.randomUUID(), accounts.accounts[1])), session);
+    intent.vaultLocked("expired", session.accountId); lockVault();
+    assert.equal(intent.pending, true);
+    const ticket = intent.beginAuthentication(vaultGeneration());
+    const renewed = await open(account); intent.finishAuthentication(ticket, renewed, vaultGeneration());
+    assert.equal(intent.current(renewed), account === 0);
+    assert.equal(intent.pending, account === 0);
+  }
+}));
+
+test("expired Saved selection restores only identical owned originals in the original account", async () => scoped(async () => {
+  const {photo} = await fixture(), other = {...photo, manifest: {...photo.manifest, photoId: crypto.randomUUID()}},
+    selection = new ExpiredSavedSelection(photo.manifest.ownerAccountId, [photo, other], new Set([photo.manifest.photoId]));
+  const restored = {...photo, manifest: structuredClone(photo.manifest), metadataKey: new Uint8Array(32)};
+  photo.manifest.representations.length = 0;
+  assert.deepEqual([...selection.restore([restored, other], restored.manifest.ownerAccountId)], [restored.manifest.photoId]);
+  assert.deepEqual([...selection.restore([restored], accounts.accounts[1].accountId)], []);
+  assert.deepEqual([...selection.restore([{...restored, grantId: crypto.randomUUID()}], restored.manifest.ownerAccountId)], []);
+  const changed = {...restored, manifest: {...restored.manifest, representations: [{...restored.manifest.representations[0], objectId: crypto.randomUUID()}]}};
+  assert.deepEqual([...selection.restore([changed], restored.manifest.ownerAccountId)], []);
+  assert.deepEqual([...selection.restore([], restored.manifest.ownerAccountId)], []);
+}));
+
+test("expiration retains browser-picked Files only for their original account", () => {
+  const files = [new File(["selected original"], "selected.jpg")], original = files[0];
+  const selection = new ExpiredSavedSelection(accounts.accounts[0].accountId, [], new Set(), files);
+  files.push(new File(["unselected"], "unselected.jpg"));
+  assert.deepEqual(selection.filesFor(accounts.accounts[0].accountId), [original]);
+  assert.deepEqual(selection.filesFor(accounts.accounts[1].accountId), []);
+});
+
+test("fresh catalog reconciliation never resurrects an expired selection the user cleared or replaces a new choice", async () => scoped(async () => {
+  const {photo} = await fixture(), other = {...photo, manifest: {...photo.manifest, photoId: crypto.randomUUID()}};
+  const selection = new ExpiredSavedSelection(photo.manifest.ownerAccountId, [photo, other], new Set([photo.manifest.photoId]));
+  assert.deepEqual([...selection.restore([photo, other], photo.manifest.ownerAccountId, new Set())], []);
+  assert.deepEqual([...selection.restore([photo, other], photo.manifest.ownerAccountId, new Set([other.manifest.photoId]))], [other.manifest.photoId]);
+  const changed = {...photo, manifest: {...photo.manifest, representations: []}};
+  assert.deepEqual([...selection.restore([changed, other], photo.manifest.ownerAccountId, new Set([photo.manifest.photoId, other.manifest.photoId]))], [other.manifest.photoId]);
 }));
 test("contact acceptance persists encrypted identities and a changed key needs a new explicit acceptance", async () => scoped(async () => {
   await open(1); const sender = accounts.accounts[0]; await pinCard(sender);

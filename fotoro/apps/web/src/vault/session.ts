@@ -18,7 +18,7 @@ import {
   utf8,
 } from "@fotoro/crypto";
 import { api, ApiError, setFixtureAccount, fixtureMode } from "../exchange/api";
-import { get, put } from "../exchange/cache";
+import { get, put, clearAccount } from "../exchange/cache";
 import {
   configureVault,
   configureDevice,
@@ -28,6 +28,21 @@ import {
   vaultGeneration,
 } from "./vault";
 import { formatFotoroPassword, parseFotoroPassword } from "./password";
+let browserSignOut: AbortController | undefined;
+function cancelBrowserSignOut() {browserSignOut?.abort(); browserSignOut = undefined;}
+export async function clearBrowserSession(session = requireVault()): Promise<{remote: Promise<boolean>; generation: number}> {
+  if (requireVault() !== session) throw new Error("VAULT_LOCKED");
+  cancelBrowserSignOut();
+  lockVault();
+  const generation = vaultGeneration(), controller = new AbortController();
+  browserSignOut = controller;
+  // Local erasure must finish even if the session expired or the network never answers.
+  const remote = (fixtureMode ? Promise.resolve(true) : api("/v1/auth/logout", {}, undefined, "POST", controller.signal).then(() => true, () => false))
+    .finally(() => {if (browserSignOut === controller) browserSignOut = undefined;});
+  setFixtureAccount();
+  await clearAccount(session.accountId);
+  return {remote, generation};
+}
 export async function fixtureAccounts() {
   if (!fixtureMode) throw new Error("FIXTURE_DISABLED");
   return api<{
@@ -44,6 +59,7 @@ async function remember(vault: VaultV1, current = () => true) {
   checkCurrent();
 }
 export async function publicTestSession(accountId: string) {
+  cancelBrowserSignOut();
   lockVault();
   const data = await fixtureAccounts();
   setFixtureAccount(accountId);
@@ -75,6 +91,7 @@ function publicResponse(response: any) {
   };
 }
 export async function passkeyLogin() {
+  cancelBrowserSignOut();
   setFixtureAccount();
   const known = await get<string>("settings", "last-account");
   const stored = known
@@ -115,6 +132,7 @@ export async function passkeyLogin() {
   return session;
 }
 export async function recover(code: string, current = () => true) {
+  cancelBrowserSignOut();
   let opened: ReturnType<typeof requireVault> | undefined;
   let generation = vaultGeneration();
   const checkCurrent = () => { if (!current() || vaultGeneration() !== generation) throw new DOMException("Sign-in cancelled", "AbortError"); };
@@ -201,6 +219,7 @@ let enrollment:
   | undefined;
 let enrollmentEpoch = 0;
 export async function prepareEnrollment() {
+  cancelBrowserSignOut();
   cancelEnrollment();
   const epoch = enrollmentEpoch;
   await ready;

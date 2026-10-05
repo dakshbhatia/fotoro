@@ -10,6 +10,7 @@ import {
   lockVault,
   requireVault,
   vaultGeneration,
+  vaultLockDetail,
 } from "./vault/vault";
 import {
   publicTestSession,
@@ -17,15 +18,15 @@ import {
   prepareEnrollment,
   completeEnrollment,
   cancelEnrollment,
+  clearBrowserSession,
 } from "./vault/session";
 import {
   fixtureMode,
-  setFixtureAccount,
-  api,
   isPublicDemoAccount,
+  ApiError,
 } from "./exchange/api";
 import { Exchange } from "./exchange/Exchange";
-import {IncomingShareIntent, grantState, ShareSelection} from "./exchange/sharing";
+import {ExpiredSavedSelection, IncomingShareIntent, grantState, ShareSelection} from "./exchange/sharing";
 import {ReceivedAccessRefresh} from "./exchange/received-access";
 import {
   stageImport,
@@ -44,7 +45,6 @@ import {
   clearSkipped,
 } from "./exchange/sync";
 import { syncSelectedSequential } from "./exchange/selected";
-import { clearAccount } from "./exchange/cache";
 import { localOriginalDigest, queueAnnotations, queuePhotoLocation, queueLocalAnnotations, pendingAnnotations, resolveAnnotationConflict, type PendingAnnotation } from "./exchange/annotations";
 import {useSemanticFind} from "./local/useSemanticFind";
 import { PhotoSearchIndex, normalizeSearch } from "./local/search";
@@ -185,7 +185,10 @@ export default function CloudApp({
   const currentCatalog = useRef(photos);
   currentCatalog.current = photos;
   const currentSelection = useRef(selected), currentReceived = useRef(received);
+  const currentPickedFiles = useRef(pickedFiles);
+  const expiredSelection = useRef<ExpiredSavedSelection | null>(null);
   currentSelection.current = selected; currentReceived.current = received;
+  currentPickedFiles.current = pickedFiles;
   const originalsCurrent = (context: SelectedOriginalContext) => originalContext.current === context && context.snapshot.current && activeRef.current &&
     document.visibilityState !== "hidden" && !currentReceived.current && sameVault(context.session) &&
     savedOriginalSelectionCurrent(context.snapshot.photos, currentCatalog.current, currentSelection.current, context.session.accountId);
@@ -268,9 +271,14 @@ export default function CloudApp({
     try {
       observed = requireVault();
     } catch {}
-    const onLock = () => {
+    const onLock = (event: Event) => {
+      const detail = vaultLockDetail(event);
+      if (detail?.reason === "expired" && detail.accountId && !currentReceived.current)
+        expiredSelection.current = new ExpiredSavedSelection(detail.accountId, currentCatalog.current, currentSelection.current, currentPickedFiles.current);
+      else if (detail?.reason !== "expired" && detail?.reason !== "unlock") expiredSelection.current = null;
       if (observed) pauseSync(observed);
       clear();
+      if (detail?.reason === "expired") setStatus("Enter your Fotoro password again to continue.");
     };
     window.addEventListener("fotoro-lock", onLock);
     return () => window.removeEventListener("fotoro-lock", onLock);
@@ -283,6 +291,12 @@ export default function CloudApp({
     check();
     if (!sameVault(session)) return;
     setPhotos(cached.photos);
+    const recoveredSelection = expiredSelection.current;
+    expiredSelection.current = null;
+    if (recoveredSelection) {
+      setSelected(recoveredSelection.restore(cached.photos, session.accountId));
+      setPickedFiles(recoveredSelection.filesFor(session.accountId));
+    }
     setPending(cached.pending);
     setAnnotationPending(cached.annotations);
     setLastSuccessfulSync(cached.lastSuccessfulSync);
@@ -303,6 +317,7 @@ export default function CloudApp({
     check();
     if (!sameVault(session)) return;
     setPhotos((previous) => (sameVault(session) ? result.photos : previous));
+    if (recoveredSelection) setSelected(previous => recoveredSelection.restore(result.photos, session.accountId, previous));
     setPending((previous) => (sameVault(session) ? result.pending : previous));
     setSkipped((previous) => (sameVault(session) ? result.skipped : previous));
     setAnnotationPending(result.annotations);
@@ -327,7 +342,8 @@ export default function CloudApp({
       accepted = (await fn()) !== false;
     } catch (e) {
       if (!session || sameVault(session)) {
-        const message = readableSyncError(e);
+        const message = e instanceof ApiError && ["UNAUTHENTICATED", "HTTP_401"].includes(e.code)
+          ? "Enter your Fotoro password again to continue." : readableSyncError(e);
         setStatus(accountAction && message.startsWith("Save could not finish.") ? "Sign-in could not finish. Check your connection and try again." : message);
         setNeedsAttention(true);
       }
@@ -1056,11 +1072,14 @@ export default function CloudApp({
                     )
                   )
                     return;
-                  if (!fixtureMode) await api("/v1/auth/logout", {});
-                  await clearAccount(account);
-                  setFixtureAccount();
-                  lockVault();
+                  const origin = location.origin;
+                  const result = await clearBrowserSession();
                   setMenu(false);
+                  setStatus("This browser is cleared.");
+                  void result.remote.then(confirmed => {
+                    if (!running.current && vaultGeneration() === result.generation && location.origin === origin)
+                      setStatus(confirmed ? "Signed out and cleared this browser." : "This browser is cleared. Server sign-out could not be confirmed.");
+                  });
                 })
               }
             >

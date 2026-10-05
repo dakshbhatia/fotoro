@@ -75,11 +75,14 @@ pass uses CI for native validation; no new IPA, phone install or TestFlight uplo
 is implied by web deployment. The owner reports Xcode already signed in; do not
 repeat historical account setup instructions.
 
-Build 36 is archived and audited with the three-S simplification. Check release
+Build 37 archives the current working source and passes the full archive audit
+with all 69 native input hashes unchanged. It is development-signed; no IPA was
+exported and no TestFlight upload occurred. Build 36 remains the earlier archive
+of the qualified three-S source. Check release
 credentials without archiving, exporting or uploading:
 
 ```sh
-FOTORO_DEVELOPMENT_TEAM=YOUR_TEAM node tools/build-testflight.mjs 36 --preflight
+FOTORO_DEVELOPMENT_TEAM=YOUR_TEAM node tools/build-testflight.mjs 37 --preflight
 ```
 
 The check reports credential type and local distribution identity count, without
@@ -93,5 +96,13 @@ team key with its issuer for automatic provisioning. Keep keys outside the repo.
 First App Store publication excludes France, as approved by the owner. Keep full
 app encryption and the distribution artifact's compliance declaration aligned;
 the local Photos preview is a separate target with a different encryption scope.
+The full release helper audits the archive before export and requires an audited
+distribution IPA before upload. The audit checks the requested build and signed
+app identity, production associated domains, one arm64 executable, matching
+binary/dSYM UUIDs and ten defined static crypto symbols. Preview scope,
+false or malformed full-app encryption declarations, extra executable resources
+and a mismatched exported build fail before upload. `pnpm check` includes the
+release orchestration regressions. An archive-only audit does not qualify an IPA
+or an App Store Connect upload; processing and compliance still require readback.
 See [verification](verification.md) for current evidence and its historical appendix.
 Earlier deployment checkpoints remain available in Git history.

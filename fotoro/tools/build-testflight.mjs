@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkIosPreview } from "./check-ios-preview.mjs";
+import { checkIosRelease } from "./check-ios-release.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const [buildNumber, ...flags] = process.argv.slice(2);
@@ -83,9 +84,12 @@ console.log(`Archive succeeded: ${archive}`);
 if (localPreview) {
   checkIosPreview({archivePath: archive, linkMapPath: linkMap});
   console.log("Local preview archive audit passed.");
+} else {
+  checkIosRelease({archivePath: archive, buildNumber, teamIdentifier: team});
+  console.log("Full app archive audit passed.");
 }
 if (flags.includes("--upload")) {
-  if (localPreview) {
+  {
     // Audit a distribution-signed export as well as the archive before the
     // signed-in Xcode account uploads from that same immutable archive.
     const localExportOptions = join(output, "ExportOptions-Audit.plist");
@@ -98,11 +102,13 @@ if (flags.includes("--upload")) {
       "-exportPath", localExport, "-allowProvisioningUpdates", ...authentication,
     ], "audit-export.log");
     const ipas = readdirSync(localExport).filter(name => name.endsWith(".ipa"));
-    if (ipas.length !== 1) throw new Error("Preview export must contain exactly one IPA.");
-    const audit = checkIosPreview({archivePath: archive, ipaPath: join(localExport, ipas[0]), linkMapPath: linkMap});
-    if (audit.ipaAudited !== true) throw new Error("The distribution IPA audit is required before preview upload.");
-    writeFileSync(join(output, "preview-audit.json"), JSON.stringify(audit, null, 2), { mode: 0o600 });
-    console.log("Local preview distribution IPA audit passed.");
+    if (ipas.length !== 1) throw new Error("Export must contain exactly one IPA.");
+    const audit = localPreview
+      ? checkIosPreview({archivePath: archive, ipaPath: join(localExport, ipas[0]), linkMapPath: linkMap})
+      : checkIosRelease({archivePath: archive, ipaPath: join(localExport, ipas[0]), buildNumber, teamIdentifier: team});
+    if (audit.ipaAudited !== true) throw new Error("The distribution IPA audit is required before upload.");
+    writeFileSync(join(output, localPreview ? "preview-audit.json" : "release-audit.json"), JSON.stringify(audit, null, 2), { mode: 0o600 });
+    console.log(`${localPreview ? "Local preview" : "Full app"} distribution IPA audit passed.`);
   }
   console.log("Uploading to App Store Connect…");
   await run([
