@@ -188,7 +188,7 @@ pnpm dev
 
 Open http://127.0.0.1:4310 and choose Open photos. No account is required for local
 browsing. Sync photos exposes public test accounts inside Advanced in fixture
-development builds. Those keys are intentionally public and private uploads are
+development builds launched with `-fotoro-developer`. Those keys are intentionally public and private uploads are
 blocked, including when a public account is unlocked through recovery. Fixtures reset when
 stopped; clear the cloud session after a reset. The demo does not simulate successful passkeys.
 
@@ -204,7 +204,7 @@ the command. Do not store personal photographs in either public test account.
 
 Open `apps/ios/Fotoro.xcodeproj`, scheme `Fotoro`, on an iOS 26+ Simulator.
 Open Photos starts local browsing. Saved photos opens the saved library or one
-password entry; developer controls are inside Advanced in DEBUG builds. Physical-device
+password entry; developer controls require DEBUG and the `-fotoro-developer` launch flag. Physical-device
 passkeys require HTTPS, signing, and associated domains.
 
 ## Check

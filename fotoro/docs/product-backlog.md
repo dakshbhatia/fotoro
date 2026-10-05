@@ -19,10 +19,11 @@ not a second selection to manage.
 
 Sync, Search and Share are the core. Their current source has public-fixture
 acceptance evidence; personal-library acceptance and physical performance remain
-open. Web/API are live at merged PR 34, including private photo locations,
-Places and confirmed Google Timeline import. Build 32 is archived and audited.
-CLI distribution remains blocked by missing distribution signing identity and
-usable App Store Connect API access. Build 25 remains the latest verified internal TestFlight build
+open. Web/API are live at merged PR 35, with simpler account entry, complete
+selection sharing, private photo locations, Places and confirmed Google Timeline import.
+Build 33 is archived and audited. Individual App Store Connect API access is verified;
+distribution signing remains unavailable. The individual key cannot provision signing.
+Build 25 remains the latest verified internal TestFlight build
 (`VALID`, `IN_BETA_TESTING` in Fotoro Internal).
 
 Completed on-device text analysis follows opted-in sync through the encrypted

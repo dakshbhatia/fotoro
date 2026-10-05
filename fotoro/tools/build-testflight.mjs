@@ -7,14 +7,36 @@ import { checkIosPreview } from "./check-ios-preview.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const [buildNumber, ...flags] = process.argv.slice(2);
-if (!/^[1-9]\d*$/.test(buildNumber ?? "") || flags.some(flag => !["--upload", "--local-preview"].includes(flag))) {
-  console.error("Usage: node tools/build-testflight.mjs <build-number> [--upload] [--local-preview]");
+if (!/^[1-9]\d*$/.test(buildNumber ?? "") || flags.some(flag => !["--upload", "--local-preview", "--preflight"].includes(flag))
+    || flags.includes("--preflight") && flags.includes("--upload")) {
+  console.error("Usage: node tools/build-testflight.mjs <build-number> [--upload | --preflight] [--local-preview]");
   console.error("Set FOTORO_DEVELOPMENT_TEAM; sign in to Xcode or provide all three ASC_KEY_* variables.");
   process.exit(2);
 }
 const team = process.env.FOTORO_DEVELOPMENT_TEAM;
 if (!team) throw new Error("FOTORO_DEVELOPMENT_TEAM is required.");
 const credentials = [process.env.ASC_KEY_PATH, process.env.ASC_KEY_ID, process.env.ASC_ISSUER_ID];
+const individual = process.env.ASC_KEY_SUBJECT === "user";
+if (flags.includes("--preflight")) {
+  let localDistributionIdentityCount = null;
+  try {
+    localDistributionIdentityCount = (execFileSync("/usr/bin/security", ["find-identity", "-v", "-p", "codesigning"], {encoding: "utf8"})
+      .match(/Apple Distribution:/g) ?? []).length;
+  } catch { /* This read-only check is also usable on CI without a macOS keychain. */ }
+  const keyPresent = !!credentials[0] && existsSync(credentials[0]);
+  const keyType = individual ? "individual" : credentials.every(Boolean) ? "team" : credentials.some(Boolean) ? "incomplete" : "none";
+  console.log(JSON.stringify({
+    buildNumber, localDistributionIdentityCount,
+    apiKeyType: keyType,
+    metadataCredentialsConfigured: keyPresent && !!credentials[1] && (individual ? !credentials[2] : !!credentials[2]),
+    provisioningAuthentication: keyType === "team" && keyPresent ? "team-api-key" : "signed-in-xcode-account-required",
+    xcodeAccountVerified: false,
+  }));
+  process.exit(0);
+}
+if (individual && credentials.some(Boolean)) {
+  throw new Error("Individual API keys work for App Store Connect metadata, but cannot provision signing. Use a team API key for provisioning, or unset ASC_KEY_* variables to use the signed-in Xcode account.");
+}
 if (credentials.some(Boolean) && !credentials.every(Boolean)) {
   throw new Error("Provide ASC_KEY_PATH, ASC_KEY_ID and ASC_ISSUER_ID together, or use the signed-in Xcode account.");
 }
