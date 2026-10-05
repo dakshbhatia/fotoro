@@ -211,6 +211,10 @@ final class SearchIndex: @unchecked Sendable {
         record.ocrText = ocr.text
         record.ocrConfidence = ocr.confidence
         record.ocrStatus = .complete
+      } else {
+        record.ocrText = record.beforeSync?.ocrText ?? ""
+        record.ocrConfidence = record.beforeSync?.ocrConfidence ?? 0
+        record.ocrStatus = record.beforeSync?.ocrStatus ?? .pending
       }
       if let visual = value.visual, visual.processor == record.visualProcessor,
         visual.processor == SearchVisualPolicy.processor {

@@ -21,7 +21,7 @@ entry, account focus and Back path without unexpected JavaScript errors or
 production account writes. [Deployment](deployment.md) owns release commands.
 Documentation-only changes leave this runtime checkpoint unchanged.
 
-## What this iteration verifies
+## PR 39 verification
 
 The three-S simplification preserves an explicit Turn on sync choice through
 account entry, bound to the selected service, account and unlocked catalog.
@@ -52,7 +52,42 @@ below the 500 KiB budget. Account crypto and visual inference remain deferred.
 Pinned-model public-image smoke checks exercise real inference; they do not
 establish held-out search quality or physical-device latency, memory or battery use.
 
+## Current source checks — in progress
+
+The current working source closes these reproduced correctness gaps:
+
+- A changed Photos revision excluded by resource admission now has its own
+  incomplete checkpoint. The earlier saved original remains available; admission
+  recovery retries even when the current source revision has not changed.
+- Replacing synced OCR with absent or incompatible OCR removes obsolete remote
+  search text and restores the existing local text, confidence and analysis status.
+- Browser session expiration locks the affected current vault. Password reentry
+  can preserve a chosen Save, incoming invitation, selected owned originals and
+  picked files for the same account. Changed originals, another account and
+  later user selection changes cannot revive an obsolete choice.
+- Clearing this browser locks and erases its account cache independently of
+  server logout. A new sign-in cancels the outstanding logout request.
+- The full TestFlight helper now requires archive and exported-IPA audits before
+  upload, including signed identity, production associations, matching arm64
+  binary/dSYM UUIDs and ten defined static crypto symbols.
+
+Local `pnpm check` passes, including all 411 web and 70 API tests, core/release
+checks, typechecks and the production web build. Full native verification
+executes 367 tests with one existing Vision inference-context skip and no
+failures, including real loopback authentication integration. The pinned-model
+visual smoke passes. Preview verification executes 113 tests with the same
+known Vision skip and no failures; isolated encrypted exchange passes all five
+tests. These source checks do not establish a new commit, merge, deployment,
+exported IPA, TestFlight upload or physical-device qualification.
+The qualified PR 39 and live Worker records remain the deployed release
+checkpoints.
+
 ## iPhone and distribution
+
+Build 37 archives the current working source and passes the full archive audit.
+All 69 native input hashes remain unchanged across the archive. It is
+development-signed; no IPA was exported and no TestFlight upload occurred.
+The archive and its proof are preserved outside Git under `core-gaps-build37`.
 
 Build 36 archives with all 42 Swift sources, 69 native inputs, matching arm64 dSYM,
 production associations and unchanged full static encryption. The archive source

@@ -114,7 +114,7 @@ function requirePositiveControls(evidence, code) {
   if (positiveControls.some(control => !evidence.includes(control))) fail(code);
 }
 
-function readDsyms(archive) {
+function readDsyms(archive, evidenceReader = binaryEvidence) {
   const dwarfFiles = regularFiles(join(archive, "dSYMs"))
     .filter(path => relative(join(archive, "dSYMs"), path).includes("/Contents/Resources/DWARF/"))
     .filter(isMachO);
@@ -123,7 +123,7 @@ function readDsyms(archive) {
   for (const path of dwarfFiles) {
     const identity = uuidKey(uuids(path));
     if (byUuid.has(identity)) fail("AMBIGUOUS_DSYM_UUID");
-    byUuid.set(identity, { path, evidence: binaryEvidence(path) });
+    byUuid.set(identity, { path, evidence: evidenceReader(path) });
   }
   return byUuid;
 }
@@ -246,6 +246,10 @@ function extractIpa(ipa, directory) {
   regularFiles(directory);
   return singleApp(join(directory, "Payload"));
 }
+
+// Shared filesystem/tool boundaries keep both artifact audits fail-closed.
+export const iosArtifactTools = Object.freeze({runTool, plist, regularFiles, singleApp,
+  uuids, uuidKey, readDsyms, extractIpa, isMachO});
 
 /*
  * Synchronously audit the signed local preview archive and, when supplied, its

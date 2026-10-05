@@ -16,6 +16,12 @@ The encrypted catalog opens from GRDB after Keychain/password recovery/PRF/devic
 
 Opening local Photos does not opt into uploads. After private account unlock and Photos permission, explicit one-time automatic Sync consent scans permitted photos and videos while Fotoro is open and unlocked. Its preference is scoped to the account catalog and endpoint origin. Changes to Photos trigger a new scan; account, vault, origin, permission and source revision fences prevent stale work. Manual Sync remains available. Each account-scoped asset identifier receives a durable photo ID; its checkpoint, catalog photo and transfer journal insertion commit atomically. Existing pending work stays resumable. Retry reconciles the same reservation/commit operation; repeated scans and owned original digests reuse an existing photo. Photos edits do not replace the unmodified original.
 
+An excluded changed Photos revision remains incomplete even when an earlier
+revision was saved. That earlier original stays available; resource admission
+can recover and retry without another asset revision change. Replacing synced
+OCR with absent or incompatible OCR restores the local index's existing OCR
+text, confidence and status instead of retaining obsolete remote text.
+
 Backgrounding or vault lock stops new Photos preparation at durable boundaries. iOS may finish already scheduled ciphertext staging uploads using bounded, expiring capabilities, without account credentials or plaintext in the background daemon. Commit and catalog publication require foreground authenticated reconciliation. Pause/disable/sign-out and account/origin changes cancel or fence work; this is not a promise that a closed app imports new Photos. Public fixture mode and the two seeded public account IDs cannot sync device Photos, including when authenticated by recovery. Safari can read the same account’s committed encrypted changes; camera-media negotiation preserves older-reader compatibility. Production allowance is 10 GiB of reserved/stored ciphertext; the client’s saved-original summary counts logical original bytes.
 
 From `fotoro/`, prepare the public local accounts with `pnpm seed:local`, run `pnpm dev:fixtures` on 8790, and run `pnpm --filter @fotoro/api dev:native-test` on 8787. The latter runs the real bundled Worker directly against local D1/R2 without the development proxy. Run `pnpm test:ios`; the helper discovers an available iOS 26+ iPhone Simulator. Optionally set `FOTORO_SIMULATOR_ID=<discovered-UDID>` to choose one. For a direct invocation from `fotoro/apps/ios/`:
@@ -36,6 +42,12 @@ Physical passkey/PRF ceremonies, real iCloud conditions, Photos edits, large-lib
 Full builds record bounded runtime diagnostics in OSLog (`cloud.fotoro.Fotoro`, category `runtime`) and protected `Library/Application Support/FotoroDiagnostics/runtime.jsonl`. Launch, pick-analysis duration, Photos consent, sync state changes and API outcomes use fixed categories, counts, status/network codes and UUID request references. The file keeps at most 160 events and 64 KiB, writes on a utility queue and is excluded from device backup. It excludes photo contents, filenames, paths, account/photo identifiers, queries, keys, recovery codes and raw error descriptions. The separate local-preview target does not compile this account diagnostics implementation.
 
 For TestFlight, use `FOTORO_DEVELOPMENT_TEAM=<your-team> node tools/build-testflight.mjs <build-number> --upload` from `fotoro/`. The helper archives and uploads with the signed-in Xcode account, or all three optional `ASC_KEY_PATH`, `ASC_KEY_ID`, `ASC_ISSUER_ID` variables. It keeps artifacts and private logs under the system temporary directory. Verify processing and complete Apple's encryption questionnaire before distribution; this app uses third-party end-to-end encryption and must not blindly declare that it contains no encryption.
+
+Full-app upload requires both archive and exported-IPA audits: requested build,
+signed app identity, production associations, matching arm64 binary/dSYM UUIDs
+and ten defined static crypto symbols. These checks run before upload and their
+orchestration regressions are included in `pnpm check`. Passing them does not
+establish distribution signing availability, Apple processing or a phone install.
 
 For the separate local-only preview target, select scheme `FotoroLocalPreview`. This separate app target compiles only the shared PhotoKit canvas, local search, Vision text processing, local labels and original sharing; GRDB is its only package product. Account, backup, transfer and third-party cryptography code/resources are excluded. Its `FotoroLocalPreviewSearch` index is separate from the full app index. Both apps use the same bundle identifier; installing one replaces the other while keeping their stored indexes separate. The full scheme and encrypted formats are unchanged.
 

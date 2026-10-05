@@ -5,6 +5,35 @@ import XCTest
 @testable import Fotoro
 
 final class SearchLifecycleTests: XCTestCase {
+  #if !FOTORO_LOCAL_PREVIEW
+  func testReplacingSyncedOCRRemovesObsoleteTextAndRestoresOnlyLocalEvidence() throws {
+    for replacement in [nil, PhotoAnnotationsV1.OCR(text: "unsupported text", confidence: 1, processor: "future-ocr")] {
+      let index = try SearchIndex()
+      var local = SearchRecord(id: "local")
+      local.ocrText = "device receipt"
+      local.ocrConfidence = 0.8
+      local.ocrStatus = .complete
+      let pending = SearchRecord(id: "pending")
+      try index.replacePermitted([local, pending])
+      for record in [local, pending] {
+        var annotation = PhotoAnnotationsV1(photoId: Wire.id(), originalSha256: Data("photo".utf8).digest,
+          ocr: PhotoAnnotationsV1.OCR(text: "obsolete boarding pass", confidence: 0.9, processor: "vision-text-v1"))
+        XCTAssertTrue(try index.applyAnnotations(annotation, photoID: record.id, revision: record.revision, accountId: "owner"))
+        XCTAssertEqual(try index.record(record.id)?.ocrText, "obsolete boarding pass")
+        annotation.ocr = replacement
+        XCTAssertTrue(try index.applyAnnotations(annotation, photoID: record.id, revision: record.revision, accountId: "owner"))
+      }
+      XCTAssertNil(try index.search("obsolete").leading)
+      XCTAssertNil(try index.search("unsupported").leading)
+      XCTAssertEqual(try index.search("device receipt").results.map(\.id), ["local"])
+      XCTAssertEqual(try index.record("local")?.ocrConfidence, 0.8)
+      XCTAssertEqual(try index.record("local")?.ocrStatus, .complete)
+      XCTAssertEqual(try index.record("pending")?.ocrText, "")
+      XCTAssertEqual(try index.record("pending")?.ocrStatus, .pending)
+      XCTAssertEqual(try index.pendingRecords().map(\.id), ["pending"])
+    }
+  }
+  #endif
   func testAllAgePolicyAllowsOlderAndMissingCaptureDatesOnlyWithinAuthorization() {
     for date in [Date(timeIntervalSince1970: 0), nil] {
       XCTAssertTrue(

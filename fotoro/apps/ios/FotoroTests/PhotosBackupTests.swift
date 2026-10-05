@@ -719,6 +719,48 @@ final class PhotosBackupTests: XCTestCase {
 }
 
 final class AutomaticPhotoSyncTests: XCTestCase {
+  @MainActor func testExcludedNewRevisionStaysIncompleteAndRetriesWhenCompleteResourcesReturn() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
+    let services = try await context.enroll()
+    defer { services.vault.lock() }
+    let oldBytes = try Data(contentsOf: context.sample)
+    let newBytes = try Data(contentsOf: XCTUnwrap(Bundle(for: Self.self).url(forResource: "neutral-a", withExtension: "png")))
+    services.automaticPhotosAuthorization = { .authorized }
+    services.photosBackupSnapshot = { _ in [BackupCandidate(id: "source", sourceRevision: "before")] }
+    services.importer = PhotoImport(store: services.store, sourceReader: { _ in (oldBytes, "earlier.jpg", false) },
+      sourceRevision: { _ in "before" })
+    try services.enableAutomaticPhotoSync(); await services.waitForAutomaticPhotoSync()
+    let oldSource = try services.store.backupSource("source")
+    let oldPhoto = try XCTUnwrap(services.consumerSavedPhoto(oldSource.photoId))
+    XCTAssertEqual(oldSource.phase, .committed)
+    XCTAssertEqual(try Data(contentsOf: XCTUnwrap(oldPhoto.originalURL)), oldBytes)
+
+    services.photosBackupSnapshot = { _ in [BackupCandidate(id: "source",
+      skipReason: "Both unmodified Live Photo resources are required. Nothing was saved.", sourceRevision: "after")] }
+    services.kickAutomaticPhotoSync(); await services.waitForAutomaticPhotoSync()
+    let excluded = try services.store.backupSource("source")
+    XCTAssertEqual(excluded.phase, .skipped, "A saved earlier revision does not cover an excluded current revision")
+    XCTAssertEqual(excluded.sourceRevision, "after")
+    XCTAssertNotEqual(excluded.photoId, oldPhoto.id)
+    XCTAssertEqual(services.automaticPhotoSync.phase, .partial)
+    XCTAssertEqual(services.backup.status.skipped, 1)
+    XCTAssertEqual(try services.consumerSavedPhoto(oldPhoto.id)?.metadata.originalSha256, oldBytes.digest)
+    XCTAssertEqual(try Data(contentsOf: XCTUnwrap(oldPhoto.originalURL)), oldBytes)
+
+    // PhotoKit resource admission can recover without changing the asset revision.
+    services.photosBackupSnapshot = { _ in [BackupCandidate(id: "source", sourceRevision: "after")] }
+    services.importer = PhotoImport(store: services.store, sourceReader: { _ in (newBytes, "current.png", false) },
+      sourceRevision: { _ in "after" })
+    services.kickAutomaticPhotoSync(); await services.waitForAutomaticPhotoSync()
+    let current = try services.store.backupSource("source")
+    XCTAssertEqual(current.phase, .committed)
+    XCTAssertEqual(current.originalSha256, newBytes.digest)
+    XCTAssertEqual(services.automaticPhotoSync.phase, .ready)
+    XCTAssertEqual(services.backup.status.skipped, 0)
+    XCTAssertEqual(try Data(contentsOf: XCTUnwrap(services.consumerSavedPhoto(current.photoId)?.originalURL)), newBytes)
+    XCTAssertEqual(try Data(contentsOf: XCTUnwrap(services.consumerSavedPhoto(oldPhoto.id)?.originalURL)), oldBytes)
+  }
   @MainActor func testAutomaticPreflightKeepsFailedReadsVisibleUntilVerifiedRetrySucceeds() async throws {
     let context = try PausedUploadContext()
     defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }

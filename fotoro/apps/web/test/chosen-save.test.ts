@@ -164,3 +164,31 @@ test("locking or switching the account cancels a bound selection without writes 
   lockVault();const pending=new ChosenSaveIntent([photo()]),ticket=pending.beginAuthentication(vaultGeneration());lockVault();await open(other);finishAuth(pending,ticket);
   assert.equal(await pending.start(saveOptions(pending,async()=>{writes++;return true;})),false);assert.equal(writes,0);
 }));
+
+test("expiration keeps the chosen files for the same account and old work cannot cancel its explicit retry",async()=>scoped(async()=>{
+  const session=await open(),chosen=photo(),intent=new ChosenSaveIntent([chosen],session);
+  let reject!: (error: Error) => void;
+  const old=intent.start(saveOptions(intent,async()=>new Promise<boolean>((_resolve,rejection)=>{reject=rejection;})));
+  const rejected=assert.rejects(old,/expired work/);
+  intent.vaultLocked("expired",owner); lockVault();
+  assert.equal(intent.pending,true);assert.deepEqual(intent.snapshot.files,[chosen.file]);assert.equal(intent.needsInitialSave,false);
+  const ticket=intent.beginAuthentication(vaultGeneration());
+  window.addEventListener("fotoro-lock",()=>intent.vaultLocked());
+  await open();finishAuth(intent,ticket);
+  reject(new Error("expired work"));await rejected;
+  assert.equal(intent.pending,true);
+  let writes=0;
+  assert.equal(await intent.start(saveOptions(intent,async(snapshot)=>{writes++;assert.equal(snapshot.files[0],chosen.file);return true;})),true);
+  assert.equal(writes,1);
+}));
+
+test("expiration never carries a chosen Save into a different password account",async()=>scoped(async()=>{
+  const session=await open(),intent=new ChosenSaveIntent([photo()],session);
+  intent.vaultLocked("expired",owner); lockVault();
+  const ticket=intent.beginAuthentication(vaultGeneration());
+  window.addEventListener("fotoro-lock",()=>intent.vaultLocked());
+  await open(other);finishAuth(intent,ticket);
+  let writes=0;
+  assert.equal(await intent.start(saveOptions(intent,async()=>{writes++;return true;})),false);
+  assert.equal(writes,0);assert.equal(intent.pending,false);
+}));

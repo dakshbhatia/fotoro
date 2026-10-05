@@ -12,6 +12,7 @@ export class ChosenSaveIntent {
   private started = false;
   private session?: object;
   private authentication?: { generation: number };
+  private expiredAccount?: string;
   private controller = new AbortController();
 
   constructor(photos: readonly LocalPhoto[], session?: object) {
@@ -42,10 +43,19 @@ export class ChosenSaveIntent {
     this.authentication = undefined;
     if (error instanceof Error && error.name === "AbortError") { this.cancel(); return; }
     if (!result) return; // A rejected password keeps the original Save available for retry.
-    if (!this.pending || !result.current() || result.generation !== ticket.generation + 1) { this.cancel(); return; }
+    if (!this.pending || !result.current() || result.generation !== ticket.generation + 1 ||
+        this.expiredAccount && (result.session as {accountId?: string}).accountId !== this.expiredAccount) { this.cancel(); return; }
     this.session = result.session;
+    this.expiredAccount = undefined;
   }
-  vaultLocked() {
+  vaultLocked(reason = "manual", accountId?: string) {
+    if (reason === "expired" && this.session && accountId && (this.state === "pending" || this.state === "running")) {
+      this.expiredAccount = accountId;
+      this.session = undefined; this.authentication = undefined;
+      this.controller.abort(); this.controller = new AbortController();
+      this.state = "pending";
+      return;
+    }
     // unlockVault emits its own lock before installing the authenticated vault.
     if (this.session || !this.authentication) this.cancel();
   }
@@ -65,12 +75,15 @@ export class ChosenSaveIntent {
     if (this.session !== options.session || !options.current()) { this.cancel(); return false; }
     this.started = true;
     this.state = "running";
-    const current = () => this.state === "running" && options.current() && !this.controller.signal.aborted;
+    const controller = this.controller;
+    const current = () => this.controller === controller && this.state === "running" && options.current() && !controller.signal.aborted;
     try {
-      const accepted = await options.save(this.snapshot, this.controller.signal, current);
+      const accepted = await options.save(this.snapshot, controller.signal, current);
+      if (this.controller !== controller) return false;
       if (this.state === "running") this.state = accepted ? "complete" : current() ? "pending" : "cancelled";
       return accepted;
     } catch (error) {
+      if (this.controller !== controller) throw error;
       if (current()) this.state = "pending";
       else this.cancel();
       throw error;

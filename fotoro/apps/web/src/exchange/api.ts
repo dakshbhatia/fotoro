@@ -1,5 +1,6 @@
 import {ApiError} from "./api-errors";
 import { validateWire } from "@fotoro/contracts/validate";
+import {requireVault, lockVault, vaultGeneration, type UnlockedVault} from "../vault/vault";
 let fixtureAccount: string | undefined;
 export const fixtureMode =
   import.meta.env?.DEV === true &&
@@ -39,8 +40,19 @@ export function setFixtureAccount(id?: string) {
   fixtureAccount = id;
 }
 export {ApiError, accountLimitMessage} from "./api-errors";
-async function responseError(response: Response) {
+interface RequestSession {vault: UnlockedVault; generation: number; origin?: string;}
+function requestSession(path: string): RequestSession | undefined {
+  // Password verification runs after local unlock and must handle its own rejection.
+  if (path.startsWith("/v1/auth/")) return;
+  try {return {vault: requireVault(), generation: vaultGeneration(), origin: typeof location === "undefined" ? undefined : location.origin};} catch {return;}
+}
+async function responseError(response: Response, session?: RequestSession, signal?: AbortSignal) {
   const error = await response.json().catch(() => null);
+  signal?.throwIfAborted();
+  if (response.status === 401 && session && session.generation === vaultGeneration() &&
+      session.origin === (typeof location === "undefined" ? undefined : location.origin)) {
+    try {if (requireVault() === session.vault) lockVault("expired");} catch {}
+  }
   return new ApiError(
     typeof error?.code === "string" ? error.code : `HTTP_${response.status}`,
     error?.retryable === true,
@@ -56,6 +68,7 @@ export async function api<T>(
   signal?: AbortSignal,
 ): Promise<T> {
   signal?.throwIfAborted();
+  const session = requestSession(path);
   const response = await fetch(base + path, {
     method,
     signal,
@@ -70,7 +83,7 @@ export async function api<T>(
   });
   signal?.throwIfAborted();
   if (!response.ok) {
-    throw await responseError(response);
+    throw await responseError(response, session, signal);
   }
   const result = await response.json();
   signal?.throwIfAborted();
@@ -78,6 +91,7 @@ export async function api<T>(
 }
 export async function fetchCipher(objectId: string, signal?: AbortSignal) {
   signal?.throwIfAborted();
+  const session = requestSession("/v1/objects/" + objectId);
   const r = await fetch(base + "/v1/objects/" + objectId, {
     signal,
     credentials: "include",
@@ -88,7 +102,7 @@ export async function fetchCipher(objectId: string, signal?: AbortSignal) {
   });
   signal?.throwIfAborted();
   if (!r.ok) {
-    throw await responseError(r);
+    throw await responseError(r, session, signal);
   }
   const bytes = new Uint8Array(await r.arrayBuffer());
   signal?.throwIfAborted();

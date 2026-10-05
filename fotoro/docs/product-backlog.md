@@ -52,6 +52,13 @@ Sign in with Apple is not delivered. System sharing is the main original-file
 route; private invitations require accepted contacts. Contact synchronization
 across devices remains open.
 
+The current source fixes Sync checkpoints for excluded changed Photos revisions, obsolete
+synced OCR evidence, browser expiration recovery for the same account and local
+browser clearing when server logout cannot finish. Full-app release audits now
+gate archive/export/upload. These changes and their local regression evidence
+are recorded in [verification](verification.md); they do not close the physical
+acceptance or distribution-signing gates above.
+
 ## Admit later work only with a complete job
 
 Correctable People needs a measured task, naming/merge/split corrections and

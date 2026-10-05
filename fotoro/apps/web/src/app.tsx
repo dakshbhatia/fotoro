@@ -6,7 +6,7 @@ import type { OwnedPhotoSnapshot } from "./library/consumer-search";
 import { ChosenSaveIntent } from "./exchange/chosen-save";
 import {IncomingShareIntent} from "./exchange/sharing";
 import {parseShareLink} from "@fotoro/contracts/share-links";
-import {requireVault} from "./vault/vault";
+import {requireVault, vaultLockDetail} from "./vault/vault";
 import type {Photo} from "./library/catalog";
 import {hasRememberedAccount} from "./vault/account-reference";
 import type {ConsumerPhotoChanges} from "./library/consumer-changes";
@@ -80,7 +80,13 @@ export default function App() {
     });
   };
   useEffect(() => {
-    const locked = () => {setOwnedPhotos(null); setPhotoChanges(null); setSavedViewer(null); setSharePhotos(null); pendingSave.current?.vaultLocked(); pendingShare.current?.vaultLocked(); if (pendingShare.current && !pendingShare.current.pending) cancelIncoming();};
+    const locked = (event: Event) => {
+      const detail = vaultLockDetail(event);
+      setOwnedPhotos(null); setPhotoChanges(null); setSavedViewer(null); setSharePhotos(null);
+      pendingSave.current?.vaultLocked(detail?.reason, detail?.accountId);
+      pendingShare.current?.vaultLocked(detail?.reason, detail?.accountId);
+      if (pendingShare.current && !pendingShare.current.pending) cancelIncoming();
+    };
     const hidden = () => {if (document.visibilityState === "hidden") cancelSave();};
     window.addEventListener("fotoro-lock", locked);
     window.addEventListener("pagehide", cancelSave);

@@ -168,7 +168,7 @@ export async function unlockVault(
     },
   };
   checkCurrent();
-  lockVault();
+  lockVault("unlock");
   // Lock listeners run synchronously. An explicit lock/reconfiguration from a
   // listener must win over this operation's normal internal lock notification.
   if (generation !== token + 1 || envelope !== target) {
@@ -178,7 +178,12 @@ export async function unlockVault(
   active = opened;
   return active;
 }
-export function lockVault() {
+export interface VaultLockDetail {reason: "manual" | "expired" | "unlock"; accountId?: string;}
+export function vaultLockDetail(event: Event): VaultLockDetail | undefined {
+  return (event as CustomEvent<VaultLockDetail>).detail;
+}
+export function lockVault(reason: VaultLockDetail["reason"] = "manual") {
+  const accountId = active?.accountId;
   generation++;
   active?.dispose();
   active = undefined;
@@ -187,7 +192,7 @@ export function lockVault() {
   for (const { url } of urls.values()) URL.revokeObjectURL(url);
   urls.clear();
   if (typeof window !== "undefined")
-    window.dispatchEvent(new Event("fotoro-lock"));
+    window.dispatchEvent(new CustomEvent<VaultLockDetail>("fotoro-lock", {detail: {reason, accountId}}));
 }
 export function mediaURL(
   key: string,
