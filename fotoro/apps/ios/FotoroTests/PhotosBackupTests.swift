@@ -873,8 +873,8 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     let candidates = [BackupCandidate(id: "old", capturedAt: Date(timeIntervalSince1970: 0), sourceRevision: "current"),
       BackupCandidate(id: "undated", sourceRevision: "current"),
       BackupCandidate(id: "recent", capturedAt: Date(), sourceRevision: "current"),
-      BackupCandidate(id: "video", skipReason: "Video is not backed up.", sourceRevision: "current"),
-      BackupCandidate(id: "live", skipReason: "Live Photo pairs are not backed up.", sourceRevision: "current")]
+      BackupCandidate(id: "unsupported", skipReason: "This photo format is not supported.", sourceRevision: "current"),
+      BackupCandidate(id: "live", skipReason: "Both Live Photo resources are required.", sourceRevision: "current")]
     services.photosBackupSnapshot = { cutoff in
       XCTAssertEqual(cutoff, .distantPast, "Automatic sync cannot use the recent Picks cutoff")
       return candidates
@@ -885,7 +885,8 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     XCTAssertEqual(Set(firstReads), ["old", "undated", "recent"])
     XCTAssertEqual(services.backup.status.completed, 3)
     XCTAssertEqual(services.backup.status.skipped, 2)
-    XCTAssertEqual(services.automaticPhotoSync.phase, .ready)
+    XCTAssertEqual(services.automaticPhotoSync.phase, .partial)
+    XCTAssertTrue(services.automaticPhotoSync.detail.contains("2 originals"))
     XCTAssertEqual(try services.store.consumerCommittedCount(accountId: XCTUnwrap(services.session.accountId)), 1,
       "Identical originals share the existing committed photo, not another upload")
     XCTAssertEqual(Set(try services.store.backupSources().filter { $0.phase == .committed }.map(\.photoId)).count, 1)
@@ -897,6 +898,8 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     await services.waitForAutomaticPhotoSync()
     let secondReads = await reads.values()
     XCTAssertEqual(secondReads.count, 3)
+    XCTAssertEqual(services.automaticPhotoSync.phase, .partial,
+      "An unchanged rescan must not hide unsupported originals")
     XCTAssertEqual(PausedUploadProtocol.server.requests.filter { $0.method != "GET" }.count, writes,
       "An unchanged scan may reconcile the catalog but cannot upload again")
     XCTAssertEqual(try services.annotations.ledger.pendingIDs(), [photo.id], "Photo opt-in cannot publish unsaved annotation edits")

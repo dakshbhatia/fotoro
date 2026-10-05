@@ -591,7 +591,10 @@ enum ReviewedPhotosBackupPolicy {
       return status(.needsAttention, "Some photo changes could not sync. Use Sync changes to try again.")
     }
     if backup.status.skipped > 0 {
-      return status(.ready, "Supported photos, videos and complete Live Photos are synced. Originals larger than 50 MiB stay in Photos.")
+      let count = backup.status.skipped
+      return status(.partial, count == 1
+        ? "1 original wasn't saved in Fotoro. It stays in Photos."
+        : "\(count) originals weren't saved in Fotoro. They stay in Photos.")
     }
     return status(.ready, "Automatic sync is on for permitted photos and videos while Fotoro is open. Complete originals must fit within 50 MiB.")
   }

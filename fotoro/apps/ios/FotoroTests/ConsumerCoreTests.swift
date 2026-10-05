@@ -238,6 +238,7 @@ final class ConsumerCoreTests: XCTestCase {
       (.locked, "Open Fotoro to resume sync."),
       (.permissionRequired, "Allow Photos access in Settings to sync your photos."),
       (.needsAttention, "Open Sync to review what needs attention."),
+      (.partial, "Some originals couldn't sync. Open Sync for details."),
       (.background, "Open Fotoro to continue syncing your photos."),
       (.syncing, "Photos appear here as they sync. Keep Fotoro open."),
       (.ready, "No photos saved yet. Sync is on for the photos you allow.")

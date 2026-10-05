@@ -171,15 +171,13 @@ struct PhotoSyncView: View {
               }
             }
             Section {
+              DisclosureGroup("How sync works") { syncExplanation }
               if status.enabled {
-                DisclosureGroup("How sync works") { syncExplanation }
                 Button("Turn off automatic sync", role: .destructive) {
                   cancelConsent()
                   do { try services.disableAutomaticPhotoSync() }
                   catch { services.error = error.localizedDescription }
                 }.accessibilityIdentifier("sync.disable")
-              } else {
-                syncExplanation
               }
             }.font(.footnote).foregroundStyle(.secondary)
             if catalogFailure != nil { Section { catalogDetails } }
@@ -217,6 +215,7 @@ struct PhotoSyncView: View {
     case .permissionRequired: "Photos access needed"
     case .background: "Sync will continue"
     case .syncing: "Syncing your photos"
+    case .partial: "Some originals weren't synced"
     case .needsAttention: "Sync needs attention"
     case .ready: "Sync is on"
     }
@@ -228,7 +227,7 @@ struct PhotoSyncView: View {
   private var syncExplanation: some View {
     Group {
       Text("Keep Fotoro open for the first sync. iOS can finish uploads already prepared after you leave the app.")
-      Text("JPEG, PNG and HEIC photos up to 50 MB are supported. Videos and Live Photo pairs stay in Photos for now. Originals are never removed.")
+      Text("JPEG, PNG and HEIC photos, MP4 and MOV videos, and complete Live Photos are supported. Each complete original must fit within 50 MiB. Originals are never removed from Photos.")
     }
   }
   private func turnOn() {
