@@ -117,9 +117,11 @@ offline reopen, checking exact bytes, names, types and digests. Those reader tes
 use real crypto and fake IndexedDB with HTTP responses mocked; they do not prove
 physical-device restoration or a browser-process restart.
 
-Nine rendered loopback checks pass the existing chosen Save, selection,
+Ten rendered loopback checks pass the existing chosen Save, selection,
 expiration, private invitation and recipient Save journeys plus cached access
-while `navigator.onLine` is true and transport is unreachable. Two additional
+while `navigator.onLine` is true and transport is unreachable. Cached access
+reports the unavailable connection accurately; an uncached browser remains at
+sign-in. Two additional
 rendered checks confirm Photos and Saved show visual-search failure instead of a
 false empty result. The latter inject a failing worker boundary and make no
 inference-quality claim. Headless Google Chrome is used; Safari and physical

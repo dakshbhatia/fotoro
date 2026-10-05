@@ -24,6 +24,7 @@ import {
   fixtureMode,
   isPublicDemoAccount,
   ApiError,
+  ApiTransportError,
 } from "./exchange/api";
 import { Exchange } from "./exchange/Exchange";
 import {ExpiredSavedSelection, IncomingShareIntent, grantState, ShareSelection} from "./exchange/sharing";
@@ -375,8 +376,10 @@ export default function CloudApp({
       try {await fn();}
       catch (error) {request?.finishAuthentication(ticket, undefined, error); shareRequest?.finishAuthentication(shareTicket); throw error;}
       if (!activeRef.current || authIntent.current !== version) {request?.cancel(); shareRequest?.cancel(); return;}
+      let opened: {session: UnlockedVault; generation: number; origin: string};
       try {
         const session = requireVault();
+        opened = {session, generation: vaultGeneration(), origin: location.origin};
         request?.finishAuthentication(ticket, {session, generation: vaultGeneration(), current: () => sameVault(session)});
         shareRequest?.finishAuthentication(shareTicket, session, vaultGeneration());
         setAccount(session.accountId);
@@ -390,7 +393,19 @@ export default function CloudApp({
         return;
       }
       await restorePause();
-      await refresh();
+      const current = () => activeRef.current && authIntent.current === version &&
+        vaultGeneration() === opened.generation && location.origin === opened.origin && sameVault(opened.session);
+      try {await refresh(false, current);}
+      catch (error) {
+        if (!current()) return;
+        if (!(error instanceof ApiTransportError)) throw error;
+        let cached;
+        try {cached = await cachedSync(opened.session);}
+        catch (cacheError) {if (!current()) return; throw cacheError;}
+        if (!current()) return;
+        setStatus(cached.photos.length ? "Couldn’t connect. Showing saved photos." : "Couldn’t connect. Try again when you’re online.");
+        setNeedsAttention(true);
+      }
     }, true);
   };
   useEffect(() => {
