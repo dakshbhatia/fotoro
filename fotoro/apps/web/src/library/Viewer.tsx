@@ -41,6 +41,7 @@ export function Viewer({
     [zoom, setZoom] = useState(false),
     [details, setDetails] = useState(false),
     [status, setStatus] = useState(""),
+    [originalShareError, setOriginalShareError] = useState(""),
     [editError, setEditError] = useState(""),
     [savingChanges, setSavingChanges] = useState(false),
     [label, setLabel] = useState(""),
@@ -60,11 +61,19 @@ export function Viewer({
   const currentPreviewSource = useRef(previewSource);
   currentPreviewSource.current = previewSource;
   const currentPhoto = useRef(photo), mounted = useRef(false), shareGeneration = useRef(0), savingRef = useRef(false);
+  const shareController = useRef<AbortController | null>(null), preparedRef = useRef(prepared);
+  preparedRef.current = prepared;
   const savingChangesRef = useRef(false);
   currentPhoto.current = photo;
   const authorized = (source: Photo, session: UnlockedVault) => mounted.current && currentPhoto.current === source && sameVault(session);
-  useDialogFocus(panel, () => prepared ? setPrepared(null) : onClose());
-  useDialogFocus(originalPanel, () => setPrepared(null), !!prepared);
+  const originalCurrent = (source: Photo, session: UnlockedVault) => authorized(source, session) && document.visibilityState !== "hidden";
+  const clearPrepared = () => {
+    shareGeneration.current++; shareController.current?.abort(); shareController.current = null;
+    if (preparedRef.current) preparedRef.current.files.length = 0;
+    preparedRef.current = null; setPrepared(null); setPreparingShare(false); setOriginalShareError("");
+  };
+  useDialogFocus(panel, () => prepared ? clearPrepared() : onClose());
+  useDialogFocus(originalPanel, clearPrepared, !!prepared);
   useEffect(() => {
     if (prepared) {hadOriginalOptions.current = true; return;}
     if (!hadOriginalOptions.current) return;
@@ -74,7 +83,14 @@ export function Viewer({
   }, [prepared]);
   useEffect(() => {
     mounted.current = true;
-    return () => {mounted.current = false; shareGeneration.current++;};
+    const hidden = () => {if (document.visibilityState === "hidden") clearPrepared();};
+    window.addEventListener("fotoro-lock", clearPrepared); window.addEventListener("pagehide", clearPrepared);
+    document.addEventListener("visibilitychange", hidden);
+    return () => {
+      mounted.current = false; clearPrepared();
+      window.removeEventListener("fotoro-lock", clearPrepared); window.removeEventListener("pagehide", clearPrepared);
+      document.removeEventListener("visibilitychange", hidden);
+    };
   }, []);
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
@@ -86,7 +102,7 @@ export function Viewer({
     return () => window.removeEventListener("keydown", key);
   }, [photos, index, selected, prepared]);
   useEffect(() => {
-    shareGeneration.current++; setPrepared(null); setPreparingShare(false); setPlayRequest(undefined); setMotion(undefined);
+    clearPrepared(); setPlayRequest(undefined); setMotion(undefined);
   }, [photo]);
   useEffect(() => {
     if (!photo) return;
@@ -145,18 +161,23 @@ export function Viewer({
     catch {if (session && mounted.current && sameVault(session) && currentPhoto.current?.manifest.photoId === source.manifest.photoId && currentPhoto.current?.metadata.originalSha256 === source.metadata.originalSha256) setEditError("Changes could not be kept. Try again.");}
   };
   const prepareShare = async () => {
-    const session = requireVault(), generation = ++shareGeneration.current;
-    setPreparingShare(true); setStatus("Preparing original…");
+    if (shareController.current || shareAttempt.pending || !mounted.current || document.visibilityState === "hidden") return;
+    let session: UnlockedVault;
+    try {session = requireVault();} catch {return;}
+    const generation = ++shareGeneration.current, controller = new AbortController();
+    shareController.current = controller;
+    const current = () => !controller.signal.aborted && originalCurrent(photo, session) && shareGeneration.current === generation;
+    setPreparingShare(true); setStatus("Preparing original…"); setOriginalShareError("");
     try {
-      const bytes = await photoBytes(photo, "original");
+      const bytes = await photoBytes(photo, "original", controller.signal);
       try {
-        if (!authorized(photo, session) || shareGeneration.current !== generation) return;
+        if (!current()) return;
         const files = await cameraOriginalFiles(bytes, photo.metadata);
-        if (!authorized(photo, session) || shareGeneration.current !== generation) return;
-        setPrepared({files, photo, session}); setStatus("");
+        if (!current()) {files.length = 0; return;}
+        preparedRef.current = {files, photo, session}; setPrepared(preparedRef.current); setStatus("");
       } finally {bytes.fill(0);}
-    } catch (error) {if (authorized(photo, session) && shareGeneration.current === generation) setStatus((error as Error).message);}
-    finally {if (authorized(photo, session) && shareGeneration.current === generation) setPreparingShare(false);}
+    } catch (error) {if (current() && (error as Error).name !== "AbortError") setStatus("The original could not be prepared. Check your connection and try again.");}
+    finally {if (shareController.current === controller) {shareController.current = null; if (current()) setPreparingShare(false);}}
   };
   const save = async () => {
     if (!photo.grantId || savingRef.current) return;
@@ -187,9 +208,7 @@ export function Viewer({
         {photos.length > 1 && <span>
           {index + 1} / {photos.length}
         </span>}
-        <button onClick={() => setDetails(!details)} aria-label="Photo details" aria-expanded={details}>
-          <Icon kind="info" />
-        </button>
+        <button onClick={() => setDetails(!details)} aria-label="More photo options" aria-expanded={details}>More</button>
       </div>
       <div
         className="view-image"
@@ -237,18 +256,17 @@ export function Viewer({
         >
           <Icon kind="previous" />
         </button>}
-        {!isCameraMedia(photo.metadata.mediaType) && <button onClick={() => setZoom(!zoom)}>{zoom ? "Fit" : "Zoom"}</button>}
         {isCameraMedia(photo.metadata.mediaType) && <button disabled={playRequest === previewSource && !motion?.url && !motion?.failed} onClick={() => {setPlayRequest(previewSource); setPlayAttempt(value => value + 1);}}>
           {playRequest === previewSource && !motion?.url && !motion?.failed ? "Opening original…" : photo.metadata.mediaType === LIVE_PHOTO_TYPE ? "Play Live Photo" : "Play video"}
         </button>}
         {motion?.source === previewSource && motion.failed && <p role="status">This browser cannot play the original. You can download its unchanged resources.</p>}
-        {onShare && !photo.grantId && <button onClick={() => onShare(photo)}>Share in Fotoro</button>}
         <button
           ref={originalButton}
+          className="primary-action"
           disabled={preparingShare || sharing}
           onClick={() => void prepareShare()}
         >
-          {preparingShare ? "Preparing…" : sharing ? "Sharing…" : "Share original"}
+          {preparingShare ? "Preparing…" : sharing ? "Sharing…" : "Share"}
         </button>
         {photo.grantId && (
           <button
@@ -266,24 +284,35 @@ export function Viewer({
           <Icon kind="next" />
         </button>}
       </div>
-      {prepared && prepared.photo === photo && sameVault(prepared.session) && <aside className="original-share" ref={originalPanel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Share original">
-        <button className="close" aria-label="Close share options" onClick={() => setPrepared(null)}><Icon kind="close" /></button>
-        <h2>Original ready</h2><p className="hint">{photo.metadata.filename} · verified, unchanged</p>
+      {prepared && prepared.photo === photo && sameVault(prepared.session) && <aside className="original-share" ref={originalPanel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Share photo">
+        <button className="close" aria-label="Close share options" onClick={clearPrepared}><Icon kind="close" /></button>
+        <h2>Share photo</h2>
+        {originalShareError && <p className="hint" role="status">{originalShareError}</p>}
         <div className="actions">
-          {canShareOriginals(prepared.files) && <button disabled={sharing} onClick={() => {
+          {canShareOriginals(prepared.files) && <button className="primary-action" disabled={sharing} onClick={() => {
             if (shareAttempt.pending) return;
-            const current = () => authorized(prepared.photo, prepared.session);
-            setSharing(true); setStatus("");
+            const current = () => originalCurrent(prepared.photo, prepared.session);
+            setSharing(true); setStatus(""); setOriginalShareError("");
             void shareAttempt.runFiles(prepared.files, current).then(result => {
-              if (current() && result !== "cancelled" && result !== "busy") {setPrepared(null); if (result === "downloaded") setStatus("Original downloaded");}
-            }).catch(error => {if (current()) setStatus("Sharing could not finish. You can download the original instead.");})
+              if (current() && result !== "cancelled" && result !== "busy") {clearPrepared(); if (result === "downloaded") setStatus("Original downloaded");}
+            }).catch(() => {if (current()) setOriginalShareError("Sharing could not finish. You can download the original instead.");})
               .finally(() => {if (mounted.current) setSharing(false);});
-          }}>{sharing ? "Sharing…" : "Share original"}</button>}
-          <button disabled={sharing} onClick={() => {if (!authorized(prepared.photo, prepared.session)) return; for (const file of prepared.files) downloadOriginal(file); setPrepared(null); setStatus("Original downloaded");}}>Download original</button>
+          }}>{sharing ? "Sharing…" : "Share"}</button>}
+          <button className={canShareOriginals(prepared.files) ? undefined : "primary-action"} disabled={sharing} onClick={() => {
+            if (shareAttempt.pending || !originalCurrent(prepared.photo, prepared.session)) return;
+            const current = () => originalCurrent(prepared.photo, prepared.session);
+            setSharing(true); setStatus(""); setOriginalShareError("");
+            void shareAttempt.runFiles(prepared.files, current, {canShare: () => false, download: downloadOriginal}).then(result => {
+              if (current() && result === "downloaded") {clearPrepared(); setStatus("Original downloaded");}
+            }).catch(() => {if (current()) setOriginalShareError("The original could not be downloaded. Try again.");})
+              .finally(() => {if (mounted.current) setSharing(false);});
+          }}>Download original</button>
         </div>
       </aside>}
       {details && (
         <aside className="details" inert={prepared ? true : undefined}>
+          {!isCameraMedia(photo.metadata.mediaType) && <button onClick={() => setZoom(!zoom)}>{zoom ? "Fit" : "Zoom"}</button>}
+          {onShare && !photo.grantId && <button disabled={preparingShare || sharing} onClick={() => onShare(photo)}>Share in Fotoro</button>}
           <p>{photo.metadata.filename}</p>
           <p>
             {photo.metadata.mediaType} ·{" "}

@@ -56,7 +56,7 @@ import type {OwnedPhotoSnapshot} from "./library/consumer-search";
 import {savedSearchPhotos} from "./library/consumer-search";
 import {findMatchPhotos, shortlistSearchResult} from "./local/find-best-shots";
 import {useFindBestShots} from "./local/useFindBestShots";
-import {FindBestShots} from "./local/FindBestShots";
+import {FindBestShots, selectionCandidates} from "./local/FindBestShots";
 import {useDialogFocus} from "./library/dialog-focus";
 import {AccountAccess} from "./vault/AccountAccess";
 import {ChosenSaveIntent, type ChosenSaveSnapshot} from "./exchange/chosen-save";
@@ -95,7 +95,6 @@ export default function CloudApp({
   incomingError = "",
   onIncomingDone,
   sharePhotos = null,
-  shareKind = "fotoro",
   onShareDone,
 }: {
   onBack: () => void;
@@ -109,7 +108,6 @@ export default function CloudApp({
   incomingError?: string;
   onIncomingDone?: () => void;
   sharePhotos?: Photo[] | null;
-  shareKind?: "fotoro" | "originals";
   onShareDone?: () => void;
 }) {
   const [account, setAccount] = useState(() => {
@@ -136,6 +134,7 @@ export default function CloudApp({
   const [receivedContext, setReceivedContext] = useState<{grant: GrantV1; sender: string} | null>(null);
   const [preparingOriginals, setPreparingOriginals] = useState(false), [sharingOriginals, setSharingOriginals] = useState(false);
   const [preparedOriginals, setPreparedOriginals] = useState<{files: File[]; context: SelectedOriginalContext} | null>(null);
+  const [originalShareError, setOriginalShareError] = useState("");
   const [originalShareAttempt] = useState(() => new OriginalShareAttempt());
   const originalContext = useRef<SelectedOriginalContext | null>(null), originalPanel = useRef<HTMLElement>(null), originalButton = useRef<HTMLButtonElement>(null), hadOriginalOptions = useRef(false);
   const [receivedNow, setReceivedNow] = useState(Date.now);
@@ -196,7 +195,7 @@ export default function CloudApp({
     const context = originalContext.current;
     originalContext.current = null;
     context?.controller.abort(); context?.snapshot.dispose();
-    setPreparedOriginals(null); setPreparingOriginals(false);
+    setPreparedOriginals(null); setPreparingOriginals(false); setOriginalShareError("");
   };
   useDialogFocus(originalPanel, cancelOriginals, !!preparedOriginals);
   useEffect(() => {
@@ -704,6 +703,12 @@ export default function CloudApp({
     });
   }, [photos]);
   const chosen = photos.filter((p) => selected.has(p.manifest.photoId));
+  const selectBestShots = () => {
+    if (!bestShots.active || bestShots.busy || !bestShots.recommendations || !ownedSnapshot?.current() || !activeRef.current || currentReceived.current || preparingOriginals || sharingOriginals) return;
+    const ids = selectionCandidates(findMatches, bestShots.recommendations).map(photo => photo.id);
+    setSelected(previous => ownedSnapshot.current() ? new Set([...previous, ...ids]) : previous);
+    setSelecting(true);
+  };
   const prepareSelectedOriginals = async (items = chosen) => {
     if (originalContext.current || originalShareAttempt.pending || !items.length || received || !activeRef.current || document.visibilityState === "hidden") return;
     const session = requireVault(), ids = new Set(items.map(photo => photo.manifest.photoId));
@@ -711,7 +716,7 @@ export default function CloudApp({
     currentSelection.current = ids; setSelected(ids);
     const context = {snapshot: new ShareSelection(items), session, controller: new AbortController()};
     originalContext.current = context;
-    setPreparingOriginals(true); setStatus("");
+    setPreparingOriginals(true); setStatus(""); setOriginalShareError("");
     try {
       const files = await prepareSavedOriginals(context.snapshot.photos, context.controller.signal, () => originalsCurrent(context), photoBytes, (bytes, photo) => cameraOriginalFiles(bytes, photo.metadata));
       if (originalsCurrent(context)) setPreparedOriginals({files, context});
@@ -723,14 +728,14 @@ export default function CloudApp({
   const sendSelectedOriginals = (prepared: NonNullable<typeof preparedOriginals>, download = false) => {
     if (originalShareAttempt.pending || sharingOriginals || !originalsCurrent(prepared.context)) return;
     const current = () => originalsCurrent(prepared.context);
-    setSharingOriginals(true); setStatus("");
+    setSharingOriginals(true); setStatus(""); setOriginalShareError("");
     const result = download ? originalShareAttempt.runFiles(prepared.files, current, {canShare: () => false, download: downloadOriginal})
       : originalShareAttempt.runFiles(prepared.files, current);
     void result.then(outcome => {
       if (current() && outcome !== "cancelled" && outcome !== "busy") {
         cancelOriginals(); if (outcome === "downloaded") setStatus("Original downloads started.");
       }
-    }).catch(() => {if (current()) setStatus("Sharing could not finish. You can download the originals instead.");})
+    }).catch(() => {if (current()) setOriginalShareError(download ? "The originals could not be downloaded. Try again." : "Sharing could not finish. You can download the originals instead.");})
       .finally(() => setSharingOriginals(false));
   };
   const toggleSelection = (id: string) => setSelected(previous => {
@@ -750,12 +755,8 @@ export default function CloudApp({
   }, [active, account, incoming]);
   useEffect(() => {
     if (!active || !account || !sharePhotos?.length) return;
-    if (shareKind === "originals") {
-      if (received) {setReceived(null); setReceivedContext(null); return;}
-      void prepareSelectedOriginals(sharePhotos); onShareDone?.();
-    }
-    else openSharing(sharePhotos);
-  }, [active, account, sharePhotos, shareKind, received]);
+    openSharing(sharePhotos);
+  }, [active, account, sharePhotos]);
   return (
     <>
       <main className={"cloud-library" + (selecting ? " exchange-selection" : "")} aria-busy={searchResult.searching || undefined} inert={viewing || exchange || menu || preparedOriginals || placesOpen ? true : undefined}>
@@ -896,7 +897,7 @@ export default function CloudApp({
                 <span>Also try</span>{searchResult.meanings.filter(meaning => meaning.id !== searchResult.meaning?.id && meaning.photoIds.some(id => !searchResult.photoIds.includes(id))).slice(0, 3).map(meaning => <button key={meaning.id} onClick={() => setCommittedMeaning(meaning.id)}>{meaning.term}</button>)}
               </div>
             )}
-            {normalizeSearch(query) && !received && (findMatches.length > 0 || bestShots.active) && <FindBestShots total={findMatches.length} review={bestShots} showCount />}
+            {normalizeSearch(query) && !received && (findMatches.length > 0 || bestShots.active) && <FindBestShots total={findMatches.length} review={bestShots} showCount onSelect={selectBestShots} disabled={preparingOriginals || sharingOriginals} />}
             {shown.length ? (
               <Library
                 active={active}
@@ -927,7 +928,9 @@ export default function CloudApp({
               <span role="status">{selected.size} selected</span>
               <button disabled={sharingOriginals} onClick={() => setSelected(new Set())}>Clear</button>
               <button ref={originalButton} className="primary-action" disabled={preparingOriginals || sharingOriginals} onClick={() => void prepareSelectedOriginals()}>{preparingOriginals ? "Preparing…" : "Share"}</button>
-              <button disabled={preparingOriginals || sharingOriginals} onClick={() => openSharing(chosen)}>Share in Fotoro</button>
+              <details className="selection-more" onKeyDown={event => {if (event.key === "Escape") {event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();}}}>
+                <summary>More</summary><div><button disabled={preparingOriginals || sharingOriginals} onClick={() => openSharing(chosen)}>Share in Fotoro</button></div>
+              </details>
             </div>}
             <input
               ref={input}
@@ -1071,9 +1074,10 @@ export default function CloudApp({
       {active && preparedOriginals && originalsCurrent(preparedOriginals.context) && <aside className="original-share saved-original-share" ref={originalPanel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Share selected photos">
         <button className="close" aria-label="Close share options" disabled={sharingOriginals} onClick={cancelOriginals}>Close</button>
         <h2>Share {preparedOriginals.context.snapshot.photos.length} {preparedOriginals.context.snapshot.photos.length === 1 ? "photo" : "photos"}</h2>
+        {originalShareError && <p className="hint" role="status">{originalShareError}</p>}
         <div className="actions">
-          {canShareOriginals(preparedOriginals.files) && <button className="primary-action" disabled={sharingOriginals} onClick={() => sendSelectedOriginals(preparedOriginals)}>{sharingOriginals ? "Sharing…" : "Share photos"}</button>}
-          <button disabled={sharingOriginals} onClick={() => sendSelectedOriginals(preparedOriginals, true)}>Download originals</button>
+          {canShareOriginals(preparedOriginals.files) && <button className="primary-action" disabled={sharingOriginals} onClick={() => sendSelectedOriginals(preparedOriginals)}>{sharingOriginals ? "Sharing…" : "Share"}</button>}
+          <button className={canShareOriginals(preparedOriginals.files) ? undefined : "primary-action"} disabled={sharingOriginals} onClick={() => sendSelectedOriginals(preparedOriginals, true)}>Download originals</button>
         </div>
       </aside>}
       {active && placesOpen && unlocked && <Places photos={findPhotos} resources={placeResources} onClose={() => setPlacesOpen(false)}

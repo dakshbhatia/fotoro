@@ -76,16 +76,21 @@ struct PhotoViewer: View {
                 .disabled(services.busy || current == nil || current.map { savedReceivedIDs.contains($0.id) } == true)
             }
           } else {
-          ToolbarItem(placement: .bottomBar) {
-            Menu("Share", systemImage: "square.and.arrow.up") {
-              Button("Share in Fotoro") {
-                if let current { sharedPhotos = SharedPhotosPresentation(photos: [current]) }
-              }
-              Button("Share original", action: share)
-              Button("Save to Photos", action: restoreOriginal)
+            ToolbarItem(placement: .bottomBar) {
+              Button("Share", systemImage: "square.and.arrow.up", action: share)
+                .disabled(preparingShare || current == nil)
+                .accessibilityIdentifier("viewer.share")
             }
-              .disabled(preparingShare || current == nil)
-          }
+            ToolbarItem(placement: .bottomBar) {
+              Menu("More", systemImage: "ellipsis.circle") {
+                Button("Share in Fotoro") {
+                  if let current { sharedPhotos = SharedPhotosPresentation(photos: [current]) }
+                }
+                Button("Save to Photos", action: restoreOriginal)
+              }
+                .disabled(preparingShare || current == nil)
+                .accessibilityIdentifier("viewer.more")
+            }
           }
         }
         .toolbar(controlsVisible ? .visible : .hidden, for: .navigationBar, .bottomBar)

@@ -196,6 +196,8 @@ private struct PhotosAccountPresentation: Identifiable {
 private struct PhotoSyncPresentation: Identifiable {
   let id = UUID()
   let services: AppServices
+  let savedRefresh: SavedLibraryRefresh
+  let requiresAuthentication: Bool
 }
 #endif
 
@@ -402,13 +404,7 @@ struct RecentPhotosView: View {
         AccountView(services: services, onAuthenticationTask: { homeAuthenticationTask = $0 })
       } else {
         ScrollView {
-          if savedRefresh.isRefreshing { ProgressView("Loading saved photos…").padding(.bottom, 12) }
-          if let error = savedRefresh.error {
-            VStack(spacing: 8) {
-              Text(error).font(.footnote).foregroundStyle(.secondary)
-              Button("Try again") { Task { await savedRefresh.refresh(services) } }
-            }.padding()
-          }
+          if savedRefresh.isRefreshing, ownedPhotos.isEmpty { ProgressView().padding(.bottom, 12) }
           LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 2), spacing: 3) {
             ForEach(savedDays, id: \.0) { day in
               Section {
@@ -482,7 +478,9 @@ struct RecentPhotosView: View {
       .sheet(item: $backupAccount) {
         LibraryView(services: $0.services, saveSelection: $0.selection, incomingLink: $0.incoming)
       }
-      .sheet(item: $photoSyncPresentation) { PhotoSyncView(services: $0.services) }
+      .sheet(item: $photoSyncPresentation) {
+        PhotoSyncView(services: $0.services, savedRefresh: $0.savedRefresh, requiresAuthentication: $0.requiresAuthentication)
+      }
       .onOpenURL { url in
         do {
           let incoming = try FotoroShareLinks.parse(url, expectedOrigin: services?.api.origin ?? FotoroShareLinks.origin)
@@ -658,7 +656,6 @@ struct RecentPhotosView: View {
           if !hasBrowseAccess {
             Button("Open Saved photos", systemImage: "icloud") { scope = .saved }
               .accessibilityIdentifier("home.saved")
-            if let services { ConsumerSaveStatus(services: services, showsIdleSummary: false) }
           }
         #endif
       }.padding().frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -677,16 +674,13 @@ struct RecentPhotosView: View {
           if !hasBrowseAccess {
             Button("Open Saved photos", systemImage: "icloud") { scope = .saved }
               .accessibilityIdentifier("home.saved")
-            if let services { ConsumerSaveStatus(services: services, showsIdleSummary: false) }
           }
         #endif
       }
     } else {
       ScrollView {
         if mode == .search {
-          if preparingBestShots || bestShots.reviewing || bestShots.snapshot != nil || bestShots.error != nil {
-            bestShotsControls
-          }
+          bestShotsControls
 #if FOTORO_LOCAL_PREVIEW
           LocalSearchView(search: search, photos: store, review: bestShots.snapshot, choseMeaning: { queryFocused = false },
             selectedIDs: selected, selecting: selecting, toggleSelection: toggleSelection) {
@@ -709,9 +703,6 @@ struct RecentPhotosView: View {
           #if !FOTORO_LOCAL_PREVIEW
             if allPhotos { timelineFeedback }
           #endif
-          if !allPhotos, store.picksSnapshot == nil || (store.picksSnapshot?.recommendations.unassessed ?? 0) > 0 {
-            galleryHeader
-          }
           gallery
           if browseLibraryIsEmpty && !hasMoreBrowsePhotos {
             ContentUnavailableView("No photos", systemImage: "photo", description: Text("Choose photos Fotoro may access in Settings."))
@@ -783,13 +774,7 @@ struct RecentPhotosView: View {
           }
         }.padding(.horizontal, 16).padding(.vertical, 10)
       }
-      if savedRefresh.isRefreshing { ProgressView("Loading photos…").font(.footnote).padding() }
-      if let error = savedRefresh.error {
-        VStack(spacing: 8) {
-          Text(error).font(.footnote).foregroundStyle(.secondary)
-          if let services { Button("Try again") { Task { await savedRefresh.refresh(services) } } }
-        }.padding()
-      }
+      if savedRefresh.isRefreshing, store.photos.isEmpty, allOwnedPhotos.isEmpty { ProgressView().padding() }
     }
   #endif
   private var browseScrollBinding: Binding<String?> {
@@ -799,6 +784,18 @@ struct RecentPhotosView: View {
   }
   private var bestShotsControls: some View {
     VStack(alignment: .leading, spacing: 8) {
+      HStack(spacing: 12) {
+        if bestShots.showing || preparingBestShots {
+          Button("All matches", action: cancelBestShots)
+            .accessibilityIdentifier("find.allMatches")
+        } else {
+          Button("Best shots", systemImage: "sparkles", action: beginBestShots)
+            .disabled(searchMatchCount == 0 || preparingShare)
+            .accessibilityIdentifier("find.bestShots")
+        }
+        Spacer(minLength: 0)
+        if hasSelectablePhotos { selectionToggle }
+      }.buttonStyle(.bordered)
       if preparingBestShots || bestShots.reviewing {
         ProgressView(preparingBestShots ? "Checking matches…" : "Reviewing previews…")
           .font(.footnote)
@@ -809,12 +806,33 @@ struct RecentPhotosView: View {
           Text("\(result.recommendations.unassessed) previews unavailable. All matches keeps every photo reviewable.")
             .font(.caption).foregroundStyle(.secondary)
         }
+        if !result.recommendations.ids.isEmpty {
+          Button("Select best shots", action: selectBestShots)
+            .buttonStyle(.borderedProminent).disabled(preparingShare || showShare)
+            .accessibilityIdentifier("find.selectBestShots")
+        }
       }
       if let error = bestShots.error {
         Text(error).font(.caption).foregroundStyle(.secondary)
         Button("Try again", action: beginBestShots)
       }
     }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.bottom, 12)
+  }
+  private func selectBestShots() {
+    guard !preparingShare, !showShare, scenePhase == .active else { return }
+    let recommendations = bestShots.selectionCandidates()
+    guard !recommendations.isEmpty else { return }
+    let revisions = Dictionary(recommendations.map { ($0.id, $0.sourceRevision) }, uniquingKeysWith: { _, last in last })
+    queryFocused = false
+    for photo in searchPhotos where revisions["device:" + photo.id] == photo.sourceRevision && !selected.contains(photo.id) {
+      toggleSelection(photo)
+    }
+    #if !FOTORO_LOCAL_PREVIEW
+      for photo in savedPhotos where revisions["saved:" + photo.id] != nil && !selectedSavedPhotos.contains(photo.id) {
+        toggleSavedSelection(photo)
+      }
+    #endif
+    selecting = true
   }
   private func cancelBestShots() {
     bestShotsRequest = UUID()
@@ -962,19 +980,6 @@ struct RecentPhotosView: View {
     return await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
   }
   #endif
-  private var galleryHeader: some View {
-    VStack(alignment: .leading, spacing: 8) {
-      if !allPhotos {
-        if store.picksSnapshot == nil {
-          Text("Finding your picks. Showing recent photos for now.")
-            .font(.footnote).foregroundStyle(.secondary)
-        } else if let missing = store.picksSnapshot?.recommendations.unassessed, missing > 0 {
-          Text("Some previews are unavailable. Every original stays in Photos.")
-            .font(.footnote).foregroundStyle(.secondary)
-        }
-      }
-    }.padding(.horizontal, 16).padding(.bottom, 12)
-  }
   private var selectionToggle: some View {
     Button(selecting ? "Done" : "Select") { selecting.toggle(); queryFocused = false }
       .frame(minHeight: 44).disabled(preparingShare)
@@ -1116,9 +1121,6 @@ struct RecentPhotosView: View {
             }
           }
         }
-        #if !FOTORO_LOCAL_PREVIEW
-          if let services { ConsumerSaveStatus(services: services, showsIdleSummary: false) }
-        #endif
       }.padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 12)
     }
   }
@@ -1151,16 +1153,7 @@ struct RecentPhotosView: View {
             .accessibilityIdentifier("saved.refresh")
         }
       #endif
-      if !query.isEmpty {
-        Button("All matches", action: cancelBestShots)
-          .accessibilityValue(bestShots.showing || preparingBestShots ? "" : "Selected")
-          .accessibilityIdentifier("find.allMatches")
-        Button("Best shots", action: beginBestShots)
-          .disabled(searchMatchCount == 0 || preparingBestShots || bestShots.reviewing)
-          .accessibilityValue(bestShots.showing || preparingBestShots ? "Selected" : "")
-          .accessibilityIdentifier("find.bestShots")
-      }
-      if hasSelectablePhotos { selectionToggle }
+      if query.isEmpty, hasSelectablePhotos { selectionToggle }
       Button("Settings", systemImage: "gearshape") { queryFocused = false; settings = true }
         .accessibilityIdentifier("home.settings")
     } label: {
@@ -1187,8 +1180,19 @@ struct RecentPhotosView: View {
     }
   }
   #if !FOTORO_LOCAL_PREVIEW
+    private var homeSyncNeedsAttention: Bool {
+      savedRefresh.error != nil || services.map { savedRefresh.requiresAuthentication($0) } == true
+        || services?.consumerSyncSummary.state == .needsAttention
+        || services?.automaticPhotoSync.phase == .needsAttention
+    }
     @ViewBuilder private var homeSyncButton: some View {
-      if store.opened, RecentPhotosPolicy.canRead(store.status), services?.automaticPhotoSync.enabled == false {
+      if homeSyncNeedsAttention {
+        Button("Sync needs attention", systemImage: "exclamationmark.icloud", action: openPhotoSync)
+          .labelStyle(.iconOnly).font(.title3).buttonStyle(.glass).buttonBorderShape(.circle)
+          .frame(width: 44, height: 44).accessibilityIdentifier("home.sync")
+      } else if store.opened, RecentPhotosPolicy.canRead(store.status), services?.automaticPhotoSync.enabled == false,
+        services.map({ $0.session.accountId == nil
+          || NativeBackupPolicy.allowsPrivatePhotos(accountId: $0.session.accountId, fixture: $0.session.fixture) }) != false {
         Button("Turn on sync", systemImage: "icloud.and.arrow.up", action: openPhotoSync)
           .font(.subheadline.weight(.semibold)).buttonStyle(.glassProminent)
           .frame(minHeight: 44).fixedSize(horizontal: false, vertical: true)
@@ -1397,7 +1401,14 @@ struct RecentPhotosView: View {
       services?.bindLocalSearch(search)
       services?.bindRecentPhotos(store)
       services?.setPhotoSyncForeground(scenePhase == .active)
-      if let services { photoSyncPresentation = PhotoSyncPresentation(services: services) }
+      if let services {
+        let requiresAuthentication = savedRefresh.requiresAuthentication(services)
+          || (services.session.accountId != nil && PhotoSyncAccountPolicy.requiresAuthentication(
+            hasAccountAccess: services.photoAccountAccess != nil, isSignedIn: services.session.isSignedIn,
+            accountId: services.session.accountId, fixture: services.session.fixture, rejectedSession: false))
+        photoSyncPresentation = PhotoSyncPresentation(services: services,
+          savedRefresh: savedRefresh, requiresAuthentication: requiresAuthentication)
+      }
     } catch { store.error = error.localizedDescription }
   }
   private func reviewSave(_ sources: [RecentPhotoSource]) {

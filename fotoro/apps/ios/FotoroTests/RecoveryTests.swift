@@ -129,6 +129,35 @@ final class RecoveryTests: XCTestCase {
       XCTAssertEqual(responses.paths.filter { $0 == "/v1/auth/recovery/verify" }.count, 1)
     }
   }
+  @MainActor func testRejectedCurrentRememberedSessionRenewsWithoutClearingAccountOrStoredPassword() async throws {
+    try await withExpiredRememberedLogin { auth, session, vault, responses in
+      _ = try await auth.openRememberedAccount()
+      let account = try XCTUnwrap(session.accountId), token = session.bearerToken
+      let password = try Keychain.read("password-" + account)
+      let key = try vault.requireBundle().vaultKey
+      let first = responses.paths.count
+      responses.recoveryUnavailable = true
+      do {
+        _ = try await auth.openRememberedAccount(forceReauthentication: true)
+        XCTFail("A rejected session must request fresh authentication")
+      } catch let error as FotoroError {
+        XCTAssertEqual(error.message, "CONTROLLED_RECOVERY_UNAVAILABLE")
+      }
+      XCTAssertEqual(session.accountId, account)
+      XCTAssertEqual(session.bearerToken, token)
+      XCTAssertTrue(vault.isUnlocked)
+      XCTAssertEqual(try vault.requireBundle().vaultKey, key)
+      XCTAssertEqual(try Keychain.read("password-" + account), password)
+      XCTAssertEqual(Array(responses.paths.dropFirst(first)), ["/v1/auth/recovery/options"])
+      responses.recoveryUnavailable = false
+      let retry = responses.paths.count
+      _ = try await auth.openRememberedAccount(forceReauthentication: true)
+      XCTAssertEqual(Array(responses.paths.dropFirst(retry)), ["/v1/auth/recovery/options", "/v1/auth/recovery/verify"])
+      XCTAssertEqual(session.accountId, account)
+      XCTAssertEqual(try vault.requireBundle().vaultKey, key)
+      XCTAssertEqual(try Keychain.read("password-" + account), password)
+    }
+  }
   @MainActor func testRememberedRenewalRejectsLateResponsesAfterCancellationLockAccountOrOriginChange() async throws {
     for path in ["/v1/auth/recovery/options", "/v1/auth/recovery/verify"] {
       for interruption in ["cancel", "lock", "account", "origin", "server"] {

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Icon } from "../library/icons";
 import { type LocalPhoto, LocalResources } from "./resources";
 import type { LocalOcrPhoto } from "./useLocalOcr";
-import {canShareOriginal, downloadOriginal, OriginalShareAttempt} from "../library/system-share";
+import {downloadOriginal, OriginalShareAttempt} from "../library/system-share";
 import {useDialogFocus} from "../library/dialog-focus";
 import {PhotoLocation} from "./PhotoLocation";
 export function LocalViewer({photos, initial, resources, onClose, onLabels, onFavorite, onUse, onConfirm, onPin, meaning, onReselect, onSave, isSaved}: {
@@ -45,13 +45,12 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
     if (!photo.file || !alive.current || currentPhoto.current !== photo) return;
     downloadOriginal(photo.file); onUse?.(photo.id);
   };
-  const canShare = !!photo.file && canShareOriginal(photo.file);
   const saved = isSaved?.(photo) ?? false;
   return <div className="viewer" ref={panel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Photo viewer">
     <div className="viewer-top glass">
       <button onClick={onClose} aria-label="Close viewer"><Icon kind="close" /></button>
       <span>{index + 1} / {photos.length}</span>
-      <button onClick={() => setDetails(!details)} aria-label="Photo details" aria-expanded={details}><Icon kind="info" /></button>
+      <button onClick={() => setDetails(!details)} aria-label="More photo options" aria-expanded={details}>More</button>
     </div>
     <div className="view-image" onDoubleClick={() => setZoom(!zoom)}
       onTouchStart={event => {touch.current = event.touches.length === 1 ? {x: event.touches[0].clientX, y: event.touches[0].clientY} : undefined;}}
@@ -64,24 +63,24 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
       }}>
       {loaded.id === photo.id && loaded.url && <img className={zoom ? "zoomed" : ""} src={loaded.url} alt={photo.filename} />}
     </div>
-    {!photo.file && <p className="original-gate">Reselect the original to download or share. <button onClick={onReselect}>Reselect</button></p>}
+    {!photo.file && <p className="original-gate">Reselect the original to Save or Share. <button onClick={onReselect}>Reselect</button></p>}
     <div className="viewer-bottom glass">
       <button aria-label="Previous photo" disabled={index === 0} onClick={() => setSelected(photos[index - 1].id)}><Icon kind="previous" /></button>
-      <button onClick={() => setZoom(!zoom)}>{zoom ? "Fit" : "Zoom"}</button>
       {onSave && <button disabled={!photo.file || sharing || saved} onClick={() => {
         if (photo.file && !isSaved?.(photo) && alive.current && currentPhoto.current === photo) onSave(photo);
       }}>{saved ? "Saved" : "Save"}</button>}
-      {canShare ? <button disabled={sharing} onClick={async () => {
+      <button className="primary-action" disabled={!photo.file || sharing} onClick={async () => {
         if (!photo.file || shareAttempt.pending) return;
-        const current = () => alive.current && currentPhoto.current === photo;
+        const current = () => alive.current && currentPhoto.current === photo && photo.current?.() !== false && document.visibilityState !== "hidden";
         setSharing(true); setStatus("");
         try {const result = await shareAttempt.run(photo.file, current); if (current() && result !== "cancelled" && result !== "busy") onUse?.(photo.id);}
-        catch (error) {if (current()) setStatus("The photo could not be shared. Download the original from Info.");}
+        catch (error) {if (current()) setStatus("The photo could not be shared. Download the original from More.");}
         finally {if (alive.current) setSharing(false);}
-      }}>{sharing ? "Sharing…" : "Share original"}</button> : <button onClick={download} disabled={!photo.file || sharing}>Download original</button>}
+      }}>{sharing ? "Sharing…" : "Share"}</button>
       <button aria-label="Next photo" disabled={index === photos.length - 1} onClick={() => setSelected(photos[index + 1].id)}><Icon kind="next" /></button>
     </div>
     {details && <aside className="details local-details">
+      <button onClick={() => setZoom(!zoom)}>{zoom ? "Fit" : "Zoom"}</button>
       <p>{photo.filename}</p><p>{photo.width} × {photo.height}{(photo.originalSize ?? photo.file?.size) ? ` · ${((photo.originalSize ?? photo.file!.size) / 1024 / 1024).toFixed(1)} MB` : ""}</p>
       <p>{new Date(photo.date).toLocaleString()}</p><p>{photo.dateSource === "photos" ? "Date from Photos" : photo.dateSource === "exif" ? "Date from the photo" : "Capture date unavailable · date selected"}</p>
       <PhotoLocation location={photo.location} />
@@ -89,7 +88,7 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
       {onFavorite && <button aria-pressed={!!photo.favorite} onClick={() => {
         if (alive.current && currentPhoto.current === photo) onFavorite(photo.id, !photo.favorite);
       }}>{photo.favorite ? "Unfavorite" : "Favorite"}</button>}
-      {canShare && <button onClick={download} disabled={sharing}>Download original</button>}
+      {photo.file && <button onClick={download} disabled={sharing}>Download original</button>}
       <h3>Labels</h3>
       <div className="local-labels">{(photo.labels ?? []).map((value, i) => <button key={i} aria-label={"Remove label " + value} onClick={() => onLabels?.(photo.id, photo.labels!.filter((_, position) => position !== i))}>{value} ×</button>)}</div>
       {onLabels && <form className="local-label-form" onSubmit={event => {
@@ -98,7 +97,6 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
         if (!photo.labels?.includes(label)) onLabels(photo.id, [...(photo.labels ?? []), label]);
         setLabel("");
       }}><label>New label<input aria-label="New label" value={label} maxLength={120} onChange={event => setLabel(event.target.value)} /></label><button disabled={!label.trim() || (photo.labels?.length ?? 0) >= 64}>Add label</button></form>}
-      <p className="hint">Labels are your supplied associations.</p>
       {photo.ocr?.status === "complete" && <details><summary>Text in photo</summary><p className="local-ocr-text">{photo.ocr.text || "No readable text found."}</p></details>}
       {photo.ocr?.status === "failed" && <p>Text unavailable · {photo.ocr.error ?? "This preview could not be read."}</p>}
       {meaning && <details><summary>Adjust future matches</summary><div className="actions">{onConfirm && <button onClick={() => {onConfirm(photo.id); setStatus("Photo choice saved on this device.");}}>This is the photo</button>}{onPin && <button onClick={() => {onPin(photo.id); setStatus("Preferred photo saved on this device.");}}>Prefer this photo</button>}</div></details>}

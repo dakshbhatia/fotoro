@@ -53,16 +53,42 @@ struct AutomaticPhotoSyncConsent {
   mutating func cancel() { pending = false; authorization = nil; origin = nil }
 }
 
+enum PhotoSyncAccountPolicy {
+  static func requiresAuthentication(hasAccountAccess: Bool, isSignedIn: Bool,
+    accountId: String?, fixture: Bool, rejectedSession: Bool) -> Bool {
+    rejectedSession || !hasAccountAccess || !isSignedIn
+      || !NativeBackupPolicy.allowsPrivatePhotos(accountId: accountId, fixture: fixture)
+  }
+}
+
 struct PhotoSyncView: View {
   @Bindable var services: AppServices
+  let savedRefresh: SavedLibraryRefresh?
   @State private var consent: AutomaticPhotoSyncConsent?
   @State private var openingAccount = false
+  @State private var rejectedSession = false
   @State private var authenticationTask: Task<Void, Never>?
   @State private var permissionTask: Task<Void, Never>?
   @State private var password: FotoroPassword?
   @Environment(\.scenePhase) private var scenePhase
   @Environment(\.dismiss) private var dismiss
+  init(services: AppServices, savedRefresh: SavedLibraryRefresh? = nil, requiresAuthentication: Bool = false) {
+    self.services = services
+    self.savedRefresh = savedRefresh
+    _openingAccount = State(initialValue: requiresAuthentication)
+    _rejectedSession = State(initialValue: requiresAuthentication)
+  }
   private var status: AutomaticPhotoSyncStatus { services.automaticPhotoSync }
+  private var catalogFailure: String? { savedRefresh?.failureDetails(services) }
+  private var sessionRejected: Bool { rejectedSession || savedRefresh?.requiresAuthentication(services) == true }
+  private var manualRecovery: Bool {
+    !status.enabled && (services.consumerSyncSummary.action == .retry || services.consumerSyncSummary.action == .continue)
+  }
+  private var accountNeedsOpening: Bool {
+    PhotoSyncAccountPolicy.requiresAuthentication(hasAccountAccess: services.photoAccountAccess != nil,
+      isSignedIn: services.session.isSignedIn, accountId: services.session.accountId,
+      fixture: services.session.fixture, rejectedSession: sessionRejected)
+  }
   private var photosAccessBlocked: Bool {
     let permission = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     return permission == .denied || permission == .restricted
@@ -70,20 +96,33 @@ struct PhotoSyncView: View {
   var body: some View {
     NavigationStack {
       Group {
-        if openingAccount && (services.photoAccountAccess == nil || services.auth.startPassword != nil) {
-          VStack(alignment: .leading, spacing: 12) {
-            Text("Open Fotoro to turn on sync").font(.headline).padding(.horizontal).padding(.top)
-            AccountView(services: services, onSignedIn: openedAccount,
-              onAuthenticationTask: { authenticationTask = $0 })
-          }
+        if openingAccount {
+          AccountView(services: services, reauthenticate: sessionRejected, diagnosticDetail: catalogFailure,
+            onSignedIn: openedAccount, onAuthenticationTask: { authenticationTask = $0 })
         } else {
           List {
             Section {
               Text(status.enabled ? syncTitle : "Your photos, everywhere").font(.title2.weight(.semibold))
               Text(status.enabled ? syncDetail : "Turn on once. Fotoro saves the photos you allow and keeps new photos in sync.")
                 .foregroundStyle(.secondary)
-              if permissionTask != nil || authenticationTask != nil {
+              if savedRefresh?.isRefreshing == true {
+                ProgressView("Loading photos…")
+              } else if permissionTask != nil || authenticationTask != nil {
                 ProgressView("Opening sync…")
+              } else if accountNeedsOpening {
+                Button("Open Fotoro", systemImage: "person.crop.circle") {
+                  openingAccount = true
+                  services.error = nil
+                }.accessibilityIdentifier("sync.openAccount")
+              } else if catalogFailure != nil, let savedRefresh, !savedRefresh.requiresAuthentication(services) {
+                Button("Retry loading photos", systemImage: "arrow.clockwise") {
+                  Task { await savedRefresh.refresh(services) }
+                }.disabled(services.busy).accessibilityIdentifier("sync.retryCatalog")
+              } else if manualRecovery {
+                Button(services.consumerSyncSummary.action == .continue ? "Continue saving" : "Try saving again",
+                  systemImage: "arrow.clockwise") {
+                  services.run { try await services.continueSync() }
+                }.disabled(services.busy).accessibilityIdentifier("sync.continueSave")
               } else if photosAccessBlocked {
                 Text("Allow Photos access in Settings to turn on sync.").font(.footnote).foregroundStyle(.secondary)
                 Button("Open Photos settings", systemImage: "gearshape") {
@@ -102,6 +141,11 @@ struct PhotoSyncView: View {
                     }
                   }.disabled(services.busy)
                 }
+              }
+              if !status.enabled, !accountNeedsOpening, !photosAccessBlocked, catalogFailure != nil || manualRecovery {
+                Button("Turn on sync", systemImage: "icloud.and.arrow.up", action: turnOn)
+                  .disabled(services.busy || savedRefresh?.isRefreshing == true)
+                  .accessibilityIdentifier("sync.enable")
               }
             }
             if services.photoAccountAccess != nil {
@@ -138,6 +182,7 @@ struct PhotoSyncView: View {
                 syncExplanation
               }
             }.font(.footnote).foregroundStyle(.secondary)
+            if catalogFailure != nil { Section { catalogDetails } }
           }
         }
       }.navigationTitle("Sync").navigationBarTitleDisplayMode(.inline)
@@ -157,6 +202,12 @@ struct PhotoSyncView: View {
           Button("OK") { services.error = nil }
         } message: { Text(services.error ?? "") }
     }.preferredColorScheme(.dark)
+  }
+  @ViewBuilder private var catalogDetails: some View {
+    if let catalogFailure {
+      DisclosureGroup("Details") { Text(catalogFailure).textSelection(.enabled) }
+        .font(.footnote).foregroundStyle(.secondary)
+    }
   }
   private var syncTitle: String {
     switch status.phase {
@@ -182,17 +233,22 @@ struct PhotoSyncView: View {
   }
   private func turnOn() {
     consent = AutomaticPhotoSyncConsent()
-    openingAccount = services.photoAccountAccess == nil
+    openingAccount = accountNeedsOpening
     services.error = nil
     resumeConsent()
   }
   private func openedAccount() {
+    rejectedSession = false
+    guard !accountNeedsOpening else {
+      services.error = "Open your private Fotoro account before enabling automatic sync."
+      return
+    }
     openingAccount = false
     resumeConsent()
   }
   private func resumeConsent() {
     guard scenePhase == .active, permissionTask == nil, consent?.pending == true,
-      services.auth.startPassword == nil, services.photoAccountAccess != nil else { return }
+      !accountNeedsOpening, services.auth.startPassword == nil, services.photoAccountAccess != nil else { return }
     consent?.authorize(services.photoAccountAccess, origin: services.api.origin)
     permissionTask = Task {
       defer { permissionTask = nil }

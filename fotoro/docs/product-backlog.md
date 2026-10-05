@@ -17,13 +17,12 @@ opens the saved library on iPhone and web. Picks are suggestions;
 they never replace the full Photos library. Saved is the other-device library,
 not a second selection to manage.
 
-The core still-photo journey is implemented and has public-fixture acceptance
-evidence. Web/API are live at the merged PR 30 checkpoint. The compact photo
-home, opted-in sync, current-query progress and retry recovery are implemented.
-Build 28 is archived with its encryption, source inputs and production domains
-verified; distribution remains blocked by the empty Xcode developer-account
-list. Later consumer recovery changes must qualify their exact committed source
-before rollout. Build 25 remains the latest verified internal TestFlight build
+Sync, Search and Share are the core. Their current source has public-fixture
+acceptance evidence; personal-library acceptance and physical performance remain
+open. Web/API are live at merged PR 34, including private photo locations,
+Places and confirmed Google Timeline import. Build 32 is archived and audited.
+CLI distribution remains blocked by missing distribution signing identity and
+usable App Store Connect API access. Build 25 remains the latest verified internal TestFlight build
 (`VALID`, `IN_BETA_TESTING` in Fotoro Internal).
 
 Completed on-device text analysis follows opted-in sync through the encrypted
@@ -38,17 +37,17 @@ performance remain open.
 
 | Priority | Work | Complete when |
 | --- | --- | --- |
-| 1 | Deliver the current full app | Restore the existing Xcode developer account and publish the latest qualified archive to Fotoro Internal. Keep build 25 available until the replacement is installable, then install with fresh phone authorization. |
+| 1 | Deliver the current full app | Publish the latest qualified archive when distribution signing and App Store Connect access are usable. Keep build 25 available until the replacement is installable, then install with fresh phone authorization. |
 | 2 | Qualify the mom journey on real devices | Install, allow Photos, opt in once, interrupt and resume sync, open the same Saved library in Safari, find and share chosen photos, and restore identical originals. Account entry must preserve the chosen action; pause and source permissions must remain respected. |
-| 3 | Make Find and Picks smarter | Qualify installed scene readers before enabling signed scene publication; keep old Saved refresh usable. Evaluate one local visual representation against held-out queries and useful-shot examples. Add correctable People only with naming, merge/split and source-permission fences. Browsing must stay usable while indexing. |
-| 4 | Complete media backup | Save and restore the complete Live Photo pair and videos, including playback and an interrupted transfer. Larger-media recovery follows the same queue. |
+| 3 | Measure Search and highlights | Evaluate the implemented local visual search and quality/burst recommendations against held-out queries and useful-shot examples. Add correctable People only with naming, merge/split and source-permission fences. Browsing must stay usable while indexing. |
+| 4 | Qualify media backup and larger originals | Exercise implemented video and complete Live Photo playback, interrupted transfer and original restore on a physical phone. Originals above 50 MiB remain excluded and need bounded streaming recovery. |
 | 5 | Add safe cleanup | Recoverable trash, undo and cross-device convergence come before deletion or freeing phone storage. Verify a full original restore before offering storage removal. |
 
 Automatic preparation runs while the iPhone app is open and unlocked; iOS can
 finish ciphertext uploads already scheduled. Browser uploads remain explicit.
-The current 50 MiB still-photo limit and skipped video/Live Photo motion are
-visible limitations. Broader semantic search, People and cleanup are roadmap
-work, not current product claims. This file owns the queue; the inventory below
+The current 50 MiB limit applies to each logical original, including complete
+Live Photo pairs and videos. Local semantic search is implemented; retrieval
+quality, correctable People and cleanup remain open. This file owns the queue; the inventory below
 records the detailed scope.
 
 ## Core journey acceptance
@@ -124,10 +123,10 @@ People require the evaluations below before product claims change.
 
 | Capability | Complete scope before exposing it |
 | --- | --- |
-| Visual meaning search | Choose and measure one local image-representation approach. Bind results to current permitted sources, combine them with date/text evidence and evaluate retrieval on a fixed corpus. |
+| Visual meaning search | Measure the implemented pinned local models against a held-out corpus. Preserve current source, permission and model-identity boundaries. |
 | Correctable People | On-device grouping, explicit naming, merge/split corrections and permission/deletion fences; never infer a named identity from a text mention. |
 | Similar-photo review | Show a group, recommend a representative and let the user choose. Preserve every original until explicit deletion exists. |
-| Live Photos and video | Treat complete media resources as one saved item; implement preparation, preview/playback, interrupted transfer and complete original restore together. |
+| Live Photos and video | Qualify the implemented logical-media preparation, playback and complete restore on physical devices, including interrupted transfers. |
 | Trash and storage cleanup | Recoverable signed deletion, undo, multi-device convergence, quota/collection behavior and restore proof before offering phone-storage removal. |
 
 Share extension, saved URLs, nearby handoff, stories and optional cloud AI stay in
@@ -165,7 +164,7 @@ are separate checks. “Partial” identifies a concrete remaining capability.
 | 20 | Add photos back | Selected owned saved photos can contribute to a shared moment. |
 | 21 | Reuse people | Explicitly accepted contact keys and encrypted optional local names are implemented. Contact synchronization across devices remains open. |
 | 22 | Honest sharing states | Foreground/focus/reconnect reads withdraw received content when verified access ends; known expiry also withdraws locally. Network failures retain access, and independent copies/durable Save requests remain. Consumer opened/saved receipt counters remain open. |
-| 23 | Visual search | Partial: conservative local Vision categories with separate inferred evidence; native/web can read a validated signed scene sidecar. Scene publication is disabled for installed-reader compatibility. Physical classification and unrestricted embeddings remain open. |
+| 23 | Visual search | Native Core ML and browser ONNX TinyCLIP search run locally on bounded previews with pinned, separate model identities. Real-model smoke checks pass; held-out retrieval accuracy and physical latency remain open. Scene publication remains disabled for installed-reader compatibility. |
 | 24 | Natural language with evidence | Native/web relative/calendar/ISO date phrases and prefix/suffix compound queries use existing evidence and verified capture dates. Arbitrary person/place understanding remains open. |
 | 25 | Correctable people groups | Not implemented. Requires on-device grouping, explicit naming/corrections and deletion/permission fences. |
 | 26 | Better automatic picks | Bounded local clarity/exposure/favorite/burst policies and Find-scoped Best shots are implemented and tested. Physical ranking acceptance remains open. |
@@ -173,13 +172,13 @@ are separate checks. “Partial” identifies a concrete remaining capability.
 | 28 | Editable memories/stories | Not implemented. Must preserve original photos and user-authored captions. |
 | 29 | Document OCR | Rotated English OCR is implemented/tested. Multilanguage support remains open. |
 | 30 | Incremental intelligence | Source/revision cache, serial bounded previews and lifecycle cancellation are implemented. Physical energy/memory acceptance remains open. |
-| 31 | Encrypted intelligence across devices | Supplied labels, favorites and completed OCR synchronize in signed encrypted annotations. Inferred categories/group identities remain open. |
+| 31 | Encrypted intelligence across devices | Labels, favorites, completed OCR and private photo locations synchronize in signed encrypted annotations. Raw Timeline history and model vectors are not uploaded. Inferred categories/group identities remain open. |
 | 32 | Optional cloud AI | Not implemented. Requires explicit opt-in, bounded spending and encrypted persisted results. |
 | 33 | iPhone Share extension | Not implemented. Requires an isolated intake target and protected app-group handoff. |
 | 34 | Saved webpages/URLs | Not implemented. |
 | 35 | Browser HEIC import | Safari intake for verified HEVC stills/simple grids is implemented with bounded decoding and byte-preserved encrypted originals. Primary-associated EXIF capture-date extraction is bounded and tested through grouping/search/Save; absent or invalid metadata retains the fallback. Unsupported browsers/layouts show a clear alternative. Personal Safari acceptance remains open. |
-| 36 | Complete Live Photo restore | Not implemented. Local still preview works; motion-pair backup is skipped visibly. |
-| 37 | Video save/playback/restore | Not implemented. Video backup is skipped visibly. |
+| 36 | Complete Live Photo restore | Implemented for complete still/MOV pairs within the 50 MiB logical-original limit, with byte-preserving encrypted save, playback and Save to Photos. Physical acceptance remains open. |
+| 37 | Video save/playback/restore | Implemented for supported MP4/MOV originals within 50 MiB, with encrypted save, verified playback and original restore. Physical acceptance remains open. |
 | 38 | Larger media recovery | Current originals are bounded to 50 MiB and queued durably. Larger-file multipart/streaming recovery remains open. |
 | 39 | Nearby handoff | Not implemented. Public links provide the current remote handoff. |
 | 40 | Exact duplicate review | Not implemented. SHA-256 verifies originals; it does not automatically delete or merge photos. |

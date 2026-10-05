@@ -378,6 +378,51 @@ import XCTest
       ["Moment highlight", "Representative of 2 similar photos"])
   }
 
+  func testFindReviewSelectionRequiresCompletedCurrentRecommendedSources() async {
+    let gate = PickPreviewGate()
+    let review = FindBestShotsReview()
+    defer { review.showAll(); gate.open() }
+    let firstPreview = expectation(description: "First recommendation preview is suspended")
+    let completed = expectation(description: "Both recommendation previews finish")
+    var sources = [candidate("device:a"), candidate("saved:b")]
+    for index in sources.indices { sources[index].capturedAt = Date(timeIntervalSince1970: 1_780_315_200) }
+    var currentRevisions = Dictionary(uniqueKeysWithValues: sources.map { ($0.id, $0.sourceRevision) })
+    var accountCurrent = true
+    var currentSourceChecks: [[String]] = []
+    review.start(sources, matchCount: 2, preview: { source in
+      if source.id == "device:a" {
+        firstPreview.fulfill()
+        await gate.wait()
+      }
+      var signal = self.signal
+      signal.hash = source.id == "device:a" ? 0 : UInt64.max
+      return signal
+    }, isCurrent: { candidates in
+      currentSourceChecks.append(candidates.map(\.id))
+      return candidates.allSatisfy { currentRevisions[$0.id] == $0.sourceRevision }
+    }, valid: { accountCurrent })
+    await fulfillment(of: [firstPreview], timeout: 1)
+    guard gate.entered else { XCTFail("The first preview did not reach its gate"); return }
+    XCTAssertTrue(review.selectionCandidates().isEmpty, "Reviewing must never select unfinished suggestions")
+    gate.open()
+    Task { await review.completedReview(); completed.fulfill() }
+    await fulfillment(of: [completed], timeout: 1)
+    currentSourceChecks = []
+    XCTAssertEqual(review.snapshot?.recommendations.groupCount, 2, "Distinct perceptual fixtures must remain two recommendations")
+    XCTAssertEqual(review.selectionCandidates().map(\.id), sources.map(\.id))
+    XCTAssertEqual(currentSourceChecks, [["device:a", "saved:b"]], "Current suggestions should require one source fetch")
+    currentRevisions["device:a"] = "2"
+    XCTAssertEqual(review.selectionCandidates().map(\.id), ["saved:b"], "An edited source cannot be added from an old review")
+    currentRevisions.removeValue(forKey: "saved:b")
+    XCTAssertTrue(review.selectionCandidates().isEmpty, "Withdrawn sources cannot be selected")
+    currentRevisions = Dictionary(uniqueKeysWithValues: sources.map { ($0.id, $0.sourceRevision) })
+    accountCurrent = false
+    XCTAssertTrue(review.selectionCandidates().isEmpty, "Changing the review or account invalidates the shortlist")
+    accountCurrent = true
+    review.showAll()
+    XCTAssertTrue(review.selectionCandidates().isEmpty)
+  }
+
   func testFindReviewBoundsWorkAndUnavailableSavedPreviewsDoNotBecomeSuggestions() async {
     var reads: [String] = []
     let review = FindBestShotsReview()

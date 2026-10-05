@@ -89,6 +89,54 @@ test("worker startup is lazy; completed vectors survive same-digest metadata ref
   assert.equal(updates.at(-1)?.get("one"), 1); engine.clear();
   assert.equal(workers[0].terminated, true); assert.ok(raster.cleared > 0);
 });
+test("a warm visual search ranks cached photos without scheduling one event-loop turn per photo", async t => {
+  const worker = new FakeWorker(), raster = resources(), engine = new SemanticFindSession(() => worker as unknown as Worker, raster);
+  const photos = Array.from({length: 4096}, (_, index) => photo("warm-" + index));
+  try {
+    await engine.search(photos, "city", () => true, () => {});
+    let turns = 0, latest: ReadonlyMap<string, number> | undefined;
+    const schedule = globalThis.setTimeout;
+    t.mock.method(globalThis, "setTimeout", (callback: (...args: any[]) => void, delay?: number, ...args: any[]) => {
+      if (delay === 0) turns++;
+      return schedule(callback, delay, ...args);
+    });
+    const started = performance.now();
+    await engine.search(photos, "fireworks", () => true, scores => {latest = scores;});
+    t.diagnostic(`4096 cached vectors: ${turns} scheduled turns, ${(performance.now() - started).toFixed(1)} ms`);
+    assert.equal(latest?.size, 4096); assert.equal(latest?.get("warm-4095"), 1);
+    assert.equal(raster.loads, 4096); assert.equal(worker.messages.filter(value => value.kind === "image").length, 4096);
+    assert.equal(worker.messages.filter(value => value.kind === "text").length, 2);
+    assert.ok(turns <= 128, `Cached ranking scheduled ${turns} turns for 4096 photos`);
+  } finally {engine.clear();}
+});
+test("cached ranking yields to a replacement query and excludes a source withdrawn between batches", async () => {
+  const axis = (index: number) => {const value = new Float32Array(512); value[index] = 1; return value;};
+  const worker = new FakeWorker((message, own) => {
+    if (message.kind !== "cancel") queueMicrotask(() => own.reply(message.id, axis(message.kind === "text" && message.text !== "new city" ? 0 : 1)));
+  });
+  const raster = resources(), engine = new SemanticFindSession(() => worker as unknown as Worker, raster);
+  let permitted = true, replacementStarted = false, scheduled = false, late = 0;
+  const photos = Array.from({length: 96}, (_, index) => ({...photo("cached-" + index), current: () => index !== 95 || permitted}));
+  const replaced = deferred<void>(), oldSizes: number[] = [], latest: ReadonlyMap<string, number>[] = [];
+  try {
+    await engine.search(photos, "seed city", () => true, () => {});
+    await engine.search(photos, "old city", () => true, scores => {
+      if (replacementStarted) late++;
+      oldSizes.push(scores.size);
+      if (scheduled) return;
+      scheduled = true;
+      setTimeout(() => {
+        replacementStarted = true; permitted = false;
+        void engine.search(photos, "new city", () => true, scores => latest.push(scores)).finally(() => replaced.resolve());
+      }, 0);
+    });
+    await replaced.promise;
+    assert.ok(oldSizes.length > 0); assert.ok(Math.max(...oldSizes) <= 64, "Old scoring monopolized the event loop");
+    assert.equal(late, 0); assert.equal(latest.at(-1)?.size, 95);
+    assert.equal(latest.at(-1)?.get("cached-0"), 1); assert.equal(latest.at(-1)?.has("cached-95"), false);
+    assert.equal(raster.loads, 96); assert.equal(worker.messages.filter(value => value.kind === "image").length, 96);
+  } finally {engine.clear();}
+});
 test("a changed or withdrawn original cannot keep its vector or publish a late image match", async () => {
   const raster = resources(), started = deferred<void>(); let allowed = true, reply!: () => void;
   const worker = new FakeWorker((message, own) => {

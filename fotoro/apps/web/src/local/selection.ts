@@ -1,9 +1,30 @@
 import {savedSearchPhotos, type OwnedPhotoSnapshot} from "../library/consumer-search";
 import type {LocalPhoto} from "./resources";
 
+export function availablePhotoSelection(selection: Set<string>, photos: readonly LocalPhoto[]) {
+  const available = new Set(photos.filter(photo => selection.has(photo.id) && photo.current?.() !== false).map(photo => photo.id));
+  return available.size === selection.size ? selection : available;
+}
+
 export function selectedOwnedPhotos(snapshot: OwnedPhotoSnapshot | null, token: object | null, ids: ReadonlySet<string>) {
   if (!snapshot?.current() || snapshot.token !== token) return [];
   return snapshot.photos.filter(photo => !photo.grantId && photo.manifest.ownerAccountId === snapshot.accountId && ids.has(photo.manifest.photoId));
+}
+
+export function reconcileSavedSelection(snapshot: OwnedPhotoSnapshot | null, token: object | null, ids: ReadonlySet<string>, local: readonly LocalPhoto[]) {
+  const chosen = selectedOwnedPhotos(snapshot, token, ids);
+  const savedIDs = new Set(chosen.map(photo => photo.manifest.photoId)), localIDs = new Set<string>();
+  if (!snapshot || !chosen.length) return {savedIDs, localIDs};
+  const available = local.filter(photo => photo.file instanceof File && photo.digest && photo.current?.() !== false);
+  const originals = new Map(available.map(photo => [photo.id, photo]));
+  // Use the search adapter's digest identity when a saved hit becomes a local hit.
+  savedSearchPhotos({...snapshot, photos: chosen}, available).forEach((photo, index) => {
+    const original = originals.get(photo.id);
+    if (photo.id.startsWith("saved:") || !original || original.current?.() === false || photo.current?.() === false) return;
+    savedIDs.delete(chosen[index].manifest.photoId); localIDs.add(original.id);
+  });
+  if (!snapshot.current() || snapshot.token !== token) {savedIDs.clear(); localIDs.clear();}
+  return {savedIDs, localIDs};
 }
 
 export function ownedPhotoForLocal(snapshot: OwnedPhotoSnapshot | null, local: LocalPhoto) {

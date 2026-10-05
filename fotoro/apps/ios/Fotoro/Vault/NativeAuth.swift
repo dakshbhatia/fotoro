@@ -308,7 +308,7 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
     else { throw FotoroError("This iPhone hasn't saved a Fotoro password yet.") }
     return try RecoveryCode.format(accountId: account, secret: code.secret)
   }
-  func openRememberedAccount() async throws -> UUID {
+  func openRememberedAccount(forceReauthentication: Bool = false) async throws -> UUID {
     try Task.checkCancellation()
     guard !session.fixture, let account = session.accountId else {
       throw FotoroError("Enter your Fotoro password to sign in.")
@@ -318,7 +318,7 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
     isOpeningRememberedAccount = true
     defer { isOpeningRememberedAccount = false }
     do {
-      if session.isSignedIn {
+      if session.isSignedIn && !forceReauthentication {
         if !vault.isUnlocked {
           if vault.canUnlockLocally { try await vault.unlock(.localKeychain) }
           else { try await recover(rememberedPassword(for: account)) }
