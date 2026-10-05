@@ -4,6 +4,7 @@ import { type LocalPhoto, LocalResources } from "./resources";
 import type { LocalOcrPhoto } from "./useLocalOcr";
 import {canShareOriginal, downloadOriginal, OriginalShareAttempt} from "../library/system-share";
 import {useDialogFocus} from "../library/dialog-focus";
+import {PhotoLocation} from "./PhotoLocation";
 export function LocalViewer({photos, initial, resources, onClose, onLabels, onFavorite, onUse, onConfirm, onPin, meaning, onReselect, onSave, isSaved}: {
   photos: LocalPhoto[]; initial: string; resources: LocalResources; onClose: () => void;
   onLabels?: (id: string, labels: string[]) => void;
@@ -83,6 +84,7 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
     {details && <aside className="details local-details">
       <p>{photo.filename}</p><p>{photo.width} × {photo.height}{(photo.originalSize ?? photo.file?.size) ? ` · ${((photo.originalSize ?? photo.file!.size) / 1024 / 1024).toFixed(1)} MB` : ""}</p>
       <p>{new Date(photo.date).toLocaleString()}</p><p>{photo.dateSource === "photos" ? "Date from Photos" : photo.dateSource === "exif" ? "Date from the photo" : "Capture date unavailable · date selected"}</p>
+      <PhotoLocation location={photo.location} />
       <p>{photo.file ? "Original file unchanged" : "Retained preview · original not selected"}</p>
       {onFavorite && <button aria-pressed={!!photo.favorite} onClick={() => {
         if (alive.current && currentPhoto.current === photo) onFavorite(photo.id, !photo.favorite);

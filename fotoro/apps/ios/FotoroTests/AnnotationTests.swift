@@ -5,6 +5,93 @@ import XCTest
 @testable import Fotoro
 
 final class AnnotationTests: XCTestCase {
+  @MainActor func testHydratedMaximumFactAnnotationSurvivesDeviceLabelEditWithoutRecapturingLocationSearchTerms() async throws {
+    let (_, photo, bundle, card) = try context()
+    let secret = try fixture(FixtureAccounts.self, "accounts").testSecrets[0]
+    let service = try AppServices(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
+    service.session.accountId = card.accountId
+    service.session.fixture = true
+    try service.session.pin(card)
+    try await service.vault.unlock(.recoveryEnvelope(secret: Data(b64: secret.recoverySecret), wrapper: secret.encryptedBundle))
+    try service.activateAccount()
+    defer { service.vault.lock() }
+    try service.store.put(photo)
+    let source = BackupSource(id: "asset", photoId: photo.id, phase: .committed,
+      sourceRevision: "current", originalSha256: photo.metadata.originalSha256)
+    try service.store.putBackupSource(source)
+    let suppliedFacts = (0..<62).map { "  Exact user fact \($0)  " }
+    var original = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256,
+      labels: ["Original label"], facts: suppliedFacts)
+    let location = PhotoLocationV1(latitude: 40.7128, longitude: -74.006, source: "photos", name: "User place")
+    try original.setLocation(location)
+    XCTAssertEqual(original.facts?.count, 64)
+    try service.annotations.ledger.receive(AnnotationCrypto.seal(original, revision: 1, photo: photo,
+      accountId: card.accountId, bundle: bundle), photo: photo, bundle: bundle, card: card)
+    let index = try SearchIndex()
+    try index.replacePermitted([SearchRecord(id: "asset", revision: "current")])
+    let local = LocalSearchStore(index: index)
+    service.bindLocalSearch(local)
+    try local.applyAnnotations(original, source: source, accountId: card.accountId)
+    XCTAssertEqual(try local.record("asset")?.facts.count, 65, "Search terms are local derived metadata")
+    XCTAssertTrue(local.setLabels(["  New user label  "], photoID: "asset"), local.error ?? "")
+    XCTAssertNil(local.error)
+    let edited = try XCTUnwrap(service.annotations.ledger.current(photo: photo, bundle: bundle, card: card))
+    XCTAssertEqual(edited.labels, ["  New user label  "])
+    XCTAssertEqual(edited.facts, original.facts)
+    XCTAssertEqual(PhotoLocationFacts.userFacts(edited.facts), suppliedFacts)
+    XCTAssertEqual(edited.location, location)
+    XCTAssertNoThrow(try AnnotationCrypto.validate(edited, photo: photo, accountId: card.accountId))
+  }
+  func testLocationFactsRemainReadableByReleasedAnnotationsAndEncryptedAtRest() throws {
+    let (store, photo, bundle, card) = try context()
+    let location = PhotoLocationV1(latitude: 40.7128, longitude: -74.006, source: "photos", name: "Grandma’s home")
+    var value = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256, labels: ["Exact label"], facts: ["User fact"])
+    try value.setLocation(location)
+    let encoded = try Wire.encode(value)
+    let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+    // Frozen released allowlist, including its 64 facts / 240 codepoint bounds.
+    XCTAssertTrue(Set(fields.keys).isSubset(of: ["version", "photoId", "originalSha256", "labels", "caption", "keywords", "facts", "favorite", "ocr"]))
+    let facts = try XCTUnwrap(fields["facts"] as? [String])
+    XCTAssertLessThanOrEqual(facts.count, 64)
+    XCTAssertTrue(facts.allSatisfy { !$0.isEmpty && $0.unicodeScalars.count <= 240 })
+    XCTAssertNil(fields["location"])
+    let ledger = AnnotationLedger(store: store, accountId: card.accountId)
+    try ledger.edit(value, photo: photo, bundle: bundle, card: card)
+    let persisted = try store.database.read { try Data.fetchOne($0, sql: "SELECT value FROM annotations WHERE id=?", arguments: [photo.id]) }
+    XCTAssertFalse(String(decoding: try XCTUnwrap(persisted), as: UTF8.self).contains("Grandma"))
+    let signed = try XCTUnwrap(ledger.prepare(photo: photo, bundle: bundle))
+    let restored = AnnotationLedger(store: try LibraryStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())), accountId: card.accountId)
+    try restored.receive(signed, photo: photo, bundle: bundle, card: card)
+    XCTAssertEqual(try restored.current(photo: photo, bundle: bundle, card: card)?.location, location)
+    XCTAssertEqual(try restored.current(photo: photo, bundle: bundle, card: card)?.labels, ["Exact label"])
+  }
+  func testPlacesDedupeOnlyVerifiedCurrentPermittedCopiesAndOwnedSavedPhotos() throws {
+    let (_, photo, _, card) = try context()
+    let location = PhotoLocationV1(latitude: 40, longitude: -74, source: "photos")
+    let device = PhotoPlaceItem(reference: .device("asset"), revision: "current", location: location)
+    var source = BackupSource(id: "asset", photoId: photo.id, phase: .committed,
+      sourceRevision: "current", originalSha256: photo.metadata.originalSha256)
+    let saved = PhotoPlacesPolicy.SavedItem(photo: photo, location: location)
+    XCTAssertEqual(PhotoPlacesPolicy.items(device: [device], saved: [saved], sources: [source], account: card.accountId).map(\.id), [device.id])
+    XCTAssertEqual(PhotoPlacesPolicy.items(device: [], saved: [saved], sources: [source], account: card.accountId).map(\.id), ["saved:" + photo.id])
+    source.sourceRevision = "stale"
+    XCTAssertEqual(PhotoPlacesPolicy.items(device: [device], saved: [saved], sources: [source], account: card.accountId).count, 2)
+    XCTAssertTrue(PhotoPlacesPolicy.items(device: [], saved: [saved], sources: [], account: "another account").isEmpty)
+    XCTAssertTrue(PhotoPlacesPolicy.items(device: [], saved: [saved], sources: [], account: nil).isEmpty)
+  }
+  func testLocationNamesAndGPSAreSearchableWhileMachineFactsStayHiddenAndLockRestoresLocalFields() throws {
+    let index = try SearchIndex()
+    try index.replacePermitted([SearchRecord(id: "asset", facts: ["device fact"])])
+    var value = PhotoAnnotationsV1(photoId: Wire.id(), originalSha256: Data("photo".utf8).digest, facts: ["saved fact"])
+    try value.setLocation(PhotoLocationV1(latitude: 40.7128, longitude: -74.006, source: "google-timeline", name: "Grandma’s home"))
+    XCTAssertTrue(try index.applyAnnotations(value, photoID: "asset", revision: "1", accountId: "owner"))
+    XCTAssertNotNil(try index.search("Grandma").leading)
+    XCTAssertNotNil(try index.search("gps").leading)
+    XCTAssertNil(try index.search("fotoro.location.v1").leading)
+    try index.clearSyncedAnnotations()
+    XCTAssertEqual(try index.record("asset")?.facts, ["device fact"])
+    XCTAssertNil(try index.search("Grandma").leading)
+  }
   private func context() throws -> (LibraryStore, LocalPhoto, AccountBundle, AccountCardV1) {
     let store = try LibraryStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
     let accounts = try fixture(FixtureAccounts.self, "accounts")

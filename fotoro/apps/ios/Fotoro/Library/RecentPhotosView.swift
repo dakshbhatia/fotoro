@@ -268,6 +268,8 @@ struct RecentPhotosView: View {
   @State private var sharedPhotoIDs: [String] = []
   @State private var shareSources: [RecentPhotoSource] = []
   @State private var settings = false
+  @State private var places: PhotoPlacesPresentation?
+  @State private var pendingPlace: PhotoPlaceItem?
   @Environment(\.scenePhase) private var scenePhase
 
   private var allPhotos: Bool { scope == .photos }
@@ -376,7 +378,7 @@ struct RecentPhotosView: View {
       return PhotoTimelineSavedItem(photo: photo, facts: RecentPhotoFacts(
         capturedAt: Wire.parseDate(photo.metadata.sourceDate), favorite: annotation?.favorite == true,
         screenshot: annotation?.facts?.contains("screenshot") == true,
-        livePhoto: photo.metadata.mediaType == CameraMedia.liveType, location: nil))
+        livePhoto: photo.metadata.mediaType == CameraMedia.liveType, location: annotation?.location?.displayName))
     }
     return PhotoTimelinePolicy.groups(device: device, saved: saved,
       sources: (try? services?.store.backupSources()) ?? [],
@@ -554,6 +556,13 @@ struct RecentPhotosView: View {
           else if pendingPhotoSync { pendingPhotoSync = false; openPhotoSync() }
 #endif
         }) { settingsView }
+        .sheet(item: $places, onDismiss: openPendingPlace) { _ in
+          #if FOTORO_LOCAL_PREVIEW
+          PhotoPlacesView(store: store, open: { pendingPlace = $0 })
+          #else
+          PhotoPlacesView(store: store, services: services, open: { pendingPlace = $0 })
+          #endif
+        }
         .onChange(of: query) { cancelBestShots(); search.updateQuery(query) }
         .onChange(of: search.response.generation) { cancelBestShots() }
         .onChange(of: search.acceptedMeaningID) { cancelBestShots() }
@@ -1125,6 +1134,8 @@ struct RecentPhotosView: View {
       Picker("Photo library", selection: $scope) {
         ForEach(PhotoHomeScope.allCases) { Text($0.rawValue).tag($0) }
       }
+      Button("Places", systemImage: "map") { queryFocused = false; places = PhotoPlacesPresentation() }
+        .accessibilityIdentifier("home.places")
       if query.isEmpty, RecentPhotosPolicy.canRead(store.status) {
         #if !FOTORO_LOCAL_PREVIEW
           if scope != .saved { deviceBrowseOptions }
@@ -1435,6 +1446,22 @@ struct RecentPhotosView: View {
 #endif
   private func openViewer(_ photo: RecentPhoto) {
     viewer = RecentPhotoViewerPresentation(initial: photo, photos: visible)
+  }
+  private func openPendingPlace() {
+    guard let item = pendingPlace else { return }
+    pendingPlace = nil
+    switch item.reference {
+    case .device(let id):
+      guard let photo = store.photos.first(where: { $0.id == id }), photo.sourceRevision == item.revision,
+        store.validatePresentation(viewer: [RecentPhotoSource(photo)], selection: [], share: []).viewerIsCurrent else { return }
+      viewer = RecentPhotoViewerPresentation(initial: photo, photos: store.photos.filter { $0.photoLocation != nil })
+    case .saved(let id):
+      #if !FOTORO_LOCAL_PREVIEW
+      guard let services, services.photoAccountAccess?.account == item.owner,
+        let photo = try? services.consumerSavedPhoto(id), PhotoPlacesPolicy.savedRevision(photo) == item.revision else { return }
+      savedViewer = SavedPhotoViewerPresentation(initial: photo, photos: allOwnedPhotos.filter { services.annotation($0).location != nil })
+      #endif
+    }
   }
   private func toggleSelection(_ photo: RecentPhoto) {
     selecting = true

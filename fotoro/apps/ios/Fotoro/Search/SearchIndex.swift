@@ -205,7 +205,7 @@ final class SearchIndex: @unchecked Sendable {
       record.labels = value.labels ?? []
       record.captions = value.caption.map { [$0] } ?? []
       record.keywords = value.keywords ?? []
-      record.facts = value.facts ?? []
+      record.facts = PhotoLocationFacts.userFacts(value.facts) + (value.location?.searchTerms ?? [])
       record.favorite = value.favorite ?? record.favorite
       if let ocr = value.ocr, ocr.processor == record.processor {
         record.ocrText = ocr.text

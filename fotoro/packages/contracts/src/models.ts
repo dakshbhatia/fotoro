@@ -1,5 +1,6 @@
 export type UUID = string;
 export type Base64Url = string;
+export type {PhotoLocationV1} from "./location.js";
 export interface AccountCardV1 {
   version: 1;
   accountId: UUID;

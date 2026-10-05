@@ -244,10 +244,14 @@ import XCTest
         return available ? self.signal : nil
       })
       let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in [photo] }, picks: analyzer)
+      defer { store.pauseAnalysis() }
       let now = try XCTUnwrap(photo.capturedAt)
       store.restoreAccess(now: now)
-      for _ in 0..<100 where store.picksSnapshot == nil { await Task.yield() }
-      XCTAssertEqual(store.picksSnapshot?.recommendations.unassessed, 1)
+      // These injected reads use the asset's capture date as their clock. Real
+      // Photos callbacks use today's date and do not belong to this fixture.
+      PHPhotoLibrary.shared().unregisterChangeObserver(store)
+      let missing = try await store.completedPicks()
+      XCTAssertEqual(missing.recommendations.unassessed, 1)
       XCTAssertTrue(store.pickedPhotos.isEmpty)
       available = true
       if !explicitSync { store.restoreAccess(now: now) }
@@ -256,8 +260,55 @@ import XCTest
       XCTAssertEqual(retried.recommendations.unassessed, 0)
       XCTAssertEqual(reads, 2)
       XCTAssertEqual(store.photos.map(\.id), [photo.id])
-      store.pauseAnalysis()
     }
+  }
+  func testCompletedPicksWaitsForTheSuccessorAfterARefreshReplacesItsTask() async throws {
+    let permission = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+    guard RecentPhotosPolicy.canRead(permission) else {
+      throw XCTSkip("Permit the public Simulator Photos library to verify pick refresh ordering.")
+    }
+    var asset: PHAsset?
+    PHAsset.fetchAssets(with: .image, options: nil).enumerateObjects { candidate, _, stop in
+      if !candidate.isHidden, !candidate.mediaSubtypes.contains(.photoScreenshot) {
+        asset = candidate
+        stop.pointee = true
+      }
+    }
+    let photo = RecentPhoto(asset: try XCTUnwrap(asset))
+    let now = try XCTUnwrap(photo.capturedAt)
+    let initialGate = PickPreviewGate(), successorGate = PickPreviewGate()
+    let initialStarted = expectation(description: "Initial preview is suspended")
+    let successorStarted = expectation(description: "Successor preview is suspended")
+    let waiterStarted = expectation(description: "Caller is waiting for the initial analysis")
+    let returnedWhileBlocked = expectation(description: "Caller cannot finish before the successor preview")
+    returnedWhileBlocked.isInverted = true
+    var reads = 0, successorReleased = false
+    let analyzer = PhotoPickAnalyzer(preview: { _ in
+      reads += 1
+      if reads == 1 { initialStarted.fulfill(); await initialGate.wait() }
+      else { successorStarted.fulfill(); await successorGate.wait() }
+      return self.signal
+    })
+    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in [photo] }, picks: analyzer)
+    defer { store.pauseAnalysis(); initialGate.open(); successorGate.open() }
+    store.restoreAccess(now: now)
+    PHPhotoLibrary.shared().unregisterChangeObserver(store)
+    let waiting = Task {
+      waiterStarted.fulfill()
+      defer { if !successorReleased { returnedWhileBlocked.fulfill() } }
+      return try await store.completedPicks()
+    }
+    await fulfillment(of: [initialStarted, waiterStarted], timeout: 1)
+    store.refresh(now: now)
+    initialGate.open()
+    await fulfillment(of: [successorStarted], timeout: 1)
+    await fulfillment(of: [returnedWhileBlocked], timeout: 0.05)
+    successorReleased = true
+    successorGate.open()
+    let result = try await waiting.value
+    XCTAssertEqual(reads, 2)
+    XCTAssertEqual(result.recommendations.ids, [photo.id])
+    XCTAssertEqual(result.recommendations.unassessed, 0)
   }
   func testPermissionOrRevisionWithdrawalCannotPublishCompletedPicks() async throws {
     var permitted = true

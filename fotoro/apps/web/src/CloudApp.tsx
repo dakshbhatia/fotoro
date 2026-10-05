@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { GrantV1 } from "@fotoro/contracts";
+import type { GrantV1, PhotoLocationV1 } from "@fotoro/contracts";
+import {annotationLocation} from "@fotoro/contracts/location";
 import { ready } from "@fotoro/crypto";
 import { Library } from "./library/Library";
 import { Viewer } from "./library/Viewer";
@@ -44,7 +45,7 @@ import {
 } from "./exchange/sync";
 import { syncSelectedSequential } from "./exchange/selected";
 import { clearAccount } from "./exchange/cache";
-import { localOriginalDigest, queueAnnotations, queueLocalAnnotations, pendingAnnotations, resolveAnnotationConflict, type PendingAnnotation } from "./exchange/annotations";
+import { localOriginalDigest, queueAnnotations, queuePhotoLocation, queueLocalAnnotations, pendingAnnotations, resolveAnnotationConflict, type PendingAnnotation } from "./exchange/annotations";
 import {useSemanticFind} from "./local/useSemanticFind";
 import { PhotoSearchIndex, normalizeSearch } from "./local/search";
 import type { LocalPhoto } from "./local/resources";
@@ -65,6 +66,10 @@ import {saveQueuedAnnotations} from "./library/consumer-annotation-save";
 import type {ConsumerPhotoChanges} from "./library/consumer-changes";
 import {canShareOriginals, downloadOriginal, OriginalShareAttempt, prepareSavedOriginals, savedOriginalSelectionCurrent} from "./library/system-share";
 import {cameraOriginalFiles} from "./media/camera-original";
+import {Places} from "./local/PhotoPlaces";
+import {currentTimelineCandidates} from "./local/places";
+import type {TimelineCandidate} from "./local/google-timeline";
+import {ConsumerPreviewResources} from "./library/consumer-search";
 interface SelectedOriginalContext {snapshot: ShareSelection; session: UnlockedVault; controller: AbortController;}
 const noLocalPhotos: LocalPhoto[] = [];
 const SearchIcon = () => (
@@ -149,6 +154,9 @@ export default function CloudApp({
     [selecting, setSelecting] = useState(false),
     [online, setOnline] = useState(() => navigator.onLine !== false);
   const [saveReady, setSaveReady] = useState<UnlockedVault | null>(null);
+  const [placesOpen, setPlacesOpen] = useState(false), [placeResources] = useState(() => new ConsumerPreviewResources());
+  useEffect(() => {if (!active || !account) setPlacesOpen(false);}, [active, account]);
+  useEffect(() => () => placeResources.clear(), [placeResources]);
   const running = useRef(false),
     authIntent = useRef(0),
     pausedRef = useRef(true),
@@ -553,7 +561,10 @@ export default function CloudApp({
     try {session = requireVault();} catch {return null;}
     if (session.accountId !== account) return null;
     const current = () => sameVault(session) && currentCatalog.current === photos;
-    return {accountId: account, token: session, photos, current, edit: publicDemo ? undefined : async (photo, changes) => {
+    return {accountId: account, token: session, photos, current, locate: publicDemo ? undefined : async updates => {
+      if (!current()) throw new Error("VAULT_LOCKED");
+      return editPhotoLocations(updates, session);
+    }, edit: publicDemo ? undefined : async (photo, changes) => {
       if (!current() || !photos.includes(photo) || photo.manifest.ownerAccountId !== account || photo.grantId) throw new Error("VAULT_LOCKED");
       await editAnnotations(photo, changes, session);
     }, preview: async photo => {
@@ -564,6 +575,7 @@ export default function CloudApp({
       finally {bytes.fill(0);}
     }};
   }, [account, photos, publicDemo]);
+  useEffect(() => {placeResources.clear();}, [ownedSnapshot?.token, ownedSnapshot?.photos, placeResources]);
   useEffect(() => {onOwnedPhotos?.(ownedSnapshot);}, [ownedSnapshot, onOwnedPhotos]);
   const photoChanges = useMemo<ConsumerPhotoChanges | null>(() => {
     if (!account || publicDemo) return null;
@@ -608,17 +620,48 @@ export default function CloudApp({
     }) : previous);
     setAnnotationPending(previous => sameVault(session) && current() ? edits : previous);
   };
-  const editAnnotations = async (photo: Photo, changes: {labels?: string[]; favorite?: boolean}, session = requireVault()) => {
+  const editAnnotations = async (photo: Photo, changes: {labels?: string[]; favorite?: boolean; location?: PhotoLocationV1}, session = requireVault()) => {
     if (!sameVault(session) || !currentCatalog.current.includes(photo) || photo.grantId || photo.manifest.ownerAccountId !== session.accountId) throw new Error("VAULT_LOCKED");
     try {
       setAnnotationError(null);
-      await queueAnnotations({ownerAccountId: photo.manifest.ownerAccountId, photoId: photo.manifest.photoId, originalSha256: photo.metadata.originalSha256}, changes, session);
+      const {location, ...patch} = changes;
+      const identity = {ownerAccountId: photo.manifest.ownerAccountId, photoId: photo.manifest.photoId, originalSha256: photo.metadata.originalSha256};
+      if (location && !await queuePhotoLocation(identity, location, session)) throw new Error("Photo location changed");
+      if (Object.keys(patch).length) await queueAnnotations(identity, patch, session);
       await publishLocalAnnotations([photo], session);
     } catch (error) {if (sameVault(session)) {
       const message = "Changes could not be kept on this device. Try again.";
       setAnnotationError({message, photoId: photo.manifest.photoId, originalSha256: photo.metadata.originalSha256});
       setStatus(message); setNeedsAttention(true);
     } throw error;}
+  };
+  const editPhotoLocations = async (updates: readonly {photo: Photo; location: PhotoLocationV1}[], session = requireVault()) => {
+    const sources: Photo[] = [], seen = new Set<string>();
+    let failed = 0;
+    for (const {photo, location} of updates) {
+      if (!sameVault(session)) throw new Error("VAULT_LOCKED");
+      if (!currentCatalog.current.includes(photo) || photo.grantId || photo.manifest.ownerAccountId !== session.accountId
+        || annotationLocation(photo.annotations ?? {}) || seen.has(photo.manifest.photoId)) {failed++; continue;}
+      seen.add(photo.manifest.photoId);
+      try {
+        const accepted = await queuePhotoLocation({ownerAccountId: session.accountId, photoId: photo.manifest.photoId, originalSha256: photo.metadata.originalSha256}, location, session);
+        if (!sameVault(session)) throw new Error("VAULT_LOCKED");
+        if (accepted) sources.push(photo); else failed++;
+      } catch (error) {if (!sameVault(session)) throw error; failed++;}
+    }
+    if (sources.length) await publishLocalAnnotations(sources, session);
+    if (!sameVault(session)) throw new Error("VAULT_LOCKED");
+    return {applied: sources.length, failed, updatedPhotoIDs: sources.map(photo => photo.manifest.photoId)};
+  };
+  const applyTimelineLocations = async (candidates: readonly TimelineCandidate[]) => {
+    const snapshot = ownedSnapshot;
+    if (!snapshot?.current() || !snapshot.locate) throw new Error("VAULT_LOCKED");
+    const eligible = currentTimelineCandidates(candidates, findPhotos);
+    const updates = eligible.flatMap(candidate => {
+      const photo = snapshot.photos.find(photo => photo.manifest.photoId === candidate.photoID);
+      return photo ? [{photo, location: candidate.location}] : [];
+    });
+    return {...await snapshot.locate(updates), needsSave: true};
   };
   const saveAnnotationChanges = async (session = requireVault()) => {
     if (!sameVault(session) || publicDemo || running.current) return false;
@@ -715,13 +758,14 @@ export default function CloudApp({
   }, [active, account, sharePhotos, shareKind, received]);
   return (
     <>
-      <main className={"cloud-library" + (selecting ? " exchange-selection" : "")} aria-busy={searchResult.searching || undefined} inert={viewing || exchange || menu || preparedOriginals ? true : undefined}>
+      <main className={"cloud-library" + (selecting ? " exchange-selection" : "")} aria-busy={searchResult.searching || undefined} inert={viewing || exchange || menu || preparedOriginals || placesOpen ? true : undefined}>
         <header className="consumer-navigation">
           {unlocked ? <nav className="consumer-scope-menu" aria-label="Photo library"><select ref={scopeSelector} aria-label="Photo library" value={received ? "shared" : "saved"} onChange={event => {
             if (event.target.value === "photos") onBack();
+            else if (event.target.value === "places") setPlacesOpen(true);
             else if (event.target.value === "shared") openSharing();
             else {setReceived(null); setReceivedContext(null); setQuery(""); setCommittedMeaning(undefined);}
-          }}><option value="photos">Photos</option><option value="saved">Saved</option><option value="shared">Shared</option></select></nav> : <h1>Fotoro</h1>}
+          }}><option value="photos">Photos</option><option value="saved">Saved</option><option value="shared">Shared</option><option value="places">Places</option></select></nav> : <h1>Fotoro</h1>}
           <div className="header-actions">
           {!unlocked && <button
             ref={backButton}
@@ -1032,6 +1076,10 @@ export default function CloudApp({
           <button disabled={sharingOriginals} onClick={() => sendSelectedOriginals(preparedOriginals, true)}>Download originals</button>
         </div>
       </aside>}
+      {active && placesOpen && unlocked && <Places photos={findPhotos} resources={placeResources} onClose={() => setPlacesOpen(false)}
+        onApplyLocations={!publicDemo ? applyTimelineLocations : undefined} onOpen={id => {
+          setPlacesOpen(false); setReceived(null); setReceivedContext(null); setQuery(""); setCommittedMeaning(undefined); setViewer(id);
+        }} />}
       {active && exchange && unlocked && (
         <Exchange
           key={exchangeVersion}

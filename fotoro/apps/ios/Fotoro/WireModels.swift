@@ -265,6 +265,10 @@ struct PhotoAnnotationsV1: Codable, Equatable, Sendable {
   var favorite: Bool?
   var ocr: OCR?
   var visual: Visual?
+  var location: PhotoLocationV1? { PhotoLocationFacts.read(facts) }
+  mutating func setLocation(_ value: PhotoLocationV1?) throws {
+    facts = try PhotoLocationFacts.replacing(in: facts, with: value)
+  }
 }
 struct PhotoAnnotationsUpdateV1: Codable, Equatable, Sendable {
   var version = 1

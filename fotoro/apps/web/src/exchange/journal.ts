@@ -4,6 +4,7 @@ import type {
   UploadCommitV1,
   UploadReservationV1,
   WrappedKeyV1,
+  PhotoLocationV1,
 } from "@fotoro/contracts";
 import { ready, signPayload, utf8 } from "@fotoro/crypto";
 import { requireVault, encryptPrivate, decryptPrivate } from "../vault/vault";
@@ -18,7 +19,8 @@ import {
 } from "./api";
 import { digest } from "../library/catalog";
 import { assertVault, sameVault } from "../vault/scope";
-import { captureDate } from "../library/exif";
+import { photoExif } from "../library/exif";
+import {queuePhotoLocation} from "./annotations";
 import {photoFormat, photoMime, displayPhotoDimensions, safePhotoDimensions, photoPreview, PHOTO_HEADER_BYTES} from "../media/photo-source";
 export interface PendingImport {
   operationId: string;
@@ -26,6 +28,7 @@ export interface PendingImport {
   stagingKeys: string[];
   sourceFilename: string;
   sourceDigest: string;
+  location?: PhotoLocationV1;
   state:
     | "staging"
     | "queued"
@@ -107,7 +110,7 @@ export async function stageImport(
     try {const {blob} = await photoPreview(file, dimensions, maximum, check); const bytes = await blob.arrayBuffer(); check(); return bytes;}
     catch (error) {check(); if (format === "heic") throw new Error("HEIC_NATIVE_DECODE_UNAVAILABLE"); throw error;}
   };
-  const exifDate = captureDate(new Uint8Array(original));
+  const exif = photoExif(new Uint8Array(original)), exifDate = exif.date;
   const thumb = await preview(256);
   assertVault(v);
   signal?.throwIfAborted();
@@ -160,6 +163,7 @@ export async function stageImport(
     stagingKeys,
     sourceFilename: file.name,
     sourceDigest: result.sourceDigest,
+    location: exif.location,
     state: "queued",
     parts: result.staged.map(({ bytes, ...part }: any) => ({
       ...part,
@@ -326,6 +330,11 @@ export async function resumePendingImports(signal?: AbortSignal) {
         signal,
       );
       check();
+      if (pending.location) {
+        const identity = {ownerAccountId: v.accountId, photoId: pending.photoId, originalSha256: pending.sourceDigest};
+        await queuePhotoLocation(identity, pending.location, v);
+        check();
+      }
       pending.state = "committed";
       pending.error = undefined;
       await atomic([

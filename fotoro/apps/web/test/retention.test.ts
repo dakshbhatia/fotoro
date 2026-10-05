@@ -7,6 +7,14 @@ import { emptyFeedback } from "../src/local/search";
 const fixture = () => ({ id: "sha-photo", digest: "sha-photo", filename: "private-name.jpg", labels: ["Ronald"], date: "2026-09-01T00:00:00Z", dateSource: "exif" as const, width: 640, height: 480, originalSize: 1234, preview: new Blob(["bounded jpeg"], { type: "image/jpeg" }) });
 const store = (budget?: number) => new LocalRetention({ name: "test-search-" + crypto.randomUUID(), budget });
 
+test("GPS and absolute capture-time evidence survive encrypted retention and Clear", async () => {
+  const saved = store(), location = {latitude: 41.9028, longitude: 12.4964, source: "exif" as const};
+  await saved.save([{...fixture(), location, captureVerified: true as const, captureTimezoneVerified: true as const}], emptyFeedback());
+  const restored = (await saved.load()).photos[0];
+  assert.deepEqual(restored.location, location); assert.equal(restored.captureTimezoneVerified, true);
+  await saved.clear(); assert.deepEqual((await saved.load()).photos, []);
+});
+
 test("capture verification survives retention without inventing it for legacy dates", async () => {
   const saved=store();
   await saved.save([{...fixture(),captureVerified:true as const},{...fixture(),id:"legacy"}],emptyFeedback());

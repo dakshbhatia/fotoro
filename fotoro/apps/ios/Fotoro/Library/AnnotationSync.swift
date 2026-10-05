@@ -174,6 +174,20 @@ final class AnnotationLedger: @unchecked Sendable {
   private func save(_ state: AnnotationState, db: Database) throws {
     try db.execute(sql: "INSERT INTO annotations(id,value) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value", arguments: [state.photoId, try Wire.encode(state)])
   }
+  // Intake can seed a new private draft in the same transaction as its original.
+  // Existing overlays are never overwritten by an import or a duplicate source.
+  func seedLocation(_ location: PhotoLocationV1?, photo: LocalPhoto, bundle: AccountBundle, db: Database) throws {
+    guard let location else { return }
+    var value = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+    try value.setLocation(location)
+    try AnnotationCrypto.validate(value, photo: photo, accountId: accountId)
+    guard try Data.fetchOne(db, sql: "SELECT value FROM annotations WHERE id=?", arguments: [photo.id]) == nil else { return }
+    let key = try Data(b64: bundle.vaultKey)
+    let base = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+    try save(AnnotationState(accountId: accountId, photoId: photo.id, originalSha256: photo.metadata.originalSha256,
+      draft: CryptoAdapter().wrap(Wire.encode(value), key: key), editId: Wire.id(),
+      base: CryptoAdapter().wrap(Wire.encode(base), key: key)), db: db)
+  }
   private func checked(_ state: AnnotationState, photo: LocalPhoto) throws {
     guard state.accountId == accountId, state.photoId == photo.id,
       photo.manifest.ownerAccountId == accountId, state.originalSha256 == photo.metadata.originalSha256
@@ -222,7 +236,9 @@ final class AnnotationLedger: @unchecked Sendable {
           ?? PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
         // Automatic sync never publishes an unfinished supplied-field edit, including a frozen retry.
         return value.labels == base.labels && value.caption == base.caption && value.keywords == base.keywords
-          && value.facts == base.facts && value.favorite == base.favorite
+          && (value.facts == base.facts || (value.location.map { ["exif", "photos"].contains($0.source) } == true
+            && PhotoLocationFacts.userFacts(value.facts) == PhotoLocationFacts.userFacts(base.facts)))
+          && value.favorite == base.favorite
           && (value.ocr == base.ocr || value.ocr?.processor == "vision-text-v1")
           && (value.visual == base.visual || (value.visual?.processor == SearchVisualPolicy.processor
             && value.visual?.labels == SearchVisualPolicy.validated(value.visual).map {

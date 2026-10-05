@@ -1,6 +1,7 @@
 import {parseNaturalDateQuery} from "./natural-date";
-import type {PhotoVisualV1} from "@fotoro/contracts";
+import type {PhotoVisualV1, PhotoLocationV1} from "@fotoro/contracts";
 import {validatedVisualLabels} from "@fotoro/contracts/visual";
+import {isLocationFact, validatedPhotoLocation} from "@fotoro/contracts/location";
 
 export interface SearchOcr {
   photoID: string;
@@ -17,6 +18,9 @@ export interface SearchPhoto {
   filename: string;
   date: string;
   dateSource: "exif" | "photos" | "selected";
+  captureTimezoneVerified?: true;
+  captureVerified?: true;
+  location?: PhotoLocationV1;
   labels?: string[];
   caption?: string;
   keywords?: string[];
@@ -127,7 +131,12 @@ export class PhotoSearchIndex {
         add(keyword, "keyword", photo.id);
         for (const word of words(keyword)) add(word, "keyword", photo.id);
       }
-      for (const fact of photo.facts ?? []) { add(fact, "fact", photo.id); phraseSource(fact, "fact", photo.id); }
+      for (const fact of photo.facts ?? []) if (!isLocationFact(fact)) { add(fact, "fact", photo.id); phraseSource(fact, "fact", photo.id); }
+      const location = validatedPhotoLocation(photo.location);
+      if (location) {
+        add("GPS", "fact", photo.id);
+        if (location.name) {add(location.name, "fact", photo.id); phraseSource(location.name, "fact", photo.id); for (const word of words(location.name)) add(word, "fact", photo.id);}
+      }
       phraseSource(photo.caption ?? "", "caption", photo.id);
       phraseSource(photo.filename.replace(/\.[^.]+$/, ""), "filename", photo.id);
       for (const word of words(photo.caption ?? "")) if (!noise.test(word)) add(word, "caption", photo.id);

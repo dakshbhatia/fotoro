@@ -4,8 +4,22 @@ import { PhotoSearchIndex } from "../src/local/search";
 import { cloudSearchRecords } from "../src/library/search";
 import {savedSearchPhotos} from "../src/library/consumer-search";
 import type { Photo } from "../src/library/catalog";
+import {withAnnotationLocation} from "@fotoro/contracts/location";
 const digest = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const photo = {manifest: {photoId: "cloud-id", ownerAccountId: "owner"}, metadata: {filename: "IMG_001.jpg", sourceDate: "2026-10-01T12:00:00Z", dateSource: "exif", originalSha256: digest}, annotations: {version: 1, photoId: "cloud-id", originalSha256: digest, labels: ["Family dinner"], ocr: {text: "Invoice number 1234", confidence: 0.9, processor: "native-vision-v1"}}} as Photo;
+test("saved private locations restore names and GPS search while machine facts stay hidden", () => {
+  const location = {latitude: 41.9028, longitude: 12.4964, source: "photos" as const, name: "Villa Borghese"};
+  const located = {...photo, annotations: withAnnotationLocation(photo.annotations!, location)};
+  const record = cloudSearchRecords([located])[0];
+  assert.deepEqual(record.location, location);
+  const index = new PhotoSearchIndex([record]);
+  assert.deepEqual(index.search("villa borg").photoIds, ["cloud-id"]);
+  assert.deepEqual(index.search("gps").photoIds, ["cloud-id"]);
+  assert.deepEqual(index.search("fotoro.location").photoIds, []);
+  assert.deepEqual(index.search("latitude").photoIds, []);
+  for (const invalid of [{...located, grantId: "received"}, {...located, annotations: {...located.annotations, originalSha256: "other"}}])
+    assert.equal(cloudSearchRecords([invalid])[0].location, undefined);
+});
 test("cloud labels and verified OCR use the local search index without rewriting stored original identity", () => {
   const index = new PhotoSearchIndex(cloudSearchRecords([photo]));
   assert.deepEqual(index.search("family").photoIds, ["cloud-id"]);
