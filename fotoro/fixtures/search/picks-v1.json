@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "processor": "moment-highlights-v2",
+  "processor": "moment-highlights-v3",
   "clock": "2026-10-03T12:00:00Z",
   "qualification": "Synthetic source metadata and preview measurements. This evaluates Find-to-shortlist policy composition, not image recognition, held-out ranking accuracy or device latency.",
   "records": [

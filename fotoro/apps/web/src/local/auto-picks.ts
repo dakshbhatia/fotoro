@@ -1,5 +1,5 @@
 import type {LocalPhoto} from "./resources";
-export const PICK_PROCESSOR = "moment-highlights-v2";
+export const PICK_PROCESSOR = "moment-highlights-v3";
 export interface PhotoSignals {
   hash: bigint;
   luminance: number;
@@ -126,11 +126,13 @@ function* recommendationSteps(photos: LocalPhoto[], signals: ReadonlyMap<string,
     const budget = Math.min(6, Math.max(1, Math.ceil(Math.sqrt(moment.length) / 2)));
     const bestQuality = moment.reduce((best, group) => Math.max(best, group.best.score - (group.best.photo.favorite ? 2 : 0)), -Infinity);
     const chosen: Group[] = [];
+    let suggestions = 0;
     for (const group of moment.sort(compare)) {
       if (++reviewed % PICK_WORK_BATCH === 0) yield;
-      if (!group.best.photo.favorite && (group.best.score < bestQuality * .65 || chosen.length >= budget || chosen.some(previous =>
+      if (!group.best.photo.favorite && (group.best.score < bestQuality * .65 || suggestions >= budget || chosen.some(previous =>
         similar(previous.best.photo, group.best.photo, previous.best.signal, group.best.signal)))) continue;
       chosen.push(group);
+      if (!group.best.photo.favorite) suggestions++;
     }
     for (const group of chosen) {
       ids.add(group.best.photo.id);
