@@ -31,6 +31,10 @@ Cloudflare proposals become tasks here only when a consumer need admits them.
 These gates qualify the current implementation. Test coverage and a public
 fixture exchange do not prove a personal-library journey or a better product.
 Current release and build numbers live in [verification](verification.md).
+The native screen pass removes repeated receiving rows, exposes Save to Photos
+in the owned viewer, and puts copying the password ahead of opening the website.
+These changes simplify the implemented loop; they do not close the physical
+acceptance gates above.
 
 ## Current boundaries
 

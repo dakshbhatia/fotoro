@@ -15,12 +15,12 @@ Hono Worker with D1 and private R2. The upstream Ente application is a reference
 - Visual search runs locally. Model downloads contain public weights; private
   photos, queries and vectors are not sent to an inference provider.
 
-The last verified active Worker is `e6a09961-6ddb-42c5-9fc0-fabaf195d9b0`
-at 100%, deployment `49a1d235-3bc4-499f-bc1b-e48955447078` (2026-10-05,
-merged [PR 42](https://github.com/dakshbhatia/fotoro/pull/42)). All 35 non-HTML
+The last verified active Worker is `2ca15bc9-614b-4b21-a115-f3748c60bbc4`
+at 100%, deployment `7a474426-4b3b-4d7c-baf7-026bfd36e090` (2026-10-05,
+merged [PR 43](https://github.com/dakshbhatia/fotoro/pull/43)). All 35 non-HTML
 asset digests match the qualified build; Photos and Saved HTML routes reference
 the expected entry assets. The preceding qualified version is
-`f19242f0-7762-43a8-b66c-0be45c3f6cdf`. Read the current deployment back before
+`e6a09961-6ddb-42c5-9fc0-fabaf195d9b0`. Read the current deployment back before
 changing traffic; preserve the preceding qualified version for rollback.
 
 Documentation-only edits do not change this runtime checkpoint and need no Worker
@@ -48,7 +48,7 @@ head before building release artifacts.
 Build production web assets from the qualified merged source with `pnpm build:web`.
 Development fixture settings belong to local processes and must not be exported
 into the production build. Keep the configured D1/R2 bindings and production
-origin unchanged. Apply migrations only when the qualified change requires them; PR 42 needs none.
+origin unchanged. Apply migrations only when the qualified change requires them; the current screen changes need none.
 
 Use Wrangler's existing OAuth session in the intended Cloudflare account. Do not
 copy credentials into chat, Git or release logs. From `services/api/`, prepare a
@@ -76,14 +76,14 @@ pass uses CI for native validation; no new IPA, phone install or TestFlight uplo
 is implied by web deployment. The owner reports Xcode already signed in; do not
 repeat historical account setup instructions.
 
-Build 37 archives the qualified PR 41 source and passes the full archive audit
-with all 69 native input hashes unchanged. It is development-signed; no IPA was
-exported and no TestFlight upload occurred. Build 36 remains the earlier archive
-of the qualified three-S source. Check release
+Build 38 archives the qualified PR 43 source and passes the full archive audit
+with all 69 native input hashes matched. It is development-signed; no IPA was
+exported and no TestFlight upload occurred. Build 37 preserves the earlier PR 41
+archive. Check release
 credentials without archiving, exporting or uploading:
 
 ```sh
-FOTORO_DEVELOPMENT_TEAM=YOUR_TEAM node tools/build-testflight.mjs 37 --preflight
+FOTORO_DEVELOPMENT_TEAM=YOUR_TEAM node tools/build-testflight.mjs 38 --preflight
 ```
 
 The check reports credential type and local distribution identity count, without
