@@ -273,6 +273,9 @@ struct RecentPhotosView: View {
   @State private var shareSources: [RecentPhotoSource] = []
   @State private var settings = false
   @State private var places: PhotoPlacesPresentation?
+  #if !FOTORO_LOCAL_PREVIEW
+  @State private var people: PhotoPeoplePresentation?
+  #endif
   @State private var pendingPlace: PhotoPlaceItem?
   @Environment(\.scenePhase) private var scenePhase
 
@@ -573,6 +576,9 @@ struct RecentPhotosView: View {
           PhotoPlacesView(store: store, services: services, open: { pendingPlace = $0 })
           #endif
         }
+        #if !FOTORO_LOCAL_PREVIEW
+        .sheet(item: $people) { _ in PhotoPeopleView(search: search) }
+        #endif
         .onChange(of: query) { cancelBestShots(); search.updateQuery(query) }
         .onChange(of: search.response.generation) { cancelBestShots() }
         .onChange(of: search.acceptedMeaningID) { cancelBestShots() }
@@ -1121,6 +1127,10 @@ struct RecentPhotosView: View {
       Picker("Photo library", selection: $scope) {
         ForEach(PhotoHomeScope.allCases) { Text($0.rawValue).tag($0) }
       }
+      #if !FOTORO_LOCAL_PREVIEW
+      Button("People", systemImage: "person.2") { queryFocused = false; people = PhotoPeoplePresentation() }
+        .accessibilityIdentifier("home.people")
+      #endif
       Button("Places", systemImage: "map") { queryFocused = false; places = PhotoPlacesPresentation() }
         .accessibilityIdentifier("home.places")
       if query.isEmpty, RecentPhotosPolicy.canRead(store.status) {

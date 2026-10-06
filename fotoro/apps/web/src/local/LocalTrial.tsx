@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../library/icons";
 import { LocalLibrary } from "./LocalLibrary";
 import { LocalViewer } from "./LocalViewer";
@@ -28,6 +28,13 @@ import type {PhotoLocationV1} from "@fotoro/contracts";
 import {annotationLocation} from "@fotoro/contracts/location";
 import {requireVault} from "../vault/vault";
 import {applyTimelineTargets} from "./timeline-application";
+import {withPhotoObservation, type PhotoObservationV1} from "@fotoro/contracts/intelligence";
+import {intelligenceScope} from "../intelligence/scope";
+import {factsWithPeople} from "@fotoro/contracts/people";
+import type {PeopleUpdate} from "../people/People";
+import {peopleSourceCurrent} from "../people/groups";
+import {peopleEditsVisible} from "../people/settlement";
+const People = lazy(() => import("../people/People").then(module => ({default: module.People})));
 interface ChosenOriginalContext {
   local: LocalPhoto[]; saved: ShareSelection; snapshot: OwnedPhotoSnapshot; generation: number;
   controller: AbortController; files: File[];
@@ -75,6 +82,7 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
     [committed, setCommitted] = useState<string>(), [navigation, setNavigation] = useState<SearchNavigation>(), [sourceGeneration, setSourceGeneration] = useState(0);
   const [reviewingPicks, setReviewingPicks] = useState(false);
   const [placesOpen, setPlacesOpen] = useState(false);
+  const [peopleOpen, setPeopleOpen] = useState(false);
   const [browseScope, setBrowseScope] = useState<"photos" | "picks">("photos"), [sharing, setSharing] = useState(false);
   const [chosenSavedIDs, setChosenSavedIDs] = useState(new Set<string>());
   const [preparingShare, setPreparingShare] = useState(false), [preparedShare, setPreparedShare] = useState<ChosenOriginalContext | null>(null);
@@ -118,8 +126,9 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
   };
   const searchSelectionIDs = useMemo(() => new Set([...picks.ids, ...chosenSaved.map(photo => "saved:" + photo.manifest.photoId)]), [picks.ids, chosenSaved]);
   const searchPhotos = useMemo(() => mergeConsumerSearchPhotos(photos, savedPhotos), [photos, savedPhotos]);
+  const currentSearchPhotos = useRef(searchPhotos); currentSearchPhotos.current = searchPhotos;
   const hasPhotos = searchPhotos.length > 0;
-  useEffect(() => {if (!active) setPlacesOpen(false);}, [active]);
+  useEffect(() => {if (!active) {setPlacesOpen(false); setPeopleOpen(false);}}, [active]);
   const index = useMemo(() => new PhotoSearchIndex(photos.map(photo => photo.ocr && photo.ocr.processor !== OCR_PROCESSOR ? {...photo, ocr: undefined} : photo), feedback), [photos, feedback]);
   const localPredicted = useMemo(() => index.search(query, {scope, committedMeaning: committed, previous: previous.current}), [index, query, committed]);
   const savedIndex = useMemo(() => new PhotoSearchIndex(savedPhotos), [savedPhotos]);
@@ -167,7 +176,7 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
   // Selection changes stay local until Sync is opened; clearing revokes old File references.
   useEffect(() => {if (!photos.length) onPhotosChange?.([]);}, [photos.length, onPhotosChange]);
   useEffect(() => {
-    const clearSaved = () => {savedResources.clear(); setChosenSavedIDs(new Set()); setPlacesOpen(false);};
+    const clearSaved = () => {savedResources.clear(); setChosenSavedIDs(new Set()); setPlacesOpen(false); setPeopleOpen(false);};
     window.addEventListener("fotoro-lock", clearSaved);
     return () => {window.removeEventListener("fotoro-lock", clearSaved); savedResources.clear();};
   }, [savedResources]);
@@ -318,6 +327,48 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
       if (alive.current && generation.current === token && snapshot.current()) setStatus("Changes remain on this device. Open Saved to try again.");
     });
   };
+  const keepLocalObservation = async (photo: LocalPhoto, observation: PhotoObservationV1) => {
+    const snapshot = currentOwnedPhotos.current;
+    if (!alive.current || !activeRef.current || !snapshot?.current() || photo.current?.() === false || observation.photoId !== photo.id || observation.sourceRevision !== (photo.digest ?? photo.id)) throw new Error("Photo source changed");
+    const local = currentPhotos.current.find(value => value.id === photo.id && value.digest === photo.digest && value.file === photo.file);
+    if (!local) throw new Error("Photo source changed");
+    const facts = withPhotoObservation(local, observation).facts;
+    setPhotos(current => current.map(value => value === local ? {...value, facts} : value));
+  };
+  const applyPeople = async (updates: PeopleUpdate[]) => {
+    const snapshot = currentOwnedPhotos.current, token = generation.current;
+    const sources = currentSearchPhotos.current;
+    const changes = updates.map(update => {
+      if (!alive.current || !activeRef.current || !peopleSourceCurrent(update.photo, sources.find(photo => photo.id === update.photo.id))) throw new Error("Photo source changed");
+      const local = currentPhotos.current.find(photo => photo.id === update.photo.id);
+      const saved = local ? ownedPhotoForLocal(snapshot, local) : snapshot?.photos.find(photo => "saved:" + photo.manifest.photoId === update.photo.id);
+      if (saved && (!snapshot?.people || !snapshot.current())) throw new Error("Saved library is read-only");
+      return {local, saved, assignments: update.assignments, facts: local ? factsWithPeople(local.facts, local.digest ?? "", update.assignments) : undefined};
+    });
+    const saved = changes.flatMap(change => change.saved ? [{photo: change.saved, assignments: change.assignments}] : []);
+    if (saved.length) {
+      await snapshot!.people!(saved);
+      let settled = false;
+      for (let attempt = 0; attempt < 60; attempt++) {
+        if (!alive.current || !activeRef.current || generation.current !== token || currentOwnedPhotos.current?.token !== snapshot!.token) throw new Error("Photo source changed");
+        if (peopleEditsVisible(currentOwnedPhotos.current, snapshot!.token, saved)) {settled = true; break;}
+        await new Promise(resolve => setTimeout(resolve, 16));
+      }
+      if (!settled) throw new Error("People edits were kept. Reopen People after Saved finishes updating.");
+    }
+    if (!alive.current || !activeRef.current || token !== generation.current || saved.length && currentOwnedPhotos.current?.token !== snapshot?.token) throw new Error("Photo source changed");
+    for (const update of updates) if (!peopleSourceCurrent(update.photo, currentSearchPhotos.current.find(photo => photo.id === update.photo.id), saved.length > 0)) throw new Error("Photo source changed");
+    const rebased = changes.flatMap(change => {
+      if (!change.local) return [];
+      const local = currentPhotos.current.find(photo => photo.id === change.local!.id);
+      if (!local || !peopleSourceCurrent(change.local, local)) throw new Error("Photo source changed");
+      return [{local, facts: factsWithPeople(local.facts, local.digest ?? "", change.assignments)}];
+    });
+    setPhotos(current => current.map(photo => {
+      const change = rebased.find(change => change.local === photo);
+      return change ? {...photo, facts: change.facts} : photo;
+    }));
+  };
   const applyTimelineLocations = async (candidates: readonly TimelineCandidate[]) => {
     const token = generation.current, snapshot = ownedPhotos;
     const sources = mergeConsumerSearchPhotos(currentPhotos.current, savedSearchPhotos(snapshot, currentPhotos.current));
@@ -357,7 +408,7 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
       }});
   };
   return <>
-    <main inert={viewing || settings || placesOpen || preparedShare ? true : undefined} className="local-trial">
+    <main inert={viewing || settings || placesOpen || peopleOpen || preparedShare ? true : undefined} className="local-trial">
       <header className="consumer-navigation">
         {hasPhotos ? <nav className="consumer-scope-menu" aria-label="Photo library"><select aria-label="Photo library" value={browseScope} onChange={event => {
           if (event.target.value === "saved") openBackup();
@@ -395,6 +446,7 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
     {settings && <aside className="sheet local-settings" ref={settingsPanel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Settings">
       <button className="close" aria-label="Close settings" onClick={closeSettings}><Icon kind="close" /></button><h2>Settings</h2>
       <button onClick={() => {closeSettings(); setPlacesOpen(true);}}>Places</button>
+      <button onClick={() => {closeSettings(); setPeopleOpen(true);}}>People</button>
       <label className="local-check"><input type="checkbox" checked={last30} onChange={event => setLast30(event.target.checked)} />Browse the last 10 days</label>
       <h3>Selection</h3>
       <p className="hint">{picks.ids.size} of {photos.length} selected.</p>
@@ -420,11 +472,14 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
         <button className={canShareOriginals(preparedShare.files) ? undefined : "primary-action"} disabled={sharing} onClick={() => sendPrepared(preparedShare, true)}>Download originals</button>
       </div>
     </aside>}
+    {active && peopleOpen && <Suspense fallback={<aside className="settings-panel" role="dialog" aria-modal="true" aria-label="People"><button autoFocus onClick={() => setPeopleOpen(false)}>Close</button><p role="status">Opening People…</p></aside>}><People photos={searchPhotos} resources={resources} savedResources={savedResources} onClose={() => setPeopleOpen(false)} onAssignments={applyPeople} onOpen={id => {
+      setPeopleOpen(false); if (id.startsWith("saved:")) onOpenSaved?.(id.slice(6)); else setViewer(id);
+    }} /></Suspense>}
     {active && placesOpen && <Places photos={searchPhotos} resources={resources} savedResources={savedResources} onClose={() => setPlacesOpen(false)} onApplyLocations={applyTimelineLocations} onOpen={id => {
       setPlacesOpen(false);
       if (id.startsWith("saved:")) onOpenSaved?.(id.slice(6));
       else {setBrowseScope("photos"); setLast30(false); changeQuery(""); setViewer(id);}
     }} />}
-    {viewing && viewer && <LocalViewer photos={viewerPhotos.filter(photo => !photo.id.startsWith("saved:"))} initial={viewer} resources={resources} onSave={onSave ? photo => onSave([photo]) : undefined} isSaved={photo => !!ownedPhotos?.current() && savedPhotos.some(saved => saved.id === photo.id)} onLabels={(id, labels) => editLocalPhoto(id, {labels})} onFavorite={(id, favorite) => editLocalPhoto(id, {favorite})} onUse={normalizeSearch(query) ? id => confirm(id) : undefined} onConfirm={normalizeSearch(query) ? id => confirm(id) : undefined} onPin={normalizeSearch(query) ? id => confirm(id, true) : undefined} meaning={result.meaning?.term} onReselect={() => {input.current?.click(); setViewer(null);}} onClose={() => setViewer(null)} />}
+    {viewing && viewer && <LocalViewer photos={viewerPhotos.filter(photo => !photo.id.startsWith("saved:"))} initial={viewer} resources={resources} intelligence={active && ownedPhotos?.current() && ownedPhotos.edit ? {scopeKey: intelligenceScope(ownedPhotos.token), current: () => activeRef.current && currentOwnedPhotos.current?.token === ownedPhotos.token && ownedPhotos.current(), keep: keepLocalObservation} : undefined} onSave={onSave ? photo => onSave([photo]) : undefined} isSaved={photo => !!ownedPhotos?.current() && savedPhotos.some(saved => saved.id === photo.id)} onLabels={(id, labels) => editLocalPhoto(id, {labels})} onFavorite={(id, favorite) => editLocalPhoto(id, {favorite})} onUse={normalizeSearch(query) ? id => confirm(id) : undefined} onConfirm={normalizeSearch(query) ? id => confirm(id) : undefined} onPin={normalizeSearch(query) ? id => confirm(id, true) : undefined} meaning={result.meaning?.term} onReselect={() => {input.current?.click(); setViewer(null);}} onClose={() => setViewer(null)} />}
   </>;
 }

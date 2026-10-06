@@ -48,8 +48,8 @@ Browser uploads remain explicit. Private annotations use their existing encrypte
 outbox; AI suggestions never authorize Save or replace a user's selection.
 
 Photo GPS and confirmed Google Timeline imports support Places/Timeline locally.
-Raw imported location data and local vectors are not uploaded. Named people,
-automatically inferred trips and automatic cleanup remain open product work.
+Raw imported location data and local vectors are not uploaded. Reviewed People groups now use the existing local index and encrypted facts.
+Automatically inferred trips and automatic cleanup remain open product work.
 
 ## Intelligence wiring — October 2026
 
@@ -104,3 +104,45 @@ available if inference cannot prepare. A single public-image smoke test does not
 qualify held-out retrieval accuracy, memory, latency or thermal behavior on iPhone
 and Safari. Cloud inference still requires explicit opt-in and a spending bound;
 local intelligence creates no upload intent; opted-in Sync can run during browsing.
+
+## October 6 foundation implementation
+
+Automatic native Sync now anchors its first intake to the last 10 days. The
+checkpoint excludes older or undated initial assets, then admits newly observed
+identifiers without inventing a capture date. This includes later permission
+grants and backdated imports; it is an initial intake boundary, not a permanent
+capture-date filter. Expanding to older photos is explicit;
+Pause and saved source retries survive returning to the app. Browsing still
+shows every permitted photo. Preparation requires an open, unlocked app;
+already staged ciphertext can finish uploading in the background.
+
+The browser photo table shares the grid's selection, viewer and thumbnail
+resources. Optional columns expose observed capture dates, dimensions, type,
+location, labels, OCR status and original availability. Missing capture dates
+remain unavailable. Thumbnail leases protect displayed object URLs from cache
+eviction; abandoned queued requests do not decode offscreen images.
+
+People is opt-in local inference. Both clients use the pinned OpenCV SFace
+2021dec embedding model from OpenCV Zoo commit
+`47534e27c9851bb1128ccc0102f1145e27f23f98` (Apache 2.0). Both clients use
+YuNet 2023mar from the same commit (MIT). Notices ship with the assets. Automatic
+groups are tentative; naming, merging, separating and rejecting are reviewed
+corrections. Templates stay local. Confirmed names use digest-bound encrypted
+facts and the existing search index, with source, permission and account fences.
+Native publication requires an eligible unadjusted original; edited-current
+photo boxes remain local until their original pixel binding can be proved.
+Browser provisional groups and rejections last for the session; named edits use
+local retention or the owned annotation outbox.
+
+Optional cloud photo understanding uses the authenticated Worker route and
+Gemini 3.8 Flash or 3.5 Flash-Lite. It remains unavailable until a server key and
+explicit account/global daily work caps are configured. Each analysis needs
+separate consent to send a reduced, metadata-free JPEG to Google. Analyze stages
+objects, scenes and visible text for review; Keep retains separate source-bound
+observations. Supplied captions, labels and local OCR remain intact. Kept cloud
+observations enter browser search; native readers preserve their encrypted facts
+without indexing internal marker syntax. Owned edits
+use the encrypted outbox and explicit Save changes. Uncertainty and internal
+marker syntax do not become search terms. Work caps bound request counts;
+provider billing after timeout is not a dollar guarantee. No live provider or
+physical-device quality claim follows from fixture checks.

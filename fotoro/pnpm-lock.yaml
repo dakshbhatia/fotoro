@@ -55,6 +55,9 @@ importers:
       '@tesseract.js-data/eng':
         specifier: 1.0.0
         version: 1.0.0
+      onnxruntime-web:
+        specifier: 1.25.0-dev.20260327-722743c0e2
+        version: 1.25.0-dev.20260327-722743c0e2
       react:
         specifier: 19.3.0
         version: 19.3.0

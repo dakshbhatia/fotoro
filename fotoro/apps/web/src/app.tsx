@@ -149,6 +149,9 @@ export default function App() {
       } : undefined} onFavorite={ownedPhotos.edit ? (photo, favorite) => {
         if (!ownedPhotos.current() || !ownedPhotos.photos.includes(photo) || photo.grantId || photo.manifest.ownerAccountId !== ownedPhotos.accountId) return;
         return ownedPhotos.edit?.(photo, {favorite});
+      } : undefined} onObservation={ownedPhotos.edit ? async (photo, observation) => {
+        if (!ownedPhotos.current() || !ownedPhotos.photos.includes(photo) || photo.grantId || photo.manifest.ownerAccountId !== ownedPhotos.accountId) throw new Error("Photo source changed");
+        await ownedPhotos.edit?.(photo, {observation});
       } : undefined} onShare={photo => {
         if (!ownedPhotos.current() || !ownedPhotos.photos.includes(photo)) return;
         setSavedViewer(null); setSharePhotos([photo]); setOpened(true); setCloud(true);

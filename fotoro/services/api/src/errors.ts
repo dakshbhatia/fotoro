@@ -10,6 +10,10 @@ export interface Env {
   ACCOUNT_STORAGE_LIMIT_BYTES?: string;
   AUTH_REQUESTS_PER_MINUTE?: string;
   ENROLLMENTS_PER_MINUTE?: string;
+  CLOUD_INTELLIGENCE_ENABLED?: string;
+  GEMINI_API_KEY?: string;
+  CLOUD_INTELLIGENCE_DAILY_ACCOUNT_REQUESTS?: string;
+  CLOUD_INTELLIGENCE_DAILY_GLOBAL_REQUESTS?: string;
 }
 export interface Actor {
   accountId: string;

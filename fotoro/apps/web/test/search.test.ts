@@ -1,4 +1,6 @@
 import test from "node:test";
+import {withPhotoObservation} from "@fotoro/contracts/intelligence";
+import {factsWithPeople} from "@fotoro/contracts/people";
 import assert from "node:assert/strict";
 import { PhotoSearchIndex, type SearchPhoto } from "../src/local/search";
 
@@ -186,4 +188,15 @@ test("broad-prefix ranking reads capture dates and photo history at most once pe
     assert.equal(result.photoIds.length, 200);
     assert.ok(dates <= photos.length && photoHistory <= photos.length, `${dates} capture-date parses and ${photoHistory} photo-history keys for ${photos.length} eligible photos`);
   } finally { Date.parse = parse; JSON.stringify = stringify; }
+});
+
+test("source-bound People and observations use the existing search without exposing reserved payloads or uncertainty", () => {
+  const digest = "a".repeat(64), observation = {version: 1 as const, photoId: "original", sourceRevision: digest, processor: "gemini-3.8-flash" as const, observedAt: "2026-10-06T12:00:00.000Z", observations: {objects: ["red bicycle"], scene: ["green park"], visibleText: "Cafe", uncertainty: ["moonlight"]}};
+  const facts = factsWithPeople(withPhotoObservation({facts: ["My exact fact"]}, observation).facts, digest, [{personId: crypto.randomUUID(), name: "Ronald", box: [0, 0, 1000, 1000]}]);
+  const source = {...photo("saved:original", "IMG_0001.jpg"), observationPhotoId: "original", digest, facts};
+  const index = new PhotoSearchIndex([source]);
+  for (const query of ["bicycle", "Cafe", "Ron", "My exact fact"]) assert.equal(index.search(query, {now}).photoId, source.id);
+  for (const query of ["moonlight", "fotoro.ai", "gemini", digest]) assert.equal(index.search(query, {now}).photoId, undefined);
+  const stale = new PhotoSearchIndex([{...source, digest: "b".repeat(64)}]);
+  for (const query of ["bicycle", "Cafe", "Ron"]) assert.equal(stale.search(query, {now}).photoId, undefined);
 });

@@ -103,6 +103,7 @@ enum ReviewedPhotosBackupPolicy {
   @ObservationIgnored private var consumerObservation = UUID()
   @ObservationIgnored private var syncIntent = UUID()
   private var automaticSyncPreference = AutomaticPhotoSyncPreference()
+  private var automaticSyncIntake: AutomaticPhotoSyncIntake?
   private var photoSyncForeground = false
   private var automaticSyncFailure: String?
   private var automaticSyncTask: Task<Void, Never>?
@@ -487,7 +488,9 @@ enum ReviewedPhotosBackupPolicy {
     try initialStore.setSyncEnabled(false)
     backup = try PhotosBackup(store: initialStore)
     store = initialStore
-    automaticSyncPreference = try initialStore.automaticPhotoSyncPreference()
+    let initialSyncPreference = try initialStore.automaticPhotoSyncPreference()
+    automaticSyncPreference = initialSyncPreference
+    automaticSyncIntake = try initialSyncPreference.origin.flatMap { try initialStore.automaticPhotoSyncIntake(origin: $0) }
     importer = PhotoImport(store: initialStore)
     journal = TransferJournal(store: initialStore, api: api, vault: vault)
     annotations = AnnotationSync(ledger: AnnotationLedger(store: initialStore, accountId: session.accountId ?? "locked"))
@@ -540,6 +543,7 @@ enum ReviewedPhotosBackupPolicy {
     try BackgroundUploadTransport.shared.configure(accountId: id, fixture: session.fixture, baseURL: api.baseURL)
     store = catalog
     automaticSyncPreference = try catalog.automaticPhotoSyncPreference()
+    automaticSyncIntake = try automaticSyncPreference.origin.flatMap { try catalog.automaticPhotoSyncIntake(origin: $0) }
     automaticSyncFailure = nil
     backup = nextBackup
     importer = nextImporter
@@ -596,7 +600,12 @@ enum ReviewedPhotosBackupPolicy {
         ? "1 original wasn't saved in Fotoro. It stays in Photos."
         : "\(count) originals weren't saved in Fotoro. They stay in Photos.")
     }
-    return status(.ready, "Automatic sync is on for permitted photos and videos while Fotoro is open. Complete originals must fit within 50 MiB.")
+    return status(.ready, automaticPhotoSyncIncludesAll
+      ? "Automatic sync is on for all permitted photos and videos while Fotoro is open. Complete originals must fit within 50 MiB."
+      : "Sync includes the last 10 days when first turned on, plus new arrivals. Complete originals must fit within 50 MiB.")
+  }
+  var automaticPhotoSyncIncludesAll: Bool {
+    automaticSyncPreference.origin == BackgroundUploadPolicy.origin(api.baseURL) && automaticSyncIntake?.includesAll == true
   }
   func enableAutomaticPhotoSync() throws {
     try Task.checkCancellation()
@@ -607,12 +616,29 @@ enum ReviewedPhotosBackupPolicy {
       throw FotoroError("Open your private Fotoro account before enabling automatic sync.")
     }
     guard RecentPhotosPolicy.canRead(automaticPhotosPermission) else { throw FotoroError("Allow Photos access to enable automatic sync.") }
+    let intake = try store.automaticPhotoSyncIntake(origin: origin) ?? AutomaticPhotoSyncIntake()
+    try store.setAutomaticPhotoSyncIntake(intake, origin: origin)
     let preference = AutomaticPhotoSyncPreference(enabled: true, paused: false, origin: origin)
     try store.setAutomaticPhotoSyncPreference(preference, uploadsPaused: false)
     automaticSyncPreference = preference
+    automaticSyncIntake = intake
     automaticSyncFailure = nil
     photoSyncForeground = true
     kickAutomaticPhotoSync()
+  }
+  func expandAutomaticPhotoSyncToAll() throws {
+    try Task.checkCancellation()
+    guard photoAccountAccess != nil, session.isSignedIn,
+      automaticPhotoSync.enabled, let origin = BackgroundUploadPolicy.origin(api.baseURL),
+      NativeBackupPolicy.allowsPrivatePhotos(accountId: session.accountId, fixture: session.fixture),
+      RecentPhotosPolicy.canRead(automaticPhotosPermission) else {
+      throw FotoroError("Open your account and allow Photos access before expanding sync.")
+    }
+    var intake = try store.automaticPhotoSyncIntake(origin: origin) ?? AutomaticPhotoSyncIntake()
+    intake.includesAll = true
+    try store.setAutomaticPhotoSyncIntake(intake, origin: origin)
+    automaticSyncIntake = intake
+    kickAutomaticPhotoSync(sourcesChanged: true)
   }
   func pauseAutomaticPhotoSync() { pauseSync() }
   func retryAutomaticPhotoSync() async throws {
@@ -754,6 +780,21 @@ enum ReviewedPhotosBackupPolicy {
     let uploadJournal = journal
     let trustedCard = session.pinnedCards[account]
     var acceptedPicks: PhotoPicksSnapshot?
+    @MainActor func intakeCandidates(_ candidates: [BackupCandidate]) throws -> [BackupCandidate] {
+      guard automatic, let origin else { return candidates }
+      try Task.checkCancellation()
+      guard self.automaticPhotoSyncAdmitted, self.store === catalog,
+        self.vault.generation == generation, self.session.accountId == account,
+        BackgroundUploadPolicy.origin(self.api.baseURL) == origin else { throw CancellationError() }
+      var intake = try catalog.automaticPhotoSyncIntake(origin: origin) ?? AutomaticPhotoSyncIntake()
+      let selected = intake.select(candidates, existingSourceIDs: Set(try catalog.backupSources()
+        .filter { !$0.isRetainedOriginal }.map(\.id)))
+      if intake != self.automaticSyncIntake {
+        try catalog.setAutomaticPhotoSyncIntake(intake, origin: origin)
+        self.automaticSyncIntake = intake
+      }
+      return selected
+    }
     @MainActor func sourceCurrent(_ source: BackupSource) -> Bool {
       guard automatic else { return true }
       guard self.automaticPhotoSyncAdmitted else { return false }
@@ -853,7 +894,7 @@ enum ReviewedPhotosBackupPolicy {
           if let snapshot = self.photosBackupSnapshot {
             let candidates = try snapshot(automatic ? .distantPast : RecentPhotosPolicy.cutoff(now: Date()))
             if let selection { return try await reconcile(ReviewedPhotosBackupPolicy.select(candidates, selection: selection)) }
-            return try await reconcile(candidates)
+            return try await reconcile(intakeCandidates(candidates))
           }
         #endif
         let permission = PHPhotoLibrary.authorizationStatus(for: .readWrite)
@@ -905,7 +946,7 @@ enum ReviewedPhotosBackupPolicy {
         }
         if let selection { candidates = try ReviewedPhotosBackupPolicy.select(candidates, selection: selection) }
         else if !automatic { candidates = PhotoPicksBackupPolicy.select(candidates, snapshot: acceptedPicks) }
-        return try await reconcile(candidates)
+        return try await reconcile(intakeCandidates(candidates))
       },
       valid: { [weak self] in
         guard let self else { return false }
@@ -1372,7 +1413,7 @@ enum ReviewedPhotosBackupPolicy {
           }
           let value = try ledger.current(photo: photo, bundle: bundle, card: card)
           let scenes = SearchVisualPolicy.validated(value?.visual).map(\.label)
-          let terms = [photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + PhotoLocationFacts.userFacts(value?.facts) + (value?.location?.searchTerms ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""]
+          let terms = [photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + PhotoLocationFacts.userFacts(value?.facts).filter { !PhotoPeopleFacts.isReserved($0) && !$0.hasPrefix("fotoro.ai.v1:") } + PhotoPeopleFacts.read(value?.facts ?? [], originalSha256: photo.metadata.originalSha256).map(\.n) + (value?.location?.searchTerms ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""]
           if parsed.text.isEmpty || terms.contains(where: { SearchNormalization.text($0).contains(parsed.text) })
             || scenes.contains(where: { SearchNormalization.text($0).hasPrefix(parsed.text) }) { matches.append(photo) }
         }
@@ -1394,7 +1435,7 @@ enum ReviewedPhotosBackupPolicy {
     guard !query.isEmpty else { return true }
     let value = photoAnnotations[photo.id]
     return SearchVisualPolicy.validated(value?.visual).contains { SearchNormalization.text($0.label).hasPrefix(SearchNormalization.text(query)) }
-      || ([photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + PhotoLocationFacts.userFacts(value?.facts) + (value?.location?.searchTerms ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""])
+      || ([photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + PhotoLocationFacts.userFacts(value?.facts).filter { !PhotoPeopleFacts.isReserved($0) && !$0.hasPrefix("fotoro.ai.v1:") } + PhotoPeopleFacts.read(value?.facts ?? [], originalSha256: photo.metadata.originalSha256).map(\.n) + (value?.location?.searchTerms ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""])
       .contains { $0.localizedCaseInsensitiveContains(query) }
   }
   private func automaticDerivedSourceCurrent(_ source: BackupSource) -> Bool {
@@ -1450,8 +1491,15 @@ enum ReviewedPhotosBackupPolicy {
       // Keep the encrypted facts exact instead of recapturing that search overlay.
       if record.syncedAccountId == nil, !record.facts.isEmpty {
         let location = value.location
-        value.facts = PhotoLocationFacts.userFacts(record.facts)
+        value.facts = PhotoLocationFacts.userFacts(record.facts).filter { !PhotoPeopleFacts.isReserved($0) }
         if let location { try value.setLocation(location) }
+      }
+      if labelsChanged {
+        let people = PhotoPeopleFacts.read(record.facts, enforceWireLimits: false)
+        // Current edited previews cannot bind face coordinates to an unmodified saved original.
+        if people.isEmpty || automaticDerivedSourceCurrent(source) {
+          value.facts = try PhotoPeopleFacts.replacing(value.facts ?? [], with: people, originalSha256: photo.metadata.originalSha256)
+        }
       }
       value.favorite = record.favorite
     }

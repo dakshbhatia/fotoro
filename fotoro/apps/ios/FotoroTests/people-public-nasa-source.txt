@@ -1,0 +1,6 @@
+Public test portrait: NASA official Eileen Collins portrait, KSC-99pp0310.
+Source page: https://www.nasa.gov/former-astronaut-eileen-collins/
+Image: https://images-assets.nasa.gov/image/KSC-99pp0310/KSC-99pp0310~large.jpg
+Credit: NASA. U.S. government image, public domain in the United States.
+Used only to exercise local face detection, pixel orientation and model runtime.
+Fixtures establish no face recognition accuracy, identity or demographic claims.

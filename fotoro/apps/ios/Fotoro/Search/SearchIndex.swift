@@ -205,7 +205,8 @@ final class SearchIndex: @unchecked Sendable {
       record.labels = value.labels ?? []
       record.captions = value.caption.map { [$0] } ?? []
       record.keywords = value.keywords ?? []
-      record.facts = PhotoLocationFacts.userFacts(value.facts) + (value.location?.searchTerms ?? [])
+      record.facts = PhotoLocationFacts.userFacts(value.facts).filter { !PhotoPeopleFacts.isReserved($0) } + (value.location?.searchTerms ?? [])
+      record.facts = try PhotoPeopleFacts.replacing(record.facts, with: PhotoPeopleFacts.read(value.facts ?? [], originalSha256: value.originalSha256), enforceWireLimits: false)
       record.favorite = value.favorite ?? record.favorite
       if let ocr = value.ocr, ocr.processor == record.processor {
         record.ocrText = ocr.text
@@ -276,7 +277,7 @@ final class SearchIndex: @unchecked Sendable {
     defer { generationLock.unlock() }
     workGeneration = generation
   }
-  private func acceptsGeneration(_ generation: UInt64?) -> Bool {
+  func acceptsGeneration(_ generation: UInt64?) -> Bool {
     guard let generation else { return true }
     generationLock.lock()
     defer { generationLock.unlock() }
@@ -301,6 +302,11 @@ final class SearchIndex: @unchecked Sendable {
             db, sql: "SELECT value FROM searchRecords WHERE id=?", arguments: [r.id]
           ).map(decode) {
             r.labels = old.revision == r.revision ? old.labels : (old.beforeSync?.labels ?? old.labels)
+            #if !FOTORO_LOCAL_PREVIEW
+            if old.revision == r.revision {
+              r.facts = try PhotoPeopleFacts.replacing(r.facts, with: PhotoPeopleFacts.read(old.beforeSync?.facts ?? old.facts, enforceWireLimits: false), enforceWireLimits: false)
+            }
+            #endif
             if old.revision == r.revision {
               r.syncedAccountId = old.syncedAccountId
               r.beforeSync = old.beforeSync
@@ -326,6 +332,11 @@ final class SearchIndex: @unchecked Sendable {
             "DELETE FROM searchFTS WHERE id NOT IN (SELECT id FROM permittedSearchIDs); DELETE FROM searchRecords WHERE id NOT IN (SELECT id FROM permittedSearchIDs); DELETE FROM searchPins WHERE photo NOT IN (SELECT id FROM permittedSearchIDs); DELETE FROM searchEvents WHERE photo != '' AND photo NOT IN (SELECT id FROM permittedSearchIDs); DELETE FROM searchTerms WHERE meaning NOT IN (SELECT meaning FROM searchPostings)"
         )
         try db.execute(sql: "DELETE FROM searchVectors WHERE photo NOT IN (SELECT id FROM searchRecords) OR revision!= (SELECT json_extract(value,'$.revision') FROM searchRecords WHERE id=photo)")
+        #if !FOTORO_LOCAL_PREVIEW
+        if try db.tableExists("peopleFaces") {
+          try db.execute(sql: "DELETE FROM peopleFaces WHERE photo NOT IN (SELECT id FROM searchRecords) OR revision!=(SELECT json_extract(value,'$.revision') FROM searchRecords WHERE id=photo); DELETE FROM peopleScans WHERE photo NOT IN (SELECT id FROM searchRecords) OR revision!=(SELECT json_extract(value,'$.revision') FROM searchRecords WHERE id=photo)")
+        }
+        #endif
         if records.isEmpty {
           try db.execute(sql: "DELETE FROM searchEvents; DELETE FROM searchPins")
         }
@@ -334,7 +345,7 @@ final class SearchIndex: @unchecked Sendable {
     } catch is CancellationError { return false }
   }
   func put(_ record: SearchRecord) throws { try database.write { try put(record, db: $0) } }
-  private func put(_ r: SearchRecord, db: Database) throws {
+  func put(_ r: SearchRecord, db: Database) throws {
     try db.execute(
       sql:
         "INSERT INTO searchRecords(id,scope,capture,favorite,moment,ocrState,visualState,preview,burst,value) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET scope=excluded.scope,capture=excluded.capture,favorite=excluded.favorite,moment=excluded.moment,ocrState=excluded.ocrState,visualState=excluded.visualState,preview=excluded.preview,burst=excluded.burst,value=excluded.value",
@@ -379,7 +390,15 @@ final class SearchIndex: @unchecked Sendable {
         try add(label.label, relation: .visual, evidence: 5, confidence: label.confidence)
       }
     }
-    for fact in r.facts { try add(fact, relation: .metadata, evidence: 1, supplied: true) }
+    for fact in r.facts {
+      #if !FOTORO_LOCAL_PREVIEW
+      if PhotoPeopleFacts.isReserved(fact) || fact.hasPrefix("fotoro.ai.v1:") { continue }
+      #endif
+      try add(fact, relation: .metadata, evidence: 1, supplied: true)
+    }
+    #if !FOTORO_LOCAL_PREVIEW
+    for person in PhotoPeopleFacts.read(r.facts, enforceWireLimits: false) { try add(person.n, relation: .label, evidence: 0, supplied: true) }
+    #endif
     if r.favorite { try add("favorite", relation: .metadata, evidence: 1) }
     if let date = r.capturedAt {
       let iso = ISO8601DateFormatter()

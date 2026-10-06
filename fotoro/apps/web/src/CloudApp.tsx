@@ -46,7 +46,9 @@ import {
   clearSkipped,
 } from "./exchange/sync";
 import { syncSelectedSequential } from "./exchange/selected";
-import { localOriginalDigest, queueAnnotations, queuePhotoLocation, queueLocalAnnotations, pendingAnnotations, resolveAnnotationConflict, type PendingAnnotation } from "./exchange/annotations";
+import { localOriginalDigest, queueAnnotations, queuePhotoLocation, queuePhotoObservation, queuePhotoPeople, queueLocalAnnotations, pendingAnnotations, resolveAnnotationConflict, type PendingAnnotation } from "./exchange/annotations";
+import type {PhotoObservationV1} from "@fotoro/contracts/intelligence";
+import type {PeopleAssignment} from "@fotoro/contracts/people";
 import {useSemanticFind} from "./local/useSemanticFind";
 import {visualSearchFeedback} from "./local/LocalSearch";
 import { PhotoSearchIndex, normalizeSearch } from "./local/search";
@@ -587,7 +589,10 @@ export default function CloudApp({
     try {session = requireVault();} catch {return null;}
     if (session.accountId !== account) return null;
     const current = () => sameVault(session) && currentCatalog.current === photos;
-    return {accountId: account, token: session, photos, current, locate: publicDemo ? undefined : async updates => {
+    return {accountId: account, token: session, photos, current, people: publicDemo ? undefined : async updates => {
+      if (!current() || updates.some(update => !photos.includes(update.photo) || update.photo.grantId || update.photo.manifest.ownerAccountId !== account)) throw new Error("Photo source changed");
+      for (const update of updates) await editAnnotations(update.photo, {people: update.assignments}, session);
+    }, locate: publicDemo ? undefined : async updates => {
       if (!current()) throw new Error("VAULT_LOCKED");
       return editPhotoLocations(updates, session);
     }, edit: publicDemo ? undefined : async (photo, changes) => {
@@ -646,13 +651,15 @@ export default function CloudApp({
     }) : previous);
     setAnnotationPending(previous => sameVault(session) && current() ? edits : previous);
   };
-  const editAnnotations = async (photo: Photo, changes: {labels?: string[]; favorite?: boolean; location?: PhotoLocationV1}, session = requireVault()) => {
+  const editAnnotations = async (photo: Photo, changes: {labels?: string[]; favorite?: boolean; location?: PhotoLocationV1; observation?: PhotoObservationV1; people?: PeopleAssignment[]}, session = requireVault()) => {
     if (!sameVault(session) || !currentCatalog.current.includes(photo) || photo.grantId || photo.manifest.ownerAccountId !== session.accountId) throw new Error("VAULT_LOCKED");
     try {
       setAnnotationError(null);
-      const {location, ...patch} = changes;
+      const {location, observation, people, ...patch} = changes;
       const identity = {ownerAccountId: photo.manifest.ownerAccountId, photoId: photo.manifest.photoId, originalSha256: photo.metadata.originalSha256};
       if (location && !await queuePhotoLocation(identity, location, session)) throw new Error("Photo location changed");
+      if (observation) await queuePhotoObservation(identity, observation, session);
+      if (people) await queuePhotoPeople(identity, people, session);
       if (Object.keys(patch).length) await queueAnnotations(identity, patch, session);
       await publishLocalAnnotations([photo], session);
     } catch (error) {if (sameVault(session)) {
@@ -1143,6 +1150,7 @@ export default function CloudApp({
           changes={!received ? photoChanges ?? undefined : undefined}
           onLabels={!received && !publicDemo ? (photo, labels) => editAnnotations(photo, {labels}) : undefined}
           onFavorite={!received && !publicDemo ? (photo, favorite) => editAnnotations(photo, {favorite}) : undefined}
+          onObservation={!received && !publicDemo ? (photo, observation) => editAnnotations(photo, {observation}) : undefined}
           onClose={() => setViewer(null)}
         />
       )}

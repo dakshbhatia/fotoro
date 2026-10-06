@@ -7,6 +7,7 @@ import * as devices from "./devices";
 import * as grants from "./grants";
 import { savePhoto } from "./saves";
 import * as annotations from "./annotations";
+import * as intelligence from "./intelligence";
 import {diagnosticMethod, diagnosticPhase, diagnosticErrorClass} from "./diagnostics";
 import { readJson } from "./requests";
 import {accountStorage, throttleAuth} from "./limits";
@@ -110,6 +111,14 @@ app.get("/v1/vault", async (c) =>
 app.get("/v1/storage", async (c) => {
   c.header("Cache-Control", "no-store");
   return c.json(await accountStorage(c.env, c.get("actor")));
+});
+app.get("/v1/intelligence/capabilities", async (c) => {
+  c.header("Cache-Control", "no-store");
+  return c.json(await intelligence.capabilities(c.env));
+});
+app.post("/v1/intelligence/observe", async (c) => {
+  c.header("Cache-Control", "no-store");
+  return c.json(await intelligence.observe(c.env, c.get("actor"), c.req.raw));
 });
 app.put("/v1/vault/wrappers/:id", async (c) =>
   c.json(

@@ -4,6 +4,8 @@ import type {LocalPhoto} from "../local/resources";
 import {LocalResources, imageDimensions} from "../local/resources";
 import type {SearchResult, SearchMeaning} from "../local/search";
 import type {PhotoLocationV1} from "@fotoro/contracts";
+import type {PhotoObservationV1} from "@fotoro/contracts/intelligence";
+import type {PeopleAssignment} from "@fotoro/contracts/people";
 const savedSources = new WeakMap<object, {snapshot: OwnedPhotoSnapshot; date: string; dateSource: LocalPhoto["dateSource"]; digest?: string; file?: File; location?: PhotoLocationV1}>();
 export function mergeConsumerSearchPhotos<T extends {id: string}>(local: T[], saved: T[]): T[] {
   const localIDs = new Set(local.map(photo => photo.id));
@@ -27,24 +29,45 @@ export interface OwnedPhotoSnapshot {
   photos: Photo[];
   current: () => boolean;
   preview: (photo: Photo) => Promise<Blob>;
-  edit?: (photo: Photo, changes: {labels?: string[]; favorite?: boolean; location?: PhotoLocationV1}) => Promise<void>;
+  edit?: (photo: Photo, changes: {labels?: string[]; favorite?: boolean; location?: PhotoLocationV1; observation?: PhotoObservationV1; people?: PeopleAssignment[]}) => Promise<void>;
   locate?: (updates: readonly {photo: Photo; location: PhotoLocationV1}[]) => Promise<{applied: number; failed: number; updatedPhotoIDs: string[]}>;
+  people?: (updates: readonly {photo: Photo; assignments: PeopleAssignment[]}[]) => Promise<void>;
 }
 export class ConsumerPreviewResources extends LocalResources {
   private sourceGeneration = 0;
-  override async load(photo: LocalPhoto, kind: "thumbnail" | "preview") {
+  private previewReads = new WeakMap<object, Promise<Blob | undefined>>();
+  private dimensions = new WeakMap<object, {width: number; height: number}>();
+  override async load(photo: LocalPhoto, kind: "thumbnail" | "preview", signal?: AbortSignal) {
+    signal?.throwIfAborted();
     const generation = this.sourceGeneration;
     if (!photo.file && (photo.preview || photo.previewLoader)) {
-      const preview = photo.preview ?? await photo.previewLoader?.();
+      const identity = photo.preview ?? photo.previewLoader!;
+      const known = this.dimensions.get(identity);
+      if (known) return super.load({...photo, ...known, rasterIdentity: identity,
+        previewLoader: photo.preview ? undefined : async () => {
+          const preview = await photo.previewLoader!();
+          const dimensions = imageDimensions(new Uint8Array(await preview.slice(0,256*1024).arrayBuffer()));
+          if (generation !== this.sourceGeneration || !dimensions || dimensions.width !== known.width || dimensions.height !== known.height) throw new Error("Saved preview source changed.");
+          return preview;
+        }}, kind, signal);
+      let read = this.previewReads.get(identity);
+      if (!read) {
+        read = Promise.resolve().then(() => photo.preview ?? photo.previewLoader?.());
+        this.previewReads.set(identity, read);
+      }
+      let preview: Blob | undefined;
+      try {preview = await read;} finally {if (this.previewReads.get(identity) === read) this.previewReads.delete(identity);}
+      signal?.throwIfAborted();
       if (!preview) throw new Error("Saved preview unavailable.");
       const dimensions = imageDimensions(new Uint8Array(await preview.slice(0, 256 * 1024).arrayBuffer()));
       if (generation !== this.sourceGeneration) throw new Error("Photos were cleared.");
       if (!dimensions || dimensions.width > 1600 || dimensions.height > 1600) throw new Error("Saved preview dimensions are unavailable.");
-      return super.load({...photo, ...dimensions, preview, previewLoader: undefined}, kind);
+      this.dimensions.set(identity, dimensions);
+      return super.load({...photo, ...dimensions, preview, previewLoader: undefined, rasterIdentity: identity}, kind, signal);
     }
-    return super.load(photo, kind);
+    return super.load(photo, kind, signal);
   }
-  override clear() {this.sourceGeneration++; super.clear();}
+  override clear() {this.sourceGeneration++; this.previewReads = new WeakMap(); this.dimensions = new WeakMap(); super.clear();}
 }
 function comparableDigest(photo: Pick<LocalPhoto, "digest">) {
   const digest = photo.digest;
@@ -64,7 +87,7 @@ export function savedSearchPhotos(snapshot: OwnedPhotoSnapshot | null, local: Lo
     const photo = owned[index];
     const original = record.digest ? selected.get(record.digest) : undefined;
     const id = original?.id ?? "saved:" + photo.manifest.photoId;
-    const adapted = {...record, id, originalSize: photo.metadata.originalBytes,
+    const adapted = {...record, id, observationPhotoId: record.id, originalSize: photo.metadata.originalBytes,
       visual: record.visual ? {...record.visual, photoID: id} : undefined,
       current: () => snapshot.current() && record.current?.() !== false,
       captureVerified: record.dateSource === "exif" ? true as const : undefined,

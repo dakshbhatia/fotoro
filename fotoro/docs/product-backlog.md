@@ -38,14 +38,17 @@ acceptance gates above.
 
 ## Current boundaries
 
-Native automatic preparation follows one explicit opt-in while the app is open
-and unlocked. Already scheduled ciphertext uploads may finish in the background.
+Native automatic preparation starts with the last 10 days after one explicit
+opt-in while the app is open and unlocked. Older initial photos require expansion;
+newly observed arrivals are admitted without inventing capture dates. Already scheduled ciphertext uploads may finish in the background.
 Browser uploads stay explicit. The logical-original limit is 50 MiB, including
 complete Live Photo pairs; account allocation is 10 GiB of ciphertext. Excluded
 originals remain visible and are reported as incomplete sync.
 
 Local OCR, pinned visual models, Picks/Best shots, private annotations, photo
-locations and confirmed browser Timeline import are implemented. Locations need
+locations, confirmed browser Timeline import, optional photo tables and reviewed
+local People groups are implemented. Optional Gemini observations are behind
+server enablement, bounded work caps and per-photo consent. Locations need
 real capture evidence; raw Timeline history and model vectors are not uploaded.
 Scene publication remains disabled for older-reader compatibility. Personal
 retrieval quality, physical media/background acceptance and large-library

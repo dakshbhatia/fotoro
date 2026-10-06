@@ -17,6 +17,31 @@ struct AutomaticPhotoSyncPreference: Codable, Equatable {
   var origin: String?
 }
 
+// Account isolation comes from LibraryStore; the origin is part of the persisted key.
+// The initial exclusions are fixed, so the checkpoint does not grow with new arrivals.
+struct AutomaticPhotoSyncIntake: Codable, Equatable {
+  var cutoff: Date
+  var includesAll = false
+  var initialExcludedIDs: Set<String>?
+
+  init(now: Date = Date()) { cutoff = RecentPhotosPolicy.cutoff(now: now) }
+
+  mutating func select(_ candidates: [BackupCandidate], existingSourceIDs: Set<String>,
+    now: Date = Date()) -> [BackupCandidate] {
+    if initialExcludedIDs == nil {
+      initialExcludedIDs = Set(candidates.filter {
+        !existingSourceIDs.contains($0.id) && ($0.capturedAt.map { $0 < cutoff } ?? true)
+      }.map(\.id))
+    }
+    return candidates.filter {
+      if existingSourceIDs.contains($0.id) { return true }
+      if includesAll { return true }
+      if let capturedAt = $0.capturedAt, capturedAt > now { return false }
+      return initialExcludedIDs?.contains($0.id) != true
+    }
+  }
+}
+
 struct AutomaticPhotoSyncStatus {
   enum Phase { case off, paused, locked, permissionRequired, background, ready, syncing, partial, needsAttention }
   var enabled: Bool

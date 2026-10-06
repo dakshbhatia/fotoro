@@ -727,7 +727,7 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     let oldBytes = try Data(contentsOf: context.sample)
     let newBytes = try Data(contentsOf: XCTUnwrap(Bundle(for: Self.self).url(forResource: "neutral-a", withExtension: "png")))
     services.automaticPhotosAuthorization = { .authorized }
-    services.photosBackupSnapshot = { _ in [BackupCandidate(id: "source", sourceRevision: "before")] }
+    services.photosBackupSnapshot = { _ in [BackupCandidate(id: "source", capturedAt: Date(), sourceRevision: "before")] }
     services.importer = PhotoImport(store: services.store, sourceReader: { _ in (oldBytes, "earlier.jpg", false) },
       sourceRevision: { _ in "before" })
     try services.enableAutomaticPhotoSync(); await services.waitForAutomaticPhotoSync()
@@ -749,7 +749,7 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     XCTAssertEqual(try Data(contentsOf: XCTUnwrap(oldPhoto.originalURL)), oldBytes)
 
     // PhotoKit resource admission can recover without changing the asset revision.
-    services.photosBackupSnapshot = { _ in [BackupCandidate(id: "source", sourceRevision: "after")] }
+    services.photosBackupSnapshot = { _ in [BackupCandidate(id: "source", capturedAt: Date(), sourceRevision: "after")] }
     services.importer = PhotoImport(store: services.store, sourceReader: { _ in (newBytes, "current.png", false) },
       sourceRevision: { _ in "after" })
     services.kickAutomaticPhotoSync(); await services.waitForAutomaticPhotoSync()
@@ -797,7 +797,7 @@ final class AutomaticPhotoSyncTests: XCTestCase {
       var permission = PHAuthorizationStatus.limited
       var revision = "before-edit"
       services.automaticPhotosAuthorization = { permission }
-      services.photosBackupSnapshot = { _ in [BackupCandidate(id: "source", sourceRevision: revision)] }
+      services.photosBackupSnapshot = { _ in [BackupCandidate(id: "source", capturedAt: Date(), sourceRevision: revision)] }
       services.importer = PhotoImport(store: services.store, sourceReader: { _ in (original, "public-sample.jpg", false) }, sourceRevision: { _ in "before-edit" })
       try services.enableAutomaticPhotoSync()
       while gate.count == 0 { await Task.yield() }
@@ -862,7 +862,7 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     var prepared: [String] = []
     var uploaded: [String] = []
     backup.start(snapshot: {
-      (0..<5).map { BackupCandidate(id: "source-\($0)", sourceRevision: "current") }
+      (0..<5).map { BackupCandidate(id: "source-\($0)", capturedAt: Date(), sourceRevision: "current") }
     }, valid: { true }, stage: { source, _ in
       prepared.append(source.id)
       var queued = source
@@ -881,6 +881,82 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     XCTAssertEqual(backup.status.phase, .failed)
     XCTAssertNil(backup.status.lastChecked)
   }
+  func testRecentIntakeAnchorPreservesSavedSourcesAndAdmitsLaterBackdatedArrivals() throws {
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    var intake = AutomaticPhotoSyncIntake(now: now)
+    let cutoff = intake.cutoff
+    let initial = [BackupCandidate(id: "older", capturedAt: cutoff.addingTimeInterval(-1)),
+      BackupCandidate(id: "undated"), BackupCandidate(id: "boundary", capturedAt: cutoff),
+      BackupCandidate(id: "saved-older", capturedAt: .distantPast, sourceRevision: "changed"),
+      BackupCandidate(id: "future", capturedAt: now.addingTimeInterval(60))]
+    XCTAssertEqual(intake.select(initial, existingSourceIDs: ["saved-older"], now: now).map(\.id),
+      ["boundary", "saved-older"])
+    XCTAssertEqual(intake.initialExcludedIDs, ["older", "undated"])
+    var reopened = try Wire.decode(AutomaticPhotoSyncIntake.self, Wire.encode(intake))
+    let later = initial + [BackupCandidate(id: "imported-old", capturedAt: .distantPast),
+      BackupCandidate(id: "new-undated"), BackupCandidate(id: "new-photo", capturedAt: now.addingTimeInterval(120))]
+    XCTAssertEqual(reopened.select(later, existingSourceIDs: ["saved-older"], now: now.addingTimeInterval(30 * 86400)).map(\.id),
+      ["boundary", "saved-older", "future", "imported-old", "new-undated", "new-photo"])
+    XCTAssertEqual(reopened.cutoff, cutoff, "Previously admitted photos must not age out")
+    XCTAssertEqual(reopened.initialExcludedIDs, intake.initialExcludedIDs, "The initial exclusion set remains fixed")
+    reopened.includesAll = true
+    XCTAssertEqual(reopened.select(later, existingSourceIDs: [], now: now).map(\.id), later.map(\.id))
+  }
+
+  func testIntakeCheckpointPersistsSeparatelyForAccountsAndOrigins() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
+    let first = try LibraryStore(root: root.appendingPathComponent("first"))
+    var intake = AutomaticPhotoSyncIntake(now: Date(timeIntervalSince1970: 1_800_000_000))
+    _ = intake.select([BackupCandidate(id: "old", capturedAt: .distantPast)], existingSourceIDs: [])
+    intake.includesAll = true
+    try first.setAutomaticPhotoSyncIntake(intake, origin: "https://first.test:443")
+    XCTAssertEqual(try LibraryStore(root: first.root).automaticPhotoSyncIntake(origin: "https://first.test:443"), intake)
+    XCTAssertNil(try first.automaticPhotoSyncIntake(origin: "https://second.test:443"))
+    XCTAssertNil(try LibraryStore(root: root.appendingPathComponent("second")).automaticPhotoSyncIntake(origin: "https://first.test:443"))
+  }
+
+  @MainActor func testAutomaticRecentIntakeContinuesWithNewBackdatedAndUndatedArrivals() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
+    let services = try await context.enroll()
+    defer { services.vault.lock() }
+    let bytes = try Data(contentsOf: context.sample)
+    let reads = AutomaticSourceReads()
+    services.automaticPhotosAuthorization = { .limited }
+    services.importer = PhotoImport(store: services.store, sourceReader: { source in
+      await reads.record(source.resourceIdentifier)
+      return (bytes, "public-sample.jpg", false)
+    }, sourceRevision: { _ in "current" })
+    var candidates = [BackupCandidate(id: "initial-old", capturedAt: .distantPast, sourceRevision: "current"),
+      BackupCandidate(id: "initial-undated", sourceRevision: "current"),
+      BackupCandidate(id: "recent", capturedAt: Date(), sourceRevision: "current")]
+    services.photosBackupSnapshot = { _ in candidates }
+    try services.enableAutomaticPhotoSync()
+    await services.waitForAutomaticPhotoSync()
+    let firstReads = await reads.values()
+    XCTAssertEqual(firstReads, ["recent"])
+    candidates += [BackupCandidate(id: "imported-old", capturedAt: .distantPast, sourceRevision: "current"),
+      BackupCandidate(id: "arriving-undated", sourceRevision: "current")]
+    services.kickAutomaticPhotoSync(sourcesChanged: true)
+    await services.waitForAutomaticPhotoSync()
+    let secondReads = await reads.values()
+    XCTAssertEqual(Set(secondReads), ["recent", "imported-old", "arriving-undated"])
+    XCTAssertEqual(services.backup.status.completed, 3)
+    XCTAssertFalse(services.automaticPhotoSyncIncludesAll)
+    services.pauseAutomaticPhotoSync()
+    try services.expandAutomaticPhotoSyncToAll()
+    await services.waitForAutomaticPhotoSync()
+    XCTAssertEqual(services.automaticPhotoSync.phase, .paused, "Expanding scope must not resume paused uploads")
+    let pausedReads = await reads.values()
+    XCTAssertEqual(pausedReads, secondReads)
+    try services.enableAutomaticPhotoSync()
+    await services.waitForAutomaticPhotoSync()
+    let allReads = await reads.values()
+    XCTAssertEqual(Set(allReads), Set(candidates.map(\.id)))
+    XCTAssertTrue(services.automaticPhotoSyncIncludesAll)
+  }
+
   @MainActor func testAutomaticSyncDefaultsOffWithoutLibraryScanOrNetwork() async throws {
     let context = try PausedUploadContext()
     defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
@@ -900,7 +976,7 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     XCTAssertFalse(try services.store.automaticPhotoSyncPreference().enabled)
   }
 
-  @MainActor func testOptInCoversOldAndUndatedStillsAndDoesNotRetryUnchangedCopiesOrAnnotations() async throws {
+  @MainActor func testRecentOptInExpandsToOldAndUndatedStillsWithoutRetryingUnchangedCopiesOrAnnotations() async throws {
     let context = try PausedUploadContext()
     defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
     let services = try await context.enroll()
@@ -915,14 +991,22 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     let candidates = [BackupCandidate(id: "old", capturedAt: Date(timeIntervalSince1970: 0), sourceRevision: "current"),
       BackupCandidate(id: "undated", sourceRevision: "current"),
       BackupCandidate(id: "recent", capturedAt: Date(), sourceRevision: "current"),
-      BackupCandidate(id: "unsupported", skipReason: "This photo format is not supported.", sourceRevision: "current"),
-      BackupCandidate(id: "live", skipReason: "Both Live Photo resources are required.", sourceRevision: "current")]
+      BackupCandidate(id: "unsupported", capturedAt: Date(), skipReason: "This photo format is not supported.", sourceRevision: "current"),
+      BackupCandidate(id: "live", capturedAt: Date(), skipReason: "Both Live Photo resources are required.", sourceRevision: "current")]
     services.photosBackupSnapshot = { cutoff in
-      XCTAssertEqual(cutoff, .distantPast, "Automatic sync cannot use the recent Picks cutoff")
+      XCTAssertEqual(cutoff, .distantPast, "Full metadata enumeration detects new arrivals and existing revision changes")
       return candidates
     }
     try services.enableAutomaticPhotoSync()
     await services.waitForAutomaticPhotoSync()
+    let recentReads = await reads.values()
+    XCTAssertEqual(recentReads, ["recent"])
+    XCTAssertEqual(services.backup.status.completed, 1)
+    XCTAssertFalse(services.automaticPhotoSyncIncludesAll)
+    XCTAssertEqual(Set(try services.store.backupSources().map(\.id)), ["recent", "unsupported", "live"])
+    try services.expandAutomaticPhotoSyncToAll()
+    await services.waitForAutomaticPhotoSync()
+    XCTAssertTrue(services.automaticPhotoSyncIncludesAll)
     let firstReads = await reads.values()
     XCTAssertEqual(Set(firstReads), ["old", "undated", "recent"])
     XCTAssertEqual(services.backup.status.completed, 3)
@@ -957,7 +1041,7 @@ final class AutomaticPhotoSyncTests: XCTestCase {
       let bytes = try Data(contentsOf: context.sample)
       services.automaticPhotosAuthorization = { .limited }
       services.importer = PhotoImport(store: services.store, sourceReader: { _ in (bytes, "public-sample.jpg", false) }, sourceRevision: { _ in "current" })
-      services.photosBackupSnapshot = { _ in [BackupCandidate(id: "asset", sourceRevision: "current")] }
+      services.photosBackupSnapshot = { _ in [BackupCandidate(id: "asset", capturedAt: Date(), sourceRevision: "current")] }
       let index = try SearchIndex()
       var record = SearchRecord(id: "asset"); record.revision = "current"
       record.ocrStatus = status; record.visualStatus = .unavailable
@@ -982,7 +1066,7 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     let bytes = try Data(contentsOf: context.sample)
     services.automaticPhotosAuthorization = { .limited }
     services.importer = PhotoImport(store: services.store, sourceReader: { _ in (bytes, "public-sample.jpg", false) }, sourceRevision: { _ in "current" })
-    services.photosBackupSnapshot = { _ in [BackupCandidate(id: "asset", sourceRevision: "current")] }
+    services.photosBackupSnapshot = { _ in [BackupCandidate(id: "asset", capturedAt: Date(), sourceRevision: "current")] }
     let index = try SearchIndex()
     var record = SearchRecord(id: "asset"); record.revision = "current"
     record.labels = ["Unpublished label"]; record.captions = ["Unpublished caption"]
@@ -1032,7 +1116,7 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     let bytes = try Data(contentsOf: context.sample)
     let gate = BackupGate()
     services.automaticPhotosAuthorization = { .authorized }
-    services.photosBackupSnapshot = { _ in [BackupCandidate(id: "old", sourceRevision: "current")] }
+    services.photosBackupSnapshot = { _ in [BackupCandidate(id: "old", capturedAt: Date(), sourceRevision: "current")] }
     services.importer = PhotoImport(store: services.store, sourceReader: { _ in
       await gate.wait(); return (bytes, "public-sample.jpg", false)
     }, sourceRevision: { _ in "current" })
@@ -1043,6 +1127,8 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     await services.waitForAutomaticPhotoSync()
     XCTAssertTrue(try services.store.automaticPhotoSyncPreference().enabled)
     XCTAssertTrue(try services.store.automaticPhotoSyncPreference().paused)
+    let origin = try XCTUnwrap(BackgroundUploadPolicy.origin(services.api.baseURL))
+    let intake = try XCTUnwrap(services.store.automaticPhotoSyncIntake(origin: origin))
     XCTAssertTrue(try services.store.photos().isEmpty)
     let pausedReads = PausedUploadProtocol.server.requests.count
     XCTAssertTrue(PausedUploadProtocol.server.requests.allSatisfy { $0.method == "GET" })
@@ -1051,7 +1137,7 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     defer { reopened.vault.lock() }
     var scans = 0
     reopened.automaticPhotosAuthorization = { .authorized }
-    reopened.photosBackupSnapshot = { _ in scans += 1; return [BackupCandidate(id: "old", sourceRevision: "current")] }
+    reopened.photosBackupSnapshot = { _ in scans += 1; return [BackupCandidate(id: "old", capturedAt: Date(), sourceRevision: "current")] }
     reopened.importer = PhotoImport(store: reopened.store, sourceReader: { _ in (bytes, "public-sample.jpg", false) }, sourceRevision: { _ in "current" })
     reopened.setPhotoSyncForeground(true)
     await reopened.resumeSavedAccount(initialRestoration: true)
@@ -1064,6 +1150,8 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     try reopened.enableAutomaticPhotoSync()
     await reopened.waitForAutomaticPhotoSync()
     XCTAssertFalse(try reopened.store.automaticPhotoSyncPreference().paused)
+    XCTAssertEqual(try reopened.store.automaticPhotoSyncIntake(origin: origin), intake,
+      "Resume must preserve the original cutoff and exclusions")
     XCTAssertEqual(reopened.backup.status.completed, 1)
     XCTAssertFalse(try reopened.store.syncEnabled(), "Legacy enrollment does not become consent")
   }
@@ -1079,7 +1167,7 @@ final class AutomaticPhotoSyncTests: XCTestCase {
       var permission = PHAuthorizationStatus.authorized
       var revision = "current"
       services.automaticPhotosAuthorization = { permission }
-      services.photosBackupSnapshot = { _ in [BackupCandidate(id: "old", sourceRevision: revision)] }
+      services.photosBackupSnapshot = { _ in [BackupCandidate(id: "old", capturedAt: Date(), sourceRevision: revision)] }
       services.importer = PhotoImport(store: services.store, sourceReader: { _ in
         await gate.wait(); return (bytes, "public-sample.jpg", false)
       }, sourceRevision: { _ in "current" })

@@ -1,6 +1,6 @@
 import {isCameraMedia, LIVE_PHOTO_TYPE} from "@fotoro/contracts/camera-media";
 import {cameraOriginalFiles, readCameraPlayback} from "../media/camera-original";
-import { useState, useEffect, useRef } from "react";
+import { lazy, Suspense, useState, useEffect, useRef } from "react";
 import { photoBytes, type Photo } from "./catalog";
 import { Icon } from "./icons";
 import { saveReceivedPhoto } from "../exchange/share-service";
@@ -13,6 +13,10 @@ import {photoChangeState, type ConsumerPhotoChanges} from "./consumer-changes";
 import {failedViewerPreview, readViewerPreview, viewerPreviewSource, type ViewerPreview} from "./viewer-preview";
 import {annotationLocation} from "@fotoro/contracts/location";
 import {PhotoLocation} from "../local/PhotoLocation";
+import type {PhotoObservationV1} from "@fotoro/contracts/intelligence";
+import {KeptObservations} from "../intelligence/KeptObservations";
+import {intelligenceScope} from "../intelligence/scope";
+const CloudPhotoUnderstanding = lazy(() => import("../intelligence/CloudPhotoUnderstanding").then(module => ({default: module.CloudPhotoUnderstanding})));
 export function viewerPhotoIndex(photos: Photo[], selected: string) {
   return Math.max(0, photos.findIndex(photo => photo.manifest.photoId === selected));
 }
@@ -25,6 +29,7 @@ export function Viewer({
   onShare,
   onFavorite,
   changes,
+  onObservation,
 }: {
   photos: Photo[];
   initial: string;
@@ -34,6 +39,7 @@ export function Viewer({
   onShare?: (photo: Photo) => void;
   onFavorite?: (photo: Photo, favorite: boolean) => void | Promise<void>;
   changes?: ConsumerPhotoChanges;
+  onObservation?: (photo: Photo, observation: PhotoObservationV1) => Promise<void>;
 }) {
   const [selected, setSelected] = useState(initial),
     [preview, setPreview] = useState<ViewerPreview>(),
@@ -64,6 +70,8 @@ export function Viewer({
   const shareController = useRef<AbortController | null>(null), preparedRef = useRef(prepared);
   preparedRef.current = prepared;
   const savingChangesRef = useRef(false);
+  let intelligenceSession: UnlockedVault | undefined;
+  try {intelligenceSession = requireVault();} catch {}
   currentPhoto.current = photo;
   const authorized = (source: Photo, session: UnlockedVault) => mounted.current && currentPhoto.current === source && sameVault(session);
   const originalCurrent = (source: Photo, session: UnlockedVault) => authorized(source, session) && document.visibilityState !== "hidden";
@@ -326,6 +334,16 @@ export function Viewer({
           </p>
           {!photo.grantId && <PhotoLocation location={annotationLocation(photo.annotations ?? {})} />}
           {!photo.grantId && <>
+            <KeptObservations facts={photo.annotations?.facts} photoId={photo.manifest.photoId} sourceRevision={photo.metadata.originalSha256} />
+            {onObservation && intelligenceSession && photo.manifest.ownerAccountId === intelligenceSession.accountId && <Suspense fallback={null}>
+              <CloudPhotoUnderstanding apiBase="" scopeKey={intelligenceScope(intelligenceSession)} photoId={photo.manifest.photoId} sourceRevision={photo.metadata.originalSha256}
+                current={() => mounted.current && currentPhoto.current?.manifest === photo.manifest && currentPhoto.current.metadata === photo.metadata && !currentPhoto.current.grantId && sameVault(intelligenceSession!)}
+                getPreview={async signal => {
+                  const bytes = await photoBytes(photo, "preview", signal);
+                  try {signal.throwIfAborted(); return new Blob([new Uint8Array(bytes)], {type: "image/jpeg"});}
+                  finally {bytes.fill(0);}
+                }} onObservation={observation => onObservation(photo, observation)} />
+            </Suspense>}
             {(correction.pending || correction.error || editError) && <section className="viewer-changes" aria-label="Photo changes">
               <p role="status">{correction.error || editError || (correction.conflict ? "This photo changed on another device. Review before saving." : "Changes stay on this device until you Save changes.")}</p>
               {correction.pending && changes && <button disabled={correction.busy || savingChanges} onClick={() => {

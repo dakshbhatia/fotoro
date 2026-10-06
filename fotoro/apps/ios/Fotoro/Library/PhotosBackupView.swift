@@ -162,6 +162,20 @@ struct PhotoSyncView: View {
               }
             }
             if services.photoAccountAccess != nil {
+              if status.enabled {
+                Section("Photos to sync") {
+                  Text(services.automaticPhotoSyncIncludesAll
+                    ? "All permitted photos and videos"
+                    : "Last 10 days at first sync, plus new arrivals")
+                    .font(.footnote).foregroundStyle(.secondary)
+                  if !services.automaticPhotoSyncIncludesAll {
+                    Button("Sync all permitted photos and videos", systemImage: "photo.stack") {
+                      do { try services.expandAutomaticPhotoSyncToAll() }
+                      catch { services.error = error.localizedDescription }
+                    }.accessibilityIdentifier("sync.expandAll")
+                  }
+                }
+              }
               if (try? services.annotations.ledger.pendingIDs().isEmpty) == false {
                 Section {
                   Text("Photo changes are saved on this device.").font(.footnote).foregroundStyle(.secondary)

@@ -13,7 +13,9 @@ Hono Worker with D1 and private R2. The upstream Ente application is a reference
 - Account storage limit: 10 GiB. Logical camera original limit: 50 MiB.
 - Originals, previews and thumbnails are encrypted by clients before upload.
 - Visual search runs locally. Model downloads contain public weights; private
-  photos, queries and vectors are not sent to an inference provider.
+  photos, queries and vectors stay local on that path. Optional cloud observations
+  require separate preview consent and explicitly configured provider/work limits;
+  that route remains disabled by default.
 
 The last verified active Worker is `2ca15bc9-614b-4b21-a115-f3748c60bbc4`
 at 100%, deployment `7a474426-4b3b-4d7c-baf7-026bfd36e090` (2026-10-05,
@@ -48,7 +50,11 @@ head before building release artifacts.
 Build production web assets from the qualified merged source with `pnpm build:web`.
 Development fixture settings belong to local processes and must not be exported
 into the production build. Keep the configured D1/R2 bindings and production
-origin unchanged. Apply migrations only when the qualified change requires them; the current screen changes need none.
+origin unchanged. Apply migrations only when the qualified change requires them. Optional cloud
+photo understanding adds migration `0007_cloud_inference_work.sql`; its provider
+key, enable flag and explicit account/global daily work caps must remain absent
+until cloud inference is deliberately configured. See the API README for the
+preview-consent contract and limits.
 
 Use Wrangler's existing OAuth session in the intended Cloudflare account. Do not
 copy credentials into chat, Git or release logs. From `services/api/`, prepare a

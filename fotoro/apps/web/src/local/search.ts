@@ -2,6 +2,8 @@ import {parseNaturalDateQuery} from "./natural-date";
 import type {PhotoVisualV1, PhotoLocationV1} from "@fotoro/contracts";
 import {validatedVisualLabels} from "@fotoro/contracts/visual";
 import {isLocationFact, validatedPhotoLocation} from "@fotoro/contracts/location";
+import {isCloudObservationFact, observationSearchText} from "@fotoro/contracts/intelligence";
+import {isPeopleFact, peopleNames} from "@fotoro/contracts/people";
 
 export interface SearchOcr {
   photoID: string;
@@ -13,6 +15,7 @@ export interface SearchOcr {
   error?: string;
 }
 export interface SearchPhoto {
+  observationPhotoId?: string;
   id: string;
   digest?: string;
   filename: string;
@@ -132,7 +135,15 @@ export class PhotoSearchIndex {
         add(keyword, "keyword", photo.id);
         for (const word of words(keyword)) add(word, "keyword", photo.id);
       }
-      for (const fact of photo.facts ?? []) if (!isLocationFact(fact)) { add(fact, "fact", photo.id); phraseSource(fact, "fact", photo.id); }
+      for (const fact of photo.facts ?? []) if (!isLocationFact(fact) && !isCloudObservationFact(fact) && !isPeopleFact(fact)) { add(fact, "fact", photo.id); phraseSource(fact, "fact", photo.id); }
+      for (const fact of observationSearchText(photo, {photoId: photo.observationPhotoId ?? photo.id, sourceRevision: photo.digest ?? photo.id})) {
+        add(fact, "fact", photo.id); phraseSource(fact, "fact", photo.id);
+        for (const word of words(fact)) add(word, "fact", photo.id);
+      }
+      for (const name of peopleNames(photo.facts, photo.digest ?? "")) {
+        add(name, "label", photo.id); phraseSource(name, "label", photo.id);
+        for (const word of words(name)) add(word, "label", photo.id);
+      }
       const location = validatedPhotoLocation(photo.location);
       if (location) {
         add("GPS", "fact", photo.id);

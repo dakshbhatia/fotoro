@@ -216,3 +216,42 @@ test("portrait EXIF orientation uses display dimensions for undistorted bounded 
   assert.equal(photo.width, 3000);
   assert.equal(photo.height, 4000);
 });
+test("visible URL lease survives cache eviction and cancels queued viewport decodes", async () => {
+  const oldBitmap = globalThis.createImageBitmap, oldDocument = globalThis.document, oldCreate = URL.createObjectURL, oldRevoke = URL.revokeObjectURL;
+  const revoked: string[] = [], decoded: string[] = []; let serial = 0;
+  const manager = new LocalResources();
+  let release!: () => void;
+  globalThis.createImageBitmap = (async (file: File, options: any) => {
+    decoded.push(file.name);
+    if (file.name === "first.png") await new Promise<void>(resolve => {release = resolve;});
+    return {width: options.resizeWidth, height: options.resizeHeight, close() {}};
+  }) as any;
+  globalThis.document = {createElement: () => ({width: 0, height: 0, getContext: () => ({drawImage() {}}), toBlob: (callback: any) => callback(new Blob(["preview"], {type: "image/jpeg"}))})} as any;
+  URL.createObjectURL = () => `blob:lease-${serial++}`; URL.revokeObjectURL = url => {revoked.push(url);};
+  const source = (id: string) => ({id, file: new File([png()], `${id}.png`, {type: "image/png"}), filename: `${id}.png`, date: new Date().toISOString(), dateSource: "selected" as const, width: 4000, height: 4000});
+  try {
+    const visible = new AbortController(), leaving = new AbortController();
+    const first = manager.lease(source("first"), "preview", visible.signal);
+    while (!release) await new Promise(resolve => setTimeout(resolve, 0));
+    const skipped = manager.load(source("leaving"), "thumbnail", leaving.signal);
+    const rejection = assert.rejects(skipped, {name: "AbortError"}); leaving.abort(); release();
+    const leased = await first; await rejection;
+    assert.deepEqual(decoded, ["first.png"]);
+    for (let index = 0; index < 4; index++) await manager.load(source(`next${index}`), "preview");
+    assert.ok(!revoked.includes(leased.url), "LRU eviction must not break the mounted view URL");
+    assert.ok(manager.decodedBytes <= LOCAL_RASTER_BUDGET);
+    visible.abort(); assert.ok(revoked.includes(leased.url));
+    const count = revoked.length; manager.clear(); assert.equal(revoked.filter(url => url === leased.url).length, 1); assert.ok(revoked.length >= count);
+    const {ConsumerPreviewResources}=await import("../src/library/consumer-search");
+    const saved=new ConsumerPreviewResources(),savedController=new AbortController();let reads=0;
+    const bytes=png();new DataView(bytes.buffer).setUint32(16,512);new DataView(bytes.buffer).setUint32(20,320);
+    const savedPhoto={id:"saved:one",filename:"saved.png",date:new Date().toISOString(),dateSource:"photos" as const,width:4000,height:3000,
+      previewLoader:async()=>{reads++;await Promise.resolve();return new Blob([bytes],{type:"image/png"});}};
+    const [left,right]=await Promise.all([saved.lease(savedPhoto,"thumbnail",savedController.signal),saved.lease(savedPhoto,"thumbnail",savedController.signal)]);
+    assert.equal(reads,1,"Concurrent visible faces share one verified preview read");
+    await saved.load(savedPhoto,"thumbnail");
+    assert.equal(reads,1,"A warm thumbnail reuses its verified dimensions and raster without decrypting the saved preview again");
+    assert.ok(!revoked.includes(left.url)&&!revoked.includes(right.url),"Fresh Blob wrappers must not invalidate other faces of the same saved original");
+    saved.clear();assert.ok(revoked.includes(left.url)&&revoked.includes(right.url));savedController.abort();
+  } finally {manager.clear(); globalThis.createImageBitmap = oldBitmap; globalThis.document = oldDocument; URL.createObjectURL = oldCreate; URL.revokeObjectURL = oldRevoke;}
+});

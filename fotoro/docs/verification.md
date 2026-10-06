@@ -1,9 +1,47 @@
-# Verification — October 5, 2026
+# Verification — October 6, 2026
 
 This is the current evidence record. [The backlog](product-backlog.md) owns next
 work; [product](product.md) owns the intended experience. Earlier measurements and
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
+
+## October 6 foundation implementation checks
+
+The current local implementation adds durable last-10-days initial Sync intake,
+explicit expansion, optional browser photo tables, reviewed local People groups
+and optional per-photo Gemini observations. These changes have not yet replaced
+the production checkpoint below.
+
+The first local `pnpm check` passes: 33 core, 79 API and 448 web tests, plus 20 search
+fixture cases, seven Picks cases, preview/release artifact audits and the web
+build. A fresh built startup check measures 410,890 bytes in one static
+JavaScript chunk, within the 500 KiB budget. Isolated encrypted exchange passes
+all five tests. The pinned TinyCLIP public-image inference smoke passes.
+
+Browser checks at 1280×900 and 320×740 exercise table sorting, extra columns,
+selection and the same viewer without page overflow or unexpected errors.
+Actual YuNet/SFace inference on a public example finds 16 faces with finite
+normalized 128-value templates. People checks exercise explicit naming, merging,
+separating and finding the reviewed name. Public weights and runtime requests
+carry no authorization or referrer; no photo or template is uploaded. Browser
+lifecycle checks cancel work and clear provisional groups.
+
+Full native verification passes 377 of 378 tests with the existing Vision skip.
+Eight People regressions include actual pinned YuNet/SFace inference, a public
+NASA portrait rotation case and PhotoKit naming/search/rejection. The aligned
+portrait rotation exceeds 0.99 cosine similarity; this single fixture does not
+qualify general identity accuracy. Corrections recheck current per-asset access
+and revisions, adjusted-current boxes stay local, and a legal 64-fact GPS
+annotation remains hydratable after search-term expansion.
+
+A rendered Gemini component check uses a synthetic JPEG and mocked provider
+responses. Analyze needs separate preview consent and stages a review without
+keeping anything. Keep, Discard and lock clearing pass without page errors.
+Encrypted annotation regressions verify current source binding, preservation of
+newer supplied/People/location facts, local-to-owned digest rebinding and removal
+of obsolete categories. No paid provider call was made. Default cloud enablement
+remains off; live provider behavior, personal-library quality, physical phone
+performance and complete cross-device acceptance remain unqualified.
 
 ## Qualified source and live web
 

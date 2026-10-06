@@ -2,7 +2,10 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { type LocalPhoto, LocalResources } from "./resources";
 import {captureGroup} from "./capture-groups";
-interface PickSelection {
+import {PhotoTable} from "./PhotoTable";
+import {photoColumns, type PhotoColumn} from "./photo-table";
+import {useLocalThumbnail} from "./useLocalThumbnail";
+export interface PickSelection {
   ids: ReadonlySet<string>;
   reasons?: ReadonlyMap<string, string[]>;
   disabled: boolean;
@@ -22,22 +25,7 @@ function Tile({
   onFailure: (id: string, message: string) => void;
   selection?: PickSelection;
 }) {
-  const [url, setUrl] = useState(""), [error, setError] = useState("");
-  useEffect(() => {
-    let alive = true;
-    setUrl(""); setError("");
-    resources
-      .load(photo, "thumbnail")
-      .then((value) => {
-        if (alive) setUrl(value.url);
-      })
-      .catch((error) => {
-        if (alive) {setError(error.message); onFailure(photo.id, error.message);}
-      });
-    return () => {
-      alive = false;
-    };
-  }, [photo.id, photo.file, photo.previewLoader, resources]);
+  const {url, error} = useLocalThumbnail(photo, resources, onFailure);
   return (
     <div className="tile">
       <button
@@ -66,6 +54,24 @@ function Tile({
   );
 }
 export function LocalLibrary({
+  ...props
+}: Parameters<typeof LocalGrid>[0]) {
+  const [view, setView] = useState<"grid" | "table">("grid");
+  const [columns, setColumns] = useState<ReadonlySet<PhotoColumn>>(() => new Set(["name", "date", "type", "availability"]));
+  const visibleColumns = photoColumns.filter(column => columns.has(column.id)).map(column => column.id);
+  return <>
+    <div className="photo-view-controls">
+      <div role="group" aria-label="Photo view"><button aria-pressed={view === "grid"} onClick={() => setView("grid")}>Grid</button><button aria-pressed={view === "table"} onClick={() => setView("table")}>Table</button></div>
+      {view === "table" && <details className="photo-column-options"><summary>Columns</summary><fieldset><legend className="visually-hidden">Visible columns</legend>
+        {photoColumns.map(column => <label key={column.id}><input type="checkbox" checked={columns.has(column.id)} disabled={column.id === "name"} onChange={event => {
+          const checked = event.target.checked; setColumns(current => {const next = new Set(current); checked ? next.add(column.id) : next.delete(column.id); return next;});
+        }} />{column.label}</label>)}
+      </fieldset></details>}
+    </div>
+    {view === "grid" ? <LocalGrid {...props} /> : <PhotoTable {...props} columns={visibleColumns} />}
+  </>;
+}
+function LocalGrid({
   photos,
   resources,
   onOpen,

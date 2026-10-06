@@ -592,3 +592,54 @@ private final class SearchImageRequest: @unchecked Sendable {
     if let requestID { manager.cancelImageRequest(requestID) }
   }
 }
+
+#if !FOTORO_LOCAL_PREVIEW
+extension LocalSearchStore {
+  var peopleSnapshotReady: Bool { ready }
+  var peopleIndex: SearchIndex? { index }
+  func canEditPeoplePhoto(_ id: String, revision: String) -> Bool {
+    guard ready, assets[id]?.sourceRevision == revision,
+      RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+      let current = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject,
+      !current.isHidden else { return false }
+    return RecentPhoto.sourceRevision(current) == revision
+  }
+  func publishPeopleEdit(_ record: SearchRecord) throws {
+    guard canEditPeoplePhoto(record.id, revision: record.revision) else { throw FotoroError("This photo changed or is no longer permitted.") }
+    try onRecordChanged?(record, true)
+    updateQuery(query)
+  }
+  func analyzePeople(_ record: SearchRecord) async throws -> Bool {
+    let token = work.generation
+    guard let index, let photo = assets[record.id], photo.sourceRevision == record.revision,
+      RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)) else { return false }
+    // An independent PhotoKit request cannot displace metadata/OCR indexing's cancellation handle.
+    let manager = PHImageManager()
+    let request = SearchImageRequest(manager: manager)
+    let options = PHImageRequestOptions()
+    options.isNetworkAccessAllowed = false; options.deliveryMode = .highQualityFormat; options.resizeMode = .exact; options.version = .current
+    let preview = await withTaskCancellationHandler {
+      await withCheckedContinuation { continuation in
+        request.start(continuation)
+        let id = manager.requestImage(for: photo.asset, targetSize: CGSize(width: 1600, height: 1600), contentMode: .aspectFit, options: options) { image, info in
+          guard (info?[PHImageResultIsDegradedKey] as? Bool) != true else { return }
+          guard (info?[PHImageCancelledKey] as? Bool) != true, let image, let cg = image.cgImage else { request.complete(nil); return }
+          request.complete(SearchPreview(image: cg, orientation: Self.orientation(image.imageOrientation)))
+        }
+        request.setID(id)
+      }
+    } onCancel: { request.cancel() }
+    guard let preview else { return false }
+    let faces = try await PhotoFaceProcessor.shared.analyze(preview)
+    try Task.checkCancellation()
+    guard token == work.generation, assets[record.id]?.sourceRevision == record.revision,
+      RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+      let current = PHAsset.fetchAssets(withLocalIdentifiers: [record.id], options: nil).firstObject,
+      !current.isHidden, RecentPhoto.sourceRevision(current) == record.revision else { return false }
+    let worker = Task.detached(priority: .utility) {
+      try index.applyPeople(faces, photoID: record.id, revision: record.revision, generation: token)
+    }
+    return try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
+  }
+}
+#endif
