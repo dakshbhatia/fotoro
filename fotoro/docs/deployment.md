@@ -77,10 +77,11 @@ personal-account sync or original restoration on a physical phone.
 
 ## Native distribution
 
-The last verified TestFlight build is 25 (`VALID`, `IN_BETA_TESTING`). This code
-pass uses CI for native validation; no new IPA, phone install or TestFlight upload
-is implied by web deployment. The owner reports Xcode already signed in; do not
-repeat historical account setup instructions.
+The last verified TestFlight build is 40 (0.1.0), shown as `Complete` in build
+uploads and `Testing` in the existing Fotoro Internal group on October 6. The
+owner's existing tester account has access. Its archive and distribution IPA
+were audited before upload; physical installation and acceptance remain unverified.
+The existing signed-in Xcode account supplied signing and upload authentication.
 
 Build 38 archives the qualified PR 43 source and passes the full archive audit
 with all 69 native input hashes matched. It is development-signed; no IPA was
@@ -100,10 +101,21 @@ account or claim the build is upload-ready. An individual API key uses
 available distribution identity/profile, a usable signed-in Xcode account, or a
 team key with its issuer for automatic provisioning. Keep keys outside the repo.
 
-Foundation candidate build 39 compiles and passes its full archive audit. The
-October 6 local distribution export actually fails with `No Accounts` and no
-matching iOS Distribution certificate/private key. No distribution IPA or
-TestFlight upload was produced; build 25 remains the last verified upload.
+On October 6, restoring the existing Xcode account and using an Apple-first
+process PATH allowed CLI and Organizer exports of build 39. The supplied
+Organizer `Copy failed` log mixed Apple rsync with Homebrew rsync 3.5.1, which
+rejected `--extended-attributes`. The build helper already sets that tool path.
+Apple accepted the upload but rejected build 39's processing with 90208: ONNX's
+plist minimum OS was 15.1 while Xcode's generated resource-framework binary
+required 26.0.
+
+Build 40 corrects the copied framework's metadata and re-signs it in a final
+archive-only full-app phase. Both archive and signed IPA pass the strengthened
+audit with minimum OS 26.0. Apple completed processing; the encryption answers
+declare standard algorithms outside Apple's OS and preserve the approved France
+exclusion. The existing group's automatic distribution made build 40 available
+to its one tester, and the What to Test notes were saved and read back. This
+internal candidate does not qualify a production web deployment or PR merge.
 
 First App Store publication excludes France, as approved by the owner. Keep full
 app encryption and the distribution artifact's compliance declaration aligned;
@@ -115,7 +127,8 @@ binary/dSYM UUIDs and ten defined static crypto symbols. Preview scope,
 false or malformed full-app encryption declarations, extra executable resources
 and a mismatched exported build fail before upload. The only accepted nested
 Mach-O is ONNX Runtime 1.24.2's pinned codeless resource-framework stub: unsigned
-bytes, platform, identity and signature are checked, and the main binary's dSYM
+bytes, platform, declared/binary/app minimum-OS compatibility, identity and
+signature are checked, and the main binary's dSYM
 must prove static ONNX linkage. Other nested executables remain rejected.
 `pnpm check` includes the release artifact and orchestration regressions.
 An archive-only audit does not qualify an IPA

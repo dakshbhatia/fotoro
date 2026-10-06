@@ -14,6 +14,16 @@ function fail(code) {const e=new Error(`Full app artifact audit failed: ${code}.
 // Pin every unsigned byte of that stub (including UUID, platform and load
 // commands). Only code-signature size fields vary during distribution signing.
 const ortStubSha256='56d8eb73285a7b1cb70d21b232ce6f45e90e247aac4270ff5d7e17c49996972a';
+function minimumOs(value) {
+  if(typeof value!=='string'||!/^(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*)){0,2}$/.test(value))return;
+  const parts=value.split('.').map(Number);while(parts.length<3)parts.push(0);
+  if(parts[0]<1||parts[0]>65535||parts[1]>255||parts[2]>255)return;
+  return parts;
+}
+function compareOs(a,b) {
+  for(let i=0;i<3;i++)if(a[i]!==b[i])return Math.sign(a[i]-b[i]);
+  return 0;
+}
 function ortStubFingerprint(path) {
   const file=readFileSync(path);
   let slice=file;
@@ -26,7 +36,7 @@ function ortStubFingerprint(path) {
   if(slice.readUInt32LE(0)!==0xfeedfacf||slice.readUInt32LE(4)!==0x0100000c
     ||slice.readUInt32LE(12)!==6)fail('INVALID_ORT_ARCHITECTURE');
   const normalized=Buffer.from(slice),count=slice.readUInt32LE(16),commandsEnd=32+slice.readUInt32LE(20);
-  let cursor=32,signatureOffset,signatureSize,platform,emptyText=false;
+  let cursor=32,signatureOffset,signatureSize,platform,binaryMinimum,emptyText=false;
   for(let i=0;i<count;i++) {
     if(cursor+8>commandsEnd||commandsEnd>slice.length)fail('INVALID_ORT_STUB');
     const command=slice.readUInt32LE(cursor),size=slice.readUInt32LE(cursor+4);
@@ -36,7 +46,12 @@ function ortStubFingerprint(path) {
       signatureOffset=slice.readUInt32LE(cursor+8);signatureSize=slice.readUInt32LE(cursor+12);
       normalized.fill(0,cursor+8,cursor+16);
     }
-    if(command===0x32)platform=slice.readUInt32LE(cursor+8);
+    if(command===0x32) {
+      if(size<24||platform!==undefined)fail('INVALID_ORT_STUB');
+      platform=slice.readUInt32LE(cursor+8);
+      const packed=slice.readUInt32LE(cursor+12);
+      binaryMinimum=[packed>>>16,(packed>>>8)&255,packed&255];
+    }
     if(command===0x19) {
       const name=slice.toString('ascii',cursor+8,cursor+24).replace(/\0.*$/s,'');
       if(name==='__LINKEDIT') {
@@ -51,15 +66,19 @@ function ortStubFingerprint(path) {
   }
   if(cursor!==commandsEnd||platform!==2||!emptyText||signatureOffset<commandsEnd
     ||signatureOffset+signatureSize!==slice.length)fail('INVALID_ORT_STUB');
-  return createHash('sha256').update(normalized.subarray(0,signatureOffset)).digest('hex');
+  return {sha256:createHash('sha256').update(normalized.subarray(0,signatureOffset)).digest('hex'),binaryMinimum};
 }
-function ortIdentity(app,teamIdentifier) {
+function ortIdentity(app,appInfo,teamIdentifier) {
   const framework=join(app,'Frameworks/onnxruntime.framework'),binary=join(framework,'onnxruntime');
   const value=tools.plist(join(framework,'Info.plist'));
   if(value.CFBundleIdentifier!=='com.microsoft.onnxruntime'||value.CFBundleExecutable!=='onnxruntime'
     ||value.CFBundlePackageType!=='FMWK'||value.CFBundleVersion!=='1.24.2'
     ||value.CFBundleShortVersionString!=='1.24.2')fail('INVALID_ORT_IDENTITY');
-  if(ortStubFingerprint(binary)!==ortStubSha256)fail('UNRECOGNIZED_ORT_STUB');
+  const stub=ortStubFingerprint(binary);
+  if(stub.sha256!==ortStubSha256)fail('UNRECOGNIZED_ORT_STUB');
+  const frameworkMinimum=minimumOs(value.MinimumOSVersion),appMinimum=minimumOs(appInfo.MinimumOSVersion);
+  if(!frameworkMinimum||!appMinimum||compareOs(frameworkMinimum,stub.binaryMinimum)<0
+    ||compareOs(frameworkMinimum,appMinimum)>0)fail('INVALID_ORT_MINIMUM_OS');
   tools.runTool('codesign',['--verify','--strict',framework]);
   // Verify the nested signature independently, including its expected identity
   // and the same team as the app. Empty stubs have no source and no dSYM.
@@ -81,7 +100,7 @@ function identity(app,value,dsyms,teamIdentifier,{distribution=false}={}) {
   const main=join(app,value.CFBundleExecutable),ort=join(app,'Frameworks/onnxruntime.framework/onnxruntime');
   if(!binaries.includes(main)||binaries.some(path=>path!==main&&path!==ort))fail('UNEXPECTED_EXECUTABLE');
   if(files.some(path=>path.startsWith(join(app,'Frameworks/onnxruntime.framework')+'/'))&&!binaries.includes(ort))fail('INVALID_ORT_STUB');
-  const ortUuid=binaries.includes(ort)?ortIdentity(app,teamIdentifier):undefined;
+  const ortUuid=binaries.includes(ort)?ortIdentity(app,value,teamIdentifier):undefined;
   tools.runTool('codesign',['--verify','--strict','--deep',app]);
   const xml=tools.runTool('codesign',['-d','--entitlements',':-',app]);
   const entitlements=JSON.parse(tools.runTool('plutil',['-convert','json','-o','-','-'],{input:xml}));

@@ -10,7 +10,7 @@ marketing_version=version_match.group(1) if version_match else '0.1.0'
 objects={}
 def uid(s): return hashlib.sha1(s.encode()).hexdigest()[:24].upper()
 def add(name,body): objects[uid(name)]=body;return uid(name)
-def q(s): return '"'+s+'"'
+def q(s): return '"'+s.replace('\\','\\\\').replace('"','\\"').replace('\n','\\n')+'"'
 files=[];build=[];resources=[];testfiles=[];testres=[];file_refs={}
 for folder in ['Fotoro','FotoroTests']:
  for p in sorted((root/folder).rglob('*')):
@@ -77,6 +77,13 @@ for target,sources,res,ptype,host,target_deps,target_frameworks in definitions:
  prod=add(target+'product',f'isa = PBXFileReference; explicitFileType = wrapper.{"application" if app else "cfbundle"}; path = {target}.{"app" if app else "xctest"}; sourceTree = BUILT_PRODUCTS_DIR;');products.append(prod)
  phases=[]
  for kind,items in [('Sources',sources),('Resources',res),('Frameworks',target_frameworks)]:phases.append(add(target+kind,f'isa = PBX{kind}BuildPhase; buildActionMask = 2147483647; files = ({",".join(items)}); runOnlyForDeploymentPostprocessing = 0;'))
+ if target=='Fotoro':
+  # Xcode injects an empty dylib into ORT's static resource framework using the
+  # app deployment target, but retains the upstream iOS 15.1 Info.plist value.
+  # Wait for implicit SPM copying and signing before correcting and re-signing
+  # the copied bundle. A separate stamp avoids a second producer for Info.plist.
+  inputs=[q('$(SRCROOT)/scripts/normalize-ort-framework.sh')]+[q('$(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/onnxruntime.framework/'+p) for p in ['Info.plist','onnxruntime','_CodeSignature']]
+  phases.append(add('FotoroNormalizeORT',f'isa = PBXShellScriptBuildPhase; buildActionMask = 2147483647; alwaysOutOfDate = 1; files = (); inputPaths = ({",".join(inputs)}); outputPaths = ({q("$(DERIVED_FILE_DIR)/fotoro-ort-framework-normalized.stamp")}); name = "Normalize ONNX Runtime deployment metadata"; shellPath = /bin/sh; shellScript = {q("exec /bin/sh \"$SRCROOT/scripts/normalize-ort-framework.sh\"")}; runOnlyForDeploymentPostprocessing = 1;'))
  configs=[]
  for conf in ['Debug','Release']:
   bundle='cloud.fotoro.Fotoro' if app else 'cloud.fotoro.'+target

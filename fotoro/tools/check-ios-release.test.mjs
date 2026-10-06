@@ -22,12 +22,12 @@ function binary(path,changes={}) {mkdirSync(join(path,'..'),{recursive:true});wr
 function fixture({ort=true}={}) {
   const root=mkdtempSync(join(tmpdir(),'fotoro-release-test-'));roots.push(root);
   const archivePath=join(root,'build.xcarchive'),app=join(archivePath,'Products/Applications/Fotoro.app');mkdirSync(app,{recursive:true});
-  const info={CFBundleIdentifier:'cloud.fotoro.Fotoro',CFBundleExecutable:'Fotoro',FotoroBuildMode:'encrypted',CFBundleVersion:'39',CFBundleShortVersionString:'1.0',ITSAppUsesNonExemptEncryption:true};
+  const info={CFBundleIdentifier:'cloud.fotoro.Fotoro',CFBundleExecutable:'Fotoro',FotoroBuildMode:'encrypted',CFBundleVersion:'39',CFBundleShortVersionString:'1.0',ITSAppUsesNonExemptEncryption:true,MinimumOSVersion:'26.0'};
   const infoPath=join(app,'Info.plist');writeFileSync(infoPath,JSON.stringify(info));
   const executable=join(app,'Fotoro');binary(executable);
   const dsym=join(archivePath,'dSYMs/Fotoro.app.dSYM/Contents/Resources/DWARF/Fotoro');binary(dsym);
   const framework=join(app,'Frameworks/onnxruntime.framework'),ortBinary=join(framework,'onnxruntime');
-  const ortInfo={CFBundleIdentifier:'com.microsoft.onnxruntime',CFBundleExecutable:'onnxruntime',CFBundlePackageType:'FMWK',CFBundleVersion:'1.24.2',CFBundleShortVersionString:'1.24.2'};
+  const ortInfo={CFBundleIdentifier:'com.microsoft.onnxruntime',CFBundleExecutable:'onnxruntime',CFBundlePackageType:'FMWK',CFBundleVersion:'1.24.2',CFBundleShortVersionString:'1.24.2',MinimumOSVersion:'26.0'};
   if(ort) {mkdirSync(framework,{recursive:true});writeFileSync(ortBinary,stub);writeFileSync(join(framework,'Info.plist'),JSON.stringify(ortInfo));}
   return {root,archivePath,app,info,infoPath,executable,dsym,framework,ortBinary,ortInfo,commands:[],
     entitlements:{'application-identifier':`${team}.cloud.fotoro.Fotoro`,'com.apple.developer.associated-domains':['webcredentials:fotoro.cloud','applinks:fotoro.cloud'],'get-task-allow':false}};
@@ -79,6 +79,15 @@ test('hidden executable rejected even with matching dSYM',()=>reject(f=>binary(j
 test('unapproved framework executable rejected',()=>reject(f=>binary(join(f.app,'Frameworks/other.framework/other')),'UNEXPECTED_EXECUTABLE'));
 test('ORT identity substitution rejected',()=>reject(f=>{f.ortInfo.CFBundleIdentifier='other';writeFileSync(join(f.framework,'Info.plist'),JSON.stringify(f.ortInfo));},'INVALID_ORT_IDENTITY'));
 test('ORT version substitution rejected',()=>reject(f=>{f.ortInfo.CFBundleVersion='1.24.3';writeFileSync(join(f.framework,'Info.plist'),JSON.stringify(f.ortInfo));},'INVALID_ORT_IDENTITY'));
+test('build39 framework declaration15.1 rejects pinned iOS26 executable before signing',()=>reject(f=>{f.ortInfo.MinimumOSVersion='15.1';writeFileSync(join(f.framework,'Info.plist'),JSON.stringify(f.ortInfo));},'INVALID_ORT_MINIMUM_OS'));
+test('missing framework deployment declaration rejected',()=>reject(f=>{delete f.ortInfo.MinimumOSVersion;writeFileSync(join(f.framework,'Info.plist'),JSON.stringify(f.ortInfo));},'INVALID_ORT_MINIMUM_OS'));
+test('malformed framework deployment declarations rejected',async()=>{for(const value of ['26.x','26.0suffix','26.0.0.1','',26,'26.256','65536.0'])await reject(f=>{f.ortInfo.MinimumOSVersion=value;writeFileSync(join(f.framework,'Info.plist'),JSON.stringify(f.ortInfo));},'INVALID_ORT_MINIMUM_OS');});
+test('framework declaration cannot require a newer OS than the app',()=>reject(f=>{f.ortInfo.MinimumOSVersion='26.1';writeFileSync(join(f.framework,'Info.plist'),JSON.stringify(f.ortInfo));},'INVALID_ORT_MINIMUM_OS'));
+test('application deployment declaration must be valid for the compatibility comparison',async()=>{for(const value of [undefined,'26.beta'])await reject(f=>{f.info.MinimumOSVersion=value;writeFileSync(f.infoPath,JSON.stringify(f.info));},'INVALID_ORT_MINIMUM_OS');});
+test('deployment components are compared numerically and equivalent versions accepted',async()=>{
+ const f=fixture();f.ortInfo.MinimumOSVersion='26.0.0';f.info.MinimumOSVersion='26';writeFileSync(join(f.framework,'Info.plist'),JSON.stringify(f.ortInfo));writeFileSync(f.infoPath,JSON.stringify(f.info));assert.equal((await load(f))(input(f)).archiveAudited,true);
+ const newer=fixture();newer.ortInfo.MinimumOSVersion='26.2';newer.info.MinimumOSVersion='26.10';writeFileSync(join(newer.framework,'Info.plist'),JSON.stringify(newer.ortInfo));writeFileSync(newer.infoPath,JSON.stringify(newer.info));assert.equal((await load(newer))(input(newer)).archiveAudited,true);
+});
 test('malformed ORT executable cannot bypass optional legacy path',()=>reject(f=>writeFileSync(f.ortBinary,'invalid executable'),'INVALID_ORT_STUB'));
 test('code-bearing ORT framework rejected',()=>reject(f=>mutateStub(f,b=>b.writeBigUInt64LE(4n,commandOffset(b,0x19)+112)),'INVALID_ORT_STUB'));
 test('unsigned byte change rejected by fingerprint',()=>reject(f=>mutateStub(f,b=>{b[1000]=1;}),'UNRECOGNIZED_ORT_STUB'));
@@ -94,5 +103,6 @@ test('artifact symlinks rejected before scanning',()=>reject(f=>symlinkSync(f.or
 test('identical signed IPA stub accepted',async()=>{const f=fixture(),check=await load(f);writeFileSync(join(f.root,'sample.ipa'),'fixture');assert.equal(check({...input(f),ipaPath:join(f.root,'sample.ipa')}).ipaAudited,true);});
 test('IPA omitted framework cannot inherit archive audit',()=>reject(f=>{f.mutateIpa=app=>rmSync(join(app,'Frameworks'),{recursive:true});},'IPA_BINARY_MISMATCH',{ipa:true}));
 test('IPA substituted framework rejected independently',()=>reject(f=>{f.mutateIpa=app=>{const b=Buffer.from(stub);b[1000]=1;writeFileSync(join(app,'Frameworks/onnxruntime.framework/onnxruntime'),b);};},'UNRECOGNIZED_ORT_STUB',{ipa:true}));
+test('IPA-only stale framework declaration rejected independently of valid archive',()=>reject(f=>{f.mutateIpa=app=>{writeFileSync(join(app,'Frameworks/onnxruntime.framework/Info.plist'),JSON.stringify({...f.ortInfo,MinimumOSVersion:'15.1'}));};},'INVALID_ORT_MINIMUM_OS',{ipa:true}));
 test('IPA debug entitlement still rejected',()=>reject(f=>{f.entitlements['get-task-allow']=true;},'IPA_ALLOWS_DEBUGGING',{ipa:true}));
 try {for(const {name,run} of tests){await run();console.log(`PASS ${name}`);}console.log(`Passed ${tests.length} full artifact verifier tests.`);}finally{for(const root of roots)rmSync(root,{recursive:true,force:true});}

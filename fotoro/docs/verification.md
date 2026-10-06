@@ -60,13 +60,25 @@ Cloud capabilities and inference require the unlocked vault's expected account
 to match the authenticated server account. A real shared-cookie regression
 rejects an account switch before allocating work or dispatching a provider call.
 
-Full iPhone candidate build 39 compiles and passes the archive audit, including
-signed identity, matching binary/dSYM UUIDs, production associations, ten static
-crypto symbols and the pinned codeless ONNX resource-framework stub. The actual
-local distribution export fails with `No Accounts` and no matching iOS
-Distribution certificate/private key. No distribution IPA or TestFlight upload
-was produced. Build 25 remains the last verified TestFlight build; the candidate
-does not replace the qualified production checkpoint below.
+After the existing Xcode account was restored, build 39 exported through CLI and
+Organizer and uploaded successfully. Apple then rejected processing with 90208:
+the ONNX framework plist declared iOS 15.1 while Xcode's generated empty binary
+required iOS 26.0. The earlier artifact audit missed this metadata mismatch.
+
+Replacement build 40 uses a final full-app archive phase that waits for implicit
+framework copying and signing, sets the copied framework minimum OS to the app's
+deployment target, and re-signs it before app signing. The real build log confirms
+that ordering. Both archive and signed IPA declare iOS 26.0 and pass the full
+artifact audit; the strengthened audit rejects the actual build 39 archive.
+All nine release orchestration, 31 full artifact and 24 preview artifact cases
+pass. Project regeneration is stable. Apple completed build 40's processing on
+October 6. App Store Connect readback shows 0.1.0 (40) `Testing` in Fotoro Internal,
+with the owner's existing tester account in the group. Encryption answers select
+standard algorithms outside Apple's OS and the approved France exclusion. What
+to Test notes were saved and read back. Private screenshots and artifact/input
+hash evidence are retained under the ignored local distribution-fix directory.
+This establishes internal TestFlight availability; physical installation,
+device acceptance and production web acceptance remain unverified.
 
 ## Qualified source and live web
 
