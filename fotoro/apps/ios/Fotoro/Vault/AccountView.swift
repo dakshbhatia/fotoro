@@ -221,29 +221,36 @@ struct FotoroPassword: Identifiable {
 struct FotoroPasswordView: View {
   let password: FotoroPassword
   @Environment(\.dismiss) private var dismiss
+  @State private var copied = false
   var body: some View {
     NavigationStack {
       ScrollView {
         VStack(alignment: .leading, spacing: 24) {
-          Link(destination: URL(string: "https://fotoro.cloud/saved")!) {
-            Text("Open fotoro.cloud").font(.headline).frame(maxWidth: .infinity, minHeight: 52)
-          }.buttonStyle(.glassProminent).buttonBorderShape(.roundedRectangle(radius: 16))
-            .accessibilityIdentifier("account.otherDeviceWebsite")
           Text("Use this password to open your Fotoro on another device.").font(.body).foregroundStyle(.secondary)
           Text("Your Fotoro password").font(.headline)
           Text(password.value).font(.system(.body, design: .monospaced))
             .textSelection(.enabled).privacySensitive().fixedSize(horizontal: false, vertical: true)
             .padding(16).frame(maxWidth: .infinity, alignment: .leading)
             .glassEffect(.regular, in: .rect(cornerRadius: 16))
-          Button { UIPasteboard.general.string = password.value } label: {
-            Label("Copy password", systemImage: "doc.on.doc").font(.headline).frame(maxWidth: .infinity, minHeight: 52)
-          }.buttonStyle(.glass).buttonBorderShape(.roundedRectangle(radius: 16))
+          Button {
+            UIPasteboard.general.string = password.value
+            copied = true
+          } label: {
+            Label(copied ? "Copied" : "Copy password", systemImage: copied ? "checkmark" : "doc.on.doc")
+              .font(.headline).frame(maxWidth: .infinity, minHeight: 52)
+          }.buttonStyle(.glassProminent).buttonBorderShape(.roundedRectangle(radius: 16))
+            .accessibilityLabel(copied ? "Password copied" : "Copy password")
           ShareLink(item: password.value) {
             Label("Save password", systemImage: "square.and.arrow.up").font(.headline).frame(maxWidth: .infinity, minHeight: 52)
           }.buttonStyle(.glass).buttonBorderShape(.roundedRectangle(radius: 16))
+          Link(destination: URL(string: "https://fotoro.cloud/saved")!) {
+            Text("Open fotoro.cloud").font(.body).frame(maxWidth: .infinity, minHeight: 48)
+          }.buttonStyle(.glass).buttonBorderShape(.roundedRectangle(radius: 16))
+            .accessibilityIdentifier("account.otherDeviceWebsite")
         }.frame(maxWidth: 520, alignment: .leading).frame(maxWidth: .infinity).padding(24)
       }.navigationTitle("Open on another device").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+        .onChange(of: password.id) { copied = false }
     }
   }
 }

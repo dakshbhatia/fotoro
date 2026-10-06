@@ -7,17 +7,17 @@ No speed, accuracy, cost or adoption claim is inferred from a passing smoke test
 
 ## Qualified source and live web
 
-[PR 42](https://github.com/dakshbhatia/fotoro/pull/42) merged as
-`8c60066b81c9f7d33a12afdef7016c6707825f0b`. Its exact checked head was
-`ca1dab953252f59fd406126ad97a3ea5c2b7ef9f`; all 23 reported checks completed
+[PR 43](https://github.com/dakshbhatia/fotoro/pull/43) merged as
+`1e1434f2524b2c41fbb8baac8529972e77e5035d`. Its exact checked head was
+`9e479913ac51b6f0a6c83a787dd7527e7de75ff7`; all 23 reported checks completed
 successfully or were skipped, including successful full/preview iOS and web/API
-jobs. [Fotoro run 37380380467](https://github.com/dakshbhatia/fotoro/actions/runs/37380380467)
+jobs. [Fotoro run 37384619261](https://github.com/dakshbhatia/fotoro/actions/runs/37384619261)
 contains native and web/API validation. The merged tree matches the qualified
-head, and all 69 native input hashes match the audited build 37 archive.
+head, and all 69 native input hashes match the audited build 38 archive.
 Independent review found no remaining material issue.
 
-The active Worker is `e6a09961-6ddb-42c5-9fc0-fabaf195d9b0`, deployment
-`49a1d235-3bc4-499f-bc1b-e48955447078`, at 100%. All 35 non-HTML asset digests
+The active Worker is `2ca15bc9-614b-4b21-a115-f3748c60bbc4`, deployment
+`7a474426-4b3b-4d7c-baf7-026bfd36e090`, at 100%. All 35 non-HTML asset digests
 match the qualified production build. Photos and Saved HTML routes reference the
 expected entry assets. HTTPS service routes and the exact Apple app association
 pass readback. Fresh production browser checks pass entry, account focus and Back
@@ -157,10 +157,44 @@ mobile soft-keyboard and OS send completion are not asserted.
 Local `pnpm check` passes with 431 web and 70 API tests and the production web
 build. Local preview verification executes 113 tests with one existing Vision
 inference-context skip and no failures. Protected rendered evidence lives under `screen-audit-2026-10-05` and its
-timestamped web capture. This screen pass changes native inputs, so build 37's
-archive does not qualify it for distribution.
+timestamped web capture. Build 38 matches this screen pass; its archive audit
+does not qualify a distribution IPA or TestFlight upload.
+
+## Native photo handoff pass
+
+Receiving now uses one native scroll canvas and a three-column thumbnail grid opening the existing viewer
+full screen. Save remains explicit inside that viewer. Foreground inbox refresh
+and known expiry checks remain active while it covers the receiving screen;
+returning does not replay an accepted invitation. Owned Saved photos put Save to
+Photos beside Share, with Info under More. Another-device access puts Copy password
+first with a copied acknowledgement; Save and the website remain secondary.
+Authentication, account storage, original verification and upload consent are
+unchanged.
+
+The full app builds on the iOS 27 iPhone 18 Pro Simulator. Local native testing
+against freshly seeded loopback services executes 367 tests: 366 pass, one known
+Vision inference-context case skips and none fail. Core/release checks pass.
+Independent review covers receiving lifecycle, account handoff and original
+restoration guards. Rendered public-fixture checks verify the owned toolbar,
+Info under More and successful Save to Photos. The recently created simulator
+Photos resource matches the public Singapore JPEG bytes and digest exactly.
+The named receiving thumbnail opens the full-screen viewer; Done returns to the
+same grid. The scroll container keeps that thumbnail's accessible tap target
+inside its square bounds.
+This does not qualify physical iPhone, video or Live Photo restoration.
+Password action ordering and copied state have code review; actual cross-device
+password transfer is not qualified by this pass. No web runtime, API, encryption
+format, model, migration or production binding changes are introduced.
 
 ## iPhone and distribution
+
+Build 38 archives the qualified PR 43 source and passes the full archive audit.
+All 69 native input hashes match both the checked head and merged tree. It is
+development-signed; no IPA was exported and no TestFlight upload occurred.
+Protected `photo-canvas-2026-10-05` evidence records the archive, exact-head CI,
+merge, asset digests, production traffic and browser/service checks. CI preview
+verification executes 113 tests with four skips and no failures; local preview
+executes 113 with one skip. These results do not qualify a physical iPhone.
 
 Build 37 archives the qualified PR 41 source and passes the full archive audit.
 All 69 native input hashes remain unchanged across the archive. It is
@@ -179,7 +213,7 @@ Individual API access is verified for build metadata; provisioning/signing and a
 fresh TestFlight install remain open. No external TestFlight invitation is qualified.
 First App Store publication excludes France, as approved by the owner.
 
-Latest release proof is kept outside Git under the protected `core-gaps-build37`
+Latest deployed release proof is kept outside Git under the protected `photo-canvas-2026-10-05`
 record: source inputs, archive audit, exact-head CI, merge proof, asset digests,
 Worker traffic readback and browser/service checks. Credentials and private account
 data are excluded from repository documentation.

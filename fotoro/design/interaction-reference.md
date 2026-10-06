@@ -20,7 +20,7 @@ accessibility or device case has passed.
 | Sync sheet | Pause/Resume or a useful recovery action; View synced photos. | Keep Pause accessible. Put format details and disable under How sync works. Never report complete when originals were skipped. |
 | System Share | Prepare the selected originals, then use the system handoff; browser downloads when file sharing is unavailable. | Preserve the exact set and respect the browser’s required user activation after async preparation. |
 | Private Fotoro Share | Choose an accepted person → prepare invitation → Send photos. | Once prepared, bind the recipient and photos. Choose another person explicitly resets preparation. Rare access/link controls sit under disclosures. |
-| Receiving | Accept a new sender’s identity → open photos → explicitly Save a copy. | Show ended access accurately. Recipient-owned saved copies survive later sender revocation. |
+| Receiving | Accept a new sender’s identity → browse thumbnails → open full screen → explicitly Save a copy. | Show ended access accurately. Recipient-owned saved copies survive later sender revocation. |
 | Another device | Open Saved with the same Fotoro password. | Read the verified catalog before showing originals; opening/refreshing does not upload unrelated pending work. |
 
 Photos is the browsing surface. Picks suggests highlights. Saved holds Fotoro
@@ -33,7 +33,9 @@ The active iPhone app uses SwiftUI system glass controls on iOS 26+:
 native toolbars, a persistent bottom Search field, glass/glassProminent actions
 and native sheets. The browse toolbar contains the current photo scope and Sync;
 Settings stays inside the scope menu. Photo viewers open full screen, with Done
-and contextual controls; Info and sharing retain their own sheets. Selection
+and contextual controls. Owned Saved photos expose Save to Photos and Share;
+Info stays under More. Receiving uses a thumbnail grid, with explicit Save in
+the full-screen viewer. Info and sharing retain their own sheets. Selection
 actions appear after an actual selection, not as a disabled instruction panel.
 The active browser uses React/Vite, CSS translucent controls and its current viewer.
 The older Ente MUI/PhotoSwipe experiment is historical; it does not define this app.
@@ -62,6 +64,9 @@ ineligible sources visibly. Suggestions never become a Save or sharing intent.
 Clearing Search keeps editing active. Compact selection controls wrap only when
 content needs the space; preserve full labels and touch targets at enlarged text.
 Account entry owns its inline error instead of also showing a Sync alert.
+Another-device access starts with Copy password and confirms the copy; Save and
+the website link are secondary. Opening the website never substitutes for
+transferring the password to the intended device.
 Closing a viewer restores context; modal surfaces keep background interaction
 inert and restore focus when dismissed. These are behaviors to test, not an excuse
 to add another screen or gesture engine.

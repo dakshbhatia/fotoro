@@ -29,6 +29,7 @@ struct ExchangeView: View {
   @State private var openedPhoto: ReceivedViewerPresentation?
   @State private var recipient: AccountCardV1?
   @State private var shareCode: ShareCodePresentation?
+  @State private var preparedIncoming = false
   private enum FocusField: Hashable { case link, name }
   @FocusState private var focusedField: FocusField?
   @Environment(\.scenePhase) private var scenePhase
@@ -55,12 +56,14 @@ struct ExchangeView: View {
 
   var body: some View {
     NavigationStack {
-      List {
+      ScrollView {
+        LazyVStack(alignment: .leading, spacing: 20) {
         if services.busy { ProgressView("Working…") }
         if let feedback { Text(feedback).foregroundStyle(.secondary) }
         if let candidateCard {
           Section(candidateIsMoment ? "Photo invitation" : "Add a contact") {
             TextField("Their name (optional)", text: $name).textContentType(.name)
+              .textFieldStyle(.roundedBorder).frame(minHeight: 44)
               .focused($focusedField, equals: .name).disabled(services.busy)
             Text("Confirm this link came from the person you want to share with.")
               .font(.footnote).foregroundStyle(.secondary)
@@ -139,26 +142,28 @@ struct ExchangeView: View {
           }
         }
         if selected.isEmpty {
-        if services.selectedGrant != nil {
-          Section("Opened photos") {
-            ForEach(services.received) { photo in
-              VStack(alignment: .leading, spacing: 12) {
-                Button {
-                  if let grant = services.selectedGrant {
+        if let grant = services.selectedGrant {
+          Section("Photos from \(services.contactName(grant.ownerAccountId))") {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3) {
+              ForEach(services.received) { photo in
+                GeometryReader { geometry in
+                  Button("Open \(photo.metadata.filename)") {
+                    guard services.isReceivedGrantCurrent(grant) else { services.withdrawExpiredReceivedMoment(); return }
+                    focusedField = nil
                     openedPhoto = ReceivedViewerPresentation(photo: photo, photos: services.received, grant: grant)
-                  }
-                } label: {
-                  LazyImage(url: photo.thumbnailURL) { state in
-                    if let image = state.image { image.resizable().scaledToFit() }
-                    else { Rectangle().fill(.quaternary).overlay { ProgressView() } }
-                  }.frame(height: 180).frame(maxWidth: .infinity)
-                }.buttonStyle(.plain).accessibilityLabel("Open \(photo.metadata.filename)")
-                Button("Save to my photos", systemImage: "icloud.and.arrow.up") {
-                  perform { try await services.save(photo); feedback = "Saved in your Fotoro." }
-                }.disabled(services.busy)
-              }.padding(.vertical, 4)
+                  }.buttonStyle(.plain).disabled(services.busy)
+                    .frame(width: geometry.size.width, height: geometry.size.width)
+                    .overlay {
+                      LazyImage(url: photo.thumbnailURL) { state in
+                        if let image = state.image { image.resizable().scaledToFill() }
+                        else { Rectangle().fill(.quaternary).overlay { ProgressView() } }
+                      }.frame(width: geometry.size.width, height: geometry.size.width).clipped()
+                        .allowsHitTesting(false).accessibilityHidden(true)
+                    }
+                    .contentShape(Rectangle())
+                }.aspectRatio(1, contentMode: .fit)
+              }
             }
-
           }
         }
         Section("Shared with you") {
@@ -209,32 +214,25 @@ struct ExchangeView: View {
             ForEach(contacts, id: \.accountId) { card in Text(services.contactName(card.accountId)) }
           }
         }
-      }.scrollDismissesKeyboard(.interactively)
+        }.padding(16)
+      }.buttonStyle(.glass).controlSize(.large)
+        .scrollDismissesKeyboard(.interactively)
         .navigationTitle(selected.isEmpty ? "Shared photos" : "Share photos")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         .task {
+          guard !preparedIncoming else { return }
+          preparedIncoming = true
           candidate = incoming
           if let card = candidateCard, contacts.contains(where: { $0.accountId == card.accountId }) { name = services.contactName(card.accountId) }
         }
-        .task(id: scenePhase) {
-          guard scenePhase == .active else { services.cancelSharedMomentRefresh(); return }
-          do { try await services.refreshSharedMoments() }
-          catch is CancellationError {} catch {
-            guard !Task.isCancelled, scenePhase == .active else { return }
-            services.error = error.localizedDescription
-          }
-        }
-        .task(id: services.selectedGrant?.expiresAt) {
-          guard let expiry = services.selectedGrant?.expiresAt.flatMap(Wire.parseDate) else { return }
-          let remaining = expiry.timeIntervalSinceNow
-          if remaining > 0 { try? await Task.sleep(for: .seconds(remaining)) }
-          guard !Task.isCancelled else { return }
-          services.withdrawExpiredReceivedMoment()
-        }
-        .sheet(item: $openedPhoto) { presentation in
+        .task(id: scenePhase) { await refreshMoments() }
+        .task(id: services.selectedGrant?.expiresAt) { await waitForExpiry() }
+        .fullScreenCover(item: $openedPhoto) { presentation in
           PhotoViewer(services: services, initialID: presentation.photo.id,
             displayedPhotos: presentation.photos, receivedGrant: presentation.grant)
+            .task(id: scenePhase) { await refreshMoments() }
+            .task(id: services.selectedGrant?.expiresAt) { await waitForExpiry() }
         }
         .sheet(item: $shareCode) { ShareCodeView(presentation: $0) }
         .onChange(of: scenePhase) { if scenePhase == .background { operation?.cancel() } }
@@ -242,15 +240,34 @@ struct ExchangeView: View {
         .onChange(of: services.selectedGrant) { previous, current in
           if previous != nil && current == nil { feedback = "These shared photos are no longer available. Copies you saved stay in your Fotoro." }
         }
-        .onDisappear { operation?.cancel(); services.cancelSharedMomentRefresh() }
+        .onDisappear {
+          operation?.cancel()
+          if openedPhoto == nil { services.cancelSharedMomentRefresh() }
+        }
         .alert("Fotoro", isPresented: Binding(get: { services.error != nil }, set: { if !$0 { services.error = nil } })) {
           Button("OK") { services.error = nil }
         } message: { Text(services.error ?? "") }
     }
   }
+  private func refreshMoments() async {
+    guard scenePhase == .active else { services.cancelSharedMomentRefresh(); return }
+    do { try await services.refreshSharedMoments() }
+    catch is CancellationError {} catch {
+      guard !Task.isCancelled, scenePhase == .active else { return }
+      services.error = error.localizedDescription
+    }
+  }
+  private func waitForExpiry() async {
+    guard let expiry = services.selectedGrant?.expiresAt.flatMap(Wire.parseDate) else { return }
+    let remaining = expiry.timeIntervalSinceNow
+    if remaining > 0 { try? await Task.sleep(for: .seconds(remaining)) }
+    guard !Task.isCancelled else { return }
+    services.withdrawExpiredReceivedMoment()
+  }
   private var contactEntry: some View {
     Group {
       TextField("Paste a Fotoro link", text: $link)
+        .textFieldStyle(.roundedBorder).frame(minHeight: 44)
         .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
         .focused($focusedField, equals: .link).submitLabel(.go).onSubmit(openLink)
         .disabled(services.busy)

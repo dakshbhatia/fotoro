@@ -68,15 +68,21 @@ struct PhotoViewer: View {
         .onChange(of: selected) { zoom.reset(); feedback = nil }
         .toolbar {
           ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() } }
-          ToolbarItem(placement: .bottomBar) {
-            Button("Info", systemImage: "info.circle") { details = current }
-          }
           if receivedGrant != nil {
+            ToolbarItem(placement: .bottomBar) {
+              Button("Info", systemImage: "info.circle") { details = current }
+            }
             ToolbarItem(placement: .bottomBar) {
               Button(current.map { savedReceivedIDs.contains($0.id) } == true ? "Saved" : "Save", systemImage: "icloud.and.arrow.up", action: saveReceived)
                 .disabled(services.busy || current == nil || current.map { savedReceivedIDs.contains($0.id) } == true)
             }
           } else {
+            ToolbarItem(placement: .bottomBar) {
+              Button("Save to Photos", systemImage: "square.and.arrow.down", action: restoreOriginal)
+                .disabled(preparingShare || current == nil)
+                .accessibilityLabel("Save to Photos")
+                .accessibilityIdentifier("viewer.saveToPhotos")
+            }
             ToolbarItem(placement: .bottomBar) {
               Button("Share", systemImage: "square.and.arrow.up", action: share)
                 .disabled(preparingShare || current == nil)
@@ -84,10 +90,10 @@ struct PhotoViewer: View {
             }
             ToolbarItem(placement: .bottomBar) {
               Menu("More", systemImage: "ellipsis.circle") {
+                Button("Info", systemImage: "info.circle") { details = current }
                 Button("Share in Fotoro") {
                   if let current { sharedPhotos = SharedPhotosPresentation(photos: [current]) }
                 }
-                Button("Save to Photos", action: restoreOriginal)
               }
                 .disabled(preparingShare || current == nil)
                 .accessibilityIdentifier("viewer.more")
