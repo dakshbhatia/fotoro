@@ -25,7 +25,13 @@ const config = (env: Env) => {
   return env.CLOUD_INTELLIGENCE_ENABLED === "true" && env.GEMINI_API_KEY?.trim() && account && global
     ? {key: env.GEMINI_API_KEY, account, global} : undefined;
 };
-export async function capabilities(env: Env) {
+function requireExpectedAccount(actor: Actor, expectedAccountId: unknown) {
+  if (typeof expectedAccountId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(expectedAccountId)) fail("INVALID_WIRE");
+  // Cookies are shared between tabs, while unlocked vaults are tab-local.
+  if (expectedAccountId !== actor.accountId) fail("CLOUD_ACCOUNT_MISMATCH", 403);
+}
+export async function capabilities(env: Env, actor: Actor, expectedAccountId: unknown) {
+  requireExpectedAccount(actor, expectedAccountId);
   let enabled = !!config(env);
   if (enabled) {
     // Fail closed until the work-cap migration is present.
@@ -133,7 +139,7 @@ export async function observe(env: Env, actor: Actor, request: Request): Promise
   const settings = config(env);
   if (!settings) fail("CLOUD_UNAVAILABLE", 503);
   const input = await readJson<any>(request, JSON_BYTES);
-  if (!record(input, ["version", "photoId", "sourceRevision", "consent", "model", "preview"])
+  if (!record(input, ["version", "expectedAccountId", "photoId", "sourceRevision", "consent", "model", "preview"])
     || input.version !== 1 || input.consent !== "send-this-preview-to-google"
     || !string(input.photoId, 128) || !/^[A-Za-z0-9_-]+$/.test(input.photoId)
     || !string(input.sourceRevision, 128) || !/^[A-Za-z0-9_-]+$/.test(input.sourceRevision)
@@ -141,6 +147,7 @@ export async function observe(env: Env, actor: Actor, request: Request): Promise
     || input.preview.mimeType !== "image/jpeg" || typeof input.preview.base64 !== "string"
     || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(input.preview.base64)
     || input.preview.base64.length > Math.ceil(PREVIEW_BYTES / 3) * 4) fail("INVALID_WIRE");
+  requireExpectedAccount(actor, input.expectedAccountId);
   const bytes = Uint8Array.from(atob(input.preview.base64), c => c.charCodeAt(0));
   try {validatePreview(bytes);} finally {bytes.fill(0);}
   await claimWork(env, actor, settings!);

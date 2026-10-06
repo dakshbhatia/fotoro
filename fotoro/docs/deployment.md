@@ -100,6 +100,11 @@ account or claim the build is upload-ready. An individual API key uses
 available distribution identity/profile, a usable signed-in Xcode account, or a
 team key with its issuer for automatic provisioning. Keep keys outside the repo.
 
+Foundation candidate build 39 compiles and passes its full archive audit. The
+October 6 local distribution export actually fails with `No Accounts` and no
+matching iOS Distribution certificate/private key. No distribution IPA or
+TestFlight upload was produced; build 25 remains the last verified upload.
+
 First App Store publication excludes France, as approved by the owner. Keep full
 app encryption and the distribution artifact's compliance declaration aligned;
 the local Photos preview is a separate target with a different encryption scope.
@@ -108,8 +113,12 @@ distribution IPA before upload. The audit checks the requested build and signed
 app identity, production associated domains, one arm64 executable, matching
 binary/dSYM UUIDs and ten defined static crypto symbols. Preview scope,
 false or malformed full-app encryption declarations, extra executable resources
-and a mismatched exported build fail before upload. `pnpm check` includes the
-release orchestration regressions. An archive-only audit does not qualify an IPA
+and a mismatched exported build fail before upload. The only accepted nested
+Mach-O is ONNX Runtime 1.24.2's pinned codeless resource-framework stub: unsigned
+bytes, platform, identity and signature are checked, and the main binary's dSYM
+must prove static ONNX linkage. Other nested executables remain rejected.
+`pnpm check` includes the release artifact and orchestration regressions.
+An archive-only audit does not qualify an IPA
 or an App Store Connect upload; processing and compliance still require readback.
 See [verification](verification.md) for current evidence and its historical appendix.
 Earlier deployment checkpoints remain available in Git history.

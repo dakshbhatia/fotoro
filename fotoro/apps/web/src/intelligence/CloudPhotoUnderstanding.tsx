@@ -10,7 +10,7 @@ export interface CloudPhotoUnderstandingProps extends CloudConnection, CloudPhot
 }
 // Reset consent, results and in-flight work on every source or vault change.
 export function CloudPhotoUnderstanding(props: CloudPhotoUnderstandingProps) {
-  return <CloudPhotoUnderstandingSession key={JSON.stringify([props.scopeKey, props.apiBase, props.token, props.photoId, props.sourceRevision])} {...props}/>;
+  return <CloudPhotoUnderstandingSession key={JSON.stringify([props.scopeKey, props.expectedAccountId, props.apiBase, props.token, props.photoId, props.sourceRevision])} {...props}/>;
 }
 function CloudPhotoUnderstandingSession(props: CloudPhotoUnderstandingProps) {
   const [available, setAvailable] = useState(false), [consent, setConsent] = useState(false);
@@ -48,7 +48,7 @@ function CloudPhotoUnderstandingSession(props: CloudPhotoUnderstandingProps) {
       window.removeEventListener("pagehide", clear);
       window.removeEventListener("storage", clear);
     };
-  }, [props.apiBase, props.token]);
+  }, [props.apiBase, props.expectedAccountId, props.token]);
   async function analyze() {
     if (!consent || busy || !available || !current()) return;
     const controller = new AbortController(); request.current = controller;

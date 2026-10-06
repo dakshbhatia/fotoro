@@ -28,6 +28,7 @@ export interface OwnedPhotoSnapshot {
   token: object;
   photos: Photo[];
   current: () => boolean;
+  sourceCurrent?: (photo: Photo) => boolean;
   preview: (photo: Photo) => Promise<Blob>;
   edit?: (photo: Photo, changes: {labels?: string[]; favorite?: boolean; location?: PhotoLocationV1; observation?: PhotoObservationV1; people?: PeopleAssignment[]}) => Promise<void>;
   locate?: (updates: readonly {photo: Photo; location: PhotoLocationV1}[]) => Promise<{applied: number; failed: number; updatedPhotoIDs: string[]}>;
@@ -89,7 +90,7 @@ export function savedSearchPhotos(snapshot: OwnedPhotoSnapshot | null, local: Lo
     const id = original?.id ?? "saved:" + photo.manifest.photoId;
     const adapted = {...record, id, observationPhotoId: record.id, originalSize: photo.metadata.originalBytes,
       visual: record.visual ? {...record.visual, photoID: id} : undefined,
-      current: () => snapshot.current() && record.current?.() !== false,
+      current: () => (snapshot.sourceCurrent?.(photo) ?? snapshot.current()) && record.current?.() !== false,
       captureVerified: record.dateSource === "exif" ? true as const : undefined,
       previewLoader: async () => {
         if (!snapshot.current()) throw new Error("Your saved library is locked.");

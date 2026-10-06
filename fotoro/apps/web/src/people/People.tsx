@@ -96,8 +96,22 @@ export function People({photos,resources,savedResources,onClose,onOpen,onAssignm
       }
       setCorrecting(true);
       if(onAssignments)await onAssignments(updates);
-      if(!alive.current||updates.some(update=>!peopleSourceCurrent(update.photo,latest.current.find(photo=>photo.id===update.photo.id),!!onAssignments)))return;
-      for(const update of updates) scanned.current.set(update.photo.id,latest.current.find(photo=>photo.id===update.photo.id)!);
+      // The encrypted write and parent snapshot can settle before this component
+      // receives the new photo props. Keep the correction fenced while React catches up.
+      if(onAssignments)for(let attempt=0;attempt<60&&alive.current;attempt++) {
+        if(updates.every(update=>peopleSourceCurrent(update.photo,latest.current.find(photo=>photo.id===update.photo.id),true)))break;
+        await new Promise(resolve=>setTimeout(resolve,16));
+      }
+      if(!alive.current)return;
+      if(updates.some(update=>!peopleSourceCurrent(update.photo,latest.current.find(photo=>photo.id===update.photo.id),!!onAssignments)))throw new Error("Photo source changed. Find people again.");
+      // An owned edit replaces the catalog snapshot, including untouched photos.
+      // Rebase only immutable sources that still match and are currently available.
+      for(const [id,source] of scanned.current) {
+        const current=latest.current.find(photo=>photo.id===id);
+        if(peopleSourceCurrent(source,current,!!onAssignments))scanned.current.set(id,current!);
+      }
+      // The source map is a ref; invalidate the derived visible-face memo after rebasing.
+      setFaces(current=>[...current]);
       setGroups(updated);setStatus(onAssignments?"People names updated.":"People names updated for this session.");
     }catch(error){if(alive.current)setStatus(error instanceof Error?error.message:"People names could not be updated.");}
     finally{if(alive.current)setCorrecting(false);}

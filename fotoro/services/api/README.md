@@ -102,7 +102,10 @@ request references; invocation logging is disabled to avoid capability URLs.
 
 Optional Gemini photo understanding is off by default. `/v1/intelligence/capabilities`
 and `/v1/intelligence/observe` require the existing authenticated account session
-and origin checks. Local-only library users without an account session cannot use
+and origin checks. Each capability check and observation request also carries the
+captured vault's expected account ID. The service rejects a changed session account
+before allocating work or contacting Google, including shared-cookie changes in
+another tab. Local-only library users without an account session cannot use
 this route. The client must consent to sending this individual preview to Google
 for each analysis; this is separate from keeping a result or saving account changes.
 The client re-encodes the visible preview as JPEG, stripping source metadata and

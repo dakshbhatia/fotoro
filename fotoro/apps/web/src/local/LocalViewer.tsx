@@ -15,7 +15,7 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
   onUse?: (id: string) => void; onConfirm?: (id: string) => void; onPin?: (id: string) => void;
   meaning?: string; onReselect?: () => void;
   onSave?: (photo: LocalPhoto) => void; isSaved?: (photo: LocalPhoto) => boolean;
-  intelligence?: {scopeKey: string; current: () => boolean; keep: (photo: LocalPhoto, observation: Parameters<CloudPhotoUnderstandingProps["onObservation"]>[0]) => Promise<void>};
+  intelligence?: {scopeKey: string; expectedAccountId: string; current: () => boolean; keep: (photo: LocalPhoto, observation: Parameters<CloudPhotoUnderstandingProps["onObservation"]>[0]) => Promise<void>};
 }) {
   const [selected, setSelected] = useState(initial), [loaded, setLoaded] = useState({id: "", url: ""}),
     [details, setDetails] = useState(false), [zoom, setZoom] = useState(false), [status, setStatus] = useState(""), [label, setLabel] = useState(""),
@@ -89,7 +89,7 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
       <p>{new Date(photo.date).toLocaleString()}</p><p>{photo.dateSource === "photos" ? "Date from Photos" : photo.dateSource === "exif" ? "Date from the photo" : "Capture date unavailable · date selected"}</p>
       <PhotoLocation location={photo.location} />
       <KeptObservations facts={photo.facts} photoId={photo.id} sourceRevision={photo.digest ?? photo.id} />
-      {intelligence && <Suspense fallback={null}><CloudPhotoUnderstanding apiBase="" photoId={photo.id} sourceRevision={photo.digest ?? photo.id} scopeKey={intelligence.scopeKey}
+      {intelligence && <Suspense fallback={null}><CloudPhotoUnderstanding apiBase="" expectedAccountId={intelligence.expectedAccountId} photoId={photo.id} sourceRevision={photo.digest ?? photo.id} scopeKey={intelligence.scopeKey}
         current={() => alive.current && currentPhoto.current?.id === photo.id && currentPhoto.current.digest === photo.digest && photo.current?.() !== false && intelligence.current()}
         getPreview={async signal => {const loaded = await resources.load(photo, "preview", signal); return loaded.blob;}}
         onObservation={observation => intelligence.keep(photo, observation)} /></Suspense>}

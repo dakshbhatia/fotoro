@@ -12,7 +12,7 @@ export interface CloudObservation {
   observedAt: string;
   observations: {objects: string[]; scene: string[]; visibleText: string; uncertainty: string[]};
 }
-export interface CloudConnection {apiBase: string; token?: string;}
+export interface CloudConnection {apiBase: string; expectedAccountId: string; token?: string;}
 export interface CloudPhotoBinding {photoId: string; sourceRevision: string;}
 export class CloudPhotoError extends Error {}
 export function observationMatches(value: CloudObservation, binding: CloudPhotoBinding) {
@@ -34,7 +34,7 @@ export function parseCloudObservation(value: unknown, binding: CloudPhotoBinding
 function endpoint(connection: CloudConnection, path: string) {return connection.apiBase.replace(/\/$/, "") + "/v1/intelligence/" + path;}
 function headers(connection: CloudConnection) {return {"Content-Type": "application/json", ...(connection.token ? {Authorization: "Bearer " + connection.token} : {})};}
 export async function cloudCapabilities(connection: CloudConnection, signal?: AbortSignal) {
-  const response = await fetch(endpoint(connection, "capabilities"), {credentials: "include", cache: "no-store", headers: headers(connection), signal});
+  const response = await fetch(endpoint(connection, "capabilities") + "?expectedAccountId=" + encodeURIComponent(connection.expectedAccountId), {credentials: "include", cache: "no-store", headers: headers(connection), signal});
   if (!response.ok) return false;
   const result = await response.json();
   return result?.version === 1 && result.enabled === true;
@@ -76,7 +76,7 @@ export async function observeCloudPhoto(connection: CloudConnection, binding: Cl
   let binary = "";
   try {for (const byte of bytes) binary += String.fromCharCode(byte);} finally {bytes.fill(0);}
   const response = await fetch(endpoint(connection, "observe"), {method: "POST", credentials: "include", cache: "no-store", headers: headers(connection), signal,
-    body: JSON.stringify({version: 1, photoId: binding.photoId, sourceRevision: binding.sourceRevision, model, consent, preview: {mimeType: "image/jpeg", base64: btoa(binary)}})});
+    body: JSON.stringify({version: 1, expectedAccountId: connection.expectedAccountId, photoId: binding.photoId, sourceRevision: binding.sourceRevision, model, consent, preview: {mimeType: "image/jpeg", base64: btoa(binary)}})});
   binary = "";
   if (!response.ok) throw new CloudPhotoError(response.status === 429 ? "CLOUD_WORK_LIMIT" : response.status === 401 ? "CLOUD_SIGN_IN_REQUIRED" : "CLOUD_UNAVAILABLE");
   return parseCloudObservation(await response.json(), binding);

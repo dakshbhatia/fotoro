@@ -114,7 +114,7 @@ app.get("/v1/storage", async (c) => {
 });
 app.get("/v1/intelligence/capabilities", async (c) => {
   c.header("Cache-Control", "no-store");
-  return c.json(await intelligence.capabilities(c.env));
+  return c.json(await intelligence.capabilities(c.env, c.get("actor"), c.req.query("expectedAccountId")));
 });
 app.post("/v1/intelligence/observe", async (c) => {
   c.header("Cache-Control", "no-store");

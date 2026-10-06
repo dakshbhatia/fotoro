@@ -139,7 +139,9 @@ Gemini 3.8 Flash or 3.5 Flash-Lite. It remains unavailable until a server key an
 explicit account/global daily work caps are configured. Each analysis needs
 separate consent to send a reduced, metadata-free JPEG to Google. Analyze stages
 objects, scenes and visible text for review; Keep retains separate source-bound
-observations. Supplied captions, labels and local OCR remain intact. Kept cloud
+observations. Both requests bind the authenticated server account to the unlocked
+vault's expected account before provider dispatch. Supplied captions, labels and
+local OCR remain intact. Kept cloud
 observations enter browser search; native readers preserve their encrypted facts
 without indexing internal marker syntax. Owned edits
 use the encrypted outbox and explicit Save changes. Uncertainty and internal

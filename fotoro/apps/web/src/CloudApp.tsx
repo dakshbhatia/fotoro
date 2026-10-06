@@ -589,7 +589,11 @@ export default function CloudApp({
     try {session = requireVault();} catch {return null;}
     if (session.accountId !== account) return null;
     const current = () => sameVault(session) && currentCatalog.current === photos;
-    return {accountId: account, token: session, photos, current, people: publicDemo ? undefined : async updates => {
+    return {accountId: account, token: session, photos, current,
+      sourceCurrent: source => sameVault(session) && currentCatalog.current.some(photo => !photo.grantId && photo.manifest.ownerAccountId === account
+        && photo.manifest.photoId === source.manifest.photoId && photo.metadata.originalSha256 === source.metadata.originalSha256
+        && photo.manifest === source.manifest && photo.metadata === source.metadata && photo.metadataKey === source.metadataKey),
+      people: publicDemo ? undefined : async updates => {
       if (!current() || updates.some(update => !photos.includes(update.photo) || update.photo.grantId || update.photo.manifest.ownerAccountId !== account)) throw new Error("Photo source changed");
       for (const update of updates) await editAnnotations(update.photo, {people: update.assignments}, session);
     }, locate: publicDemo ? undefined : async updates => {

@@ -336,7 +336,7 @@ export function Viewer({
           {!photo.grantId && <>
             <KeptObservations facts={photo.annotations?.facts} photoId={photo.manifest.photoId} sourceRevision={photo.metadata.originalSha256} />
             {onObservation && intelligenceSession && photo.manifest.ownerAccountId === intelligenceSession.accountId && <Suspense fallback={null}>
-              <CloudPhotoUnderstanding apiBase="" scopeKey={intelligenceScope(intelligenceSession)} photoId={photo.manifest.photoId} sourceRevision={photo.metadata.originalSha256}
+              <CloudPhotoUnderstanding apiBase="" expectedAccountId={intelligenceSession.accountId} scopeKey={intelligenceScope(intelligenceSession)} photoId={photo.manifest.photoId} sourceRevision={photo.metadata.originalSha256}
                 current={() => mounted.current && currentPhoto.current?.manifest === photo.manifest && currentPhoto.current.metadata === photo.metadata && !currentPhoto.current.grantId && sameVault(intelligenceSession!)}
                 getPreview={async signal => {
                   const bytes = await photoBytes(photo, "preview", signal);

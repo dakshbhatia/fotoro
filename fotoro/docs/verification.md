@@ -12,9 +12,10 @@ explicit expansion, optional browser photo tables, reviewed local People groups
 and optional per-photo Gemini observations. These changes have not yet replaced
 the production checkpoint below.
 
-Final local `pnpm check` passes: 33 core, 79 API and 453 web tests, plus 20 search
-fixture cases, seven Picks cases, preview/release artifact audits and the web
-build. A fresh built startup check measures 412,474 bytes in one static
+Final local `pnpm check` passes: 33 core, 80 API and 454 web tests, plus 20 search
+fixture cases, seven Picks cases, 24 full release artifact cases, 24 preview
+artifact cases, release orchestration checks and the web build. A fresh built
+startup check measures 412,566 bytes in one static
 JavaScript chunk, within the 500 KiB budget. Isolated encrypted exchange passes
 all five tests. The pinned TinyCLIP public-image inference smoke passes.
 
@@ -25,6 +26,13 @@ normalized 128-value templates. People checks exercise explicit naming, merging,
 separating and finding the reviewed name. Public weights and runtime requests
 carry no authorization or referrer; no photo or template is uploaded. Browser
 lifecycle checks cancel work and clear provisional groups.
+
+Saved People checks use disposable accounts, public JPEGs and real local
+encrypted D1/R2 storage. Naming 16 groups, separating one face, finding the
+reviewed name, explicit Save changes and restoring names in a fresh browser
+context pass. Acknowledged annotation edits refresh current sources without
+discarding reviewed groups; unrelated source or account changes still invalidate
+them. These checks use Chrome, not Safari.
 
 Full native verification passes 377 of 378 tests with the existing Vision skip.
 Eight People regressions include actual pinned YuNet/SFace inference, a public
@@ -47,6 +55,18 @@ newer supplied/People/location facts, local-to-owned digest rebinding and remova
 of obsolete categories. No paid provider call was made. Default cloud enablement
 remains off; live provider behavior, personal-library quality, physical phone
 performance and complete cross-device acceptance remain unqualified.
+
+Cloud capabilities and inference require the unlocked vault's expected account
+to match the authenticated server account. A real shared-cookie regression
+rejects an account switch before allocating work or dispatching a provider call.
+
+Full iPhone candidate build 39 compiles and passes the archive audit, including
+signed identity, matching binary/dSYM UUIDs, production associations, ten static
+crypto symbols and the pinned codeless ONNX resource-framework stub. The actual
+local distribution export fails with `No Accounts` and no matching iOS
+Distribution certificate/private key. No distribution IPA or TestFlight upload
+was produced. Build 25 remains the last verified TestFlight build; the candidate
+does not replace the qualified production checkpoint below.
 
 ## Qualified source and live web
 
