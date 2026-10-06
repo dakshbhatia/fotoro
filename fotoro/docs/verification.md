@@ -12,9 +12,9 @@ explicit expansion, optional browser photo tables, reviewed local People groups
 and optional per-photo Gemini observations. These changes have not yet replaced
 the production checkpoint below.
 
-The first local `pnpm check` passes: 33 core, 79 API and 448 web tests, plus 20 search
+Final local `pnpm check` passes: 33 core, 79 API and 453 web tests, plus 20 search
 fixture cases, seven Picks cases, preview/release artifact audits and the web
-build. A fresh built startup check measures 410,890 bytes in one static
+build. A fresh built startup check measures 412,474 bytes in one static
 JavaScript chunk, within the 500 KiB budget. Isolated encrypted exchange passes
 all five tests. The pinned TinyCLIP public-image inference smoke passes.
 
@@ -33,6 +33,11 @@ portrait rotation exceeds 0.99 cosine similarity; this single fixture does not
 qualify general identity accuracy. Corrections recheck current per-asset access
 and revisions, adjusted-current boxes stay local, and a legal 64-fact GPS
 annotation remains hydratable after search-term expansion.
+
+The isolated Photos preview passes 112 of 113 tests with its existing Vision
+skip; all 24 preview artifact checks pass. Its generated graph excludes People,
+ONNX and face weights. Simulator UI input could not be automated; that is not a
+manual native UI or physical-device acceptance result.
 
 A rendered Gemini component check uses a synthetic JPEG and mocked provider
 responses. Analyze needs separate preview consent and stages a review without
