@@ -5,8 +5,6 @@ import {createElement} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
 import {subscribeSavedRefresh} from "../src/library/consumer-refresh";
 import {photoChangeState, type ConsumerPhotoChanges} from "../src/library/consumer-changes";
-import {hasRememberedAccount} from "../src/vault/account-reference";
-import {atomic, get, put} from "../src/exchange/cache";
 import {requireVault} from "../src/vault/vault";
 import {LocalTrial} from "../src/local/LocalTrial";
 
@@ -30,20 +28,16 @@ test("foreground and reconnect read refresh survive paused writes, while hidden 
   assert.equal(reads, 3, "Account withdrawal removes every read trigger");
 });
 
-test("a remembered account offers Saved without retrieving a password, contacting the server or unlocking", async () => {
-  const previous = await get("settings", "last-account"), fetch = globalThis.fetch;
-  globalThis.fetch = (async () => {throw new Error("Remembered account lookup is local only");}) as typeof fetch;
+test("first use offers Saved and device photos without contacting the server or unlocking", () => {
+  const fetch = globalThis.fetch;
+  globalThis.fetch = (async () => {throw new Error("Browsing entry must not contact the server");}) as typeof fetch;
   try {
-    await put("settings", "last-account", {accountId: "invalid"});
-    assert.equal(await hasRememberedAccount(), false);
-    await put("settings", "last-account", "11111111-1111-4111-8111-111111111111");
-    assert.equal(await hasRememberedAccount(), true);
     assert.throws(requireVault, /VAULT_LOCKED/);
-    const markup = renderToStaticMarkup(createElement(LocalTrial, {onBackup() {}, rememberedAccount: true}));
+    const markup = renderToStaticMarkup(createElement(LocalTrial, {onBackup() {}}));
     assert.match(markup, /Open Saved photos/);
     assert.match(markup, /Open photos from this device/);
     assert.throws(requireVault, /VAULT_LOCKED/);
-  } finally {globalThis.fetch = fetch; await atomic([{store: "settings", key: "last-account", value: previous}]);}
+  } finally {globalThis.fetch = fetch;}
 });
 
 test("viewer correction state follows the exact original and exposes a conflicting or failed edit without crossing sources", () => {

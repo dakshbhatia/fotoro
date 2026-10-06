@@ -52,7 +52,7 @@ import {visualSearchFeedback} from "./local/LocalSearch";
 import { PhotoSearchIndex, normalizeSearch } from "./local/search";
 import type { LocalPhoto } from "./local/resources";
 import { cloudSearchRecords } from "./library/search";
-import {deriveConsumerSyncSummary, syncStateLabel, type ConsumerSyncSummary} from "./library/consumer-sync";
+import {deriveConsumerSyncSummary, syncStateLabel} from "./library/consumer-sync";
 import {loadUploadPause, saveUploadPause} from "./library/consumer-preferences";
 import type {OwnedPhotoSnapshot} from "./library/consumer-search";
 import {savedSearchPhotos} from "./library/consumer-search";
@@ -89,7 +89,6 @@ export default function CloudApp({
   onBack,
   localPhotos = noLocalPhotos,
   active = true,
-  onSyncSummary,
   onOwnedPhotos,
   onPhotoChanges,
   saveIntent = null,
@@ -102,7 +101,6 @@ export default function CloudApp({
   onBack: () => void;
   localPhotos?: LocalPhoto[];
   active?: boolean;
-  onSyncSummary?: (summary: ConsumerSyncSummary) => void;
   onOwnedPhotos?: (snapshot: OwnedPhotoSnapshot | null) => void;
   onPhotoChanges?: (changes: ConsumerPhotoChanges | null) => void;
   saveIntent?: ChosenSaveIntent | null;
@@ -569,7 +567,7 @@ export default function CloudApp({
     } catch {}
     setStatus("Saving paused. Your originals are unchanged.");
     const session = requireVault();
-    void saveUploadPause(true, session).catch(error => {if (sameVault(session)) {setStatus("Pause could not be saved in this browser. Keep it open and try again."); setNeedsAttention(true);}});
+    void saveUploadPause(true, session).catch(() => {if (sameVault(session)) {setStatus("Pause could not be saved in this browser. Keep it open and try again."); setNeedsAttention(true);}});
   };
   const retry = () =>
     run(async () => {
@@ -583,7 +581,6 @@ export default function CloudApp({
     pendingEdits: annotationPending.filter(edit => !edit.conflict).length, conflictingEdits: annotationPending.filter(edit => edit.conflict).length,
     localPhotos: localCount, lastCheckedAt: lastSuccessfulSync,
   }), [unlocked, paused, online, staging, busy, needsAttention, photos.length, summary.pending, summary.failed, skipped, annotationPending, localCount, lastSuccessfulSync]);
-  useEffect(() => {onSyncSummary?.(consumerSummary);}, [consumerSummary, onSyncSummary]);
   const ownedSnapshot = useMemo<OwnedPhotoSnapshot | null>(() => {
     if (!account) return null;
     let session;
@@ -1046,7 +1043,7 @@ export default function CloudApp({
               >
                 Lock
               </button>
-              <div className="actions"><button onClick={() => {openSharing(); setMenu(false);}}>Shared photos</button><button onClick={() => {setSelecting(true); setMenu(false);}}>Choose photos to Share</button></div>
+              {received && <button onClick={() => {openSharing(); setMenu(false);}}>Shared photos</button>}
             {annotationPending.length > 0 && <details open={annotationPending.some(edit => edit.conflict)}>
               <summary>Labels and photo text · {annotationPending.length} pending</summary>
               {annotationPending.map(edit => <div key={edit.photoId}>

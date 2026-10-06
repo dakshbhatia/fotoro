@@ -1,14 +1,12 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { LocalTrial } from "./local/LocalTrial";
 import type { LocalPhoto } from "./local/resources";
-import type { ConsumerSyncSummary } from "./library/consumer-sync";
 import type { OwnedPhotoSnapshot } from "./library/consumer-search";
 import { ChosenSaveIntent } from "./exchange/chosen-save";
 import {IncomingShareIntent} from "./exchange/sharing";
 import {parseShareLink} from "@fotoro/contracts/share-links";
 import {requireVault, vaultLockDetail} from "./vault/vault";
 import type {Photo} from "./library/catalog";
-import {hasRememberedAccount} from "./vault/account-reference";
 import type {ConsumerPhotoChanges} from "./library/consumer-changes";
 function readIncomingLink() {
   if (!/^#(?:contact|moment)(?:=|$)/.test(location.hash)) return null;
@@ -27,19 +25,11 @@ export default function App() {
   const [cloud, setCloud] = useState(() => savedEntry || !!incoming || !!incomingError),
     [opened, setOpened] = useState(() => savedEntry || !!incoming || !!incomingError),
     [localPhotos, setLocalPhotos] = useState<LocalPhoto[]>([]),
-    [syncSummary, setSyncSummary] = useState<ConsumerSyncSummary>({state: "notStarted", skippedPhotos: 0, action: "signIn"}),
     [ownedPhotos, setOwnedPhotos] = useState<OwnedPhotoSnapshot | null>(null),
     [savedViewer, setSavedViewer] = useState<string | null>(null),
     [saveIntent, setSaveIntent] = useState<ChosenSaveIntent | null>(null),
     [sharePhotos, setSharePhotos] = useState<Photo[] | null>(null);
-  const [rememberedAccount, setRememberedAccount] = useState(false);
   const [photoChanges, setPhotoChanges] = useState<ConsumerPhotoChanges | null>(null);
-  useEffect(() => {
-    let current = true;
-    const read = () => {void hasRememberedAccount().then(value => {if (current) setRememberedAccount(value);}).catch(() => {});};
-    read(); window.addEventListener("fotoro-lock", read);
-    return () => {current = false; window.removeEventListener("fotoro-lock", read);};
-  }, [ownedPhotos?.accountId]);
   const pendingShare = useRef(incoming);
   const cancelIncoming = useCallback(() => {
     pendingShare.current?.cancel(); pendingShare.current = null; setIncoming(null); setIncomingError("");
@@ -104,9 +94,7 @@ export default function App() {
         <LocalTrial
           active={!cloud}
           onPhotosChange={setLocalPhotos}
-          syncSummary={syncSummary}
           ownedPhotos={ownedPhotos}
-          rememberedAccount={rememberedAccount}
           onOpenSaved={photoId => {
             photoOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
             setSavedViewer(photoId);
@@ -148,7 +136,6 @@ export default function App() {
               sharePhotos={sharePhotos}
               onShareDone={() => setSharePhotos(null)}
               localPhotos={localPhotos}
-              onSyncSummary={setSyncSummary}
               onOwnedPhotos={setOwnedPhotos}
               onPhotoChanges={setPhotoChanges}
               onBack={returnToPhotos}
