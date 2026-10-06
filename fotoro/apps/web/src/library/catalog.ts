@@ -5,7 +5,6 @@ import type {
   RepresentationV1,
   SignedPayloadV1,
   ChangePageV1,
-  AccountCardV1,
   WrappedKeyV1,
   PhotoAnnotationsV1,
 } from "@fotoro/contracts";

@@ -9,7 +9,6 @@ import { OCR_PROCESSOR } from "./ocr";
 import { useLocalOcr, type LocalOcrPhoto } from "./useLocalOcr";
 import { collectLocalFiles, type LocalPhoto, LocalResources } from "./resources";
 import {loadLocalChoices, saveLocalChoices} from "./preferences";
-import type {ConsumerSyncSummary} from "../library/consumer-sync";
 import {savedSearchPhotos, combineConsumerSearch, mergeConsumerSearchPhotos, ConsumerPreviewResources, type OwnedPhotoSnapshot} from "../library/consumer-search";
 import {inRecentSelectedRange} from "./consumer-range";
 import {usePhotoPicks} from "./usePhotoPicks";
@@ -67,7 +66,7 @@ export function displaySearchResult(predicted: SearchResult, navigation?: Search
     return {...predicted, photoId: navigation.photoID};
   return predicted;
 }
-export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, syncSummary, ownedPhotos = null, onOpenSaved, onShareSaved, active = true, rememberedAccount = false}: {onBackup: () => void; onSave?: (photos: LocalPhoto[]) => void; onCancelSave?: () => void; onPhotosChange?: (photos: LocalPhoto[]) => void; syncSummary?: ConsumerSyncSummary; ownedPhotos?: OwnedPhotoSnapshot | null; onOpenSaved?: (id: string) => void; onShareSaved?: (photos: Photo[]) => void; active?: boolean; rememberedAccount?: boolean}) {
+export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, ownedPhotos = null, onOpenSaved, onShareSaved, active = true}: {onBackup: () => void; onSave?: (photos: LocalPhoto[]) => void; onCancelSave?: () => void; onPhotosChange?: (photos: LocalPhoto[]) => void; ownedPhotos?: OwnedPhotoSnapshot | null; onOpenSaved?: (id: string) => void; onShareSaved?: (photos: Photo[]) => void; active?: boolean}) {
   const [photos, setPhotos] = useState<LocalOcrPhoto[]>([]), [query, setQuery] = useState(""),
     [viewer, setViewer] = useState<string | null>(null), [settings, setSettings] = useState(false),
     [last30, setLast30] = useState(false), [status, setStatus] = useState(""), [progress, setProgress] = useState(""),
@@ -362,9 +361,8 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, sync
       <header className="consumer-navigation">
         {hasPhotos ? <nav className="consumer-scope-menu" aria-label="Photo library"><select aria-label="Photo library" value={browseScope} onChange={event => {
           if (event.target.value === "saved") openBackup();
-          else if (event.target.value === "places") setPlacesOpen(true);
           else setBrowseScope(event.target.value as "photos" | "picks");
-        }}><option value="photos">Photos</option><option value="picks">Picks</option><option value="saved">Saved</option><option value="places">Places</option></select></nav> : <h1>Fotoro</h1>}
+        }}><option value="photos">Photos</option><option value="picks">Picks</option><option value="saved">Saved</option></select></nav> : <h1>Fotoro</h1>}
         <div className="header-actions">
           {hasPhotos && <>
             {(photos.length > 0 || findMatches.length > 0) && <button disabled={shareBusy} aria-pressed={reviewingPicks} onClick={() => setReviewingPicks(!reviewingPicks)}>{reviewingPicks ? "Done" : "Select"}</button>}
