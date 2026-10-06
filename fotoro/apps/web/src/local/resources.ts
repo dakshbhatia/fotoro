@@ -10,7 +10,7 @@ export interface LocalPhoto {
   originalSize?: number;
   preview?: Blob;
   previewLoader?: () => Promise<Blob>;
-  /** Internal stable identity for a verified saved loader returning fresh Blob instances. */
+  /* Stable identity for a verified saved loader returning fresh Blob instances. */
   rasterIdentity?: object;
   previewAvailable?: boolean;
   previewSize?: number;
