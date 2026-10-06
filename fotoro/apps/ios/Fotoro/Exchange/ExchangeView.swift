@@ -56,12 +56,14 @@ struct ExchangeView: View {
 
   var body: some View {
     NavigationStack {
-      List {
+      ScrollView {
+        LazyVStack(alignment: .leading, spacing: 20) {
         if services.busy { ProgressView("Working…") }
         if let feedback { Text(feedback).foregroundStyle(.secondary) }
         if let candidateCard {
           Section(candidateIsMoment ? "Photo invitation" : "Add a contact") {
             TextField("Their name (optional)", text: $name).textContentType(.name)
+              .textFieldStyle(.roundedBorder).frame(minHeight: 44)
               .focused($focusedField, equals: .name).disabled(services.busy)
             Text("Confirm this link came from the person you want to share with.")
               .font(.footnote).foregroundStyle(.secondary)
@@ -161,7 +163,7 @@ struct ExchangeView: View {
                     .contentShape(Rectangle())
                 }.aspectRatio(1, contentMode: .fit)
               }
-            }.listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
+            }
           }
         }
         Section("Shared with you") {
@@ -212,7 +214,9 @@ struct ExchangeView: View {
             ForEach(contacts, id: \.accountId) { card in Text(services.contactName(card.accountId)) }
           }
         }
-      }.scrollDismissesKeyboard(.interactively)
+        }.padding(16)
+      }.buttonStyle(.glass).controlSize(.large)
+        .scrollDismissesKeyboard(.interactively)
         .navigationTitle(selected.isEmpty ? "Shared photos" : "Share photos")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
@@ -263,6 +267,7 @@ struct ExchangeView: View {
   private var contactEntry: some View {
     Group {
       TextField("Paste a Fotoro link", text: $link)
+        .textFieldStyle(.roundedBorder).frame(minHeight: 44)
         .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
         .focused($focusedField, equals: .link).submitLabel(.go).onSubmit(openLink)
         .disabled(services.busy)

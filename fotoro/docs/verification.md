@@ -162,7 +162,7 @@ does not qualify a distribution IPA or TestFlight upload.
 
 ## Native photo handoff pass
 
-Receiving now uses a three-column thumbnail grid opening the existing viewer
+Receiving now uses one native scroll canvas and a three-column thumbnail grid opening the existing viewer
 full screen. Save remains explicit inside that viewer. Foreground inbox refresh
 and known expiry checks remain active while it covers the receiving screen;
 returning does not replay an accepted invitation. Owned Saved photos put Save to
@@ -178,6 +178,9 @@ Independent review covers receiving lifecycle, account handoff and original
 restoration guards. Rendered public-fixture checks verify the owned toolbar,
 Info under More and successful Save to Photos. The recently created simulator
 Photos resource matches the public Singapore JPEG bytes and digest exactly.
+The named receiving thumbnail opens the full-screen viewer; Done returns to the
+same grid. The scroll container keeps that thumbnail's accessible tap target
+inside its square bounds.
 This does not qualify physical iPhone, video or Live Photo restoration.
 Password action ordering and copied state have code review; actual cross-device
 password transfer is not qualified by this pass. No web runtime, API, encryption
