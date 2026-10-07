@@ -4,8 +4,12 @@ import type {SearchPhoto, SearchResult} from "../local/search";
 export interface PeopleFilter {ids: ReadonlySet<string>; mode: "any" | "everyone"}
 export interface ReviewedPerson {id: string; names: string[]; photoCount: number}
 export const emptyPeopleFilter = (): PeopleFilter => ({ids: new Set(), mode: "any"});
-export function peopleReviewPhotos<T extends SearchPhoto>(photos: readonly T[], selectedOnly = false, selectedIDs?: ReadonlySet<string>): T[] {
-  return photos.filter(photo => !!photo.digest && photo.current?.() !== false && (!selectedOnly || selectedIDs?.has(photo.id)));
+export function peopleReviewPhotos<T extends SearchPhoto>(photos: readonly T[], selectedOnly = false, selectedIDs?: ReadonlySet<string>, eligibleIDs?: ReadonlySet<string>): T[] {
+  return photos.filter(photo => !!photo.digest && photo.current?.() !== false && (!eligibleIDs || eligibleIDs.has(photo.id)) && (!selectedOnly || selectedIDs?.has(photo.id)));
+}
+export function peopleMetadataMatches(result: SearchResult, sources?: readonly SearchResult[]): Set<string> {
+  if (sources && result.meaning) return new Set(sources.flatMap(source => source.meanings.filter(meaning => meaning.id === result.meaning!.id).flatMap(meaning => meaning.photoIds)));
+  return new Set(result.meaning?.photoIds ?? result.photoIds);
 }
 export function reviewedPeople(photos: readonly SearchPhoto[]): ReviewedPerson[] {
   const people = new Map<string, {names: Set<string>; photos: Set<string>}>();

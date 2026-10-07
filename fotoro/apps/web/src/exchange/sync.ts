@@ -185,6 +185,8 @@ export function readableSyncError(error: unknown) {
     return "Public test accounts cannot Save your private files. Use a real account.";
   if (/ANNOTATION|VERSION_CONFLICT/.test(code))
     return "Your labels or text could not Save. Your pending edits are kept here; open Settings to retry or review them.";
+  if (code === "CACHE_UPDATE_REQUIRES_RELOAD")
+    return "Close other Fotoro tabs, then try again here.";
   if (code === "VAULT_LOCKED")
     return "Your library is locked. Sign in to continue.";
   if (/UNAUTHENTICATED|FORBIDDEN/.test(code))

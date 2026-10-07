@@ -18,11 +18,28 @@ struct AutomaticPhotoSyncPreference: Codable, Equatable {
 }
 
 // Account isolation comes from LibraryStore; the origin is part of the persisted key.
-// The initial exclusions are fixed, so the checkpoint does not grow with new arrivals.
+// Initial exclusions do not grow with new arrivals; explicit expansion admits older dated sources.
 struct AutomaticPhotoSyncIntake: Codable, Equatable {
   var cutoff: Date
   var includesAll = false
   var initialExcludedIDs: Set<String>?
+  var initialWindowDays = 30
+  private var expandedRecentWindow = false
+  enum CodingKeys: String, CodingKey { case cutoff, includesAll, initialExcludedIDs, initialWindowDays, expandedRecentWindow }
+  init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    cutoff = try values.decode(Date.self, forKey: .cutoff)
+    includesAll = try values.decodeIfPresent(Bool.self, forKey: .includesAll) ?? false
+    initialExcludedIDs = try values.decodeIfPresent(Set<String>.self, forKey: .initialExcludedIDs)
+    initialWindowDays = try values.decodeIfPresent(Int.self, forKey: .initialWindowDays) ?? 10
+    expandedRecentWindow = try values.decodeIfPresent(Bool.self, forKey: .expandedRecentWindow) ?? false
+  }
+  mutating func expandToThirtyDays(calendar: Calendar = .current) {
+    guard initialWindowDays < 30 else { return }
+    cutoff = calendar.date(byAdding: .day, value: initialWindowDays - 30, to: cutoff) ?? cutoff
+    initialWindowDays = 30
+    expandedRecentWindow = true
+  }
 
   init(now: Date = Date()) { cutoff = RecentPhotosPolicy.cutoff(now: now) }
 
@@ -32,6 +49,9 @@ struct AutomaticPhotoSyncIntake: Codable, Equatable {
       initialExcludedIDs = Set(candidates.filter {
         !existingSourceIDs.contains($0.id) && ($0.capturedAt.map { $0 < cutoff } ?? true)
       }.map(\.id))
+    }
+    if expandedRecentWindow {
+      initialExcludedIDs?.subtract(candidates.filter { $0.capturedAt.map { $0 >= cutoff && $0 <= now } ?? false }.map(\.id))
     }
     return candidates.filter {
       if existingSourceIDs.contains($0.id) { return true }

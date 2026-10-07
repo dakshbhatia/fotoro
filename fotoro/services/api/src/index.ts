@@ -9,7 +9,7 @@ import * as albums from "./albums";
 import { savePhoto } from "./saves";
 import * as annotations from "./annotations";
 import * as intelligence from "./intelligence";
-import {diagnosticMethod, diagnosticPhase, diagnosticErrorClass} from "./diagnostics";
+import {diagnosticArea, diagnosticMethod, diagnosticPhase, diagnosticErrorClass} from "./diagnostics";
 import { readJson } from "./requests";
 import {accountStorage, throttleAuth} from "./limits";
 const app = new Hono<{ Bindings: Env; Variables: { actor: Actor } }>();
@@ -29,7 +29,7 @@ app.onError((error, c) => {
   const method = diagnosticMethod(c.req.method);
   const phase = e.diagnostic?.phase ?? diagnosticPhase(c.req.path);
   const errorClass = e.diagnostic?.errorClass ?? diagnosticErrorClass(e.code, e.status);
-  const diagnostic = JSON.stringify({event: "api.error", requestId, method, status: e.status, code: e.code, phase, errorClass});
+  const diagnostic = JSON.stringify({event: "api.error", requestId, method, status: e.status, code: e.code, area: diagnosticArea(c.req.path), phase, errorClass});
   if (e.retryAfterSeconds) c.header("Retry-After", String(e.retryAfterSeconds));
   if (e.status >= 500) console.error(diagnostic);
   else console.warn(diagnostic);

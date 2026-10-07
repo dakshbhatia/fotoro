@@ -63,7 +63,7 @@ enum RecentPhotosPolicy {
   static let browsePageSize = 200
   static let maximumPickCandidates = 500
   static func cutoff(now: Date, calendar: Calendar = .current) -> Date {
-    calendar.date(byAdding: .day, value: -10, to: now)!
+    calendar.date(byAdding: .day, value: -30, to: now)!
   }
   static func includes(_ date: Date?, now: Date, calendar: Calendar = .current) -> Bool {
     guard let date else { return false }

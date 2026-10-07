@@ -620,12 +620,12 @@ final class RecentPhotosTests: XCTestCase {
     XCTAssertNil(services.auth.fallbackMessage)
     services.vault.lock()
   }
-  func testLast10DaysDateBoundariesAndMissingDates() {
+  func testLast30DaysDateBoundariesAndMissingDates() {
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = TimeZone(secondsFromGMT: 0)!
     let now = Date(timeIntervalSince1970: 1_780_315_200)
     let cutoff = RecentPhotosPolicy.cutoff(now: now, calendar: calendar)
-    XCTAssertEqual(cutoff, now.addingTimeInterval(-10 * 24 * 60 * 60))
+    XCTAssertEqual(cutoff, now.addingTimeInterval(-30 * 24 * 60 * 60))
     XCTAssertTrue(RecentPhotosPolicy.includes(cutoff, now: now, calendar: calendar))
     XCTAssertTrue(RecentPhotosPolicy.includes(now, now: now, calendar: calendar))
     XCTAssertFalse(

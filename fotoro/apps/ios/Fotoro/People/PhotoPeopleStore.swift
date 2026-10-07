@@ -11,6 +11,12 @@ import Photos
   private(set) var groups: [PhotoPeopleGroup] = []
   private(set) var processed = 0
   private(set) var total = 0
+  private(set) var includesOlder = false
+  private(set) var remaining = 0
+  private var unavailableIDs: Set<String> = []
+  var unavailable: Int { unavailableIDs.count }
+  private var scanScope: PhotoPeopleScanScope?
+  private var cursor: PhotoAnalysisCursor?
   var error: String?
   init(search: LocalSearchStore) { self.search = search }
   private var index: SearchIndex? { search?.peopleIndex }
@@ -29,22 +35,47 @@ import Photos
       if active { scan() }
     } catch { self.error = error.localizedDescription }
   }
-  func stop() { operation = UUID(); task?.cancel(); task = nil; busy = false }
-  func scan() {
+  func setIncludesOlder(_ active: Bool) { stop(); includesOlder = active; scanScope = nil; cursor = nil; remaining = 0; unavailableIDs = [] }
+  func invalidateScope() { stop(); scanScope = nil; cursor = nil; remaining = 0; unavailableIDs = [] }
+  func stop() {
+    if busy { remaining += max(0, total - processed) }
+    operation = UUID(); task?.cancel(); task = nil; busy = false
+  }
+  func scan(nextBatch: Bool = false) {
     guard task == nil, enabled, let search, let index else { return }
-    busy = true; error = nil; processed = 0
+    guard search.peopleSnapshotReady else { return }
+    let scope = nextBatch && scanScope?.query == search.query && scanScope?.scope.people == search.peopleSelection
+      ? scanScope! : PhotoPeopleScanScope(query: search.query, people: search.peopleSelection, includesOlder: includesOlder)
+    let after = nextBatch && scanScope == scope ? cursor : nil
+    scanScope = scope
+    if after == nil { cursor = nil; unavailableIDs = [] }
+
+    busy = true; error = nil; processed = 0; total = 0
     let token = UUID(); operation = token
     task = Task { [weak self] in
       guard let self else { return }
       defer { if self.operation == token { self.task = nil; self.busy = false; self.refresh() } }
       do {
-        let records = try index.pendingPeopleRecords(); self.total = records.count
+        let batch = try await Task.detached(priority: .utility) {
+          (try index.pendingPeopleCount(scope: scope, after: after), try index.pendingPeopleRecords(scope: scope, after: after, limit: 500))
+        }.value
+        let records = batch.1
+        try Task.checkCancellation()
+        guard self.operation == token else { throw CancellationError() }
+        self.total = records.count; self.remaining = max(0, batch.0 - records.count)
         for record in records {
           try Task.checkCancellation()
-          guard self.enabled, RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)) else { throw CancellationError() }
-          if try await search.analyzePeople(record) { self.processed += 1 }
+          guard self.enabled, search.query == scope.query, search.peopleSelection == scope.scope.people, RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)) else { throw CancellationError() }
+          let completed: Bool
+          do { completed = try await search.analyzePeople(record, scanScope: scope) }
+          catch is CancellationError { throw CancellationError() }
+          catch { completed = false; self.error = error.localizedDescription }
           try Task.checkCancellation()
           guard self.operation == token else { throw CancellationError() }
+          if completed { self.unavailableIDs.remove(record.id) }
+          else { self.unavailableIDs.insert(record.id) }
+          self.processed += 1
+          self.cursor = PhotoAnalysisCursor(record)
           self.groups = try index.peopleGroups()
           await Task.yield()
         }

@@ -19,6 +19,7 @@ struct LocalSearchView: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
       SearchAlternatives(search: search, selected: choseMeaning)
+      SearchAnalysisActions(search: search)
       if matches.isEmpty {
         SearchEmptyResults(search: search, finished: search.hasCurrentResponse, reviewing: review != nil)
       } else {
@@ -60,6 +61,28 @@ struct LocalSearchView: View {
   }
 }
 
+private struct SearchAnalysisActions: View {
+  let search: LocalSearchStore
+  var body: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      if search.analysisRemaining > 0 {
+        Text("\(search.analysisRemaining) matching photos unattempted").font(.caption).foregroundStyle(.secondary)
+        Button("Next batch", systemImage: "arrow.forward") { search.analyzeMetadataMatches(nextBatch: true) }
+          .accessibilityIdentifier("search.analysis.next")
+      } else if search.hasSearch || search.analysisUnavailable > 0 {
+        Button(search.analysisUnavailable > 0 ? "Retry unavailable photos" : "Analyze metadata matches", systemImage: "text.viewfinder") { search.analyzeMetadataMatches() }
+          .accessibilityIdentifier("search.analysis.matches")
+        Text("Check up to 500 permitted photos matching this date and metadata search. Older OCR and visual results remain searchable.")
+          .font(.caption).foregroundStyle(.secondary)
+      }
+      if search.analysisUnavailable > 0 {
+        Text("\(search.analysisUnavailable) photos have incomplete analysis. Retry after the remaining batches.")
+          .font(.caption).foregroundStyle(.secondary)
+      }
+    }.disabled(search.indexing || !search.canAnalyzeMetadataMatches).padding(.horizontal)
+  }
+}
+
 private struct SearchEmptyResults: View {
   let search: LocalSearchStore
   var searchPending = false
@@ -87,7 +110,7 @@ private struct SearchProgressFeedback: View {
     VStack(alignment: .leading, spacing: 6) {
       ProgressView(searchPending || search.searching ? "Searching photos…" : "Preparing photo search…")
       if search.indexing, let progress = search.analysisProgress {
-        Text("\(progress.processed) of \(progress.total) photos checked")
+        Text("\(progress.processed) of \(progress.total) photos attempted")
       }
     }.font(.caption).foregroundStyle(.secondary)
   }
@@ -139,6 +162,7 @@ struct ConsumerSearchResultsView: View {
         SearchPeopleSummary(search: search, edit: editPeople)
       }
       SearchAlternatives(search: search, selected: choseAlternative)
+      SearchAnalysisActions(search: search)
       if matches.isEmpty {
         SearchEmptyResults(search: search, searchPending: searchPending, reviewing: review != nil)
       } else {

@@ -5,6 +5,83 @@ work; [product](product.md) owns the intended experience. Earlier measurements a
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
 
+## October 7 metadata-first processing checks
+
+Local and Saved browsing now default to the last 30 days. A single chip switches
+between recent and all photos, and an explicit date query overrides the recent
+window. Capture dates use existing evidence; undated imports remain reachable.
+New native Sync intake uses 30 days. Existing persisted 10-day anchors and source
+exclusions survive unchanged until the owner explicitly expands them to 30 days.
+
+People, OCR, visual indexing and Picks use current date, source and reviewed-People
+metadata before preview decoding or inference. Reviewed names and previously
+processed older evidence stay searchable. Native startup publishes cheap metadata
+first, then processes at most 500 eligible photos shared across OCR/classification/
+visual work. People review also limits each explicit batch to 500, offers the next
+batch and retains unavailable sources for an explicit retry. Browser People reuses
+current reviewed/session results and puts older-source and reassessment controls
+under Options. Changing a scope, permission or source revision stops stale work.
+
+Browser refresh reuses a bounded metadata session cache and verified unchanged
+catalog envelopes while fetching current annotations. Changed envelopes verify
+again; lock/account changes clear the cache. Account-specific IndexedDB cursors
+replace broad catalog scans. The optional 100 MiB ciphertext cache now uses an
+atomic persisted size/FIFO ledger instead of reading every ciphertext on insertion.
+A blocked cache upgrade asks the owner to close other Fotoro tabs and retry.
+The server's existing account/sequence indexes and encrypted protocol are reused.
+API error diagnostics add only a bounded operation category, with no photo, account,
+URL, query or payload content.
+
+Local verification passes 532 web tests before the final scope-chip adjustment,
+then 16 affected UI tests and TypeScript on that adjustment. The final production
+build and all three startup-boundary tests pass: 430,339 static JavaScript bytes
+across eight chunks. The full API suite passes 98 tests in 19 files. Native executes
+419 tests: 418 pass and one existing Vision test skips. The isolated preview
+executes 114 tests: 113 pass with the same skip. Scoped public-fixture tests reduce
+20,000 metadata records to one current matching photo and measure exactly one
+preview/inference for each affected OCR, Picks and face pipeline. Native keyset
+tests process 601 candidates as 500 plus 101 without overlap. Cache tests cover
+cross-tab byte bounds, reopened ledgers, changed envelopes, account fences and
+fresh annotation removals.
+
+Actual isolated browser QA confirms reviewed names reopen without reassessment,
+Find more reuses current results, the recent/all chip works in both directions,
+and a 2018 query removes the recent filter. A single matching public fixture is
+reviewed and named; 320- and 390-pixel views keep one dialog and usable controls.
+This does not measure general identity accuracy or first-load performance for a
+20,000-photo encrypted catalog. The full catalog still hydrates before client
+metadata filtering, and physical iCloud, permissions, background work and memory
+acceptance remain open. These changes are not yet the production/build-42 checkpoint
+below; their release must pass exact-head CI and separate artifact audits.
+
+## October 7 production and TestFlight 42 checkpoint
+
+PR 46 merged with an exact-head guard after all 23 checks succeeded or skipped.
+Qualified head `8311a8639801ad99fe80c42449bab41b1b7f1eab` and merge
+`a092848097c07ec304835c3c09ada27c17cdf705` have the same tree. A fresh production
+build uses no fixture settings. Worker `8777a26f-ac52-4f7a-95ae-f2bdd94a188e` is
+active at 100%; deployment `8bbe9d36-e5ea-43ff-9e8e-f46ac0468526` was read back.
+All 45 non-HTML asset SHA-256 digests and the Photos/Saved HTML match the build.
+Migrations 0007/0008 have matching schema and ledger entries, with none pending.
+Existing production bindings are preserved and cloud inference remains disabled.
+Authentication and contact/moment/album Apple associations pass service checks.
+Actual production browser entry and passkey-first access render without console
+errors. Earlier Worker `2ca15bc9-614b-4b21-a115-f3748c60bbc4` remains available
+for rollback.
+
+Build 42 (0.1.0) is processed `VALID` and `IN_BETA_TESTING`, independently read
+back with the same existing internal group and one existing tester. Its source
+is `d218a02fcb8d9cfb63a7e8865900b60685b6b4e2`; all 147 native/tool input hashes
+match the immutable archive and qualified head. Both archive and Organizer-exported
+IPA pass the full release audit before upload. The signed main binary/static
+runtime dSYM pairing passes; Apple accepted the separate resource-stub dSYM warning.
+Approved What to Test notes match independent readback. No tester membership
+changed. Standard outside-OS encryption and the approved France exclusion map to
+App Store Connect documentation-exemption metadata; the signed binary is unchanged.
+This establishes internal availability, not installation of build 42 or physical
+passkey, original export, background transfer or installed-link acceptance. The
+30-day processing changes after this checkpoint require separate qualification.
+
 ## October 7 family, album and returning-account implementation checks
 
 Current source combines reviewed, source-bound People IDs with the search query.
@@ -59,15 +136,15 @@ new album creation, explicit owner end and large-photo navigation. Photo-first
 album screens use compact contributor/date tags, with account details under More.
 Responsive checks cover 320×568, 390×844 and 1280×720; the 320-pixel page has no
 horizontal overflow, one dialog and 44-pixel primary controls. These observations
-do not establish full accessibility conformance. Original preparation completes,
-but the embedded browser never produces a download event or verified file, even
-after a fresh synchronous click and connected link. File export remains a real
-browser/device acceptance gate; no UI download-success claim is made.
+do not establish full accessibility conformance. Actual Safari original preparation
+and a fresh Download original click save 329,611 bytes matching the checked-in
+public NASA original's SHA-256. The embedded browser's download event remains
+unavailable; physical iOS original export still needs acceptance. No UI
+download-success claim is made before a browser actually saves the file.
 
-This section does not claim build 42 availability,
-deployment, physical-device acceptance or enabled cloud inference. Build 41's
-verified internal availability and the earlier production checkpoint remain
-recorded below until new release evidence is added.
+The production and build 42 checkpoint above supersedes the earlier release
+status below. These implementation checks do not establish physical-device
+acceptance or enabled cloud inference.
 
 ## October 6 foundation implementation checks
 

@@ -881,6 +881,40 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     XCTAssertEqual(backup.status.phase, .failed)
     XCTAssertNil(backup.status.lastChecked)
   }
+  func testNewIntakeIncludesThirtyDaysAndLegacyTenDayAnchorExpandsOnlyOnRequest() throws {
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let fresh = AutomaticPhotoSyncIntake(now: now)
+    XCTAssertEqual(fresh.initialWindowDays, 30)
+    XCTAssertEqual(fresh.cutoff, RecentPhotosPolicy.cutoff(now: now))
+    let oldCutoff = now.addingTimeInterval(-10 * 86400)
+    let encoded = try JSONEncoder().encode(OldIntake(cutoff: oldCutoff, includesAll: false, initialExcludedIDs: ["twenty-days", "forty-days", "undated"]))
+    var legacy = try JSONDecoder().decode(AutomaticPhotoSyncIntake.self, from: encoded)
+    let candidates = [BackupCandidate(id: "twenty-days", capturedAt: now.addingTimeInterval(-20 * 86400)),
+      BackupCandidate(id: "forty-days", capturedAt: now.addingTimeInterval(-40 * 86400)),
+      BackupCandidate(id: "undated"), BackupCandidate(id: "new-old-arrival", capturedAt: .distantPast),
+      BackupCandidate(id: "saved-old", capturedAt: .distantPast)]
+    XCTAssertEqual(legacy.initialWindowDays, 10)
+    XCTAssertEqual(legacy.cutoff, oldCutoff)
+    XCTAssertEqual(legacy.select(candidates, existingSourceIDs: ["saved-old"], now: now).map(\.id), ["new-old-arrival", "saved-old"])
+    legacy.expandToThirtyDays()
+    var resumed = try Wire.decode(AutomaticPhotoSyncIntake.self, Wire.encode(legacy))
+    XCTAssertEqual(resumed.initialWindowDays, 30)
+    XCTAssertEqual(resumed.select(candidates, existingSourceIDs: ["saved-old"], now: now).map(\.id), ["twenty-days", "new-old-arrival", "saved-old"])
+    XCTAssertEqual(resumed.initialExcludedIDs, ["forty-days", "undated"])
+    let expandedCutoff = resumed.cutoff
+    resumed.expandToThirtyDays()
+    XCTAssertEqual(resumed.cutoff, expandedCutoff)
+    var limited = legacy
+    XCTAssertEqual(limited.select([], existingSourceIDs: [], now: now).count, 0)
+    XCTAssertTrue(limited.select(candidates, existingSourceIDs: [], now: now).contains { $0.id == "twenty-days" },
+      "Explicit expansion must survive a temporarily narrower permitted snapshot")
+  }
+  private struct OldIntake: Encodable {
+    let cutoff: Date
+    let includesAll: Bool
+    let initialExcludedIDs: Set<String>
+  }
+
   func testRecentIntakeAnchorPreservesSavedSourcesAndAdmitsLaterBackdatedArrivals() throws {
     let now = Date(timeIntervalSince1970: 1_800_000_000)
     var intake = AutomaticPhotoSyncIntake(now: now)

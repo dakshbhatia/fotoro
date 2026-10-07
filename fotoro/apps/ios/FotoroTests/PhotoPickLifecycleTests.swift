@@ -47,7 +47,7 @@ import XCTest
     let browsePredicate = try XCTUnwrap(browse.predicate)
     let picksPredicate = try XCTUnwrap(picks.predicate)
     let image = PHAssetMediaType.image.rawValue
-    for date in [now.addingTimeInterval(-30 * 86400), now.addingTimeInterval(86400)] {
+    for date in [now.addingTimeInterval(-31 * 86400), now.addingTimeInterval(86400)] {
       let metadata: [String: Any] = ["mediaType": image, "creationDate": date]
       XCTAssertTrue(browsePredicate.evaluate(with: metadata))
       XCTAssertFalse(picksPredicate.evaluate(with: metadata))
