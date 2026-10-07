@@ -78,7 +78,7 @@ export function displaySearchResult(predicted: SearchResult, navigation?: Search
 export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, ownedPhotos = null, onOpenSaved, onShareSaved, onAlbumSaved, active = true}: {onBackup: () => void; onSave?: (photos: LocalPhoto[]) => void; onCancelSave?: () => void; onPhotosChange?: (photos: LocalPhoto[]) => void; ownedPhotos?: OwnedPhotoSnapshot | null; onOpenSaved?: (id: string) => void; onShareSaved?: (photos: Photo[]) => void; onAlbumSaved?: (photos: Photo[]) => void; active?: boolean}) {
   const [photos, setPhotos] = useState<LocalOcrPhoto[]>([]), [query, setQuery] = useState(""),
     [viewer, setViewer] = useState<string | null>(null), [settings, setSettings] = useState(false),
-    [last30, setLast30] = useState(false), [status, setStatus] = useState(""), [progress, setProgress] = useState(""),
+    [last30, setLast30] = useState(true), [status, setStatus] = useState(""), [progress, setProgress] = useState(""),
     [retained, setRetained] = useState(false), [retentionBusy, setRetentionBusy] = useState(false), [ready, setReady] = useState(false), [saving, setSaving] = useState(""),
     [readText, setReadText] = useState(() => loadLocalChoices()?.readText ?? false), [feedback, setFeedback] = useState(emptyFeedback),
     [committed, setCommitted] = useState<string>(), [navigation, setNavigation] = useState<SearchNavigation>(), [sourceGeneration, setSourceGeneration] = useState(0);
@@ -510,7 +510,7 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
     </aside>}
     {active && peopleOpen && <Suspense fallback={<aside className="settings-panel" role="dialog" aria-modal="true" aria-label="People"><button autoFocus onClick={() => setPeopleOpen(false)}>Close</button><p role="status">Opening People…</p></aside>}><People photos={searchPhotos} selectedIDs={searchSelectionIDs} resources={resources} savedResources={savedResources} onClose={() => setPeopleOpen(false)} onAssignments={applyPeople} onOpen={id => {
       setPeopleOpen(false); peopleFind.change({...peopleFind.filter, ids: new Set()}); setBrowseScope("photos"); setLast30(false); changeQuery(""); if (id.startsWith("saved:")) onOpenSaved?.(id.slice(6)); else setViewer(id);
-    }} onFind={id => {peopleFind.change({ids: new Set([id]), mode: "any"}); setPeopleOpen(false);}} /></Suspense>}
+    }} onFind={id => {peopleFind.change({ids: new Set([id]), mode: "any"}); setLast30(false); setPeopleOpen(false);}} /></Suspense>}
     {active && placesOpen && <Places photos={searchPhotos} resources={resources} savedResources={savedResources} onClose={() => setPlacesOpen(false)} onApplyLocations={applyTimelineLocations} onOpen={id => {
       setPlacesOpen(false);
       peopleFind.change({...peopleFind.filter, ids: new Set()});

@@ -96,7 +96,7 @@ async function retainAppend(request: AlbumAppendV1, albumId: string, session: Un
   } finally {plain.fill(0);}
 }
 
-/** One open album owns its keys. Membership is rechecked around every media read. */
+// One open album owns its keys. Membership is rechecked around every media read.
 export class AlbumAccess {
   readonly session = requireVault();
   readonly identity: string;
