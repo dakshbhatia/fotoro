@@ -4,6 +4,7 @@ import {type LocalPhoto, LocalResources} from "./resources";
 import {photoCell, photoColumns, sortTablePhotos, type PhotoColumn, type PhotoSort} from "./photo-table";
 import {useLocalThumbnail} from "./useLocalThumbnail";
 import type {PickSelection} from "./LocalLibrary";
+import {usePhotoNavigation} from "../library/photo-navigation";
 
 function PhotoRow({photo, resources, columns, onOpen, onFailure, selection, index}: {
   photo: LocalPhoto; resources: LocalResources; columns: readonly PhotoColumn[];
@@ -15,6 +16,7 @@ function PhotoRow({photo, resources, columns, onOpen, onFailure, selection, inde
     {selection?.editing && <td className="table-selection"><input type="checkbox" aria-label={"Select " + photo.filename} checked={selection.ids.has(photo.id)} disabled={selection.disabled} onChange={event => selection.onChange(photo.id, event.target.checked)} /></td>}
     {columns.map(column => <td key={column} className={"photo-column-" + column}>
       {column === "name" ? <button className="table-photo" aria-label={(selection?.editing ? "Select " : "Open ") + photo.filename}
+        data-photo-navigation-id={photo.id}
         aria-pressed={selection?.editing ? selection.ids.has(photo.id) : undefined} disabled={selection?.editing && selection.disabled}
         onClick={() => selection?.editing ? selection.onChange(photo.id, !selection.ids.has(photo.id)) : onOpen(photo.id)}>
         <span className="table-thumbnail">{url ? <img src={url} alt="" /> : <span aria-label={error ? "Preview unavailable" : "Preparing photo"}>{error ? "—" : "…"}</span>}</span>
@@ -36,11 +38,14 @@ export function PhotoTable({photos, resources, onOpen, onFailure, selection, col
     getItemKey: index => sorted[index].id, estimateSize: () => 76, overscan: 4, scrollMargin: 44,
     useCachedMeasurements: !active});
   const visible = virtual.getVirtualItems(), cells = columns.length + (selection?.editing ? 1 : 0);
+  const navigationRows = useMemo(() => sorted.map(photo => [photo.id]),[sorted]);
+  const navigate = usePhotoNavigation(parent,navigationRows,index => virtual.scrollToIndex(index,{align: "auto"}),
+    Math.max(1,Math.floor(((parent.current?.clientHeight ?? 120)-44)/76)),active);
   const reorder = (column: PhotoColumn) => {
     setSort(current => ({column, descending: current.column === column ? !current.descending : column === "date"}));
     virtual.scrollToOffset(0);
   };
-  return <div ref={parent} className="canvas photo-table-scroll" role="region" aria-label="Photo table" tabIndex={0}>
+  return <div ref={parent} className="canvas photo-table-scroll" role="region" aria-label="Photo table" tabIndex={0} onKeyDown={navigate}>
     <table className="photo-table" aria-label="Photos" aria-rowcount={photos.length + 1}>
       <thead><tr>{selection?.editing && <th scope="col"><span className="visually-hidden">Selection</span></th>}
         {columns.map(column => <th key={column} scope="col" aria-sort={sort.column === column ? sort.descending ? "descending" : "ascending" : "none"}>

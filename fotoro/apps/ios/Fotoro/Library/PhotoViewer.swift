@@ -45,14 +45,18 @@ struct PhotoViewer: View {
       TabView(selection: $selected) {
         ForEach(photos) { photo in
           Group {
-            if shouldLoad(photo) { SavedPhotoPage(services: services, photo: photo, receivedGrant: receivedGrant, receivedCards: receivedCards) }
+            if shouldLoad(photo) {
+              if CameraMedia.isMotion(photo.metadata.mediaType) {
+                SavedPhotoPage(services: services, photo: photo, receivedGrant: receivedGrant, receivedCards: receivedCards,
+                  isCurrent: photo.id == selected)
+              } else {
+                SavedPhotoPage(services: services, photo: photo, receivedGrant: receivedGrant, receivedCards: receivedCards,
+                  isCurrent: photo.id == selected)
+                  .modifier(PhotoViewerStillInteraction(zoom: $zoom, controlsVisible: $controlsVisible, isCurrent: photo.id == selected))
+              }
+            }
             else { Color.black }
-          }.scaleEffect(zoom.scale)
-            .gesture(MagnifyGesture().onChanged { zoom.change($0.magnification) }
-              .onEnded { zoom.settle($0.magnification) })
-          .onTapGesture(count: 2) { zoom.toggle() }
-            .onTapGesture { controlsVisible.toggle() }
-            .tag(photo.id)
+          }.tag(photo.id)
         }
       }.tabViewStyle(.page(indexDisplayMode: .never)).background(.black)
         .ignoresSafeArea(.container)
@@ -65,9 +69,17 @@ struct PhotoViewer: View {
             }
           }
         }
-        .onChange(of: selected) { zoom.reset(); feedback = nil }
+        .onChange(of: selected) { zoom.reset(); feedback = nil; controlsVisible = true }
+        .accessibilityAction(named: "Next photo") { movePage(forward: true) }
+        .accessibilityAction(named: "Previous photo") { movePage(forward: false) }
         .toolbar {
           ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() } }
+          if current.map({ !CameraMedia.isMotion($0.metadata.mediaType) }) == true {
+            ToolbarItem(placement: .topBarTrailing) {
+              Button(zoom.scale == 1 ? "Zoom in" : "Reset zoom", systemImage: "plus.magnifyingglass") { zoom.toggle() }
+                .accessibilityIdentifier("viewer.zoom")
+            }
+          }
           if receivedGrant != nil {
             ToolbarItem(placement: .bottomBar) {
               Button("Info", systemImage: "info.circle") { details = current }
@@ -139,6 +151,9 @@ struct PhotoViewer: View {
     guard let index = photos.firstIndex(where: { $0.id == photo.id }),
       let current = photos.firstIndex(where: { $0.id == (selected.isEmpty ? initialID : selected) }) else { return false }
     return RecentPhotosPolicy.shouldLoadPage(index, current: current)
+  }
+  private func movePage(forward: Bool) {
+    if let id = RecentPhotosPolicy.adjacentPhotoID(photos.map(\.id), current: selected, forward: forward) { selected = id }
   }
   private func share() {
     guard let photo = current, !preparingShare else { return }
@@ -238,6 +253,7 @@ private struct SavedPhotoPage: View {
   let photo: LocalPhoto
   let receivedGrant: GrantV1?
   let receivedCards: [String: AccountCardV1]?
+  let isCurrent: Bool
   @State private var loaded: LocalPhoto?
   @State private var failed = false
   @State private var retry = 0
@@ -280,11 +296,12 @@ private struct SavedPhotoPage: View {
         VStack {
           if let motionFailure { Text(motionFailure).font(.footnote).multilineTextAlignment(.center) }
           Button(playing ? "Opening original…" : photo.metadata.mediaType == CameraMedia.liveType ? "Play Live Photo" : "Play video", systemImage: "play.fill", action: play)
-            .disabled(playing).padding().background(.regularMaterial, in: .capsule)
+            .disabled(playing || !isCurrent).padding().background(.regularMaterial, in: .capsule)
         }.padding(.bottom, 70)
       }
     }
       .onChange(of: request) { cleanupMotion() }
+      .onChange(of: isCurrent) { if !isCurrent { cleanupMotion() } }
       .onChange(of: scenePhase) { if scenePhase != .active { cleanupMotion() } }
       .onDisappear { cleanupMotion() }
       .task(id: request) {
@@ -310,7 +327,7 @@ private struct SavedPhotoPage: View {
       }
   }
   private func play() {
-    guard !playing, CameraMedia.isMotion(photo.metadata.mediaType) else { return }
+    guard isCurrent, !playing, CameraMedia.isMotion(photo.metadata.mediaType) else { return }
     let identity = request, token = UUID()
     motionGeneration = token
     playing = true; motionFailure = nil
@@ -321,11 +338,11 @@ private struct SavedPhotoPage: View {
         let original = try await services.consumerMediaOriginal(photo, grant: receivedGrant)
         pending = [original]
         try Task.checkCancellation()
-        guard request == identity, motionGeneration == token, scenePhase == .active else { throw CancellationError() }
+        guard isCurrent, request == identity, motionGeneration == token, scenePhase == .active else { throw CancellationError() }
         let urls = try CameraMedia.exportOriginals(try Data(contentsOf: original), metadata: photo.metadata, directory: original.deletingLastPathComponent())
         pending = urls
         try Task.checkCancellation()
-        guard request == identity, motionGeneration == token,
+        guard isCurrent, request == identity, motionGeneration == token,
           receivedGrant.map(services.isReceivedGrantCurrent) ?? true,
           receivedGrant == nil || services.session.pinnedCards == receivedCards else { throw CancellationError() }
         let movie = photo.metadata.mediaType == CameraMedia.liveType ? urls[1] : urls[0]

@@ -1,9 +1,10 @@
-export function AccountAccess({ password, onPassword, generatedPassword, busy, onSignIn, onCreate, onContinue, onBack, onCopy, onSave }: {
+export function AccountAccess({ password, onPassword, generatedPassword, busy, onSignIn, onPasskey, onCreate, onContinue, onBack, onCopy, onSave }: {
   password: string;
   onPassword: (password: string) => void;
   generatedPassword: string;
   busy: boolean;
   onSignIn: () => void;
+  onPasskey?: () => void;
   onCreate: () => void;
   onContinue: () => void;
   onBack: () => void;
@@ -36,6 +37,7 @@ export function AccountAccess({ password, onPassword, generatedPassword, busy, o
       </label>
       <button className="primary-action" type="submit" disabled={busy || !password.trim()}>Open Fotoro</button>
     </form>
+    {onPasskey && <button className="text-button" disabled={busy} onClick={onPasskey}>Use a passkey</button>}
     <button className="text-button account-create" disabled={busy} onClick={onCreate}>New Fotoro</button>
   </>;
 }

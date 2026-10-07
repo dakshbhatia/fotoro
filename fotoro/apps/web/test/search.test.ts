@@ -195,6 +195,9 @@ test("source-bound People and observations use the existing search without expos
   const facts = factsWithPeople(withPhotoObservation({facts: ["My exact fact"]}, observation).facts, digest, [{personId: crypto.randomUUID(), name: "Ronald", box: [0, 0, 1000, 1000]}]);
   const source = {...photo("saved:original", "IMG_0001.jpg"), observationPhotoId: "original", digest, facts};
   const index = new PhotoSearchIndex([source]);
+  assert.equal(index.search("Ron",{now}).meaning?.evidence[source.id],"person");
+  assert.equal(index.search("bicycle",{now}).meaning?.evidence[source.id],"observation");
+  assert.equal(index.search("My exact fact",{now}).meaning?.evidence[source.id],"fact");
   for (const query of ["bicycle", "Cafe", "Ron", "My exact fact"]) assert.equal(index.search(query, {now}).photoId, source.id);
   for (const query of ["moonlight", "fotoro.ai", "gemini", digest]) assert.equal(index.search(query, {now}).photoId, undefined);
   const stale = new PhotoSearchIndex([{...source, digest: "b".repeat(64)}]);

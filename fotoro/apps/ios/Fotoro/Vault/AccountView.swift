@@ -111,6 +111,13 @@ struct AccountView: View {
             .disabled(authenticationInProgress).accessibilityIdentifier("account.password")
           primaryAction("Open Fotoro", identifier: "account.signIn", action: signIn)
             .disabled(password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+          secondaryAction("Use a passkey", identifier: "account.passkey") {
+            authenticate {
+              try AccountEntryPolicy.preparePrivateAuthentication(services)
+              let outcome = try await services.auth.login(discoverAccount: true)
+              if outcome == .unlocked { try await finishSignIn() }
+            }
+          }
         } else {
           Text("Your Fotoro").font(.largeTitle.weight(.semibold))
           primaryAction("Get started", identifier: "account.create") {
@@ -125,6 +132,10 @@ struct AccountView: View {
         if let error = services.error {
           Text(error).font(.body).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
             .accessibilityIdentifier("account.error")
+        }
+        if services.error == nil, let message = services.auth.fallbackMessage {
+          Text(message).font(.body).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            .accessibilityIdentifier("account.passkeyFallback")
         }
         if authenticationInProgress {
           ProgressView("Opening your Fotoro…").accessibilityIdentifier("account.connecting")

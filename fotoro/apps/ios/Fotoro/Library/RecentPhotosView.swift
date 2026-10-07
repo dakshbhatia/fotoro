@@ -15,8 +15,8 @@ struct PhotosImage: View {
   @State private var request: PHImageRequestID?
   @State private var generation = UUID()
   @State private var active = false
-  @State private var unavailable = false
-  @State private var receivedFinalImage = false
+  @State private var progress = PhotoPreviewProgress()
+  @State private var retry = 0
   @Environment(\.displayScale) private var displayScale
   var body: some View {
     Group {
@@ -24,19 +24,27 @@ struct PhotosImage: View {
         Image(uiImage: image).resizable()
       } else {
         Rectangle().fill(.quaternary).overlay {
-          if unavailable {
-            Label("Preview unavailable", systemImage: "icloud.slash").font(.caption)
-          } else {
-            ProgressView()
-          }
+          if !progress.unavailable { ProgressView() }
         }
       }
     }
-    .task(id: photo.id + "|" + photo.sourceRevision) {
+    .overlay(alignment: large ? .bottom : .center) {
+      if progress.unavailable {
+        VStack(spacing: 8) {
+          Label("Preview unavailable", systemImage: "icloud.slash").font(.caption)
+          if large {
+            Button("Try again") {
+              guard store.validatePresentation(viewer: [RecentPhotoSource(photo)], selection: [], share: []).viewerIsCurrent else { return }
+              retry += 1
+            }.accessibilityIdentifier("photo.preview.retry")
+          }
+        }.padding(8).background(.regularMaterial, in: .rect(cornerRadius: 12)).padding(large ? 16 : 4)
+      }
+    }
+    .task(id: photo.id + "|" + photo.sourceRevision + "|\(retry)") {
       if let request { store.images.cancelImageRequest(request) }
       image = nil
-      unavailable = false
-      receivedFinalImage = false
+      progress = PhotoPreviewProgress()
       let token = UUID()
       generation = token
       active = true
@@ -49,17 +57,12 @@ struct PhotosImage: View {
           : CGSize(width: 360 * displayScale, height: 360 * displayScale),
         contentMode: large ? .aspectFit : .aspectFill, options: options
       ) { value, info in
-        guard (info?[PHImageCancelledKey] as? Bool) != true else { return }
+        let cancelled = (info?[PHImageCancelledKey] as? Bool) == true
+        let failed = info?[PHImageErrorKey] != nil
         Task { @MainActor in
           guard active, generation == token else { return }
           let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) == true
-          guard !degraded || !receivedFinalImage else { return }
-          if let value {
-            image = value
-            if !degraded { receivedFinalImage = true }
-          } else if !degraded {
-            unavailable = true
-          }
+          if progress.receive(hasImage: value != nil, degraded: degraded, cancelled: cancelled, failed: failed) { image = value }
         }
       }
     }
@@ -70,6 +73,30 @@ struct PhotosImage: View {
       image = nil
     }
     .accessibilityLabel(photo.capturedAt?.formatted(date: .complete, time: .shortened) ?? "Photo")
+  }
+}
+
+struct PhotoViewerStillInteraction: ViewModifier {
+  @Binding var zoom: PhotoViewerZoom
+  @Binding var controlsVisible: Bool
+  let isCurrent: Bool
+  @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
+  func body(content: Content) -> some View {
+    GeometryReader { geometry in
+      content.frame(width: geometry.size.width, height: geometry.size.height)
+        .scaleEffect(zoom.scale).offset(zoom.offset)
+        .highPriorityGesture(DragGesture()
+          .onChanged { zoom.drag($0.translation, viewport: geometry.size) }
+          .onEnded { zoom.settleDrag($0.translation, viewport: geometry.size) },
+          including: zoom.scale > 1 ? .all : .none)
+        .simultaneousGesture(MagnifyGesture()
+          .onChanged { zoom.change($0.magnification); zoom.constrain(to: geometry.size) }
+          .onEnded { zoom.settle($0.magnification); zoom.constrain(to: geometry.size) })
+        .onTapGesture(count: 2) { zoom.toggle() }
+        .onTapGesture { if !voiceOver { controlsVisible.toggle() } }
+        .onChange(of: geometry.size) { if isCurrent { zoom.constrain(to: geometry.size) } }
+        .onChange(of: voiceOver) { if isCurrent, voiceOver { controlsVisible = true } }
+    }.clipped()
   }
 }
 
@@ -125,26 +152,31 @@ struct RecentPhotoViewer: View {
                 RecentMotionPhotoPage(photo: photo, store: store, isCurrent: photo.id == selected)
               } else {
                 PhotosImage(photo: photo, store: store, large: true).scaledToFit()
+                  .modifier(PhotoViewerStillInteraction(zoom: $zoom, controlsVisible: $controlsVisible, isCurrent: photo.id == selected))
               }
               #else
               PhotosImage(photo: photo, store: store, large: true).scaledToFit()
+                .modifier(PhotoViewerStillInteraction(zoom: $zoom, controlsVisible: $controlsVisible, isCurrent: photo.id == selected))
               #endif
             } else {
               Color.black
             }
           }
-          .scaleEffect(zoom.scale).gesture(
-            MagnifyGesture().onChanged { zoom.change($0.magnification) }
-              .onEnded { zoom.settle($0.magnification) }
-          )
-          .onTapGesture(count: 2) { zoom.toggle() }
-          .onTapGesture { controlsVisible.toggle() }.tag(photo.id)
+          .tag(photo.id)
         }
       }.tabViewStyle(.page(indexDisplayMode: .never)).background(.black)
         .ignoresSafeArea(.container)
-        .onChange(of: selected) { zoom.reset() }
+        .onChange(of: selected) { zoom.reset(); controlsVisible = true }
+        .accessibilityAction(named: "Next photo") { movePage(forward: true) }
+        .accessibilityAction(named: "Previous photo") { movePage(forward: false) }
         .toolbar {
           ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() } }
+          if current.map({ !$0.isVideo && !$0.isLivePhoto }) == true {
+            ToolbarItem(placement: .topBarTrailing) {
+              Button(zoom.scale == 1 ? "Zoom in" : "Reset zoom", systemImage: "plus.magnifyingglass") { zoom.toggle() }
+                .accessibilityIdentifier("photo.zoom")
+            }
+          }
           ToolbarItem(placement: .bottomBar) {
             Button("Info", systemImage: "info.circle") { details.toggle() }
           }
@@ -168,6 +200,9 @@ struct RecentPhotoViewer: View {
           }
         }
     }.preferredColorScheme(.dark)
+  }
+  private func movePage(forward: Bool) {
+    if let id = RecentPhotosPolicy.adjacentPhotoID(photos.map(\.id), current: selected, forward: forward) { selected = id }
   }
 }
 

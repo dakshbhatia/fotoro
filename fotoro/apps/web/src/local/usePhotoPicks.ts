@@ -3,11 +3,18 @@ import {analyzePixels, PickAnalyzer, type PhotoRecommendations} from "./auto-pic
 import {LocalResources, type LocalPhoto} from "./resources";
 import {availablePhotoSelection} from "./selection";
 
-export async function readPickSignals(photo: LocalPhoto, resources: LocalResources) {
-  const thumbnail = await resources.load(photo, "thumbnail");
+export async function readPickSignals(photo: LocalPhoto, resources: LocalResources, signal?: AbortSignal) {
+  const check = () => {
+    signal?.throwIfAborted();
+    if (photo.current?.() === false) throw new DOMException("Preview source changed", "AbortError");
+  };
+  check();
+  const thumbnail = await resources.load(photo, "thumbnail", signal);
+  check();
   const image = await createImageBitmap(thumbnail.blob);
   const canvas = document.createElement("canvas");
   try {
+    check();
     const ratio = Math.min(1, 64 / Math.max(image.width, image.height));
     canvas.width = Math.max(1, Math.round(image.width * ratio)); canvas.height = Math.max(1, Math.round(image.height * ratio));
     const context = canvas.getContext("2d");
@@ -33,7 +40,7 @@ export function usePhotoPicks(photos: LocalPhoto[], resources: LocalResources, e
     let alive = true;
     if (!photos.length) {clear(); return;}
     setRecommendations(undefined); setBusy(enabled); setDone(0);
-    if (enabled) void analyzer.run(photos, photo => readPickSignals(photo, resources), completed => {if (alive) setDone(completed);})
+    if (enabled) void analyzer.run(photos, (photo, signal) => readPickSignals(photo, resources, signal), completed => {if (alive) setDone(completed);})
       .then(result => {if (alive && result) {setRecommendations(result); setBusy(false);}});
     return () => {alive = false; analyzer.cancel();};
   }, [photos, resources, analyzer, enabled, clear, sourceGeneration]);

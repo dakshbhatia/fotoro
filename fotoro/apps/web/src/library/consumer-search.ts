@@ -89,6 +89,7 @@ export function savedSearchPhotos(snapshot: OwnedPhotoSnapshot | null, local: Lo
     const original = record.digest ? selected.get(record.digest) : undefined;
     const id = original?.id ?? "saved:" + photo.manifest.photoId;
     const adapted = {...record, id, observationPhotoId: record.id, originalSize: photo.metadata.originalBytes,
+      ocr: record.ocr ? {...record.ocr, photoID: id} : undefined,
       visual: record.visual ? {...record.visual, photoID: id} : undefined,
       current: () => (snapshot.sourceCurrent?.(photo) ?? snapshot.current()) && record.current?.() !== false,
       captureVerified: record.dateSource === "exif" ? true as const : undefined,

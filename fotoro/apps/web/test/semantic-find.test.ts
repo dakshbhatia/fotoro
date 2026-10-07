@@ -8,7 +8,7 @@ import type {SearchResult} from "../src/local/search";
 import {PhotoSearchIndex} from "../src/local/search";
 import {LocalSearch} from "../src/local/LocalSearch";
 import {useSemanticFind} from "../src/local/useSemanticFind";
-import {SemanticFindSession, addSemanticMatches, cosine, eligibleSemanticPhotos, normalizeVector, subscribeSemanticLifecycle} from "../src/local/semantic-find";
+import {SemanticFindSession, addSemanticMatches, cosine, eligibleSemanticPhotos, normalizeVector, subscribeSemanticLifecycle, semanticPreviewStatus} from "../src/local/semantic-find";
 import {SEMANTIC_ASSETS, SEMANTIC_MODEL, SEMANTIC_REVISION, semanticAssetCache, semanticAssetFetch, retryableSemanticModels, verifySemanticAsset, zeroSemanticPadding} from "../src/local/semantic-config";
 const vector = () => {const out = new Float32Array(512); out[0] = 1; return out;};
 const photo = (id: string): LocalPhoto => ({id, digest: id, filename: id + ".jpg", date: "2026-10-03T12:00:00Z", dateSource: "exif", preview: new Blob([id])});
@@ -25,6 +25,68 @@ class FakeWorker {
 }
 const resources = () => ({loads: 0, cleared: 0, async load(value: LocalPhoto) {this.loads++; return {blob: value.preview!, url: "", bytes: 1, decoded: 1, width: 1, height: 1, used: 0};}, clear() {this.cleared++;}});
 
+test("missing retained previews are distinct from model failures and never initialize a model", async () => {
+  let workers = 0;
+  const missing = [{...photo("retained"), previewAvailable: false}, {...photo("without-source"), preview: undefined}];
+  const engine = new SemanticFindSession(() => {workers++; throw new Error("must not load");}, resources());
+  try {
+    assert.equal(semanticPreviewStatus(missing, "fireworks"), "missing-preview");
+    assert.equal(await engine.search(missing, "fireworks", () => true, () => {throw new Error("must not publish");}), "missing-preview");
+    assert.equal(workers, 0);
+    assert.equal(semanticPreviewStatus(missing, "2026-10-03"), undefined, "A date query needs no model or preview");
+    assert.equal(semanticPreviewStatus(missing.map(value => ({...value, current: () => false})), "fireworks"), undefined);
+  } finally {engine.clear();}
+});
+
+test("skipped retained previews leave a successful visual check explicitly incomplete", async () => {
+  const worker = new FakeWorker(), raster = resources();
+  const engine = new SemanticFindSession(() => worker as unknown as Worker, raster);
+  try {
+    let scores: ReadonlyMap<string, number> = new Map();
+    assert.equal(await engine.search([photo("readable"), {...photo("retained"), previewAvailable: false}], "fireworks", () => true, value => {scores = value;}), "incomplete");
+    assert.deepEqual([...scores.keys()], ["readable"]); assert.equal(raster.loads, 1);
+  } finally {engine.clear();}
+});
+
+test("the missing-preview hook renders recovery guidance without claiming completed no matches", () => {
+  const photos = [{...photo("retained"), previewAvailable: false}];
+  function Search() {
+    const result = useSemanticFind(photos, new PhotoSearchIndex(photos).search("fireworks"), true, "local");
+    return createElement(LocalSearch, {photos, result, resources: new LocalResources(), coverage: "1 photo", onAccept() {}, onNavigate() {}, onOpen() {}, onConfirm() {}, onPin() {}, onFailure() {}});
+  }
+  const markup = renderToStaticMarkup(createElement(Search));
+  assert.match(markup, /Photo previews are unavailable/);
+  assert.doesNotMatch(markup, /No matching photos|Searching photos…|aria-busy="true"/);
+});
+
+test("unfinished or failed text reading never renders a completed no-match claim, while found evidence stays usable", () => {
+  for (const textStatus of ["indexing", "incomplete"] as const) {
+    for (const matched of [false,true]) {
+      const photos = [{...photo("one"),labels:matched ? ["receipt"] : []}];
+      const result = {...new PhotoSearchIndex(photos).search("receipt"),textStatus};
+      const markup = renderToStaticMarkup(createElement(LocalSearch,{photos,result,resources:new LocalResources(),coverage:"1 photo",onAccept(){},onNavigate(){},onOpen(){},onConfirm(){},onPin(){},onFailure(){}}));
+      assert.doesNotMatch(markup,/No matching photos/);
+      assert.match(markup,textStatus === "indexing" ? /Text is still being read/ : /Text couldn’t be read/);
+      if(matched) assert.match(markup,/aria-label="Open one.jpg"/);
+    }
+  }
+});
+
+test("semantic cancellation aborts a pending thumbnail consumer without publishing late results", async () => {
+  const worker = new FakeWorker(), raster = resources(); let reading = false, aborted = false;
+  raster.load = ((_value:LocalPhoto,_kind:string,signal?:AbortSignal) => new Promise((_resolve,reject) => {
+    reading = true; signal!.addEventListener("abort",()=>{aborted=true;reject(new DOMException("Canceled","AbortError"));},{once:true});
+  })) as any;
+  const engine = new SemanticFindSession(()=>worker as unknown as Worker,raster);
+  try {
+    let emitted = 0;
+    const pending = engine.search([photo("one")],"fireworks",()=>true,()=>{emitted++;});
+    while(!reading) await new Promise(resolve=>setTimeout(resolve,0));
+    engine.cancel();
+    assert.equal(await pending,undefined); assert.equal(aborted,true); assert.equal(emitted,0);
+  } finally {engine.clear();}
+});
+
 test("failed previews and image inference cannot complete as a successful empty visual search", async () => {
   for (const failure of ["preview", "image"] as const) {
     const worker = new FakeWorker((message, own) => {
@@ -36,7 +98,7 @@ test("failed previews and image inference cannot complete as a successful empty 
     const engine = new SemanticFindSession(() => worker as unknown as Worker, raster);
     try {
       const scores: ReadonlyMap<string, number>[] = [];
-      assert.equal(await engine.search([photo("one")], "fireworks", () => true, value => scores.push(value)), "unavailable", failure);
+      assert.equal(await engine.search([photo("one")], "fireworks", () => true, value => scores.push(value)), failure === "preview" ? "missing-preview" : "unavailable", failure);
       assert.equal(scores.at(-1)?.size, 0);
     } finally {engine.clear();}
   }

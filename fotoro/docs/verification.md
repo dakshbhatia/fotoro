@@ -7,6 +7,51 @@ No speed, accuracy, cost or adoption claim is inferred from a passing smoke test
 
 ## October 6 foundation implementation checks
 
+The follow-up foundation pass makes optional passkeys reachable from existing
+account access on iOS and web. Enrollment preserves the same account keys and
+verified password recovery. PRF-enabled credentials that cannot evaluate during
+creation use a selected-credential assertion before wrapping keys. Browser
+discovery leaves per-credential PRF inputs out of its unbounded request and then
+evaluates the selected credential; fresh native access follows the same account
+and credential binding. Unsupported PRF keeps the password path. Back, lock,
+account/origin replacement and native task cancellation fence publication. Native
+ceremony cancellation releases the controller and ignores late callbacks from
+older operations. These checks use simulated credential responses and real local
+cryptography, not qualified physical passkeys.
+
+Search distinguishes missing previews, unavailable inference, partial visual
+coverage and unfinished/failed OCR from a completed empty result. Saved OCR
+retains its source revision while adapting its display photo ID. Reopened source
+files can retry OCR, and Picks rechecks per-photo access through ranking. Search
+details distinguish reviewed People and kept machine observations from supplied
+text. Mounted Search/viewer/thumbnail leases survive cache eviction and release
+on cleanup; Saved browsing requires derivatives rather than silently fetching an
+original. Saved thumbnails restart on page return. Native previews expose retry
+after terminal PhotoKit errors, still viewers support bounded zoom/pan, accessible
+navigation remains available, and offscreen motion loading/playback stops.
+
+Final web verification passes 488 tests, TypeScript and the production build.
+Thirteen browser passkey regressions cover identity/recovery preservation, supported and
+unsupported PRF, account selection and cancellation. A fresh built startup check
+passes all three cases at 417,908 bytes in one static JavaScript chunk. Earlier
+unchanged core/API/release checks pass: 33 core and 80 API tests, search/Picks
+fixtures, preview artifact checks and nine release orchestration cases. The
+isolated Photos preview passes 112 of 113 tests with its existing Vision skip.
+Final full native verification passes 393 of 394 tests with the same existing
+Vision skip and no failures, including 44 recovery tests.
+
+Rendered checks use the Codex in-app browser at `http://127.0.0.1:4310`, with public
+fixtures, at 1280×900 and 320×740. Grid/table Home/End reaches virtualized offscreen
+photos; table arrow navigation, sorting, exact two-photo selection, Columns
+Escape focus restoration and rapid viewer navigation/close/reopen pass. The
+optional passkey button is present on account entry. Page identity, nonblank
+content, absence of framework overlays, console health and horizontal overflow
+checks pass. Screenshots remain outside the repository. Native gestures,
+VoiceOver, physical background/iCloud behavior, cross-device PRF and general
+Search/Picks/People quality still need device or held-out evidence. The
+[ten-foundation queue](product-backlog.md) records these gates; Sign in with Apple
+remains unimplemented and Gemini enablement remains off.
+
 The current local implementation adds durable last-10-days initial Sync intake,
 explicit expansion, optional browser photo tables, reviewed local People groups
 and optional per-photo Gemini observations. These changes have not yet replaced

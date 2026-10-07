@@ -70,7 +70,7 @@ const PICK_WORK_BATCH = 128;
 function* recommendationSteps(photos: LocalPhoto[], signals: ReadonlyMap<string, PhotoSignals>): Generator<void, PhotoRecommendations> {
   const byID = new Map<string, LocalPhoto>();
   for (let i = 0; i < photos.length; i++) {
-    byID.set(photos[i].id, photos[i]);
+    if (photos[i].current?.() !== false) byID.set(photos[i].id, photos[i]);
     if ((i + 1) % PICK_WORK_BATCH === 0) yield;
   }
   const unique = [...byID.values()];
@@ -79,8 +79,10 @@ function* recommendationSteps(photos: LocalPhoto[], signals: ReadonlyMap<string,
   let unassessed = 0;
   for (let order = 0; order < unique.length; order++) {
     const photo = unique[order], signal = signals.get(photo.id);
-    if (!signal || !valid(signal)) unassessed++;
-    else if (signal.contrast >= .006) candidates.push({photo, signal, order, time: captured(photo), score: score(photo, signal)});
+    if (photo.current?.() !== false) {
+      if (!signal || !valid(signal)) unassessed++;
+      else if (signal.contrast >= .006) candidates.push({photo, signal, order, time: captured(photo), score: score(photo, signal)});
+    }
     if ((order + 1) % PICK_WORK_BATCH === 0) yield;
   }
   candidates.sort((a, b) => ((a.time ?? Infinity) - (b.time ?? Infinity)) || a.order - b.order);
@@ -159,18 +161,19 @@ interface CachedSignals {
 }
 export class PickAnalyzer {
   private version = 0;
+  private controller = new AbortController();
   private cache = new Map<string, CachedSignals>();
   constructor(private readonly yieldWork: () => Promise<void> = () => new Promise(resolve => setTimeout(resolve, 0))) {}
-  async run(photos:LocalPhoto[], load:(photo:LocalPhoto)=>Promise<PhotoSignals>, progress?:(done:number,total:number)=>void):Promise<PhotoRecommendations|undefined> {
+  async run(photos:LocalPhoto[], load:(photo:LocalPhoto, signal?: AbortSignal)=>Promise<PhotoSignals>, progress?:(done:number,total:number)=>void):Promise<PhotoRecommendations|undefined> {
     this.cancel();
-    const version = this.version, unique = [...new Map(photos.map(photo => [photo.id, photo])).values()];
+    const version = this.version, cancellationSignal = this.controller.signal, unique = [...new Map(photos.map(photo => [photo.id, photo])).values()];
     const ids = new Set(unique.map(photo => photo.id));
     for (const id of this.cache.keys()) if (!ids.has(id)) this.cache.delete(id);
     const signals = new Map<string, PhotoSignals>();
     for (let i = 0; i < unique.length; i++) {
       if (version !== this.version) return;
       const photo = unique[i], source = photo.file ?? photo.preview ?? photo.previewLoader;
-      if (source && photo.previewAvailable !== false) {
+      if (source && photo.previewAvailable !== false && photo.current?.() !== false) {
         let entry = this.cache.get(photo.id);
         if (!entry || entry.source.deref() !== source || entry.digest !== photo.digest || entry.width !== photo.width || entry.height !== photo.height) {
           entry = {source: new WeakRef(source), digest: photo.digest, width: photo.width, height: photo.height};
@@ -179,10 +182,10 @@ export class PickAnalyzer {
         const cached = entry;
         if (!cached.signal && !cached.promise) cached.promise = (async () => {
           try {
-            const signal = await load(photo);
-            if (!valid(signal)) return;
-            if (version === this.version && this.cache.get(photo.id) === cached) cached.signal = signal;
-            return signal;
+            const measured = await load(photo, cancellationSignal);
+            if (!valid(measured)) return;
+            if (version === this.version && photo.current?.() !== false && this.cache.get(photo.id) === cached) cached.signal = measured;
+            return measured;
           } catch {return;}
           finally {
             cached.promise = undefined;
@@ -191,21 +194,34 @@ export class PickAnalyzer {
         })();
         const signal = cached.signal ?? await cached.promise;
         if (version !== this.version) return;
-        if (signal) signals.set(photo.id, signal);
+        if (photo.current?.() === false) this.cache.delete(photo.id);
+        else if (signal) signals.set(photo.id, signal);
       } else this.cache.delete(photo.id);
       if ((i + 1) % 8 === 0 || i + 1 === unique.length) progress?.(i + 1, unique.length);
       if ((i + 1) % PICK_WORK_BATCH === 0) await this.yieldWork();
     }
-    const steps = recommendationSteps(unique, signals);
+    let rankedPhotos = unique.filter(photo => photo.current?.() !== false);
+    let steps = recommendationSteps(rankedPhotos, signals);
     while (version === this.version) {
       const next = steps.next();
-      if (next.done) return version === this.version ? next.value : undefined;
+      if (next.done) {
+        // A per-photo permission/source fence can change while the batch yields,
+        // even when the overall account snapshot remains current. Re-rank so a
+        // withdrawn winner cannot suppress a still-permitted runner-up.
+        const remaining = rankedPhotos.filter(photo => photo.current?.() !== false);
+        if (remaining.length !== rankedPhotos.length) {
+          for (const photo of rankedPhotos) if (photo.current?.() === false) this.cache.delete(photo.id);
+          rankedPhotos = remaining; steps = recommendationSteps(rankedPhotos, signals); continue;
+        }
+        return version === this.version ? next.value : undefined;
+      }
       await this.yieldWork();
     }
   }
   // Completed measurements survive harmless metadata updates; pending work never crosses a cancellation.
   cancel() {
     this.version++;
+    this.controller.abort(); this.controller = new AbortController();
     for (const [id, entry] of this.cache) if (!entry.signal) this.cache.delete(id);
   }
   clear() {this.cancel(); this.cache.clear();}

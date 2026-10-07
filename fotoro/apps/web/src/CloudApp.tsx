@@ -19,6 +19,8 @@ import {
   completeEnrollment,
   cancelEnrollment,
   clearBrowserSession,
+  passkeyLogin,
+  addPasskey,
 } from "./vault/session";
 import {
   fixtureMode,
@@ -172,8 +174,9 @@ export default function CloudApp({
     const target = account ? scopeSelector.current : passwordPanel.current?.querySelector<HTMLInputElement>('input[name="password"]');
     target?.focus({preventScroll: true});
   }, [active, account, recoveryNew]);
-  const accountPanel = useRef<HTMLElement>(null);
-  const closeAccountPanel = () => setMenu(false);
+  const accountPanel = useRef<HTMLElement>(null), menuRef = useRef(menu);
+  menuRef.current = menu;
+  const closeAccountPanel = () => {authIntent.current++; menuRef.current = false; setMenu(false);};
   useDialogFocus(accountPanel, closeAccountPanel, menu && active && !!account);
   useEffect(() => {
     const picker = input.current;
@@ -368,12 +371,12 @@ export default function CloudApp({
     }
     return accepted;
   };
-  const login = async (fn: () => Promise<unknown>) => {
+  const login = async (fn: (current: () => boolean) => Promise<unknown>) => {
     const request = saveIntentRef.current, version = authIntent.current;
     return run(async () => {
       const ticket = request?.beginAuthentication(vaultGeneration());
       const shareRequest = incomingRef.current, shareTicket = shareRequest?.beginAuthentication(vaultGeneration());
-      try {await fn();}
+      try {await fn(() => activeRef.current && authIntent.current === version);}
       catch (error) {request?.finishAuthentication(ticket, undefined, error); shareRequest?.finishAuthentication(shareTicket); throw error;}
       if (!activeRef.current || authIntent.current !== version) {request?.cancel(); shareRequest?.cancel(); return;}
       let opened: {session: UnlockedVault; generation: number; origin: string};
@@ -848,9 +851,10 @@ export default function CloudApp({
               generatedPassword={recoveryNew}
               busy={busy}
               onSignIn={() => {
-                const version = authIntent.current;
-                void login(async () => {await recover(recovery, () => authIntent.current === version); setRecovery("");});
+                void login(async current => {await recover(recovery, current); setRecovery("");});
               }}
+              onPasskey={window.isSecureContext && "PublicKeyCredential" in window
+                ? () => {void login(current => passkeyLogin(current));} : undefined}
               onCreate={() => {void run(async () => {setRecoveryNew(await prepareEnrollment());}, true);}}
               onContinue={() => {void login(async () => {await completeEnrollment(); setRecoveryNew("");});}}
               onBack={() => {cancelEnrollment(); setRecovery(recoveryNew); setRecoveryNew(""); setStatus("");}}
@@ -1041,6 +1045,10 @@ export default function CloudApp({
             <details>
               <summary>Open on another device</summary>
               <p className="hint">Open <a href="https://fotoro.cloud/saved" target="_blank" rel="noopener">fotoro.cloud/saved</a> and enter the same Fotoro password. In another Fotoro app, choose Saved.</p>
+              {window.isSecureContext && "PublicKeyCredential" in window && <button disabled={busy || publicDemo} onClick={() => {const version = authIntent.current; void run(async () => {
+                const ready = await addPasskey(() => activeRef.current && menuRef.current && authIntent.current === version);
+                setStatus(ready ? "Passkey added. Choose Use a passkey on your other device." : "Passkey added. Keep your Fotoro password to unlock photos on another device.");
+              }, true);}}>Add a passkey</button>}
               <p className="hint">Automatic sync enabled in the Fotoro app can add photos here too. Photos opened in this browser stay here until you choose Save.</p>
             </details>
             <details>

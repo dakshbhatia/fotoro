@@ -4,16 +4,24 @@ import { type LocalPhoto, LocalResources } from "./resources";
 import { normalizeSearch, type SearchResult, type SearchMeaning } from "./search";
 import type { LocalOcrPhoto } from "./useLocalOcr";
 export function meaningRelation(meaning: SearchMeaning) {
-  return meaning.kind === "visual" ? "Visual similarity" : meaning.kind === "label" ? "Supplied label" : meaning.kind === "date" ? "Date" : "Text mention";
+  return meaning.kind === "visual" ? "Visual similarity" : meaning.kind === "label" ? "Supplied label"
+    : meaning.kind === "person" ? "Person" : meaning.kind === "observation" ? "Machine observation" : meaning.kind === "date" ? "Date" : "Text mention";
 }
 export function visualSearchFeedback(result: SearchResult) {
   return result.visualStatus === "unavailable" ? "Visual search is unavailable."
-    : result.visualStatus === "incomplete" ? "Some photos couldn’t be checked visually." : undefined;
+    : result.visualStatus === "incomplete" ? "Some photos couldn’t be checked visually."
+    : result.visualStatus === "missing-preview" ? "Photo previews are unavailable. Reopen the photos to search visually." : undefined;
+}
+export function textSearchFeedback(result: SearchResult) {
+  return result.textStatus === "indexing" ? "Text is still being read. More matches may appear."
+    : result.textStatus === "incomplete" ? "Text couldn’t be read from some photos." : undefined;
 }
 function evidence(photo: LocalOcrPhoto, meaning: SearchMeaning) {
   const source = meaning.evidence[photo.id] ?? meaning.kind;
   if (source === "visual") return "Visual similarity";
   if (source === "label") return "Supplied label · " + meaning.term;
+  if (source === "person") return "Person · " + meaning.term;
+  if (source === "observation") return "Machine observation · " + meaning.term;
   if (source === "date") return photo.dateSource === "photos" ? "Date from Photos" : photo.dateSource === "exif" ? "Date from the photo" : "Date selected · capture date unavailable";
   const term = normalizeSearch(meaning.term), extra = photo as LocalOcrPhoto & {caption?: string; keywords?: string[]; facts?: string[]};
   const keyword = extra.keywords?.find(value => normalizeSearch(value).includes(term));
@@ -33,7 +41,7 @@ export function SearchMatchDetails({photo, meaning, coverage, committed, pinned,
   return <aside className="search-info" aria-label="About this match">
     <p className="hint">{coverage}</p><p className="local-evidence">{evidence(photo as LocalOcrPhoto, meaning)}</p>
     {meaning.kind !== "visual" && <>
-      <button aria-pressed={committed === meaning.id} onClick={() => onAccept(meaning)}>Search this {meaning.kind === "label" ? "label" : meaning.kind === "date" ? "date" : "text"}</button>
+      <button aria-pressed={committed === meaning.id} onClick={() => onAccept(meaning)}>Search this {meaning.kind === "label" ? "label" : meaning.kind === "person" ? "person" : meaning.kind === "observation" ? "observation" : meaning.kind === "date" ? "date" : "text"}</button>
       {canCorrect && <details><summary>Adjust future matches</summary><p className="hint">These choices stay on this device.</p><div className="actions"><button onClick={() => onConfirm(photo.id)}>This is the photo</button><button aria-pressed={pinned === photo.id} onClick={() => onPin(photo.id)}>{pinned === photo.id ? "Preferred photo" : "Prefer this photo"}</button></div></details>}
     </>}
   </aside>;
@@ -54,11 +62,16 @@ export function LocalSearch({photos, result, resources, committed, pinned, canCo
   const touch = useRef<{x: number; y: number} | undefined>(undefined);
   useEffect(() => {
     let current = true;
+    const controller = new AbortController();
     setLoaded({url: ""}); setError("");
     if (!photo) return;
-    resources.load(photo, "preview").then(value => {if (current) setLoaded({photo, url: value.url});})
-      .catch(reason => {if (current) {setError(reason.message); onFailure(photo.id, reason.message);}});
-    return () => {current = false;};
+    if (photo.current?.() === false) return;
+    resources.lease(photo, "preview", controller.signal).then(value => {
+      if (current && photo.current?.() !== false) setLoaded({photo, url: value.url});
+      else controller.abort();
+    })
+      .catch(reason => {if (current && !controller.signal.aborted && photo.current?.() !== false) {setError(reason.message); onFailure(photo.id, reason.message);}});
+    return () => {current = false; controller.abort();};
   }, [photo, resources]);
   const move = (step: number) => {
     const id = result.photoIds[index + step];
@@ -88,6 +101,7 @@ export function LocalSearch({photos, result, resources, committed, pinned, canCo
       {result.meanings.some(value => value.id !== meaning.id && value.photoIds.some(id => !meaning.photoIds.includes(id))) && <div className="local-alternatives" aria-label="Other matches"><span>Also try</span>{result.meanings.filter(value => value.id !== meaning.id && value.photoIds.some(id => !meaning.photoIds.includes(id))).slice(0, 3).map(value => <button key={value.id} onClick={() => onAccept(value)}>{value.term}</button>)}</div>}
       {details && <SearchMatchDetails photo={photo} meaning={meaning} coverage={coverage} committed={committed} pinned={pinned} canCorrect={canCorrect} onAccept={onAccept} onConfirm={onConfirm} onPin={onPin} />}
       {visualSearchFeedback(result) && <p className="hint" role="status">{visualSearchFeedback(result)}</p>}
-    </> : <div className="empty"><p role={result.searching || result.visualStatus ? "status" : undefined}>{result.searching ? "Searching photos…" : visualSearchFeedback(result) ?? emptyMessage ?? "No matching photos"}</p>{!result.searching && <p className="hint">{emptyHint ?? "Try a label, a date or words in the photo."}</p>}{details && <p className="hint">{coverage}. Text is searchable after it has been read on this device.</p>}</div>}
+      {textSearchFeedback(result) && <p className="hint" role="status">{textSearchFeedback(result)}</p>}
+    </> : <div className="empty"><p role={result.searching || result.visualStatus || result.textStatus ? "status" : undefined}>{result.searching ? "Searching photos…" : visualSearchFeedback(result) ?? textSearchFeedback(result) ?? emptyMessage ?? "No matching photos"}</p>{!result.searching && result.visualStatus && textSearchFeedback(result) && <p role="status">{textSearchFeedback(result)}</p>}{!result.searching && !result.textStatus && <p className="hint">{emptyHint ?? "Try a label, a date or words in the photo."}</p>}{details && <p className="hint">{coverage}. Text is searchable after it has been read on this device.</p>}</div>}
   </section>;
 }

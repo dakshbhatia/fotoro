@@ -72,6 +72,11 @@ enum RecentPhotosPolicy {
   static func shouldLoadPage(_ index: Int, current: Int) -> Bool {
     abs(index - current) <= 1
   }
+  static func adjacentPhotoID(_ ids: [String], current: String, forward: Bool) -> String? {
+    guard let index = ids.firstIndex(of: current) else { return nil }
+    let next = index + (forward ? 1 : -1)
+    return ids.indices.contains(next) ? ids[next] : nil
+  }
   static func canRead(_ status: PHAuthorizationStatus) -> Bool {
     status == .authorized || status == .limited
   }
@@ -121,9 +126,12 @@ enum RecentPhotosPolicy {
 
 struct PhotoViewerZoom {
   private(set) var scale: CGFloat = 1
+  private(set) var offset: CGSize = .zero
   private var settledScale: CGFloat = 1
+  private var settledOffset: CGSize = .zero
   mutating func change(_ magnification: CGFloat) {
     scale = min(5, max(1, settledScale * magnification))
+    if scale == 1 { offset = .zero; settledOffset = .zero }
   }
   mutating func settle(_ magnification: CGFloat) {
     change(magnification)
@@ -132,10 +140,50 @@ struct PhotoViewerZoom {
   mutating func toggle() {
     scale = scale == 1 ? 2 : 1
     settledScale = scale
+    offset = .zero
+    settledOffset = .zero
+  }
+  mutating func drag(_ translation: CGSize, viewport: CGSize) {
+    offset = clamped(CGSize(width: settledOffset.width + translation.width,
+      height: settledOffset.height + translation.height), viewport: viewport)
+  }
+  mutating func settleDrag(_ translation: CGSize, viewport: CGSize) {
+    drag(translation, viewport: viewport)
+    settledOffset = offset
+  }
+  mutating func constrain(to viewport: CGSize) {
+    offset = clamped(offset, viewport: viewport)
+    settledOffset = clamped(settledOffset, viewport: viewport)
+  }
+  private func clamped(_ value: CGSize, viewport: CGSize) -> CGSize {
+    let horizontal = max(0, viewport.width * (scale - 1) / 2)
+    let vertical = max(0, viewport.height * (scale - 1) / 2)
+    return CGSize(width: min(horizontal, max(-horizontal, value.width)),
+      height: min(vertical, max(-vertical, value.height)))
   }
   mutating func reset() {
     scale = 1
     settledScale = 1
+    offset = .zero
+    settledOffset = .zero
+  }
+}
+
+struct PhotoPreviewProgress {
+  private(set) var unavailable = false
+  private(set) var receivedFinalImage = false
+  private var finished = false
+  mutating func receive(hasImage: Bool, degraded: Bool, cancelled: Bool = false, failed: Bool = false) -> Bool {
+    guard !finished else { return false }
+    if cancelled || failed { unavailable = true; finished = true; return false }
+    if hasImage {
+      unavailable = false
+      receivedFinalImage = !degraded
+      finished = !degraded
+      return true
+    }
+    if !degraded { unavailable = true; finished = true }
+    return false
   }
 }
 

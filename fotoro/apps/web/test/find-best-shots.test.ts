@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {PickAnalyzer, recommendPhotos, type PhotoSignals} from "../src/local/auto-picks";
-import {findMatchPhotos, runCurrentFindReview, shortlistSearchResult} from "../src/local/find-best-shots";
+import {findMatchPhotos, runCurrentFindReview, shortlistSearchResult, subscribeFindReviewLifecycle} from "../src/local/find-best-shots";
 import {PhotoSearchIndex} from "../src/local/search";
 import {LocalResources, type LocalPhoto} from "../src/local/resources";
 import {savedSearchPhotos, type OwnedPhotoSnapshot} from "../src/library/consumer-search";
@@ -11,10 +11,55 @@ import {runInNewContext} from "node:vm";
 import {createElement} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
 import {FindBestShots, selectionCandidates} from "../src/local/FindBestShots";
+import {readPickSignals} from "../src/local/usePhotoPicks";
 
 const photo = (id: string, label = "trip", date = "2026-09-01T12:00:00Z"): LocalPhoto => ({id, filename: id + ".png", digest: id,
   date, dateSource: "exif", captureVerified: true, width: 800, height: 600, labels: [label], file: new File([id], id + ".png")});
 const signal = (sharpness = .1): PhotoSignals => ({hash: 0n, luminance: .5, contrast: .15, sharpness, color: [120, 120, 120]});
+
+test("a per-photo source withdrawal stops publication while the overall Find snapshot stays current", async () => {
+  let allowed = true, release!: (value: PhotoSignals) => void, reads = 0;
+  const revoked = {...photo("withdrawn"), current: () => allowed}, available = photo("available");
+  const analyzer = new PickAnalyzer();
+  const pending = runCurrentFindReview(analyzer, [revoked, available], async value => {
+    reads++; return value.id === "withdrawn" ? new Promise(resolve => {release = resolve;}) : signal();
+  }, () => true);
+  await Promise.resolve(); allowed = false; release(signal(.4));
+  const result = await pending;
+  assert.deepEqual([...result!.ids], ["available"]); assert.equal(result!.unassessed, 0);
+  assert.equal(reads, 2);
+  const matches = new PhotoSearchIndex([{...revoked, current: () => true}, available]).search("trip");
+  assert.deepEqual(findMatchPhotos([revoked, available], matches).map(value => value.id), ["available"]);
+});
+
+test("Find cancellation reaches the pending raster read, and hidden/Lock/pagehide revoke the review", async () => {
+  const analyzer = new PickAnalyzer(); let aborted = false;
+  const pending = analyzer.run([photo("pending")], (_photo, cancellation) => new Promise((_resolve, reject) => {
+    cancellation!.addEventListener("abort", () => {aborted = true; reject(new DOMException("Canceled", "AbortError"));}, {once:true});
+  }));
+  analyzer.cancel(); assert.equal(await pending,undefined); assert.equal(aborted,true);
+  const window = new EventTarget(), document = Object.assign(new EventTarget(), {visibilityState:"visible"});
+  let clears = 0;
+  const stop = subscribeFindReviewLifecycle(() => {clears++;}, {window,document} as any);
+  document.dispatchEvent(new Event("visibilitychange")); assert.equal(clears,0);
+  document.visibilityState = "hidden"; document.dispatchEvent(new Event("visibilitychange"));
+  window.dispatchEvent(new Event("fotoro-lock")); window.dispatchEvent(new Event("pagehide"));
+  assert.equal(clears,3); stop(); assert.equal(clears,4);
+  window.dispatchEvent(new Event("fotoro-lock")); assert.equal(clears,4);
+});
+
+test("withdrawn thumbnail pixels stop before Picks decoding", async () => {
+  let allowed = true, release!: (value: any) => void, decodes = 0;
+  const previousBitmap = globalThis.createImageBitmap;
+  globalThis.createImageBitmap = (async()=>{decodes++;throw new Error("must not decode");}) as any;
+  const source = {...photo("one"),current:()=>allowed};
+  const resources = {load:()=>new Promise(resolve=>{release=resolve;})} as unknown as LocalResources;
+  try {
+    const pending = readPickSignals(source,resources);
+    allowed=false; release({blob:new Blob(["public fixture"]),width:1,height:1});
+    await assert.rejects(pending,{name:"AbortError"}); assert.equal(decodes,0);
+  } finally {globalThis.createImageBitmap=previousBitmap;}
+});
 
 test("best-shot selection exposes only current matches and preserves the user's existing choices", () => {
   const matches = [photo("a"), photo("b"), {...photo("withdrawn"), current: () => false}];

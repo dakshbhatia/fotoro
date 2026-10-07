@@ -881,7 +881,7 @@ main:has(.consumer-selection) .local-search { padding-bottom: calc(140px + env(s
 .table-thumbnail { display: grid; place-items: center; flex: 0 0 56px; width: 56px; height: 56px; overflow: hidden; background: var(--photo-surface); border-radius: 4px; }
 .table-thumbnail img { width: 100%; height: 100%; object-fit: cover; }
 .photo-table .table-selection { padding: 0 8px; width: 44px; }
-.photo-table-scroll:focus-visible, .photo-column-options summary:focus-visible { outline: 2px solid var(--photo-accent); outline-offset: -2px; }
+.canvas:focus-visible, .photo-column-options summary:focus-visible { outline: 2px solid var(--photo-accent); outline-offset: -2px; }
 @media (max-width: 700px) {
   .photo-view-controls { padding-left: 12px; padding-right: 12px; }
   .photo-table-scroll { padding-left: 12px; padding-right: 12px; }

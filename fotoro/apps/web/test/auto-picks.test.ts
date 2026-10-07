@@ -6,6 +6,34 @@ import type {LocalPhoto} from "../src/local/resources";
 const photo = (id: string, date?: string): LocalPhoto => ({id, filename: id + ".png", date: date ?? "2026-10-02", dateSource: date ? "exif" : "selected", captureVerified: date ? true : undefined, width: 1200, height: 800});
 const signal = (hash: bigint, sharpness = .12): PhotoSignals => ({hash, sharpness, luminance: .5, contrast: .15, color: [120, 120, 120]});
 
+test("Picks never reads withdrawn sources and a withdrawn measured winner cannot suppress its runner-up", async () => {
+  let allowed = true, release!: (value: PhotoSignals) => void;
+  const best = {...photo("best"),file:new File(['best'],'best.png'),current:()=>allowed};
+  const runner = {...photo("runner"),file:new File(['runner'],'runner.png')};
+  const denied = {...photo("denied"),file:new File(['denied'],'denied.png'),current:()=>false};
+  const analyzer = new PickAnalyzer(), reads:string[] = [];
+  const pending = analyzer.run([best,runner,denied], async value => {
+    reads.push(value.id); return value.id === 'runner' ? new Promise(resolve => {release = resolve;}) : signal(0n,.4);
+  });
+  while(!release) await new Promise(resolve => setTimeout(resolve,0));
+  allowed = false; release(signal(0n,.1));
+  const result = await pending;
+  assert.deepEqual([...result!.ids],['runner']); assert.equal(result!.unassessed,0);
+  assert.deepEqual(reads,['best','runner']);
+});
+
+test("source withdrawal during batched ranking reselects permitted photos and retires the withdrawn cache", async () => {
+  let allowed = true, yields = 0, reads = 0;
+  const photos = Array.from({length:128},(_,index)=>({...photo(String(index)),file:new File([String(index)],index+'.png'),favorite:index===0,current:()=>index!==0||allowed}));
+  const analyzer = new PickAnalyzer(async()=>{if(++yields===3) allowed=false;});
+  const load = async()=>{reads++;return signal(0n);};
+  const result = await analyzer.run(photos,load);
+  assert.deepEqual([...result!.ids],['1']); assert.equal(result!.groupCount,127); assert.equal(result!.unassessed,0);
+  allowed=true;
+  const restored = await analyzer.run(photos,load);
+  assert.deepEqual([...restored!.ids],['0']); assert.equal(reads,129,'Withdrawn private measurements cannot remain cached across re-grant');
+});
+
 test("recommendations keep distinct strong highlights without filling a fixed quota", () => {
   const photos = Array.from({length: 20}, (_, i) => photo(String(i)));
   const signals = new Map(photos.map((p, i) => [p.id, signal(BigInt(i), i === 5 ? .5 : i === 12 ? .4 : .01)]));

@@ -1,4 +1,5 @@
-import { imageDimensions } from './resources';
+import { imageDimensions, type LocalPhoto } from './resources';
+import {parseNaturalDateQuery} from './natural-date';
 /* Optional OCR. Every runtime asset is served by this origin. */
 export const OCR_PROCESSOR = 'tesseract.js-7.0.0/eng-1.0.0/lstm-orientation-v2';
 export const OCR_ASSET_PATH = '/ocr/v1';
@@ -8,6 +9,41 @@ export interface OcrPreview { blob: Blob; width: number; height: number }
 export interface OcrResult {
   photoID: string; revision: string; processor: string;
   status: 'complete' | 'failed'; text: string; confidence: number; error?: string;
+}
+export const ocrSourceIdentity = (photo: LocalPhoto) => photo.file ?? photo.preview ?? photo.previewLoader;
+export function hasCurrentLocalOcr(photo: LocalPhoto) {
+  const ocr = photo.ocr;
+  return photo.current?.() !== false && ocr?.status === 'complete' && ocr.processor === OCR_PROCESSOR
+    && ocr.photoID === photo.id && ocr.revision === (photo.digest ?? photo.id)
+    && typeof ocr.text === 'string' && Number.isFinite(ocr.confidence) && ocr.confidence >= 0 && ocr.confidence <= 1;
+}
+export function currentOcrSource(source: LocalPhoto, photos: readonly LocalPhoto[]) {
+  const identity = ocrSourceIdentity(source);
+  return source.current?.() !== false && source.previewAvailable !== false && !!identity
+    && photos.some(photo => photo.id === source.id && (photo.digest ?? photo.id) === (source.digest ?? source.id)
+      && photo.current?.() !== false && photo.previewAvailable !== false && ocrSourceIdentity(photo) === identity);
+}
+export function localTextSearchStatus(photos: readonly LocalPhoto[], enabled: boolean, query: string, committedMeaning?: string, recognizing = false): 'indexing' | 'incomplete' | undefined {
+  const parsed = parseNaturalDateQuery(query);
+  let meaning = committedMeaning;
+  if (meaning?.startsWith('dated:')) {
+    try {const value = JSON.parse(meaning.slice(6)); if (Array.isArray(value) && typeof value[2] === 'string') meaning = value[2];} catch {}
+  }
+  if (!enabled || !parsed.text.trim() || meaning?.startsWith('label:')) return;
+  let incomplete = false;
+  for (const photo of photos) {
+    if (photo.current?.() === false || hasCurrentLocalOcr(photo)) continue;
+    if (parsed.from !== undefined || parsed.until !== undefined) {
+      const capture = Date.parse(photo.date);
+      if (!['photos','exif'].includes(photo.dateSource) || !Number.isFinite(capture)
+        || parsed.from !== undefined && capture < parsed.from || parsed.until !== undefined && capture >= parsed.until) continue;
+    }
+    const ocr = photo.ocr, failed = ocr?.status === 'failed' && ocr.processor === OCR_PROCESSOR
+      && ocr.photoID === photo.id && ocr.revision === (photo.digest ?? photo.id);
+    if ((!failed || recognizing) && photo.previewAvailable !== false && ocrSourceIdentity(photo)) return 'indexing';
+    incomplete = true;
+  }
+  return incomplete ? 'incomplete' : undefined;
 }
 export interface OcrProgress { photoID: string; status: string; progress: number }
 interface WorkerProgress { status: string; progress: number }

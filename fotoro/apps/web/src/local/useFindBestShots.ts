@@ -3,7 +3,7 @@ import {ConsumerPreviewResources} from "../library/consumer-search";
 import {PickAnalyzer, type PhotoRecommendations} from "./auto-picks";
 import {readPickSignals} from "./usePhotoPicks";
 import type {LocalPhoto} from "./resources";
-import {runCurrentFindReview} from "./find-best-shots";
+import {runCurrentFindReview, subscribeFindReviewLifecycle} from "./find-best-shots";
 
 export function useFindBestShots(photos: LocalPhoto[], scope: string, source: unknown, current: () => boolean, enabled = true) {
   const [chosenScope, setChosenScope] = useState<string>();
@@ -28,7 +28,7 @@ export function useFindBestShots(photos: LocalPhoto[], scope: string, source: un
     };
     setState({input, done: 0});
     const current = () => {try {check(); return true;} catch {return false;}};
-    void runCurrentFindReview(analyzer, photos, photo => readPickSignals(photo, resources), current,
+    void runCurrentFindReview(analyzer, photos, (photo, signal) => readPickSignals(photo, resources, signal), current,
       completed => {setState({input, done: completed});}).then(result => {
       try {check(); if (result) setState({input, done: photos.length, recommendations: result});} catch {}
     });
@@ -36,8 +36,7 @@ export function useFindBestShots(photos: LocalPhoto[], scope: string, source: un
   }, [active, input, analyzer, resources, photos]);
   useLayoutEffect(() => {
     const cancel = () => {analyzer.clear(); resources.clear(); setChosenScope(undefined); setState(undefined);};
-    window.addEventListener("fotoro-lock", cancel);
-    return () => {window.removeEventListener("fotoro-lock", cancel); analyzer.clear(); resources.clear();};
+    return subscribeFindReviewLifecycle(cancel);
   }, [analyzer, resources]);
   return {active, busy: active && !recommendations, done, recommendations,
     toggle: () => setChosenScope(active ? undefined : scope)};

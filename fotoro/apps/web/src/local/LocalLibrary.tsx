@@ -5,6 +5,7 @@ import {captureGroup} from "./capture-groups";
 import {PhotoTable} from "./PhotoTable";
 import {photoColumns, type PhotoColumn} from "./photo-table";
 import {useLocalThumbnail} from "./useLocalThumbnail";
+import {usePhotoNavigation} from "../library/photo-navigation";
 export interface PickSelection {
   ids: ReadonlySet<string>;
   reasons?: ReadonlyMap<string, string[]>;
@@ -31,6 +32,7 @@ function Tile({
       <button
         className="photo"
         id={"local-photo-" + photo.id}
+        data-photo-navigation-id={photo.id}
         aria-label={(selection?.editing ? "Select " : "Open ") + photo.filename}
         aria-pressed={selection?.editing ? selection.ids.has(photo.id) : undefined}
         disabled={selection?.editing && selection.disabled}
@@ -62,7 +64,9 @@ export function LocalLibrary({
   return <>
     <div className="photo-view-controls">
       <div role="group" aria-label="Photo view"><button aria-pressed={view === "grid"} onClick={() => setView("grid")}>Grid</button><button aria-pressed={view === "table"} onClick={() => setView("table")}>Table</button></div>
-      {view === "table" && <details className="photo-column-options"><summary>Columns</summary><fieldset><legend className="visually-hidden">Visible columns</legend>
+      {view === "table" && <details className="photo-column-options" onKeyDown={event => {
+        if(event.key === "Escape") {event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();}
+      }}><summary>Columns</summary><fieldset><legend className="visually-hidden">Visible columns</legend>
         {photoColumns.map(column => <label key={column.id}><input type="checkbox" checked={columns.has(column.id)} disabled={column.id === "name"} onChange={event => {
           const checked = event.target.checked; setColumns(current => {const next = new Set(current); checked ? next.add(column.id) : next.delete(column.id); return next;});
         }} />{column.label}</label>)}
@@ -135,6 +139,9 @@ function LocalGrid({
     overscan: 3,
     useCachedMeasurements: !active,
   });
+  const navigationRows = useMemo(() => rows.map(row => row.photos.map(photo => photo.id)),[rows]);
+  const navigate = usePhotoNavigation(parent,navigationRows,index => virtual.scrollToIndex(index,{align: "auto"}),
+    Math.max(1,Math.floor((parent.current?.clientHeight ?? width)/Math.max(1,width/columns))),active);
   useLayoutEffect(() => {
     if (!active || !anchor.current) return;
     const index = rows.findIndex((row) =>
@@ -148,6 +155,10 @@ function LocalGrid({
     <div
       className="canvas"
       ref={parent}
+      role="region"
+      aria-label="Photo grid"
+      tabIndex={0}
+      onKeyDown={navigate}
       onScroll={() => {
         if (!active) return;
         const top = parent.current?.scrollTop ?? 0;

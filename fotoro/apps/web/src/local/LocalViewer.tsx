@@ -17,11 +17,12 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
   onSave?: (photo: LocalPhoto) => void; isSaved?: (photo: LocalPhoto) => boolean;
   intelligence?: {scopeKey: string; expectedAccountId: string; current: () => boolean; keep: (photo: LocalPhoto, observation: Parameters<CloudPhotoUnderstandingProps["onObservation"]>[0]) => Promise<void>};
 }) {
-  const [selected, setSelected] = useState(initial), [loaded, setLoaded] = useState({id: "", url: ""}),
+  const [selected, setSelected] = useState(initial), [loaded, setLoaded] = useState<{id: string; source?: unknown; url: string}>({id: "", url: ""}),
     [details, setDetails] = useState(false), [zoom, setZoom] = useState(false), [status, setStatus] = useState(""), [label, setLabel] = useState(""),
     [sharing, setSharing] = useState(false), [shareAttempt] = useState(() => new OriginalShareAttempt());
   const panel = useRef<HTMLDivElement>(null), touch = useRef<{x: number; y: number} | undefined>(undefined);
   const index = Math.max(0, photos.findIndex(p => p.id === selected)), photo = photos[index] as LocalOcrPhoto | undefined;
+  const source = photo?.file ?? photo?.preview ?? photo?.previewLoader;
   const currentPhoto = useRef(photo), alive = useRef(false);
   currentPhoto.current = photo;
   useDialogFocus(panel, onClose);
@@ -37,12 +38,12 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
   }, [index, photos, selected]);
   useEffect(() => {
     if (!photo) return;
-    let alive = true;
+    const controller = new AbortController();
     setLoaded({id: "", url: ""}); setZoom(false); setStatus("");
-    resources.load(photo, "preview").then(value => {if (alive) setLoaded({id: photo.id, url: value.url});})
-      .catch(error => {if (alive) {setStatus(error.message); setDetails(true);}});
-    return () => {alive = false;};
-  }, [photo?.id, photo?.file, photo?.previewLoader, resources]);
+    resources.lease(photo, "preview", controller.signal).then(value => {if (!controller.signal.aborted) setLoaded({id: photo.id, source, url: value.url});})
+      .catch(error => {if (!controller.signal.aborted) {setStatus(error.message); setDetails(true);}});
+    return () => controller.abort();
+  }, [photo?.id, source, photo?.digest, photo?.width, photo?.height, resources]);
   useEffect(() => {setDetails(false); setLabel("");}, [photo?.id]);
   if (!photo) return null;
   const download = () => {
@@ -65,7 +66,7 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
         }
         touch.current = undefined;
       }}>
-      {loaded.id === photo.id && loaded.url && <img className={zoom ? "zoomed" : ""} src={loaded.url} alt={photo.filename} />}
+      {loaded.id === photo.id && loaded.source === source && loaded.url && <img className={zoom ? "zoomed" : ""} src={loaded.url} alt={photo.filename} />}
     </div>
     {!photo.file && <p className="original-gate">Reselect the original to Save or Share. <button onClick={onReselect}>Reselect</button></p>}
     <div className="viewer-bottom glass">

@@ -473,6 +473,199 @@ final class RecoveryTests: XCTestCase {
       XCTAssertEqual(outcome, .unlocked)
     }
   }
+  @MainActor func testAddPasskeyKeepsExistingIdentityRecoveryAndEncryptedBundle() async throws {
+    var credential = Self.loginCredential
+    credential.prf = Data(repeating: 7, count: 32)
+    try await withIsolatedLogin(ceremony: { request in
+      XCTAssertTrue(request is ASAuthorizationPlatformPublicKeyCredentialRegistrationRequest)
+      return credential
+    }) { auth, session, vault, responses in
+      try await auth.prepareStart()
+      try await auth.completeStart(code: XCTUnwrap(auth.startPassword))
+      let account = try XCTUnwrap(session.accountId), bundle = try vault.requireBundle()
+      let password = try auth.savedPassword(), before = responses.currentVault
+      let ready = try await auth.addPasskey()
+      XCTAssertTrue(ready)
+      XCTAssertEqual(session.accountId, account)
+      XCTAssertEqual(try vault.requireBundle().vaultKey, bundle.vaultKey)
+      XCTAssertEqual(try auth.savedPassword(), password)
+      let registration = try XCTUnwrap(responses.body(for: "/v1/auth/register/verify"))
+      let json = try XCTUnwrap(JSONSerialization.jsonObject(with: registration) as? [String: Any])
+      let enrollment = try Wire.decode(Enrollment.self, JSONSerialization.data(withJSONObject: XCTUnwrap(json["enrollment"])))
+      XCTAssertEqual(enrollment.accountCard, try session.requireCard(account))
+      XCTAssertEqual(enrollment.recoveryWrapper.wrapperId, before.wrappers.first?.wrapperId)
+      let wrapper = try XCTUnwrap(responses.currentVault.wrappers.first(where: { $0.kind == "prf" }))
+      let restored = try Wire.decode(AccountBundle.self, CryptoAdapter().unwrap(wrapper.wrappedBundle, key: XCTUnwrap(credential.prf)))
+      XCTAssertEqual(restored.vaultKey, bundle.vaultKey)
+      XCTAssertEqual(restored.signingSecretKey, bundle.signingSecretKey)
+      let wire = String(data: registration, encoding: .utf8)!
+      XCTAssertFalse(wire.contains(bundle.vaultKey)); XCTAssertFalse(wire.contains(password))
+      XCTAssertFalse(wire.contains(credential.prf!.b64))
+    }
+  }
+  @MainActor func testAddPasskeyWithoutPRFOrWrapperStorageKeepsPasswordAccess() async throws {
+    for failedStorage in [false, true] {
+      try await withIsolatedLogin(wrapperFail: failedStorage, ceremony: { _ in
+        var result = Self.loginCredential
+        result.prf = failedStorage ? Data(repeating: 7, count: 32) : nil
+        return result
+      }) { auth, _, vault, _ in
+        try await auth.prepareStart(); try await auth.completeStart(code: XCTUnwrap(auth.startPassword))
+        let password = try auth.savedPassword(), key = try vault.requireBundle().vaultKey
+        let ready = try await auth.addPasskey()
+        XCTAssertFalse(ready)
+        XCTAssertTrue(vault.isUnlocked)
+        XCTAssertEqual(try auth.savedPassword(), password)
+        XCTAssertEqual(try vault.requireBundle().vaultKey, key)
+      }
+    }
+  }
+  @MainActor func testSupportedRegistrationWithoutOutputVerifiesSelectedCredentialBeforeWrapping() async throws {
+    var salt: Data?, ceremonies = 0
+    try await withIsolatedLogin(allowedCredentials: [["type": "public-key", "id": Self.loginCredential.credentialId]], ceremony: { request in
+      ceremonies += 1
+      var result = Self.loginCredential
+      if let registration = request as? ASAuthorizationPlatformPublicKeyCredentialRegistrationRequest {
+        salt = try XCTUnwrap(registration.prf?.inputValues?.saltInput1)
+        result.prfSupported = true
+      } else {
+        let assertion = try XCTUnwrap(request as? ASAuthorizationPlatformPublicKeyCredentialAssertionRequest)
+        XCTAssertEqual(assertion.allowedCredentials.map(\.credentialID), [Data([1])])
+        XCTAssertEqual(assertion.prf?.perCredentialInputValues?[Data([1])]?.saltInput1, salt)
+        XCTAssertEqual(assertion.userVerificationPreference, .required)
+        result.prf = Data(repeating: 7, count: 32)
+      }
+      return result
+    }) { auth, session, vault, responses in
+      try await auth.prepareStart(); try await auth.completeStart(code: XCTUnwrap(auth.startPassword))
+      let bundle = try vault.requireBundle(), password = try auth.savedPassword()
+      let ready = try await auth.addPasskey()
+      XCTAssertTrue(ready)
+      XCTAssertEqual(ceremonies, 2)
+      let wrapper = try XCTUnwrap(responses.currentVault.wrappers.first { $0.kind == "prf" })
+      XCTAssertEqual(wrapper.prfSalt, salt?.b64)
+      let unwrapped = try Wire.decode(AccountBundle.self, CryptoAdapter().unwrap(wrapper.wrappedBundle, key: Data(repeating: 7, count: 32)))
+      XCTAssertEqual(unwrapped.vaultKey, bundle.vaultKey)
+      XCTAssertEqual(try auth.savedPassword(), password)
+      XCTAssertEqual(session.accountId, responses.card.accountId)
+      let verify = try XCTUnwrap(responses.paths.lastIndex(of: "/v1/auth/login/verify"))
+      let publish = try XCTUnwrap(responses.paths.firstIndex { $0.hasPrefix("/v1/vault/wrappers/") })
+      XCTAssertLessThan(verify, publish)
+    }
+  }
+  @MainActor func testSupportedRegistrationRejectsDifferentAssertionCredentialWithoutWrapper() async throws {
+    try await withIsolatedLogin(ceremony: { request in
+      var result = Self.loginCredential
+      if request is ASAuthorizationPlatformPublicKeyCredentialRegistrationRequest { result.prfSupported = true }
+      else { result.credentialId = Data([2]).b64; result.prf = Data(repeating: 7, count: 32) }
+      return result
+    }) { auth, _, vault, responses in
+      try await auth.prepareStart(); try await auth.completeStart(code: XCTUnwrap(auth.startPassword))
+      do { _ = try await auth.addPasskey(); XCTFail("Different assertion credential was wrapped") }
+      catch { XCTAssertEqual(error.localizedDescription, "PRF credential mismatch") }
+      XCTAssertTrue(vault.isUnlocked)
+      XCTAssertFalse(responses.paths.contains("/v1/auth/login/verify"))
+      XCTAssertFalse(responses.paths.contains { $0.hasPrefix("/v1/vault/wrappers/") })
+    }
+  }
+  @MainActor func testSupportedRegistrationStopsAfterAssertionContextWithdrawal() async throws {
+    for withdrawal in ["lock", "account", "origin", "cancel"] {
+      var invalidate: (() -> Void)?
+      try await withIsolatedLogin(ceremony: { request in
+        var result = Self.loginCredential
+        if request is ASAuthorizationPlatformPublicKeyCredentialRegistrationRequest { result.prfSupported = true }
+        else { invalidate?(); result.prf = Data(repeating: 7, count: 32) }
+        return result
+      }) { auth, session, vault, responses in
+        try await auth.prepareStart(); try await auth.completeStart(code: XCTUnwrap(auth.startPassword))
+        var adding: Task<Bool, Error>?
+        invalidate = {
+          switch withdrawal {
+          case "lock": vault.lock()
+          case "account": session.accountId = Wire.id()
+          case "origin": auth.api.baseURL = URL(string: "http://localhost:8787")!
+          default: adding?.cancel()
+          }
+        }
+        adding = Task { try await auth.addPasskey() }
+        do { _ = try await adding!.value; XCTFail("Withdrawn \(withdrawal) context published a wrapper") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertFalse(responses.paths.contains("/v1/auth/login/verify"))
+        XCTAssertFalse(responses.paths.contains { $0.hasPrefix("/v1/vault/wrappers/") })
+      }
+    }
+  }
+  @MainActor func testPasskeyTaskCancellationReleasesCeremonyAndIgnoresOldControllerCallback() async throws {
+    let firstStarted = expectation(description: "First ceremony started")
+    let secondStarted = expectation(description: "Replacement ceremony started")
+    var controllers: [ASAuthorizationController] = [], cancellations = 0
+    let ceremony = PasskeyCeremony(performRequests: { controller in
+      controllers.append(controller)
+      (controllers.count == 1 ? firstStarted : secondStarted).fulfill()
+    }, cancelRequest: { _ in cancellations += 1 })
+    func request() -> ASAuthorizationRequest {
+      ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: "fotoro.cloud")
+        .createCredentialAssertionRequest(challenge: Data([1]))
+    }
+    let first = Task { try await ceremony.perform(request()) }
+    await fulfillment(of: [firstStarted], timeout: 2)
+    first.cancel()
+    do { _ = try await first.value; XCTFail("Cancelled ceremony returned a credential") }
+    catch { XCTAssertTrue(error is CancellationError) }
+    XCTAssertEqual(cancellations, 1)
+    var secondCompleted = false
+    let second = Task {
+      defer { secondCompleted = true }
+      return try await ceremony.perform(request())
+    }
+    await fulfillment(of: [secondStarted], timeout: 2)
+    ceremony.authorizationController(controller: controllers[0], didCompleteWithError:
+      NSError(domain: ASAuthorizationError.errorDomain, code: ASAuthorizationError.Code.canceled.rawValue))
+    await Task.yield()
+    XCTAssertFalse(secondCompleted)
+    ceremony.authorizationController(controller: controllers[1], didCompleteWithError:
+      NSError(domain: ASAuthorizationError.errorDomain, code: ASAuthorizationError.Code.failed.rawValue))
+    do { _ = try await second.value; XCTFail("Failed replacement returned a credential") }
+    catch let error as ASAuthorizationError { XCTAssertEqual(error.code, .failed) }
+    XCTAssertEqual(cancellations, 1)
+  }
+  @MainActor func testAddPasskeyLockDuringCeremonyCannotRegisterOrPublishWrapper() async throws {
+    var lock: (() -> Void)?
+    try await withIsolatedLogin(ceremony: { _ in lock?(); return Self.loginCredential }) { auth, session, vault, responses in
+      try await auth.prepareStart(); try await auth.completeStart(code: XCTUnwrap(auth.startPassword))
+      lock = { vault.lock() }
+      do { _ = try await auth.addPasskey(); XCTFail("Locked account published a passkey") }
+      catch { XCTAssertTrue(error is CancellationError) }
+      XCTAssertFalse(vault.isUnlocked); XCTAssertTrue(session.isSignedIn)
+      XCTAssertFalse(responses.paths.contains("/v1/auth/register/verify"))
+      XCTAssertFalse(responses.paths.contains(where: { $0.hasPrefix("/v1/vault/wrappers/") }))
+    }
+  }
+  @MainActor func testFreshPasskeyFindsEncryptedWrapperAndUnlocksSameCredential() async throws {
+    var ceremonies = 0
+    try await withIsolatedLogin(ceremony: { request in
+      ceremonies += 1
+      let assertion = try XCTUnwrap(request as? ASAuthorizationPlatformPublicKeyCredentialAssertionRequest)
+      var result = Self.loginCredential
+      if ceremonies == 2 {
+        XCTAssertEqual(assertion.allowedCredentials.map(\.credentialID), [Data([1])])
+        result.prf = Data(repeating: 7, count: 32)
+      }
+      return result
+    }) { auth, session, vault, responses in
+      let secret = try fixture(FixtureAccounts.self, "accounts").testSecrets[0]
+      let bundle = AccountBundle(vaultKey: secret.vaultKey, boxSecretKey: secret.boxSecretKey, signingSecretKey: secret.signingSecretKey)
+      responses.setVault(VaultV1(version: 1, accountCard: responses.card, wrappers: [VaultWrapperV1(version: 1,
+        wrapperId: Wire.id(), kind: "prf", credentialId: Self.loginCredential.credentialId,
+        prfSalt: Data(repeating: 9, count: 32).b64,
+        wrappedBundle: try CryptoAdapter().wrap(Wire.encode(bundle), key: Data(repeating: 7, count: 32)), verified: false)]))
+      let outcome = try await auth.login(discoverAccount: true)
+      XCTAssertEqual(outcome, .unlocked); XCTAssertEqual(ceremonies, 2)
+      XCTAssertEqual(session.accountId, responses.card.accountId)
+      XCTAssertEqual(try vault.requireBundle().vaultKey, secret.vaultKey)
+      XCTAssertEqual(responses.paths.filter { $0 == "/v1/auth/login/verify" }.count, 2)
+    }
+  }
   @MainActor func testMalformedAllowedCredentialsNeverStartPasskey() async throws {
     var ceremonies = 0
     try await withIsolatedLogin(allowedCredentials: [["type": "public-key", "id": ""]], ceremony: { _ in
@@ -682,7 +875,7 @@ final class RecoveryTests: XCTestCase {
       XCTAssertEqual(session.bearerToken, "public-controlled-session")
       XCTAssertFalse(session.fixture)
       XCTAssertFalse(vault.isUnlocked)
-      XCTAssertEqual(auth.fallbackMessage, "Authenticated. Recover the vault with your saved code or a trusted device.")
+      XCTAssertEqual(auth.fallbackMessage, "Enter your Fotoro password to unlock photos on this iPhone.")
       let persisted = try Wire.decode(SessionV1.self, Keychain.read("session"))
       XCTAssertEqual(persisted.accountId, session.accountId)
       XCTAssertEqual(persisted.token, session.bearerToken)
@@ -905,6 +1098,11 @@ private final class NativeLoginResponses: @unchecked Sendable {
     lock.lock(); defer { lock.unlock() }
     return requestedPaths
   }
+  var currentVault: VaultV1 {
+    lock.lock(); defer { lock.unlock() }
+    return enrolledVault ?? (try! Wire.decode(VaultV1.self, vaultBytes))
+  }
+  func setVault(_ vault: VaultV1) {lock.lock(); enrolledVault = vault; lock.unlock()}
   var recoveryUnavailable: Bool {
     get { lock.lock(); defer { lock.unlock() }; return unavailable }
     set { lock.lock(); unavailable = newValue; lock.unlock() }
@@ -996,15 +1194,26 @@ private final class NativeLoginResponses: @unchecked Sendable {
     case ("GET", "/v1/vault"):
       vaultGate?.started.fulfill()
       if let vaultGate { _ = vaultGate.release.wait(timeout: .now() + 5) }
-      return (200, vaultBytes)
+      return (200, try Wire.encode(currentVault))
     case ("POST", "/v1/auth/register/options"):
+      let bytes = try requestBody(request)
+      lock.lock(); requestBodies[path] = bytes; lock.unlock()
       return (200, try JSONSerialization.data(withJSONObject: ["version": 1,
         "challengeId": "public-register-challenge", "accountId": card.accountId,
         "options": ["challenge": "AQ", "user": ["id": Data(card.accountId.utf8).b64]]]))
-    case ("POST", "/v1/auth/register/verify"): return (200, sessionBytes)
+    case ("POST", "/v1/auth/register/verify"):
+      let bytes = try requestBody(request)
+      lock.lock(); requestBodies[path] = bytes; lock.unlock()
+      return (200, sessionBytes)
     default:
       if wrapperFail, request.httpMethod == "PUT", path.hasPrefix("/v1/vault/wrappers/") {
         return (503, Data(#"{"code":"CONTROLLED_WRAPPER_FAILURE","retryable":true}"#.utf8))
+      }
+      if request.httpMethod == "PUT", path.hasPrefix("/v1/vault/wrappers/") {
+        let bytes = try requestBody(request), wrapper = try Wire.decode(VaultWrapperV1.self, bytes)
+        var vault = currentVault; vault.wrappers.append(wrapper); setVault(vault)
+        lock.lock(); requestBodies[path] = bytes; lock.unlock()
+        return (200, bytes)
       }
       throw FotoroError("Unexpected isolated login request")
     }
