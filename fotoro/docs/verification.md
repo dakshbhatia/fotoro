@@ -42,8 +42,28 @@ isolated Photos preview passes 112 of 113 tests with its existing Vision skip.
 Final full native verification passes 395 of 396 tests with the same existing
 Vision skip and no failures, including 46 recovery tests. A native CI compiler
 limit in the Saved viewer's lifecycle expression was repaired with an explicitly
-typed scene-phase callback and small cleanup helpers; fresh CI is required for
-that repair and the final native discovery change.
+typed scene-phase callback and small cleanup helpers.
+[CI run 37553744702](https://github.com/dakshbhatia/fotoro/actions/runs/37553744702)
+passes on release source `55ec36a5e24e0461d62280e1fee119a1b042d3ac`, including
+the final native discovery repair. CI executes 396 full native tests with five
+Photos-permission skips and no failures (391 passed), including all 46 recovery
+tests; the isolated preview executes 113 with four permission skips and no
+failures (109 passed). These CI skips differ from the single local Vision skip.
+The read-only live service check also passes authenticated API and signed-app
+passkey/universal-link association checks; it does not qualify device behavior.
+
+Build 41 (0.1.0) archives that exact source, with all 143 recorded native input
+hashes matched. After the existing Xcode account was refreshed, the same archive
+and distribution-signed IPA passed the full release audit and upload succeeded.
+Apple completed processing on October 6; compliance declares standard algorithms
+outside Apple's OS and preserves the approved France exclusion. App Store Connect
+readback shows build 41 `Testing` in Fotoro Internal, with the owner's existing
+one-tester account. What to Test notes show `Saved` and the expected instructions.
+Private logs, screenshots, audit and source hashes are retained under the ignored
+local build 41 distribution directory. This establishes internal availability,
+not physical installation or personal-library acceptance. Build 40 is the prior
+candidate and does not contain these follow-up fixes. Production web remains at
+the earlier checkpoint below.
 
 Rendered checks use the Codex in-app browser at `http://127.0.0.1:4310`, with public
 fixtures, at 1280×900 and 320×740. Grid/table Home/End reaches virtualized offscreen

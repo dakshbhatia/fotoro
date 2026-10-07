@@ -75,7 +75,9 @@ Production browser-reader interruption/reopen tests now cover five media kinds,
 while physical qualification remains open. Full-app release audits now
 gate archive/export/upload. These changes and their local regression evidence
 are recorded in [verification](verification.md); they do not close the physical
-acceptance or distribution-signing gates above.
+acceptance or production-release gates above. Build 41 is available through the
+existing internal TestFlight group; physical installation and acceptance remain
+open.
 
 ## Admit later work only with a complete job
 

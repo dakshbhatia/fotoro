@@ -77,11 +77,17 @@ personal-account sync or original restoration on a physical phone.
 
 ## Native distribution
 
-The last verified TestFlight build is 40 (0.1.0), shown as `Complete` in build
+The last verified TestFlight build is 41 (0.1.0), shown as `Complete` in build
 uploads and `Testing` in the existing Fotoro Internal group on October 6. The
 owner's existing tester account has access. Its archive and distribution IPA
 were audited before upload; physical installation and acceptance remain unverified.
 The existing signed-in Xcode account supplied signing and upload authentication.
+Its source is `55ec36a5e24e0461d62280e1fee119a1b042d3ac`, with all 143 native
+input hashes matched and all 23 PR checks successful or skipped. What to Test
+notes were saved and read back. Encryption answers preserve standard algorithms
+outside Apple's OS and the approved France exclusion. This internal candidate
+includes the foundation fixes in draft PR 46; it does not establish a PR merge
+or production web deployment. Build 40 is the preceding TestFlight candidate.
 
 Build 38 archives the qualified PR 43 source and passes the full archive audit
 with all 69 native input hashes matched. It is development-signed; no IPA was
