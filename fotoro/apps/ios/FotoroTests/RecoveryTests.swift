@@ -666,6 +666,67 @@ final class RecoveryTests: XCTestCase {
       XCTAssertEqual(responses.paths.filter { $0 == "/v1/auth/login/verify" }.count, 2)
     }
   }
+  @MainActor func testRememberedAccountDiscoveryOmitsCachedPRFAndUsesLocalOrSelectedKeys() async throws {
+    for localKeysAvailable in [true, false] {
+      var ceremonies = 0, inspectDiscovery: (() throws -> Void)?
+      let salt = Data(repeating: 9, count: 32), output = Data(repeating: 7, count: 32)
+      try await withIsolatedLogin(enrolled: true, ceremony: { request in
+        ceremonies += 1
+        let assertion = try XCTUnwrap(request as? ASAuthorizationPlatformPublicKeyCredentialAssertionRequest)
+        var result = Self.loginCredential
+        if ceremonies == 1 {
+          XCTAssertTrue(assertion.allowedCredentials.isEmpty)
+          XCTAssertNil(assertion.prf, "Account discovery cannot attach inputs from a remembered account")
+          try inspectDiscovery?()
+        } else {
+          XCTAssertEqual(assertion.allowedCredentials.map(\.credentialID), [Data([1])])
+          XCTAssertEqual(assertion.prf?.perCredentialInputValues?[Data([1])]?.saltInput1, salt)
+          result.prf = output
+        }
+        return result
+      }) { auth, session, vault, responses in
+        let secret = try fixture(FixtureAccounts.self, "accounts").testSecrets[0]
+        let bundle = AccountBundle(vaultKey: secret.vaultKey, boxSecretKey: secret.boxSecretKey, signingSecretKey: secret.signingSecretKey)
+        responses.setVault(VaultV1(version: 1, accountCard: responses.card, wrappers: [VaultWrapperV1(version: 1,
+          wrapperId: Wire.id(), kind: "prf", credentialId: Self.loginCredential.credentialId,
+          prfSalt: salt.b64, wrappedBundle: try CryptoAdapter().wrap(Wire.encode(bundle), key: output), verified: false)]))
+        if !localKeysAvailable { Keychain.remove(responses.card.accountId) }
+        inspectDiscovery = {
+          XCTAssertEqual(responses.paths, ["/v1/auth/login/options"], "Discovery must not fetch the remembered vault")
+          let options = try Wire.decode(AuthOptionsRequest.self, XCTUnwrap(responses.body(for: "/v1/auth/login/options")))
+          XCTAssertNil(options.accountId)
+        }
+        let outcome = try await auth.login(discoverAccount: true)
+        XCTAssertEqual(outcome, .unlocked)
+        XCTAssertEqual(ceremonies, localKeysAvailable ? 1 : 2)
+        XCTAssertEqual(session.accountId, responses.card.accountId)
+        XCTAssertEqual(try vault.requireBundle().vaultKey, bundle.vaultKey)
+        XCTAssertEqual(try vault.requireBundle().signingSecretKey, bundle.signingSecretKey)
+      }
+    }
+  }
+  @MainActor func testKnownAccountLoginRetainsAllowedCredentialsAndCachedPRFInputs() async throws {
+    let salt = Data(repeating: 9, count: 32), output = Data(repeating: 7, count: 32)
+    try await withIsolatedLogin(enrolled: true,
+      allowedCredentials: [["type": "public-key", "id": Self.loginCredential.credentialId]], ceremony: { request in
+        let assertion = try XCTUnwrap(request as? ASAuthorizationPlatformPublicKeyCredentialAssertionRequest)
+        XCTAssertEqual(assertion.allowedCredentials.map(\.credentialID), [Data([1])])
+        XCTAssertEqual(assertion.prf?.perCredentialInputValues?[Data([1])]?.saltInput1, salt)
+        var result = Self.loginCredential; result.prf = output
+        return result
+      }) { auth, session, vault, responses in
+        let secret = try fixture(FixtureAccounts.self, "accounts").testSecrets[0]
+        let bundle = AccountBundle(vaultKey: secret.vaultKey, boxSecretKey: secret.boxSecretKey, signingSecretKey: secret.signingSecretKey)
+        responses.setVault(VaultV1(version: 1, accountCard: responses.card, wrappers: [VaultWrapperV1(version: 1,
+          wrapperId: Wire.id(), kind: "prf", credentialId: Self.loginCredential.credentialId,
+          prfSalt: salt.b64, wrappedBundle: try CryptoAdapter().wrap(Wire.encode(bundle), key: output), verified: false)]))
+        let outcome = try await auth.login()
+        XCTAssertEqual(outcome, .unlocked)
+        XCTAssertEqual(session.accountId, responses.card.accountId)
+        XCTAssertEqual(try vault.requireBundle().vaultKey, bundle.vaultKey)
+        XCTAssertEqual(responses.paths, ["/v1/auth/login/options", "/v1/vault", "/v1/auth/login/verify"])
+      }
+  }
   @MainActor func testMalformedAllowedCredentialsNeverStartPasskey() async throws {
     var ceremonies = 0
     try await withIsolatedLogin(allowedCredentials: [["type": "public-key", "id": ""]], ceremony: { _ in
@@ -1188,6 +1249,8 @@ private final class NativeLoginResponses: @unchecked Sendable {
       else { throw FotoroError("Recovery proof binding failed") }
       return (200, sessionBytes)
     case ("POST", "/v1/auth/login/options"):
+      let bytes = try requestBody(request)
+      lock.lock(); requestBodies[path] = bytes; lock.unlock()
       if optionsFail { return (503, Data(#"{"code":"LOGIN_OPTIONS_BLOCKED","retryable":true}"#.utf8)) }
       return (200, optionsBytes)
     case ("POST", "/v1/auth/login/verify"): return (200, sessionBytes)

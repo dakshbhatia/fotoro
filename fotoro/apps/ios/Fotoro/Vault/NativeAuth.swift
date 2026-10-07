@@ -608,7 +608,7 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
     try applyAllowedCredentials(options, to: request)
     request.userVerificationPreference = .required
     var wrappers: [VaultWrapperV1] = []
-    if let account = session.accountId, let v: VaultV1 = try? await api.get("/v1/vault"),
+    if !discoverAccount, let account = session.accountId, let v: VaultV1 = try? await api.get("/v1/vault"),
       v.version == 1, v.accountCard.accountId == account {
       wrappers = v.wrappers
       let values = try wrappers.filter { $0.kind == "prf" }.reduce(

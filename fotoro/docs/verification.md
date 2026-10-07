@@ -12,7 +12,9 @@ account access on iOS and web. Enrollment preserves the same account keys and
 verified password recovery. PRF-enabled credentials that cannot evaluate during
 creation use a selected-credential assertion before wrapping keys. Browser
 discovery leaves per-credential PRF inputs out of its unbounded request and then
-evaluates the selected credential; fresh native access follows the same account
+evaluates the selected credential; native discovery also omits cached PRF inputs,
+then uses remembered local keys or a selected assertion for the same account.
+Fresh native access follows the same account
 and credential binding. Unsupported PRF keeps the password path. Back, lock,
 account/origin replacement and native task cancellation fence publication. Native
 ceremony cancellation releases the controller and ignores late callbacks from
@@ -37,8 +39,11 @@ passes all three cases at 417,908 bytes in one static JavaScript chunk. Earlier
 unchanged core/API/release checks pass: 33 core and 80 API tests, search/Picks
 fixtures, preview artifact checks and nine release orchestration cases. The
 isolated Photos preview passes 112 of 113 tests with its existing Vision skip.
-Final full native verification passes 393 of 394 tests with the same existing
-Vision skip and no failures, including 44 recovery tests.
+Final full native verification passes 395 of 396 tests with the same existing
+Vision skip and no failures, including 46 recovery tests. A native CI compiler
+limit in the Saved viewer's lifecycle expression was repaired with an explicitly
+typed scene-phase callback and small cleanup helpers; fresh CI is required for
+that repair and the final native discovery change.
 
 Rendered checks use the Codex in-app browser at `http://127.0.0.1:4310`, with public
 fixtures, at 1280×900 and 320×740. Grid/table Home/End reaches virtualized offscreen
