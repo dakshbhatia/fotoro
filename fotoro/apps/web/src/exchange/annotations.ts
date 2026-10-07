@@ -8,7 +8,9 @@ import { api, ApiError, fixtureMode, isPublicDemoAccount } from "./api";
 import type { LocalPhoto } from "../local/resources";
 import { OCR_PROCESSOR } from "../local/ocr";
 import {VISUAL_PUBLICATION_ENABLED} from "@fotoro/contracts/visual";
-import {annotationLocation, withAnnotationLocation, validatedPhotoLocation} from "@fotoro/contracts/location";
+import {annotationLocation, withAnnotationLocation, validatedPhotoLocation, isLocationFact} from "@fotoro/contracts/location";
+import {annotationObservation, withPhotoObservation, isCloudObservationFact, type PhotoObservationV1} from "@fotoro/contracts/intelligence";
+import {factsWithPeople, validatedPeopleAssignments, isPeopleFact, type PeopleAssignment} from "@fotoro/contracts/people";
 
 export interface AnnotationIdentity { ownerAccountId: string; photoId: string; originalSha256: string }
 export interface VerifiedAnnotations { signed: SignedPayloadV1; revision: number; value: PhotoAnnotationsV1 }
@@ -167,6 +169,22 @@ export async function queuePhotoLocation(identity: AnnotationIdentity, proposedL
     return same(annotationLocation({facts}), location);
   });
 }
+export async function queuePhotoObservation(identity: AnnotationIdentity, observation: PhotoObservationV1, session = requireVault()) {
+  return serializeAnnotationWrites(session, async () => {
+    assertAnnotationWriter(identity, session);
+    if (observation.photoId !== identity.photoId || observation.sourceRevision !== identity.originalSha256) throw new Error("Photo source changed");
+    const state = await annotationWriteState(identity, session);
+    const {facts} = withPhotoObservation({facts: state.projected?.value.facts}, observation);
+    return queueAnnotationChanges(identity, {facts}, session, state);
+  });
+}
+export async function queuePhotoPeople(identity: AnnotationIdentity, assignments: readonly PeopleAssignment[], session = requireVault()) {
+  return serializeAnnotationWrites(session, async () => {
+    assertAnnotationWriter(identity, session);
+    const state = await annotationWriteState(identity, session);
+    return queueAnnotationChanges(identity, {facts: factsWithPeople(state.projected?.value.facts, identity.originalSha256, assignments)}, session, state);
+  });
+}
 export async function pendingAnnotations(session = requireVault()) {
   const rows = await all<WrappedKeyV1>("settings");
   assertVault(session);
@@ -282,7 +300,12 @@ export async function queueLocalAnnotations(identity: AnnotationIdentity, local:
     assertVault(session);
     if (!stored && !initial) return false;
     const previous = stored ? decryptPrivate<AnnotationPatch & {location?: PhotoLocationV1}>(stored) : undefined;
-    const next = {...localFields(local), ...(local.location === undefined ? {} : {location: {...local.location}})}, patch: AnnotationPatch = {};
+    const localValue = localFields(local);
+    const observation = annotationObservation(local, {photoId: local.id, sourceRevision: local.digest ?? local.id});
+    if (observation) localValue.facts = withPhotoObservation(localValue, {...observation, photoId: identity.photoId, sourceRevision: identity.originalSha256}).facts;
+    const people = validatedPeopleAssignments(localValue.facts, local.digest ?? "");
+    if (people.length) localValue.facts = factsWithPeople(localValue.facts, identity.originalSha256, people);
+    const next = {...localValue, ...(local.location === undefined ? {} : {location: {...local.location}})}, patch: AnnotationPatch = {};
     if (next.location !== undefined && !validatedPhotoLocation(next.location)) throw new Error("Invalid photo location");
     for (const field of fields) if (Object.hasOwn(next, field) && (!previous || !same(previous[field], next[field]))) (patch as Record<string, unknown>)[field] = next[field];
     const previousLocation = previous && (previous.location ?? annotationLocation(previous));
@@ -290,6 +313,27 @@ export async function queueLocalAnnotations(identity: AnnotationIdentity, local:
     if (!Object.keys(patch).length && !locationChanged) return false;
     const state = await annotationWriteState(identity, session);
     const currentLocation = state.projected && annotationLocation(state.projected.value);
+    if (Object.hasOwn(patch, "facts")) {
+      const supplied = (facts: string[] | undefined) => (facts ?? []).filter(fact => !isLocationFact(fact) && !isPeopleFact(fact) && !isCloudObservationFact(fact));
+      // A reserved-evidence delta is independent of supplied-fact edits. Merge
+      // only categories changed in the local source into the latest account
+      // value, so another device's words, names and observations survive.
+      if (same(supplied(previous?.facts), supplied(next.facts))) {
+        let merged = state.projected?.value.facts ?? (next.facts ?? []).filter(fact => !isPeopleFact(fact) && !isCloudObservationFact(fact));
+        const category = (facts: string[] | undefined, matches: (fact: string) => boolean) => (facts ?? []).filter(matches);
+        const nextCloud = category(next.facts, isCloudObservationFact);
+        if (!same(category(previous?.facts, isCloudObservationFact), nextCloud)) {
+          const rebound = annotationObservation(next, {photoId: identity.photoId, sourceRevision: identity.originalSha256});
+          if (rebound || !nextCloud.length) merged = withPhotoObservation({facts: merged}, rebound).facts;
+        }
+        const nextPeople = category(next.facts, isPeopleFact);
+        if (!same(category(previous?.facts, isPeopleFact), nextPeople)) {
+          const assignments = validatedPeopleAssignments(next.facts, identity.originalSha256);
+          if (assignments.length || !nextPeople.length) merged = factsWithPeople(merged, identity.originalSha256, assignments);
+        }
+        patch.facts = merged;
+      }
+    }
     // Explicit supplied-fact edits retain existing GPS. A generated location
     // delta merges into current facts instead of replacing account-only text.
     if (Object.hasOwn(patch, "facts") && currentLocation) patch.facts = withAnnotationLocation({facts: patch.facts}, currentLocation).facts;

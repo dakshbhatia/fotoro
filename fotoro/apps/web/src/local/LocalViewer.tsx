@@ -1,23 +1,28 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Icon } from "../library/icons";
 import { type LocalPhoto, LocalResources } from "./resources";
 import type { LocalOcrPhoto } from "./useLocalOcr";
 import {downloadOriginal, OriginalShareAttempt} from "../library/system-share";
 import {useDialogFocus} from "../library/dialog-focus";
 import {PhotoLocation} from "./PhotoLocation";
-export function LocalViewer({photos, initial, resources, onClose, onLabels, onFavorite, onUse, onConfirm, onPin, meaning, onReselect, onSave, isSaved}: {
+import type {CloudPhotoUnderstandingProps} from "../intelligence/CloudPhotoUnderstanding";
+import {KeptObservations} from "../intelligence/KeptObservations";
+const CloudPhotoUnderstanding = lazy(() => import("../intelligence/CloudPhotoUnderstanding").then(module => ({default: module.CloudPhotoUnderstanding})));
+export function LocalViewer({photos, initial, resources, onClose, onLabels, onFavorite, onUse, onConfirm, onPin, meaning, onReselect, onSave, isSaved, intelligence}: {
   photos: LocalPhoto[]; initial: string; resources: LocalResources; onClose: () => void;
   onLabels?: (id: string, labels: string[]) => void;
   onFavorite?: (id: string, favorite: boolean) => void;
   onUse?: (id: string) => void; onConfirm?: (id: string) => void; onPin?: (id: string) => void;
   meaning?: string; onReselect?: () => void;
   onSave?: (photo: LocalPhoto) => void; isSaved?: (photo: LocalPhoto) => boolean;
+  intelligence?: {scopeKey: string; expectedAccountId: string; current: () => boolean; keep: (photo: LocalPhoto, observation: Parameters<CloudPhotoUnderstandingProps["onObservation"]>[0]) => Promise<void>};
 }) {
-  const [selected, setSelected] = useState(initial), [loaded, setLoaded] = useState({id: "", url: ""}),
+  const [selected, setSelected] = useState(initial), [loaded, setLoaded] = useState<{id: string; source?: unknown; url: string}>({id: "", url: ""}),
     [details, setDetails] = useState(false), [zoom, setZoom] = useState(false), [status, setStatus] = useState(""), [label, setLabel] = useState(""),
     [sharing, setSharing] = useState(false), [shareAttempt] = useState(() => new OriginalShareAttempt());
   const panel = useRef<HTMLDivElement>(null), touch = useRef<{x: number; y: number} | undefined>(undefined);
   const index = Math.max(0, photos.findIndex(p => p.id === selected)), photo = photos[index] as LocalOcrPhoto | undefined;
+  const source = photo?.file ?? photo?.preview ?? photo?.previewLoader;
   const currentPhoto = useRef(photo), alive = useRef(false);
   currentPhoto.current = photo;
   useDialogFocus(panel, onClose);
@@ -33,12 +38,12 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
   }, [index, photos, selected]);
   useEffect(() => {
     if (!photo) return;
-    let alive = true;
+    const controller = new AbortController();
     setLoaded({id: "", url: ""}); setZoom(false); setStatus("");
-    resources.load(photo, "preview").then(value => {if (alive) setLoaded({id: photo.id, url: value.url});})
-      .catch(error => {if (alive) {setStatus(error.message); setDetails(true);}});
-    return () => {alive = false;};
-  }, [photo?.id, photo?.file, photo?.previewLoader, resources]);
+    resources.lease(photo, "preview", controller.signal).then(value => {if (!controller.signal.aborted) setLoaded({id: photo.id, source, url: value.url});})
+      .catch(error => {if (!controller.signal.aborted) {setStatus(error.message); setDetails(true);}});
+    return () => controller.abort();
+  }, [photo?.id, source, photo?.digest, photo?.width, photo?.height, resources]);
   useEffect(() => {setDetails(false); setLabel("");}, [photo?.id]);
   if (!photo) return null;
   const download = () => {
@@ -61,7 +66,7 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
         }
         touch.current = undefined;
       }}>
-      {loaded.id === photo.id && loaded.url && <img className={zoom ? "zoomed" : ""} src={loaded.url} alt={photo.filename} />}
+      {loaded.id === photo.id && loaded.source === source && loaded.url && <img className={zoom ? "zoomed" : ""} src={loaded.url} alt={photo.filename} />}
     </div>
     {!photo.file && <p className="original-gate">Reselect the original to Save or Share. <button onClick={onReselect}>Reselect</button></p>}
     <div className="viewer-bottom glass">
@@ -84,6 +89,11 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
       <p>{photo.filename}</p><p>{photo.width} × {photo.height}{(photo.originalSize ?? photo.file?.size) ? ` · ${((photo.originalSize ?? photo.file!.size) / 1024 / 1024).toFixed(1)} MB` : ""}</p>
       <p>{new Date(photo.date).toLocaleString()}</p><p>{photo.dateSource === "photos" ? "Date from Photos" : photo.dateSource === "exif" ? "Date from the photo" : "Capture date unavailable · date selected"}</p>
       <PhotoLocation location={photo.location} />
+      <KeptObservations facts={photo.facts} photoId={photo.id} sourceRevision={photo.digest ?? photo.id} />
+      {intelligence && <Suspense fallback={null}><CloudPhotoUnderstanding apiBase="" expectedAccountId={intelligence.expectedAccountId} photoId={photo.id} sourceRevision={photo.digest ?? photo.id} scopeKey={intelligence.scopeKey}
+        current={() => alive.current && currentPhoto.current?.id === photo.id && currentPhoto.current.digest === photo.digest && photo.current?.() !== false && intelligence.current()}
+        getPreview={async signal => {const loaded = await resources.load(photo, "preview", signal); return loaded.blob;}}
+        onObservation={observation => intelligence.keep(photo, observation)} /></Suspense>}
       <p>{photo.file ? "Original file unchanged" : "Retained preview · original not selected"}</p>
       {onFavorite && <button aria-pressed={!!photo.favorite} onClick={() => {
         if (alive.current && currentPhoto.current === photo) onFavorite(photo.id, !photo.favorite);

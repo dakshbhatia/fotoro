@@ -13,10 +13,10 @@ final class SemanticSearchTests: XCTestCase {
     try index.replacePermitted([record])
     try index.applySemantic(queryVector, photoID: record.id, revision: record.revision)
     let probe = ConsumerSemanticExecutorProbe()
-    let store = LocalSearchStore(index: index, queryExecutor: { index, query, accepted, previous, generation in
+    let store = LocalSearchStore(index: index, queryExecutor: { index, query, scope, accepted, previous, generation in
       await probe.record(query)
       if query == "delayed scene" { await probe.suspend() }
-      let lexical = try index.search(query, acceptedMeaningID: accepted, previous: previous, generation: generation)
+      let lexical = try index.search(query, scope: scope, acceptedMeaningID: accepted, previous: previous, generation: generation)
       return try index.addingSemantic(queryVector, to: lexical)
     })
     let hits = try await store.consumerResults("birthday cake")

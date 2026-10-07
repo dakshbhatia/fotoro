@@ -27,6 +27,21 @@ test("cloud labels and verified OCR use the local search index without rewriting
   assert.deepEqual(index.search("1234").photoIds, ["cloud-id"]);
   assert.equal(photo.annotations?.ocr?.processor, "native-vision-v1");
 });
+
+test("consumer Saved OCR is rebound to the display ID while original account identity and revision remain intact", () => {
+  const snapshot = {accountId:"owner",token:{},current:()=>true,photos:[photo],preview:async()=>new Blob()};
+  const original = structuredClone(photo.annotations);
+  const saved = savedSearchPhotos(snapshot,[])[0];
+  assert.equal(saved.id,"saved:cloud-id"); assert.equal(saved.ocr?.photoID,saved.id); assert.equal(saved.ocr?.revision,digest);
+  assert.deepEqual(new PhotoSearchIndex([saved]).search("invoice number").photoIds,[saved.id]);
+  const local = {id:"local-digest-id",digest,filename:"IMG_001.jpg",date:"2026-10-01",dateSource:"selected" as const,file:new File(["public fixture"],"IMG_001.jpg")};
+  const reopened = savedSearchPhotos(snapshot,[local])[0];
+  assert.equal(reopened.id,local.id); assert.equal(reopened.ocr?.photoID,local.id);
+  assert.deepEqual(new PhotoSearchIndex([reopened]).search("invoice").photoIds,[local.id]);
+  assert.deepEqual(photo.annotations,original);
+  assert.equal(photo.annotations?.photoId,"cloud-id"); assert.equal(photo.annotations?.originalSha256,digest);
+  assert.deepEqual(new PhotoSearchIndex([{...reopened,digest:"replacement"}]).search("invoice").photoIds,[]);
+});
 test("cloud search excludes annotations from another digest or photo and never reads them from received photos", () => {
   for (const invalid of [{...photo, annotations: {...photo.annotations!, originalSha256: "different"}}, {...photo, annotations: {...photo.annotations!, photoId: "other-id"}}, {...photo, grantId: "received"}]) {
     const index = new PhotoSearchIndex(cloudSearchRecords([invalid]));

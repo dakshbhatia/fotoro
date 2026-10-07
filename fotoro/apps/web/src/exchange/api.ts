@@ -78,6 +78,7 @@ export async function api<T>(
     credentials: "include",
     headers: {
       ...(body === undefined ? {} : { "content-type": "application/json" }),
+      ...(session ? {"x-fotoro-account-id": session.vault.accountId} : {}),
       ...(fixtureMode && fixtureAccount
         ? { "x-fotoro-fixture-account": fixtureAccount }
         : {}),
@@ -102,10 +103,10 @@ export async function fetchCipher(objectId: string, signal?: AbortSignal) {
   const r = await fetch(base + "/v1/objects/" + objectId, {
     signal,
     credentials: "include",
-    headers:
-      fixtureMode && fixtureAccount
-        ? { "x-fotoro-fixture-account": fixtureAccount }
-        : {},
+    headers: {
+      ...(session ? {"x-fotoro-account-id": session.vault.accountId} : {}),
+      ...(fixtureMode && fixtureAccount ? {"x-fotoro-fixture-account": fixtureAccount} : {}),
+    },
   });
   signal?.throwIfAborted();
   if (!r.ok) {

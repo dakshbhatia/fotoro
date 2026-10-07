@@ -5,7 +5,6 @@ self.onmessage = async (event) => {
   const {
     id,
     photoId,
-    accountId,
     vaultKey,
     files,
     filename,

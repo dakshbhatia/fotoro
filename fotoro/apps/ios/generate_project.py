@@ -10,20 +10,20 @@ marketing_version=version_match.group(1) if version_match else '0.1.0'
 objects={}
 def uid(s): return hashlib.sha1(s.encode()).hexdigest()[:24].upper()
 def add(name,body): objects[uid(name)]=body;return uid(name)
-def q(s): return '"'+s+'"'
+def q(s): return '"'+s.replace('\\','\\\\').replace('"','\\"').replace('\n','\\n')+'"'
 files=[];build=[];resources=[];testfiles=[];testres=[];file_refs={}
 for folder in ['Fotoro','FotoroTests']:
  for p in sorted((root/folder).rglob('*')):
   if any(parent.suffix=='.xcassets' for parent in p.parents):continue
   if not (p.is_file() or p.suffix=='.xcassets') or p.suffix in [".plist",".entitlements"]:continue
-  rel=str(p.relative_to(root)); typ='folder.assetcatalog' if p.suffix=='.xcassets' else 'sourcecode.swift' if p.suffix=='.swift' else 'text.json' if p.suffix=='.json' else 'text.xml' if p.suffix=='.xcprivacy' else 'text' if p.suffix=='.txt' else 'video.quicktime' if p.suffix=='.mov' else 'file' if p.suffix=='.fotoro-live' else 'image.jpeg'
+  rel=str(p.relative_to(root)); typ='folder.assetcatalog' if p.suffix=='.xcassets' else 'sourcecode.swift' if p.suffix=='.swift' else 'text.json' if p.suffix=='.json' else 'text.xml' if p.suffix=='.xcprivacy' else 'text' if p.suffix=='.txt' else 'video.quicktime' if p.suffix=='.mov' else 'file' if p.suffix in ['.fotoro-live','.onnx'] else 'image.jpeg'
   f=add(rel,f'isa = PBXFileReference; lastKnownFileType = {typ}; path = {q(rel)}; sourceTree = SOURCE_ROOT;');files.append(f);file_refs[rel]=f
   b=add(rel+'build',f'isa = PBXBuildFile; fileRef = {f};')
   (testfiles if folder=='FotoroTests' and p.suffix=='.swift' else testres if folder=='FotoroTests' else build if p.suffix=='.swift' else resources).append(b)
 products=[]; targets=[]
 packages=[];deps=[];product_deps={}
-for name,url,version in [('Sodium','https://github.com/jedisct1/swift-sodium.git','0.9.1'),('GRDB','https://github.com/groue/GRDB.swift.git','7.0.0'),('Nuke','https://github.com/kean/Nuke.git','12.8.0')]:
- ref=add(name+'pkg',f'isa = XCRemoteSwiftPackageReference; repositoryURL = {q(url)}; requirement = {{kind = upToNextMajorVersion; minimumVersion = {version};}};');packages.append(ref)
+for name,url,version in [('Sodium','https://github.com/jedisct1/swift-sodium.git','0.9.1'),('GRDB','https://github.com/groue/GRDB.swift.git','7.0.0'),('Nuke','https://github.com/kean/Nuke.git','12.8.0'),('onnxruntime','https://github.com/microsoft/onnxruntime-swift-package-manager.git','1.24.2')]:
+ ref=add(name+'pkg',f'isa = XCRemoteSwiftPackageReference; repositoryURL = {q(url)}; requirement = {{{'kind = exactVersion; version = ' + version + ';' if name == 'onnxruntime' else 'kind = upToNextMajorVersion; minimumVersion = ' + version + ';'}}};');packages.append(ref)
  for product in ([name,'NukeUI'] if name=='Nuke' else [name]):
   dep=add(product+'dep',f'isa = XCSwiftPackageProductDependency; package = {ref}; productName = {product};');deps.append(dep);product_deps[product]=dep
 frameworks=[add(d+'build',f'isa = PBXBuildFile; productRef = {d};') for d in deps]
@@ -77,6 +77,13 @@ for target,sources,res,ptype,host,target_deps,target_frameworks in definitions:
  prod=add(target+'product',f'isa = PBXFileReference; explicitFileType = wrapper.{"application" if app else "cfbundle"}; path = {target}.{"app" if app else "xctest"}; sourceTree = BUILT_PRODUCTS_DIR;');products.append(prod)
  phases=[]
  for kind,items in [('Sources',sources),('Resources',res),('Frameworks',target_frameworks)]:phases.append(add(target+kind,f'isa = PBX{kind}BuildPhase; buildActionMask = 2147483647; files = ({",".join(items)}); runOnlyForDeploymentPostprocessing = 0;'))
+ if target=='Fotoro':
+  # Xcode injects an empty dylib into ORT's static resource framework using the
+  # app deployment target, but retains the upstream iOS 15.1 Info.plist value.
+  # Wait for implicit SPM copying and signing before correcting and re-signing
+  # the copied bundle. A separate stamp avoids a second producer for Info.plist.
+  inputs=[q('$(SRCROOT)/scripts/normalize-ort-framework.sh')]+[q('$(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/onnxruntime.framework/'+p) for p in ['Info.plist','onnxruntime','_CodeSignature']]
+  phases.append(add('FotoroNormalizeORT',f'isa = PBXShellScriptBuildPhase; buildActionMask = 2147483647; alwaysOutOfDate = 1; files = (); inputPaths = ({",".join(inputs)}); outputPaths = ({q("$(DERIVED_FILE_DIR)/fotoro-ort-framework-normalized.stamp")}); name = "Normalize ONNX Runtime deployment metadata"; shellPath = /bin/sh; shellScript = {q("exec /bin/sh \"$SRCROOT/scripts/normalize-ort-framework.sh\"")}; runOnlyForDeploymentPostprocessing = 1;'))
  configs=[]
  for conf in ['Debug','Release']:
   bundle='cloud.fotoro.Fotoro' if app else 'cloud.fotoro.'+target

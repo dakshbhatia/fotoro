@@ -72,8 +72,10 @@ struct PhotoSyncView: View {
   @State private var openingAccount = false
   @State private var rejectedSession = false
   @State private var authenticationTask: Task<Void, Never>?
+  @State private var passkeyOperation: UUID?
   @State private var permissionTask: Task<Void, Never>?
   @State private var password: FotoroPassword?
+  @State private var passkeyStatus = ""
   @Environment(\.scenePhase) private var scenePhase
   @Environment(\.dismiss) private var dismiss
   init(services: AppServices, savedRefresh: SavedLibraryRefresh? = nil, requiresAuthentication: Bool = false,
@@ -162,6 +164,20 @@ struct PhotoSyncView: View {
               }
             }
             if services.photoAccountAccess != nil {
+              if status.enabled {
+                Section("Photos to sync") {
+                  Text(services.automaticPhotoSyncIncludesAll
+                    ? "All permitted photos and videos"
+                    : "Last 10 days at first sync, plus new arrivals")
+                    .font(.footnote).foregroundStyle(.secondary)
+                  if !services.automaticPhotoSyncIncludesAll {
+                    Button("Sync all permitted photos and videos", systemImage: "photo.stack") {
+                      do { try services.expandAutomaticPhotoSyncToAll() }
+                      catch { services.error = error.localizedDescription }
+                    }.accessibilityIdentifier("sync.expandAll")
+                  }
+                }
+              }
               if (try? services.annotations.ledger.pendingIDs().isEmpty) == false {
                 Section {
                   Text("Photo changes are saved on this device.").font(.footnote).foregroundStyle(.secondary)
@@ -178,6 +194,24 @@ struct PhotoSyncView: View {
                   Button("Open on another device", systemImage: "laptopcomputer.and.iphone") {
                     do { password = FotoroPassword(value: try services.auth.savedPassword()) }
                     catch { services.error = error.localizedDescription }
+                  }
+                }
+                if !services.session.fixture {
+                  DisclosureGroup("Passkey") {
+                    Button("Add a passkey", systemImage: "person.badge.key") {
+                      let operation = UUID()
+                      passkeyOperation = operation
+                      authenticationTask = services.run(phase: .auth) {
+                        defer {
+                          if passkeyOperation == operation { authenticationTask = nil; passkeyOperation = nil }
+                        }
+                        let ready = try await services.auth.addPasskey()
+                        passkeyStatus = ready
+                          ? "Passkey added. Choose Use a passkey on your other device."
+                          : "Passkey added. Keep your Fotoro password to unlock photos on another device."
+                      }
+                    }.disabled(services.busy).accessibilityIdentifier("account.addPasskey")
+                    if !passkeyStatus.isEmpty { Text(passkeyStatus).font(.footnote).foregroundStyle(.secondary) }
                   }
                 }
                 if let openSaved {
@@ -213,7 +247,7 @@ struct PhotoSyncView: View {
           if authenticationTask == nil { resumeConsent() }
           if services.photoAccountAccess == nil { password = nil }
         }
-        .onChange(of: services.vault.generation) { password = nil }
+        .onChange(of: services.vault.generation) { password = nil; passkeyStatus = "" }
         .onDisappear { cancelConsent(); password = nil }
         .alert("Fotoro", isPresented: Binding(
           get: { !openingAccount && services.error != nil },
@@ -284,6 +318,7 @@ struct PhotoSyncView: View {
     consent?.cancel()
     permissionTask?.cancel(); permissionTask = nil
     authenticationTask?.cancel(); authenticationTask = nil
+    passkeyOperation = nil
     services.auth.cancelStart()
   }
 }

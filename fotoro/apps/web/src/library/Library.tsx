@@ -1,7 +1,10 @@
 import { useRef, useState, useEffect, useLayoutEffect, useMemo } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { photoBytes, type Photo } from "./catalog";
-import { mediaURL } from "../vault/vault";
+import { type Photo } from "./catalog";
+import {requireVault} from "../vault/vault";
+import {sameVault} from "../vault/scope";
+import {leaseSavedRaster, savedRasterSource} from "./saved-raster";
+import {usePhotoNavigation} from "./photo-navigation";
 export function Thumbnail({
   photo,
   onOpen,
@@ -17,39 +20,40 @@ export function Thumbnail({
   selecting?: boolean;
   reasons?: string[];
 }) {
-  const [loaded, setLoaded] = useState<{photo?: Photo; url: string}>({url: ""}),
+  const source = savedRasterSource(photo, "thumbnail");
+  const [loaded, setLoaded] = useState<{source?: string; url: string}>({url: ""}),
+    [returnVersion, setReturnVersion] = useState(0),
     [error, setError] = useState("");
   useEffect(() => {
-    let alive = true;
+    const controller = new AbortController();
     setLoaded({url: ""}); setError("");
-    photoBytes(photo, "thumbnail")
-      .then((bytes) => {
-        if (alive)
-          setLoaded({photo, url: mediaURL(
-              photo.manifest.ownerAccountId + ":" + photo.manifest.photoId + ":" + photo.metadata.originalSha256 + ":" + (photo.manifest.representations.find(value => value.binding.kind === "thumbnail")?.binding.representationId ?? "original") + ":thumbnail",
-              bytes,
-              "image/jpeg",
-              256 * 256 * 4,
-            )});
-      })
-      .catch((e) => {
-        if (alive) setError(e.message);
-      });
+    let session;
+    try {session = requireVault();} catch {setError("Preview unavailable."); return;}
+    const current = () => !controller.signal.aborted && sameVault(session);
+    const clear = () => {controller.abort(); setLoaded({url: ""});};
+    const returned = () => setReturnVersion(value => value + 1);
+    window.addEventListener("fotoro-lock", clear); window.addEventListener("pagehide", clear);
+    window.addEventListener("pageshow", returned);
+    leaseSavedRaster(photo, "thumbnail", controller.signal, current)
+      .then(url => {if (url && current()) setLoaded({source, url});})
+      .catch(() => {if (current()) setError("Preview unavailable.");});
     return () => {
-      alive = false;
+      controller.abort(); window.removeEventListener("fotoro-lock", clear); window.removeEventListener("pagehide", clear);
+      window.removeEventListener("pageshow", returned);
     };
-  }, [photo]);
+  }, [source, returnVersion]);
   return (
     <div className={"tile" + (selected ? " selected" : "")}>
       <button
         className="photo"
         id={"photo-" + photo.manifest.photoId}
+        data-photo-navigation-id={photo.manifest.photoId}
         onClick={onOpen}
         aria-label={"Open " + photo.metadata.filename}
         aria-description={reasons?.join(". ")}
       >
-        {loaded.photo === photo && loaded.url ? (
-          <img src={loaded.url} alt={photo.metadata.filename} />
+        {loaded.source === source && loaded.url ? (
+          <img src={loaded.url} alt="" onError={() => {setLoaded({url: ""}); setError("Preview unavailable.");}} />
         ) : (
           <span>{error || "Loading photo…"}</span>
         )}
@@ -136,6 +140,9 @@ export function Library({
     getItemKey: (index) => rows[index].key,
     useCachedMeasurements: !active,
   });
+  const navigationRows = useMemo(() => rows.map(row => row.photos.map(photo => photo.manifest.photoId)),[rows]);
+  const navigate = usePhotoNavigation(parent,navigationRows,index => virtual.scrollToIndex(index,{align: "auto"}),
+    Math.max(1,Math.floor((parent.current?.clientHeight ?? width)/Math.max(1,width/columns))),active);
   useLayoutEffect(() => {
     if (active && anchor.current && parent.current) {
       const index = rows.findIndex((row) =>
@@ -150,6 +157,10 @@ export function Library({
     <div
       className="canvas"
       ref={parent}
+      role="region"
+      aria-label="Photo grid"
+      tabIndex={0}
+      onKeyDown={navigate}
       onScroll={() => {
         if (!active) return;
         const top = parent.current?.scrollTop ?? 0;

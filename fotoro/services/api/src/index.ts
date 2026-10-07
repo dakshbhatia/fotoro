@@ -5,8 +5,10 @@ import * as storage from "./storage";
 import * as catalog from "./catalog";
 import * as devices from "./devices";
 import * as grants from "./grants";
+import * as albums from "./albums";
 import { savePhoto } from "./saves";
 import * as annotations from "./annotations";
+import * as intelligence from "./intelligence";
 import {diagnosticMethod, diagnosticPhase, diagnosticErrorClass} from "./diagnostics";
 import { readJson } from "./requests";
 import {accountStorage, throttleAuth} from "./limits";
@@ -55,6 +57,7 @@ app.get("/.well-known/apple-app-site-association", (c) => {
       components: [
         {"/": "/", "#": "contact=*"},
         {"/": "/", "#": "moment=*"},
+        {"/": "/", "#": "album=*"},
       ],
     }]},
   });
@@ -69,14 +72,17 @@ app.use("/v1/*", async (c, next) => {
     c.header("Vary", "Origin");
   }
   if (c.req.method === "OPTIONS") {
-    c.header("Access-Control-Allow-Headers", "Content-Type,Authorization");
+    c.header("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Fotoro-Account-Id");
     c.header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
     return c.body(null, 204);
   }
   const backgroundUpload = c.req.method === "PUT" && /^\/v1\/background\/uploads\/[^/]+\/staging$/.test(c.req.path);
   if (!c.req.path.startsWith("/v1/auth/") && !backgroundUpload) {
     if (c.req.method !== "GET") auth.origin(c.env, c.req.raw);
-    c.set("actor", await auth.actorFor(c.env, c.req.raw));
+    const actor = await auth.actorFor(c.env, c.req.raw);
+    const expectations = [c.req.header("x-fotoro-account-id"), c.req.query("expectedAlbumAccountId")];
+    if (expectations.some(expected => expected !== undefined && expected !== actor.accountId)) fail("ACCOUNT_MISMATCH", 403);
+    c.set("actor", actor);
   }
   if (c.req.method === "POST" && (c.req.path.startsWith("/v1/auth/") && c.req.path !== "/v1/auth/logout" || c.req.path === "/v1/devices/enroll")) {
     auth.origin(c.env, c.req.raw);
@@ -110,6 +116,14 @@ app.get("/v1/vault", async (c) =>
 app.get("/v1/storage", async (c) => {
   c.header("Cache-Control", "no-store");
   return c.json(await accountStorage(c.env, c.get("actor")));
+});
+app.get("/v1/intelligence/capabilities", async (c) => {
+  c.header("Cache-Control", "no-store");
+  return c.json(await intelligence.capabilities(c.env, c.get("actor"), c.req.query("expectedAccountId")));
+});
+app.post("/v1/intelligence/observe", async (c) => {
+  c.header("Cache-Control", "no-store");
+  return c.json(await intelligence.observe(c.env, c.get("actor"), c.req.raw));
 });
 app.put("/v1/vault/wrappers/:id", async (c) =>
   c.json(
@@ -186,6 +200,7 @@ app.get("/v1/objects/:id", (c) =>
 app.post("/v1/photos", async (c) =>
   c.json(await catalog.addPhoto(c.env, c.get("actor"), await readJson<any>(c.req.raw))),
 );
+app.get("/v1/photos/:id/manifest", async (c) => {c.header("Cache-Control", "no-store"); return c.json(await catalog.ownedManifest(c.env, c.get("actor"), c.req.param("id")));});
 app.get("/v1/photos/:id/annotations", async (c) => {
   c.header("Cache-Control", "no-store");
   return c.json(await annotations.getAnnotations(c.env, c.get("actor"), c.req.param("id")));
@@ -225,6 +240,14 @@ app.post("/v1/moments/:id/grants", async (c) =>
     ),
   ),
 );
+app.get("/v1/albums/capabilities", (c) => {c.header("Cache-Control", "no-store"); return c.json(albums.capabilities());});
+app.post("/v1/albums", async (c) => {c.header("Cache-Control", "no-store"); return c.json(await albums.create(c.env, c.get("actor"), await readJson(c.req.raw)));});
+app.get("/v1/albums", async (c) => {c.header("Cache-Control", "no-store"); return c.json(await albums.inbox(c.env, c.get("actor")));});
+app.get("/v1/albums/:id/access", async (c) => {c.header("Cache-Control", "no-store"); return c.json(await albums.access(c.env, c.get("actor"), c.req.param("id")));});
+app.get("/v1/albums/:id", async (c) => {c.header("Cache-Control", "no-store"); return c.json(await albums.detail(c.env, c.get("actor"), c.req.param("id"), c.req.query("cursor")));});
+app.post("/v1/albums/:id/accept", async (c) => {c.header("Cache-Control", "no-store"); return c.json(await albums.accept(c.env, c.get("actor"), c.req.param("id"), await readJson(c.req.raw)));});
+app.post("/v1/albums/:id/end", async (c) => {c.header("Cache-Control", "no-store"); return c.json(await albums.end(c.env, c.get("actor"), c.req.param("id"), await readJson(c.req.raw)));});
+app.post("/v1/albums/:id/photos", async (c) => {c.header("Cache-Control", "no-store"); return c.json(await albums.append(c.env, c.get("actor"), c.req.param("id"), await readJson(c.req.raw)));});
 app.get("/v1/grants", async (c) =>
   c.json(await grants.inbox(c.env, c.get("actor"))),
 );

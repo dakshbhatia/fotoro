@@ -115,10 +115,11 @@ struct PendingEnrollment {
   var wrapper: VaultWrapperV1
   var salt: Data
 }
-struct CredentialResult {
+struct CredentialResult: Sendable {
   var response: Data
   var credentialId: String
   var prf: Data?
+  var prfSupported = false
 }
 enum NativeSignInOutcome: Equatable, Sendable {
   case unlocked, recoveryRequired
@@ -145,16 +146,50 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
 {
   private var continuation: CheckedContinuation<CredentialResult, Error>?
   private var controller: ASAuthorizationController?
+  private var operation: UUID?
+  private let performRequests: @MainActor (ASAuthorizationController) -> Void
+  private let cancelRequest: @MainActor (ASAuthorizationController) -> Void
+  init(performRequests: @escaping @MainActor (ASAuthorizationController) -> Void = { $0.performRequests() },
+    cancelRequest: @escaping @MainActor (ASAuthorizationController) -> Void = { $0.cancel() }) {
+    self.performRequests = performRequests
+    self.cancelRequest = cancelRequest
+    super.init()
+  }
   func perform(_ request: ASAuthorizationRequest) async throws -> CredentialResult {
+    try Task.checkCancellation()
     guard continuation == nil else { throw FotoroError("A passkey request is already active") }
-    return try await withCheckedThrowingContinuation { continuation in
-      self.continuation = continuation
-      let controller = ASAuthorizationController(authorizationRequests: [request])
-      self.controller = controller
-      controller.delegate = self
-      controller.presentationContextProvider = self
-      controller.performRequests()
+    let operation = UUID()
+    return try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { continuation in
+        guard !Task.isCancelled else { continuation.resume(throwing: CancellationError()); return }
+        self.continuation = continuation
+        self.operation = operation
+        let controller = ASAuthorizationController(authorizationRequests: [request])
+        self.controller = controller
+        controller.delegate = self
+        controller.presentationContextProvider = self
+        performRequests(controller)
+      }
+    } onCancel: {
+      Task { @MainActor [weak self] in self?.cancel(operation: operation) }
     }
+  }
+  private func cancel(operation: UUID) {
+    guard self.operation == operation, let controller else { return }
+    let continuation = self.continuation
+    self.continuation = nil
+    self.controller = nil
+    self.operation = nil
+    cancelRequest(controller)
+    continuation?.resume(throwing: CancellationError())
+  }
+  private func complete(_ result: Result<CredentialResult, Error>, controller: ASAuthorizationController) {
+    guard self.controller === controller else { return }
+    let continuation = self.continuation
+    self.continuation = nil
+    self.controller = nil
+    self.operation = nil
+    continuation?.resume(with: result)
   }
   func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
     UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap { $0.windows }
@@ -164,10 +199,12 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
     controller: ASAuthorizationController,
     didCompleteWithAuthorization authorization: ASAuthorization
   ) {
+    guard self.controller === controller else { return }
     do {
       let response: [String: Any]
       let credentialId: String
       let prf: Data?
+      let prfSupported: Bool
       if let registration = authorization.credential
         as? ASAuthorizationPlatformPublicKeyCredentialRegistration
       {
@@ -176,6 +213,7 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
         }
         credentialId = registration.credentialID.b64
         prf = registration.prf?.first.map { $0.withUnsafeBytes { Data($0) } }
+        prfSupported = registration.prf?.isSupported ?? false
         response = [
           "id": credentialId, "rawId": credentialId, "type": "public-key",
           "authenticatorAttachment": "platform", "clientExtensionResults": [:],
@@ -189,6 +227,7 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
       {
         credentialId = assertion.credentialID.b64
         prf = assertion.prf?.first.withUnsafeBytes { Data($0) }
+        prfSupported = prf != nil
         response = [
           "id": credentialId, "rawId": credentialId, "type": "public-key",
           "authenticatorAttachment": "platform", "clientExtensionResults": [:],
@@ -201,20 +240,15 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
       } else {
         throw FotoroError("Unexpected passkey credential")
       }
-      continuation?.resume(
-        returning: CredentialResult(
+      complete(.success(CredentialResult(
           response: try JSONSerialization.data(withJSONObject: response),
-          credentialId: credentialId, prf: prf))
-    } catch { continuation?.resume(throwing: error) }
-    continuation = nil
-    self.controller = nil
+          credentialId: credentialId, prf: prf, prfSupported: prfSupported)), controller: controller)
+    } catch { complete(.failure(error), controller: controller) }
   }
   func authorizationController(
     controller: ASAuthorizationController, didCompleteWithError error: Error
   ) {
-    continuation?.resume(throwing: error)
-    continuation = nil
-    self.controller = nil
+    complete(.failure(error), controller: controller)
   }
 }
 
@@ -556,13 +590,13 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
         "This passkey has no PRF output. This enrolled iPhone uses Keychain; another device needs the saved recovery code or trusted-device approval."
     }
   }
-  @discardableResult func login() async throws -> NativeSignInOutcome {
+  @discardableResult func login(discoverAccount: Bool = false) async throws -> NativeSignInOutcome {
     fallbackMessage = nil
     guard !session.fixture else {
       throw FotoroError("Fixture authentication cannot create passkeys")
     }
     let account = session.accountId, generation = vault.generation
-    let response = try await options("/v1/auth/login/options", accountId: account)
+    let response = try await options("/v1/auth/login/options", accountId: discoverAccount ? nil : account)
     try checkAuthentication(account: account, generation: generation)
     guard let challengeId = response["challengeId"] as? String,
       let options = response["options"] as? [String: Any],
@@ -574,7 +608,7 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
     try applyAllowedCredentials(options, to: request)
     request.userVerificationPreference = .required
     var wrappers: [VaultWrapperV1] = []
-    if let account = session.accountId, let v: VaultV1 = try? await api.get("/v1/vault"),
+    if !discoverAccount, let account = session.accountId, let v: VaultV1 = try? await api.get("/v1/vault"),
       v.version == 1, v.accountCard.accountId == account {
       wrappers = v.wrappers
       let values = try wrappers.filter { $0.kind == "prf" }.reduce(
@@ -601,14 +635,16 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
     try checkAuthentication(account: account, generation: generation)
     try accept(result)
     if vault.isUnlocked { return .unlocked }
+    let acceptedGeneration = vault.generation
+    var fetchedVault: VaultV1?
     if session.pinnedCards[result.accountId] == nil {
-      let acceptedGeneration = vault.generation
       let current: VaultV1 = try await api.get("/v1/vault")
       try checkAuthentication(account: result.accountId, generation: acceptedGeneration)
       guard current.version == 1, current.accountCard.accountId == result.accountId else {
         throw FotoroError("Vault account mismatch")
       }
       try session.pin(current.accountCard)
+      fetchedVault = current
     }
     if let output = credential.prf,
       let wrapper = wrappers.first(where: { $0.credentialId == credential.credentialId })
@@ -616,14 +652,26 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
       try await vault.unlock(.prf(output: output, wrapper: wrapper.wrappedBundle))
     } else {
       do { try await vault.unlock(.localKeychain) } catch {
+        try checkAuthentication(account: result.accountId, generation: acceptedGeneration)
+        let current: VaultV1
+        if let fetchedVault { current = fetchedVault }
+        else { current = try await api.get("/v1/vault") }
+        try checkAuthentication(account: result.accountId, generation: acceptedGeneration)
+        guard current.version == 1, current.accountCard.accountId == result.accountId else {
+          throw FotoroError("Vault account mismatch")
+        }
+        if current.wrappers.contains(where: { $0.kind == "prf" && $0.credentialId == credential.credentialId && $0.prfSalt != nil }) {
+          try await unlockWithPRF(credentialId: credential.credentialId)
+          return .unlocked
+        }
         fallbackMessage =
-          "Authenticated. Recover the vault with your saved code or a trusted device."
+          "Enter your Fotoro password to unlock photos on this iPhone."
         return .recoveryRequired
       }
     }
     return .unlocked
   }
-  func unlockWithPRF() async throws {
+  func unlockWithPRF(credentialId: String? = nil) async throws {
     let account = session.accountId, generation = vault.generation
     let v: VaultV1 = try await api.get("/v1/vault")
     try checkAuthentication(account: account, generation: generation)
@@ -631,11 +679,12 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
       throw FotoroError("Vault account mismatch")
     }
     let response = try await options("/v1/auth/login/options", accountId: session.accountId)
+    try checkAuthentication(account: account, generation: generation)
     guard let challengeId = response["challengeId"] as? String,
       let options = response["options"] as? [String: Any],
       let challenge = options["challenge"] as? String
     else { throw FotoroError("Invalid PRF challenge") }
-    let values = try v.wrappers.filter { $0.kind == "prf" }.reduce(
+    let values = try v.wrappers.filter { $0.kind == "prf" && (credentialId == nil || $0.credentialId == credentialId) }.reduce(
       into: [Data: ASAuthorizationPublicKeyCredentialPRFAssertionInput.InputValues]()
     ) { dict, w in
       if let id = w.credentialId, let salt = w.prfSalt {
@@ -649,10 +698,16 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
       relyingPartyIdentifier: api.rpId
     ).createCredentialAssertionRequest(challenge: try Data(b64: challenge))
     try applyAllowedCredentials(options, to: request)
+    if let credentialId {
+      request.allowedCredentials = [ASAuthorizationPlatformPublicKeyCredentialDescriptor(credentialID: try Data(b64: credentialId))]
+    }
     request.prf = .perCredentialInputValues(values)
     request.userVerificationPreference = .required
     let credential = try await performCredential(request)
     try checkAuthentication(account: account, generation: generation)
+    guard credentialId == nil || credential.credentialId == credentialId else {
+      throw FotoroError("PRF credential mismatch")
+    }
     guard let output = credential.prf, output.count == 32,
       let wrapper = v.wrappers.first(where: {
         $0.credentialId == credential.credentialId && $0.kind == "prf"
@@ -687,6 +742,88 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
     try accept(result)
     try session.pin(v.accountCard)
     try await vault.unlock(.prf(output: output, wrapper: wrapper.wrappedBundle))
+  }
+  func addPasskey() async throws -> Bool {
+    guard session.isSignedIn, !session.fixture, let account = session.accountId else {
+      throw FotoroError("Open your Fotoro before adding a passkey.")
+    }
+    let generation = vault.generation, origin = api.origin, bundle = try vault.requireBundle()
+    func check() throws {
+      try checkAuthentication(account: account, generation: generation)
+      guard api.origin == origin, vault.isUnlocked else { throw CancellationError() }
+    }
+    let current: VaultV1 = try await api.get("/v1/vault")
+    try check()
+    guard current.version == 1, current.accountCard == (try session.requireCard(account)),
+      let recovery = current.wrappers.first(where: { $0.kind == "recovery" && $0.verified })
+    else { throw FotoroError("Account could not be verified. Open your Fotoro again.") }
+    let response = try await options("/v1/auth/register/options", accountId: account)
+    try check()
+    guard response["accountId"] as? String == account,
+      let challengeId = response["challengeId"] as? String,
+      let options = response["options"] as? [String: Any],
+      let challenge = options["challenge"] as? String,
+      let user = options["user"] as? [String: Any], let userID = user["id"] as? String
+    else { throw FotoroError("Invalid passkey setup options") }
+    let salt = crypto.randomKey()
+    let request = ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: api.rpId)
+      .createCredentialRegistrationRequest(challenge: try Data(b64: challenge), name: "Fotoro", userID: try Data(b64: userID))
+    request.prf = .inputValues(.saltInput1(salt))
+    request.userVerificationPreference = .required
+    let credential = try await performCredential(request)
+    try check()
+    let proof = try crypto.sign(EnrollmentProof(accountCard: current.accountCard, recoveryWrapper: recovery),
+      kind: "account-enrollment", accountId: account, secret: Data(b64: bundle.signingSecretKey))
+    let body: [String: Any] = ["version": 1, "challengeId": challengeId, "client": "native",
+      "response": try JSONSerialization.jsonObject(with: credential.response),
+      "enrollment": try JSONSerialization.jsonObject(with: Wire.encode(Enrollment(accountCard: current.accountCard, recoveryWrapper: recovery, proof: proof)))]
+    let result = try Wire.decode(SessionV1.self, await api.request("/v1/auth/register/verify", method: "POST",
+      body: JSONSerialization.data(withJSONObject: body)))
+    try check()
+    guard result.accountId == account else { throw FotoroError("Passkey account mismatch") }
+    try accept(result)
+    var output = credential.prf
+    if output?.count != 32, credential.prfSupported {
+      let response = try await self.options("/v1/auth/login/options", accountId: account)
+      try check()
+      guard let challengeId = response["challengeId"] as? String,
+        let options = response["options"] as? [String: Any], let challenge = options["challenge"] as? String
+      else { throw FotoroError("Invalid PRF challenge") }
+      let request = ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: api.rpId)
+        .createCredentialAssertionRequest(challenge: try Data(b64: challenge))
+      try applyAllowedCredentials(options, to: request)
+      let id = try Data(b64: credential.credentialId)
+      if options["allowCredentials"] != nil, !request.allowedCredentials.contains(where: { $0.credentialID == id }) {
+        throw FotoroError("PRF credential mismatch")
+      }
+      request.allowedCredentials = [ASAuthorizationPlatformPublicKeyCredentialDescriptor(credentialID: id)]
+      request.prf = .perCredentialInputValues([id: .saltInput1(salt)])
+      request.userVerificationPreference = .required
+      let assertion = try await performCredential(request)
+      try check()
+      guard assertion.credentialId == credential.credentialId else { throw FotoroError("PRF credential mismatch") }
+      guard let assertionOutput = assertion.prf, assertionOutput.count == 32 else { return false }
+      let body: [String: Any] = ["version": 1, "challengeId": challengeId, "client": "native",
+        "response": try JSONSerialization.jsonObject(with: assertion.response)]
+      let authenticated = try Wire.decode(SessionV1.self, await api.request("/v1/auth/login/verify", method: "POST",
+        body: JSONSerialization.data(withJSONObject: body)))
+      try check()
+      guard authenticated.accountId == account else { throw FotoroError("PRF authenticated account mismatch") }
+      try accept(authenticated)
+      output = assertionOutput
+    }
+    guard let output, output.count == 32 else { return false }
+    let wrapper = VaultWrapperV1(version: 1, wrapperId: Wire.id(), kind: "prf", credentialId: credential.credentialId,
+      prfSalt: salt.b64, wrappedBundle: try crypto.wrap(Wire.encode(bundle), key: output), verified: false)
+    do {
+      let _: VaultWrapperV1 = try Wire.decode(VaultWrapperV1.self,
+        await api.request("/v1/vault/wrappers/\(wrapper.wrapperId)", method: "PUT", body: Wire.encode(wrapper)))
+      try check()
+      return true
+    } catch {
+      try check()
+      return false
+    }
   }
   func recover(_ code: String, missingAccountIsPasswordError: Bool = true,
     validation: (() throws -> Void)? = nil, accepted: (() -> Void)? = nil) async throws {

@@ -24,7 +24,7 @@
     "test:exchange:isolated": "node tools/test-exchange.mjs",
     "test:ios": "node tools/test-ios.mjs",
     "test:ios-preview-audit": "node --experimental-vm-modules tools/check-ios-preview.test.mjs",
-    "test:release-artifact": "node --experimental-vm-modules --test tools/build-testflight.test.mjs",
+    "test:release-artifact": "node --experimental-vm-modules --test tools/build-testflight.test.mjs && node --experimental-vm-modules tools/check-ios-release.test.mjs",
     "test:asc-metadata": "node --test tools/asc-metadata.test.mjs",
     "test": "tsx --test tests/*.test.ts",
     "check:core": "tsc --noEmit && pnpm test && pnpm test:search:fixtures && pnpm test:picks:fixtures && pnpm test:ios-preview-audit && pnpm test:asc-metadata && pnpm test:release-artifact",

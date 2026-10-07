@@ -127,16 +127,25 @@ struct ConsumerSearchResultsView: View {
   let inspectDevice: (RecentPhoto) -> Void
   let inspectSaved: (LocalPhoto) -> Void
   let choseAlternative: () -> Void
+  var editPeople: () -> Void = {}
+  var selectResults: (() -> Void)?
   private var matches: [ConsumerSearchHit] {
     guard let review else { return hits }
     return hits.filter { review.recommendations.ids.contains($0.id) }
   }
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
+      if !search.peopleSelection.isEmpty {
+        SearchPeopleSummary(search: search, edit: editPeople)
+      }
       SearchAlternatives(search: search, selected: choseAlternative)
       if matches.isEmpty {
         SearchEmptyResults(search: search, searchPending: searchPending, reviewing: review != nil)
       } else {
+        if let selectResults {
+          Button("Select results", systemImage: "checkmark.circle", action: selectResults)
+            .padding(.horizontal).accessibilityIdentifier("search.selectResults")
+        }
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 2), spacing: 3) {
           ForEach(matches) { hit in
             ConsumerSearchCell(hit: hit, saved: saved, search: search, photos: photos,
@@ -154,6 +163,29 @@ struct ConsumerSearchResultsView: View {
         Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
       }
     }
+  }
+}
+
+private struct SearchPeopleSummary: View {
+  let search: LocalSearchStore
+  let edit: () -> Void
+  private var names: String {
+    search.peopleSelection.canonicalIDs.map { search.selectedPeopleNames[$0] ?? "Selected person" }.joined(separator: ", ")
+  }
+  var body: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      HStack {
+        Button(search.peopleSelection.match.title, systemImage: "person.2", action: edit)
+          .accessibilityIdentifier("search.people.edit")
+        Spacer()
+        Button("Clear people") { search.setPeopleSelection(PeopleSearchSelection()) }
+          .accessibilityIdentifier("search.people.clear")
+      }
+      Text(names).font(.subheadline)
+      if search.peopleSelection.match == .everyone {
+        Text("Confirmed together in each photo.").font(.caption).foregroundStyle(.secondary)
+      }
+    }.padding(.horizontal)
   }
 }
 

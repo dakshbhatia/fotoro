@@ -13,7 +13,9 @@ Hono Worker with D1 and private R2. The upstream Ente application is a reference
 - Account storage limit: 10 GiB. Logical camera original limit: 50 MiB.
 - Originals, previews and thumbnails are encrypted by clients before upload.
 - Visual search runs locally. Model downloads contain public weights; private
-  photos, queries and vectors are not sent to an inference provider.
+  photos, queries and vectors stay local on that path. Optional cloud observations
+  require separate preview consent and explicitly configured provider/work limits;
+  that route remains disabled by default.
 
 The last verified active Worker is `2ca15bc9-614b-4b21-a115-f3748c60bbc4`
 at 100%, deployment `7a474426-4b3b-4d7c-baf7-026bfd36e090` (2026-10-05,
@@ -48,7 +50,11 @@ head before building release artifacts.
 Build production web assets from the qualified merged source with `pnpm build:web`.
 Development fixture settings belong to local processes and must not be exported
 into the production build. Keep the configured D1/R2 bindings and production
-origin unchanged. Apply migrations only when the qualified change requires them; the current screen changes need none.
+origin unchanged. Apply migrations only when the qualified change requires them. Optional cloud
+photo understanding adds migration `0007_cloud_inference_work.sql`; its provider
+key, enable flag and explicit account/global daily work caps must remain absent
+until cloud inference is deliberately configured. See the API README for the
+preview-consent contract and limits.
 
 Use Wrangler's existing OAuth session in the intended Cloudflare account. Do not
 copy credentials into chat, Git or release logs. From `services/api/`, prepare a
@@ -71,10 +77,17 @@ personal-account sync or original restoration on a physical phone.
 
 ## Native distribution
 
-The last verified TestFlight build is 25 (`VALID`, `IN_BETA_TESTING`). This code
-pass uses CI for native validation; no new IPA, phone install or TestFlight upload
-is implied by web deployment. The owner reports Xcode already signed in; do not
-repeat historical account setup instructions.
+The last verified TestFlight build is 41 (0.1.0), shown as `Complete` in build
+uploads and `Testing` in the existing Fotoro Internal group on October 6. The
+owner's existing tester account has access. Its archive and distribution IPA
+were audited before upload; physical installation and acceptance remain unverified.
+The existing signed-in Xcode account supplied signing and upload authentication.
+Its source is `55ec36a5e24e0461d62280e1fee119a1b042d3ac`, with all 143 native
+input hashes matched and all 23 PR checks successful or skipped. What to Test
+notes were saved and read back. Encryption answers preserve standard algorithms
+outside Apple's OS and the approved France exclusion. This internal candidate
+includes the foundation fixes in draft PR 46; it does not establish a PR merge
+or production web deployment. Build 40 is the preceding TestFlight candidate.
 
 Build 38 archives the qualified PR 43 source and passes the full archive audit
 with all 69 native input hashes matched. It is development-signed; no IPA was
@@ -94,6 +107,22 @@ account or claim the build is upload-ready. An individual API key uses
 available distribution identity/profile, a usable signed-in Xcode account, or a
 team key with its issuer for automatic provisioning. Keep keys outside the repo.
 
+On October 6, restoring the existing Xcode account and using an Apple-first
+process PATH allowed CLI and Organizer exports of build 39. The supplied
+Organizer `Copy failed` log mixed Apple rsync with Homebrew rsync 3.5.1, which
+rejected `--extended-attributes`. The build helper already sets that tool path.
+Apple accepted the upload but rejected build 39's processing with 90208: ONNX's
+plist minimum OS was 15.1 while Xcode's generated resource-framework binary
+required 26.0.
+
+Build 40 corrects the copied framework's metadata and re-signs it in a final
+archive-only full-app phase. Both archive and signed IPA pass the strengthened
+audit with minimum OS 26.0. Apple completed processing; the encryption answers
+declare standard algorithms outside Apple's OS and preserve the approved France
+exclusion. The existing group's automatic distribution made build 40 available
+to its one tester, and the What to Test notes were saved and read back. This
+internal candidate does not qualify a production web deployment or PR merge.
+
 First App Store publication excludes France, as approved by the owner. Keep full
 app encryption and the distribution artifact's compliance declaration aligned;
 the local Photos preview is a separate target with a different encryption scope.
@@ -102,8 +131,13 @@ distribution IPA before upload. The audit checks the requested build and signed
 app identity, production associated domains, one arm64 executable, matching
 binary/dSYM UUIDs and ten defined static crypto symbols. Preview scope,
 false or malformed full-app encryption declarations, extra executable resources
-and a mismatched exported build fail before upload. `pnpm check` includes the
-release orchestration regressions. An archive-only audit does not qualify an IPA
+and a mismatched exported build fail before upload. The only accepted nested
+Mach-O is ONNX Runtime 1.24.2's pinned codeless resource-framework stub: unsigned
+bytes, platform, declared/binary/app minimum-OS compatibility, identity and
+signature are checked, and the main binary's dSYM
+must prove static ONNX linkage. Other nested executables remain rejected.
+`pnpm check` includes the release artifact and orchestration regressions.
+An archive-only audit does not qualify an IPA
 or an App Store Connect upload; processing and compliance still require readback.
 See [verification](verification.md) for current evidence and its historical appendix.
 Earlier deployment checkpoints remain available in Git history.

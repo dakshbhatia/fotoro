@@ -210,6 +210,8 @@ export function readableSyncError(error: unknown) {
     return "That Fotoro password could not unlock your library. Check the complete password.";
   if (/PASSWORD_ACCOUNT_MISMATCH/.test(code))
     return "That account could not be verified. Try signing in again.";
+  if (/NO_ACCOUNT_PASSKEY/.test(code))
+    return "Use your Fotoro password, then add a passkey in Settings.";
   if (/ACCOUNT_SETUP_NOT_STARTED/.test(code))
     return "Create an account to get your Fotoro password.";
   if (/PASSWORD_COPY_UNAVAILABLE/.test(code))

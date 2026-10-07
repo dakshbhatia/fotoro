@@ -8,6 +8,8 @@ import { all, clearAccount, get } from "../src/exchange/cache";
 import { applyChanges } from "../src/library/catalog";
 import * as annotations from "../src/exchange/annotations";
 import {VISUAL_PROCESSOR} from "@fotoro/contracts/visual";
+import {annotationObservation, withPhotoObservation} from "@fotoro/contracts/intelligence";
+import {peopleNames, factsWithPeople} from "@fotoro/contracts/people";
 import {annotationLocation, withAnnotationLocation} from "@fotoro/contracts/location";
 
 const owner = "11111111-1111-4111-8111-111111111111";
@@ -406,5 +408,74 @@ test("multiple annotation changes in one page keep the highest revision even whe
   try {
     await applyChanges({version: 1, changes: [{cursor: "2", entity: "annotation", entityId: photoId, deleted: false, payload: signed(2, {labels: ["new"]})}, {cursor: "1", entity: "annotation", entityId: photoId, deleted: false, payload: signed(1, {labels: ["old"]})}], nextCursor: "next", hasMore: false}, session);
     assert.equal((await annotations.readAnnotations(identity))?.revision, 2);
+  } finally {await clean();}
+});
+
+test("People and cloud observations serialize into latest encrypted facts without changing captions or OCR", async () => {
+  await open();
+  try {
+    const session = requireVault();
+    const observation = {version: 1 as const, photoId, sourceRevision: originalSha256, processor: "gemini-3.8-flash" as const, observedAt: "2026-10-06T12:00:00.000Z", observations: {objects: ["red bicycle"], scene: ["park"], visibleText: "Cafe", uncertainty: ["possibly evening"]}};
+    await annotations.queueAnnotations(identity, {facts: ["Exact supplied fact"], caption: "my caption", ocr: {processor: localProcessor, text: "LOCAL OCR", confidence: .8}}, session);
+    const naming = annotations.queuePhotoPeople(identity, [{personId: crypto.randomUUID(), name: "Ronald", box: [100, 100, 1000, 1000]}], session);
+    const observing = annotations.queuePhotoObservation(identity, observation, session);
+    await Promise.all([naming, observing]);
+    const value = (await annotations.readAnnotations(identity, session))!.value;
+    assert.equal(value.facts?.[0], "Exact supplied fact");
+    assert.deepEqual(peopleNames(value.facts, originalSha256), ["Ronald"]);
+    assert.deepEqual(annotationObservation(value, observation), observation);
+    assert.equal(value.caption, "my caption"); assert.equal(value.ocr?.text, "LOCAL OCR");
+    await assert.rejects(annotations.queuePhotoObservation(identity, {...observation, sourceRevision: "wrong"}, session), /source changed/);
+    assert.deepEqual((await annotations.readAnnotations(identity, session))!.value, value);
+  } finally {await clean();}
+});
+test("saving selected local observations and names rebinds only matching original evidence", async () => {
+  await open();
+  try {
+    const digest = "00".repeat(32), id = digest;
+    const observation = {version: 1 as const, photoId: id, sourceRevision: digest, processor: "gemini-3.8-flash" as const, observedAt: "2026-10-06T12:00:00.000Z", observations: {objects: ["bicycle"], scene: [], visibleText: "", uncertainty: []}};
+    const facts = factsWithPeople(withPhotoObservation({facts: ["Mine"]}, observation).facts, digest, [{personId: crypto.randomUUID(), name: "Maya", box: [0, 0, 1000, 1000]}]);
+    await annotations.queueLocalAnnotations(identity, {id, digest, facts, filename: "photo.jpg", date: "2026-10-06T12:00:00Z", dateSource: "selected"});
+    const value = (await annotations.readAnnotations(identity))!.value;
+    assert.deepEqual(annotationObservation(value, {photoId, sourceRevision: originalSha256}), {...observation, photoId, sourceRevision: originalSha256});
+    assert.deepEqual(peopleNames(value.facts, originalSha256), ["Maya"]);
+  } finally {await clean();}
+});
+
+test("local cloud and People deltas preserve newer account categories and supplied facts; explicit removals affect only their category", async () => {
+  await open();
+  try {
+    const session = requireVault();
+    const local = {id:"local",digest:originalSha256,filename:"sample.jpg",date:"2026-10-06T12:00:00Z",dateSource:"selected" as const};
+    const observation = {version:1 as const,photoId:local.id,sourceRevision:local.digest,processor:"gemini-3.8-flash" as const,observedAt:"2026-10-06T12:00:00.000Z",observations:{objects:["dog"],scene:[],visibleText:"",uncertainty:[]}};
+    const accountObservation = {...observation,photoId,observations:{...observation.observations,objects:["cat"]}};
+    const gps = {latitude:41.9,longitude:12.49,source:"exif" as const};
+    const originalName = {personId:crypto.randomUUID(),name:"Maya",box:[0,0,1000,1000] as [number,number,number,number]};
+    const changedName = {...originalName,name:"Ronald"};
+    await annotations.queueLocalAnnotations(identity,local,session);
+    await annotations.queueAnnotations(identity,{facts:withAnnotationLocation({facts:["Newest account supplied fact"]},gps).facts,caption:"My caption"},session);
+    await annotations.queuePhotoPeople(identity,[originalName],session);
+    let localFacts = withPhotoObservation({facts:[] as string[]},observation).facts;
+    await annotations.queueLocalAnnotations(identity,{...local,facts:localFacts},session,false);
+    let value = (await annotations.readAnnotations(identity,session))!.value;
+    assert.equal(value.facts?.[0],"Newest account supplied fact"); assert.deepEqual(annotationLocation(value),gps);
+    assert.deepEqual(peopleNames(value.facts,originalSha256),["Maya"]);
+    assert.deepEqual(annotationObservation(value,{photoId,sourceRevision:originalSha256}),{...observation,photoId});
+    await annotations.queuePhotoObservation(identity,accountObservation,session);
+    localFacts = factsWithPeople(localFacts,local.digest,[changedName]);
+    await annotations.queueLocalAnnotations(identity,{...local,facts:localFacts},session,false);
+    value = (await annotations.readAnnotations(identity,session))!.value;
+    assert.deepEqual(peopleNames(value.facts,originalSha256),["Ronald"]);
+    assert.deepEqual(annotationObservation(value,{photoId,sourceRevision:originalSha256}),accountObservation);
+    assert.equal(value.facts?.[0],"Newest account supplied fact"); assert.equal(value.caption,"My caption"); assert.deepEqual(annotationLocation(value),gps);
+    localFacts = factsWithPeople(localFacts,local.digest,[]);
+    await annotations.queueLocalAnnotations(identity,{...local,facts:localFacts},session,false);
+    value = (await annotations.readAnnotations(identity,session))!.value;
+    assert.deepEqual(peopleNames(value.facts,originalSha256),[]); assert.deepEqual(annotationObservation(value,{photoId,sourceRevision:originalSha256}),accountObservation);
+    localFacts = withPhotoObservation({facts:localFacts},undefined).facts;
+    await annotations.queueLocalAnnotations(identity,{...local,facts:localFacts},session,false);
+    value = (await annotations.readAnnotations(identity,session))!.value;
+    assert.equal(annotationObservation(value,{photoId,sourceRevision:originalSha256}),undefined);
+    assert.equal(value.facts?.[0],"Newest account supplied fact"); assert.deepEqual(annotationLocation(value),gps);
   } finally {await clean();}
 });

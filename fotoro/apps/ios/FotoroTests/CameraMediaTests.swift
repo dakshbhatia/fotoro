@@ -249,7 +249,7 @@ final class CameraMediaTests: XCTestCase {
     source.photoId = old.id; source.phase = .committed; source.sourceRevision = "before"; source.originalSha256 = old.metadata.originalSha256
     try services.store.putBackupSource(source)
     services.automaticPhotosAuthorization = { .authorized }
-    services.photosBackupSnapshot = { _ in [BackupCandidate(id: "edited", sourceRevision: "after"), BackupCandidate(id: "other", sourceRevision: "current")] }
+    services.photosBackupSnapshot = { _ in [BackupCandidate(id: "edited", capturedAt: Date(), sourceRevision: "after"), BackupCandidate(id: "other", capturedAt: Date(), sourceRevision: "current")] }
     services.importer = PhotoImport(store: services.store, sourceReader: { selected in
       if selected.id == "edited" { throw CameraMediaAdmissionError.originalTooLarge }
       return (newBytes, "other.png", false)

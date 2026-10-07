@@ -3,6 +3,62 @@ import XCTest
 @testable import Fotoro
 
 final class SearchStoreTests: XCTestCase {
+  #if !FOTORO_LOCAL_PREVIEW
+  @MainActor func testPeopleOnlySearchFencesLateSelectionAndClearWithoutLosingText() async throws {
+    let index = try SearchIndex(), a = UUID().uuidString.lowercased(), b = UUID().uuidString.lowercased()
+    func record(_ id: String, person: String) throws -> SearchRecord {
+      var value = SearchRecord(id: id); value.labels = ["beach"]
+      value.facts = try PhotoPeopleFacts.replacing([], with: [PhotoPersonAssignment(p: person, n: "Family", b: [0,0,100,100])])
+      return value
+    }
+    try index.replacePermitted([record("a", person: a), record("b", person: b)])
+    let gate = SearchQueryGate()
+    let store = LocalSearchStore(index: index, queryExecutor: { index, query, scope, accepted, previous, generation in
+      await gate.wait(scope.key)
+      let result = try index.search(query, scope: scope, acceptedMeaningID: accepted, previous: previous, generation: generation)
+      await gate.didReturn(scope.key)
+      return result
+    })
+    let first = PeopleSearchSelection(personIDs: [a]), second = PeopleSearchSelection(personIDs: [b], match: .everyone)
+    let firstKey = SearchScope(people: first).key, secondKey = SearchScope(people: second).key
+    store.setPeopleSelection(first, names: [a:"Family A"])
+    XCTAssertTrue(store.hasSearch); XCTAssertEqual(store.query, "")
+    store.setPeopleSelection(first, names: [a:"Renamed family member"])
+    XCTAssertEqual(store.selectedPeopleNames[a], "Renamed family member")
+    try await waitForGate(gate, query: firstKey)
+    store.setPeopleSelection(second, names: [b:"Family B"])
+    XCTAssertFalse(store.hasCurrentResponse)
+    try await waitForGate(gate, query: secondKey)
+    await gate.resume(firstKey)
+    try await waitForGate(gate, query: firstKey, returned: true)
+    XCTAssertTrue(store.response.results.isEmpty, "Old family selection cannot publish under the new one")
+    await gate.resume(secondKey)
+    try await waitFor(store, query: "")
+    XCTAssertEqual(store.response.results.map(\.id), ["b"])
+    store.setPeopleSelection(first)
+    try await waitForGate(gate, query: firstKey, count: 2)
+    store.setPeopleSelection(PeopleSearchSelection())
+    XCTAssertFalse(store.hasSearch); XCTAssertTrue(store.response.results.isEmpty)
+    await gate.resume(firstKey)
+    try await waitForGate(gate, query: firstKey, count: 2, returned: true)
+    XCTAssertTrue(store.response.results.isEmpty, "Clearing People cannot resurrect an old family result")
+    store.updateQuery("beach")
+    let plainKey = SearchScope().key
+    try await waitForGate(gate, query: plainKey)
+    await gate.resume(plainKey)
+    try await waitFor(store, query: "beach")
+    store.setPeopleSelection(first)
+    try await waitForGate(gate, query: firstKey, count: 3)
+    store.setPeopleSelection(PeopleSearchSelection())
+    XCTAssertEqual(store.query, "beach", "Clear people preserves the text/date query")
+    await gate.resume(firstKey)
+    try await waitForGate(gate, query: plainKey, count: 2)
+    await gate.resume(plainKey)
+    try await waitFor(store, query: "beach")
+    XCTAssertEqual(Set(store.response.results.map(\.id)), ["a","b"])
+    store.pause()
+  }
+  #endif
   @MainActor private func waitFor(_ store: LocalSearchStore, query: String) async throws {
     for _ in 0..<200 where store.response.query != query || store.searching || !store.hasCurrentResponse {
       try await Task.sleep(for: .milliseconds(10))
@@ -211,7 +267,7 @@ final class SearchStoreTests: XCTestCase {
     XCTAssertEqual(store.response.total, 0)
   }
   @MainActor func testFailedCurrentQueryEndsProgressWithoutClaimingCompletedEmptyResults() async throws {
-    let store = LocalSearchStore(index: try SearchIndex(), queryExecutor: { _, _, _, _, _ in
+    let store = LocalSearchStore(index: try SearchIndex(), queryExecutor: { _, _, _, _, _, _ in
       throw CocoaError(.fileReadCorruptFile)
     })
     store.updateQuery("receipt")
@@ -225,9 +281,9 @@ final class SearchStoreTests: XCTestCase {
     XCTAssertNotNil(store.error)
   }
   @MainActor private func gatedStore(index: SearchIndex, gate: SearchQueryGate) -> LocalSearchStore {
-    LocalSearchStore(index: index, queryExecutor: { index, query, accepted, previous, generation in
+    LocalSearchStore(index: index, queryExecutor: { index, query, scope, accepted, previous, generation in
       await gate.wait(query)
-      let response = try index.search(query, acceptedMeaningID: accepted, previous: previous, generation: generation)
+      let response = try index.search(query, scope: scope, acceptedMeaningID: accepted, previous: previous, generation: generation)
       await gate.didReturn(query)
       return response
     })

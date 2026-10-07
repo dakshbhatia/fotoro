@@ -413,6 +413,95 @@ final class RecentPhotosTests: XCTestCase {
     zoom.settle(0.5)
     XCTAssertEqual(zoom.scale, 1)
   }
+  func testZoomedPhotoCanPanWithoutLosingTheViewportAndContinueTheNextDrag() {
+    var zoom = PhotoViewerZoom()
+    let viewport = CGSize(width: 400, height: 800)
+    zoom.settle(2)
+    zoom.settleDrag(CGSize(width: 120, height: -240), viewport: viewport)
+    XCTAssertEqual(zoom.offset, CGSize(width: 120, height: -240))
+    zoom.drag(CGSize(width: 100, height: -300), viewport: viewport)
+    XCTAssertEqual(zoom.offset, CGSize(width: 200, height: -400))
+    zoom.settleDrag(CGSize(width: -20, height: 80), viewport: viewport)
+    XCTAssertEqual(zoom.offset, CGSize(width: 100, height: -160))
+  }
+  func testPhotoPanReclampsAfterZoomOutRotationAndReset() {
+    var zoom = PhotoViewerZoom()
+    zoom.settle(3)
+    zoom.settleDrag(CGSize(width: 400, height: 800), viewport: CGSize(width: 400, height: 800))
+    zoom.settle(0.5)
+    zoom.constrain(to: CGSize(width: 800, height: 400))
+    XCTAssertEqual(zoom.offset, CGSize(width: 200, height: 100))
+    zoom.toggle()
+    XCTAssertEqual(zoom.scale, 1)
+    XCTAssertEqual(zoom.offset, .zero)
+    zoom.settleDrag(CGSize(width: 100, height: 100), viewport: CGSize(width: 400, height: 800))
+    XCTAssertEqual(zoom.offset, .zero)
+    zoom.toggle()
+    zoom.settleDrag(CGSize(width: -180, height: -360), viewport: CGSize(width: 400, height: 800))
+    zoom.settle(0.5)
+    XCTAssertEqual(zoom.offset, .zero)
+    zoom.reset()
+    XCTAssertEqual(zoom.scale, 1)
+    XCTAssertEqual(zoom.offset, .zero)
+  }
+  func testAccessiblePhotoNavigationDoesNotWrapOrChooseAnUnknownPhoto() {
+    let ids = ["one", "two", "three"]
+    XCTAssertEqual(RecentPhotosPolicy.adjacentPhotoID(ids, current: "two", forward: true), "three")
+    XCTAssertEqual(RecentPhotosPolicy.adjacentPhotoID(ids, current: "two", forward: false), "one")
+    XCTAssertNil(RecentPhotosPolicy.adjacentPhotoID(ids, current: "one", forward: false))
+    XCTAssertNil(RecentPhotosPolicy.adjacentPhotoID(ids, current: "three", forward: true))
+    XCTAssertNil(RecentPhotosPolicy.adjacentPhotoID(ids, current: "withdrawn", forward: true))
+    XCTAssertNil(RecentPhotosPolicy.adjacentPhotoID([], current: "one", forward: true))
+  }
+  func testConcurrentPinchDoesNotAccumulateTheCurrentDragTranslation() {
+    var zoom = PhotoViewerZoom()
+    let viewport = CGSize(width: 400, height: 800)
+    zoom.settle(2)
+    zoom.settleDrag(CGSize(width: 40, height: 80), viewport: viewport)
+    zoom.drag(CGSize(width: 20, height: 30), viewport: viewport)
+    zoom.change(1.1)
+    zoom.constrain(to: viewport)
+    zoom.drag(CGSize(width: 25, height: 35), viewport: viewport)
+    XCTAssertEqual(zoom.offset, CGSize(width: 65, height: 115))
+  }
+  func testCachedPhotoPreviewStillReportsFinalDownloadFailureForRetry() {
+    var preview = PhotoPreviewProgress()
+    XCTAssertTrue(preview.receive(hasImage: true, degraded: true))
+    XCTAssertFalse(preview.unavailable)
+    XCTAssertFalse(preview.receive(hasImage: false, degraded: false))
+    XCTAssertTrue(preview.unavailable, "A cached thumbnail must not hide the original preview failure")
+    XCTAssertFalse(preview.receivedFinalImage)
+    XCTAssertFalse(preview.receive(hasImage: true, degraded: true))
+    XCTAssertTrue(preview.unavailable, "A late degraded callback cannot hide a terminal failure")
+    preview = PhotoPreviewProgress()
+    XCTAssertTrue(preview.receive(hasImage: true, degraded: false))
+    XCTAssertFalse(preview.unavailable)
+    XCTAssertTrue(preview.receivedFinalImage)
+  }
+  func testFinishedPhotoPreviewCannotRegressToLateDegradedOrCancelledResults() {
+    var preview = PhotoPreviewProgress()
+    XCTAssertTrue(preview.receive(hasImage: true, degraded: false))
+    XCTAssertFalse(preview.receive(hasImage: true, degraded: true))
+    XCTAssertFalse(preview.receive(hasImage: false, degraded: false, cancelled: true))
+    XCTAssertFalse(preview.unavailable)
+    XCTAssertTrue(preview.receivedFinalImage)
+  }
+  func testCancelledActivePhotoPreviewCanExposeRetryAndRestartCleanly() {
+    var preview = PhotoPreviewProgress()
+    XCTAssertFalse(preview.receive(hasImage: false, degraded: false, cancelled: true))
+    XCTAssertTrue(preview.unavailable)
+    preview = PhotoPreviewProgress()
+    XCTAssertFalse(preview.unavailable)
+    XCTAssertTrue(preview.receive(hasImage: true, degraded: false))
+    XCTAssertTrue(preview.receivedFinalImage)
+  }
+  func testPhotoPreviewErrorsExposeRetryEvenWithDegradedResultMetadata() {
+    var preview = PhotoPreviewProgress()
+    XCTAssertTrue(preview.receive(hasImage: true, degraded: true))
+    XCTAssertFalse(preview.receive(hasImage: false, degraded: true, failed: true))
+    XCTAssertTrue(preview.unavailable)
+    XCTAssertFalse(preview.receive(hasImage: true, degraded: true))
+  }
   func testMergedSearchRefreshTracksChildrenMeaningAndCatalog() {
     var original = ConsumerSearchPresentationID(query: "receipt", library: 1,
       results: [SearchHit(id: "parent", evidenceClass: 1, reason: "Supplied label")],
@@ -441,7 +530,7 @@ final class RecentPhotosTests: XCTestCase {
     enrichment.indexed = 2
     enrichment.results = [SearchHit(id: "new", evidenceClass: 1, reason: "Text")]
     XCTAssertTrue(original.permitsResults(for: enrichment))
-    for field in ["query", "library", "meaning", "catalog", "account", "vault"] {
+    for field in ["query", "library", "meaning", "catalog", "account", "vault", "people"] {
       var changed = enrichment
       switch field {
       case "query": changed.query = "beach"
@@ -449,6 +538,7 @@ final class RecentPhotosTests: XCTestCase {
       case "meaning": changed.acceptedMeaning = "another"
       case "catalog": changed.catalog = 2
       case "account": changed.account = "other"
+      case "people": changed.people = PeopleSearchSelection(personIDs: [UUID().uuidString])
       default: changed.vault = UUID()
       }
       XCTAssertFalse(original.permitsResults(for: changed), field)

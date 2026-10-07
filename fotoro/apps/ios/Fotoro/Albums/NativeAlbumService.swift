@@ -1,0 +1,400 @@
+import Foundation
+import Observation
+import Nuke
+import GRDB
+
+struct NativeAlbumSummary: Identifiable {
+  let overview: AlbumOverviewV1
+  let definition: AlbumDefinitionV1
+  let title: String?
+  let needsTrust: Bool
+  var id: String { definition.albumId }
+}
+struct NativeAlbumItem: Identifiable {
+  let entry: SignedPayloadV1
+  let signedManifest: SignedPayloadV1
+  let photo: LocalPhoto
+  var id: String { photo.id }
+}
+struct NativeAlbumContext: Equatable {
+  let photo: PhotoAccountAccess
+  let origin: String
+  let apiOrigin: String
+  let cards: [String: AccountCardV1]
+  let token: String?
+  let fixture: Bool
+  let epoch: UUID
+}
+struct NativeAlbumPendingCreate: Codable { var version = 1; var origin: String; var accountId: String; var definition: SignedPayloadV1 }
+struct NativeAlbumPendingAppend: Codable {
+  var version = 1
+  var origin: String
+  var accountId: String
+  var albumId: String
+  var definition: SignedPayloadV1
+  var request: AlbumAppendV1
+}
+struct NativeAlbumAccess {
+  let context: NativeAlbumContext
+  let albumID: String
+  let signedDefinition: SignedPayloadV1
+  let definition: AlbumDefinitionV1
+  let key: Data
+}
+
+@MainActor @Observable final class NativeAlbumService {
+  let services: AppServices
+  private(set) var albums: [NativeAlbumSummary] = []
+  private(set) var opened: NativeAlbumSummary?
+  private(set) var items: [NativeAlbumItem] = []
+  private(set) var directory: URL?
+  private var access: NativeAlbumAccess?
+  private(set) var nextCursor: String?
+  private var cursors = Set<String>()
+  private var epoch = UUID()
+  private let crypto = NativeAlbumCrypto()
+  private static var cleanedStaleCaches = false
+  init(services: AppServices) {
+    self.services = services
+    if !Self.cleanedStaleCaches {
+      Self.cleanedStaleCaches = true
+      let temporary = FileManager.default.temporaryDirectory
+      for url in (try? FileManager.default.contentsOfDirectory(at: temporary, includingPropertiesForKeys: nil)) ?? [] where url.lastPathComponent.hasPrefix("fotoro-album-") {
+        try? FileManager.default.removeItem(at: url)
+      }
+    }
+  }
+  func clear() {
+    epoch = UUID(); access = nil; opened = nil; items = []; albums = []; nextCursor = nil; cursors = []
+    if let directory { try? FileManager.default.removeItem(at: directory) }
+    directory = nil; ImageCache.shared.removeAll()
+  }
+  private func context() throws -> NativeAlbumContext {
+    try Task.checkCancellation()
+    guard let photo = services.photoAccountAccess, services.session.isSignedIn,
+      let origin = BackgroundUploadPolicy.origin(services.api.baseURL) else { throw FotoroError("Open Fotoro to use albums.") }
+    return NativeAlbumContext(photo: photo, origin: origin, apiOrigin: services.api.origin,
+      cards: services.session.pinnedCards, token: services.session.bearerToken, fixture: services.session.fixture, epoch: epoch)
+  }
+  func isCurrent(_ expected: NativeAlbumContext) -> Bool {
+    (try? context()) == expected
+  }
+  private func check(_ expected: NativeAlbumContext) throws {
+    try Task.checkCancellation()
+    guard isCurrent(expected) else { clear(); throw CancellationError() }
+  }
+  private func request<T: Codable>(_ type: T.Type, path: String, context: NativeAlbumContext, body: Data? = nil) async throws -> T {
+    try check(context)
+    let bytes = try await services.api.request(path, method: body == nil ? "GET" : "POST", body: body)
+    try check(context)
+    return try NativeAlbumWire.decode(type, bytes)
+  }
+  private func summary(_ overview: AlbumOverviewV1, context: NativeAlbumContext) throws -> NativeAlbumSummary {
+    let definition = try NativeAlbumWire.overview(overview)
+    guard definition.members.contains(where: { $0.card.accountId == context.photo.account }) else { throw FotoroError("Album is for another account.") }
+    let own = try services.session.requireCard(context.photo.account)
+    guard let owner = context.cards[definition.ownerAccountId] else {
+      return NativeAlbumSummary(overview: overview, definition: definition, title: nil, needsTrust: true)
+    }
+    let (_, _, title) = try crypto.open(overview.definition, expectedID: definition.albumId, trustedOwner: owner, recipient: own,
+      bundle: services.vault.requireBundle(), trusted: context.cards)
+    return NativeAlbumSummary(overview: overview, definition: definition, title: title, needsTrust: false)
+  }
+  func refresh() async throws {
+    do { try await refreshInbox() }
+    catch { clearOpen(); throw error }
+  }
+  private func refreshInbox() async throws {
+    let captured = try context()
+    let capabilities = try await request(AlbumCapabilitiesV1.self, path: "/v1/albums/capabilities", context: captured)
+    guard capabilities.version == 1, capabilities.albumsVersion == 1, capabilities.maxMembers == 12,
+      capabilities.maxPhotos == 1000, capabilities.pageSize == 100 else { throw FotoroError("Albums need a newer Fotoro version.") }
+    let inbox = try await request(AlbumInboxV1.self, path: "/v1/albums", context: captured)
+    guard inbox.version == 1, inbox.albums.count <= 100 else { throw FotoroError("Invalid album inbox.") }
+    var ids = Set<String>(), next: [NativeAlbumSummary] = []
+    for overview in inbox.albums {
+      let value = try summary(overview, context: captured)
+      guard ids.insert(value.id).inserted else { throw FotoroError("Duplicate album in inbox.") }
+      next.append(value)
+    }
+    try check(captured); albums = next
+    if let opened, !next.contains(where: { $0.id == opened.id && $0.overview.definition == opened.overview.definition && $0.overview.endedAt == nil && $0.overview.membership == "accepted" }) {
+      clearOpen()
+    }
+  }
+  private func clearOpen() {
+    epoch = UUID(); access = nil; opened = nil; items = []; nextCursor = nil; cursors = []
+    if let directory { try? FileManager.default.removeItem(at: directory) }; directory = nil; ImageCache.shared.removeAll()
+  }
+  private func creationID(_ captured: NativeAlbumContext) -> String { "albumcreate-" + Data(captured.origin.utf8).digest }
+  var hasPendingCreation: Bool {
+    guard let captured = try? context() else { return false }
+    return (try? services.store.existingOperation(creationID(captured), as: NativeAlbumPendingCreate.self)) != nil
+  }
+  func create(title: String, members: [AccountCardV1]) async throws -> String {
+    let captured = try context(), owner = try services.session.requireCard(captured.photo.account)
+    guard members.allSatisfy({ captured.cards[$0.accountId] == $0 && $0.accountId != owner.accountId }) else { throw FotoroError("Choose confirmed contacts for this album.") }
+    guard try services.store.existingOperation(creationID(captured), as: NativeAlbumPendingCreate.self) == nil else { throw FotoroError("Retry the pending album creation first.") }
+    let definition = try crypto.make(title: title, owner: owner, members: members, bundle: services.vault.requireBundle())
+    _ = try services.store.operation(creationID(captured)) {
+      NativeAlbumPendingCreate(origin: captured.origin, accountId: captured.photo.account, definition: definition)
+    }
+    return try await retryCreation()
+  }
+  func retryCreation() async throws -> String {
+    let captured = try context()
+    guard let pending = try services.store.existingOperation(creationID(captured), as: NativeAlbumPendingCreate.self),
+      pending.version == 1, pending.origin == captured.origin, pending.accountId == captured.photo.account else { throw FotoroError("No pending album creation for this account.") }
+    let definition = try NativeAlbumWire.signedBody(AlbumDefinitionV1.self, pending.definition, kind: "album-v1")
+    let owner = try services.session.requireCard(captured.photo.account)
+    _ = try crypto.open(pending.definition, expectedID: definition.albumId, trustedOwner: owner, recipient: owner,
+      bundle: services.vault.requireBundle(), trusted: captured.cards)
+    guard definition.members.allSatisfy({ captured.cards[$0.card.accountId] == $0.card }) else { throw FotoroError("A pending album contact changed. Confirm their original identity first.") }
+    let overview = try await request(AlbumOverviewV1.self, path: "/v1/albums", context: captured, body: Wire.encode(CreateAlbumV1(definition: pending.definition)))
+    guard overview.definition == pending.definition, overview.membership == "accepted", overview.endedAt == nil else { throw FotoroError("Album creation binding failed.") }
+    let value = try summary(overview, context: captured), completedID = creationID(captured)
+    try await services.store.database.write { db in try db.execute(sql: "DELETE FROM operations WHERE id=?", arguments: [completedID]) }
+    try check(captured); albums.removeAll { $0.id == value.id }; albums.insert(value, at: 0)
+    return value.id
+  }
+  func invitation(_ id: String) throws -> URL {
+    let captured = try context()
+    guard let value = albums.first(where: { $0.id == id }), value.overview.endedAt == nil,
+      value.overview.membership == "accepted", let owner = captured.cards[value.definition.ownerAccountId] else { throw FotoroError("Album is unavailable.") }
+    return try NativeAlbumLinks.make(FotoroAlbumInvitation(albumId: id, ownerCard: owner), origin: captured.apiOrigin)
+  }
+  func accept(_ id: String, expectedOwner: AccountCardV1? = nil) async throws {
+    let captured = try context()
+    guard let value = albums.first(where: { $0.id == id }), !value.needsTrust, value.overview.endedAt == nil,
+      expectedOwner.map({ captured.cards[value.definition.ownerAccountId] == $0 }) ?? true else { throw FotoroError("Confirm the album owner's contact first.") }
+    let action = try crypto.action(value.overview.definition, albumId: id, card: services.session.requireCard(captured.photo.account), bundle: services.vault.requireBundle(), ending: false)
+    let result = try await request(AlbumOverviewV1.self, path: "/v1/albums/\(id)/accept", context: captured, body: Wire.encode(AlbumActionRequestV1(action: action)))
+    guard result.definition == value.overview.definition, result.membership == "accepted", result.endedAt == nil else { throw FotoroError("Album acceptance binding failed.") }
+    let next = try summary(result, context: captured); albums.removeAll { $0.id == id }; albums.insert(next, at: 0)
+  }
+  func end(_ id: String) async throws {
+    let captured = try context()
+    guard let value = albums.first(where: { $0.id == id }), !value.needsTrust, value.definition.ownerAccountId == captured.photo.account else { throw FotoroError("Only the owner can end album access.") }
+    let action = try crypto.action(value.overview.definition, albumId: id, card: services.session.requireCard(captured.photo.account), bundle: services.vault.requireBundle(), ending: true)
+    let result = try await request(AlbumOverviewV1.self, path: "/v1/albums/\(id)/end", context: captured, body: Wire.encode(AlbumActionRequestV1(action: action)))
+    guard result.definition == value.overview.definition, result.endedAt != nil else { throw FotoroError("Album end binding failed.") }
+    let next = try summary(result, context: captured)
+    clearOpen(); albums.removeAll { $0.id == id }; albums.insert(next, at: 0)
+  }
+  private func validate(_ detail: AlbumDetailV1, access: NativeAlbumAccess) throws {
+    _ = try NativeAlbumWire.overview(detail.overview)
+    guard detail.version == 1, detail.definition == access.signedDefinition, detail.membership == "accepted", detail.endedAt == nil,
+      detail.entries.count == detail.manifests.count, detail.entries.count <= 100, detail.entries.count <= detail.photoCount,
+      detail.hasMore == (detail.nextCursor != nil), detail.nextCursor.map({ !$0.isEmpty && $0.utf8.count <= 256 && $0.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil }) ?? true else { throw FotoroError("Album access has ended or changed.") }
+  }
+  private func membership(_ access: NativeAlbumAccess) async throws {
+    do {
+      let value = try await request(AlbumOverviewV1.self, path: "/v1/albums/\(access.albumID)/access", context: access.context)
+      _ = try NativeAlbumWire.overview(value)
+      guard value.definition == access.signedDefinition, value.membership == "accepted", value.endedAt == nil else { throw FotoroError("Album access has ended or changed.") }
+      try check(access.context)
+    } catch {
+      if isCurrent(access.context) { clearOpen() }
+      throw error
+    }
+  }
+  private func object(_ rep: RepresentationV1, key: Data, access: NativeAlbumAccess) async throws -> Data {
+    try await membership(access)
+    let ciphertext = try await services.api.request("/v1/objects/\(rep.objectId)")
+    try check(access.context); try await membership(access)
+    let bytes = try await Task.detached { try CryptoAdapter().decrypt(ciphertext, key: key, representation: rep) }.value
+    try check(access.context); try await membership(access); try check(access.context); return bytes
+  }
+  private func write(_ bytes: Data, name: String, access: NativeAlbumAccess) throws -> URL {
+    try check(access.context)
+    if directory == nil {
+      let next = FileManager.default.temporaryDirectory.appendingPathComponent("fotoro-album-" + Wire.id())
+      try FileManager.default.createDirectory(at: next, withIntermediateDirectories: true, attributes: [.protectionKey: FileProtectionType.complete])
+      directory = next
+    }
+    let url = directory!.appendingPathComponent(name)
+    try bytes.write(to: url, options: [.atomic, .completeFileProtection]); return url
+  }
+  private func photo(_ entry: SignedPayloadV1, manifestSigned: SignedPayloadV1, access: NativeAlbumAccess) async throws -> NativeAlbumItem {
+    let (manifest, key) = try crypto.photo(entry, manifestSigned: manifestSigned, definition: access.definition, key: access.key)
+    let bytes = try await object(manifest.metadataRepresentation, key: key, access: access)
+    let metadata = try NativeAlbumWire.decode(PhotoMetadataV1.self, bytes)
+    guard metadata.version == 1, CameraMedia.supportedTypes.contains(metadata.mediaType),
+      metadata.originalBytes > 0, metadata.originalBytes <= CameraMedia.maximumOriginalBytes,
+      try Data(b64: metadata.originalSha256).count == 32,
+      manifestSigned.kind == CameraMedia.manifestKind(for: metadata.mediaType),
+      Set(metadata.representationKeys.keys) == Set(manifest.representations.map(\.binding.representationId)) else { throw FotoroError("Invalid album original metadata.") }
+    for encoded in metadata.representationKeys.values { try NativeAlbumWire.bytes(encoded, 32) }
+    // Contributions stay outside the owner's Saved catalog and annotation index.
+    let photo = LocalPhoto(photoId: manifest.photoId, manifest: manifest, metadata: metadata, transferState: "album")
+    return NativeAlbumItem(entry: entry, signedManifest: manifestSigned, photo: photo)
+  }
+  func open(_ id: String) async throws {
+    clearOpen()
+    let captured = try context()
+    guard let value = albums.first(where: { $0.id == id }), value.overview.membership == "accepted", value.overview.endedAt == nil,
+      let owner = captured.cards[value.definition.ownerAccountId] else { throw FotoroError("Accept the album invitation first.") }
+    let (definition, key, _) = try crypto.open(value.overview.definition, expectedID: id, trustedOwner: owner,
+      recipient: services.session.requireCard(captured.photo.account), bundle: services.vault.requireBundle(), trusted: captured.cards)
+    let reading = NativeAlbumAccess(context: captured, albumID: id, signedDefinition: value.overview.definition, definition: definition, key: key)
+    access = reading; opened = value
+    do { try await loadPage(reading, cursor: nil) }
+    catch { if isCurrent(captured) { clearOpen() }; throw error }
+  }
+  func loadMore() async throws {
+    guard let reading = access, let cursor = nextCursor else { return }
+    try await loadPage(reading, cursor: cursor)
+  }
+  private func loadPage(_ reading: NativeAlbumAccess, cursor: String?) async throws {
+    let captured = reading.context
+    let path = "/v1/albums/\(reading.albumID)" + (cursor.map { "?cursor=" + $0 } ?? "")
+    let detail = try await request(AlbumDetailV1.self, path: path, context: captured)
+    try validate(detail, access: reading)
+    var seen = Set(items.map(\.id))
+    // Four metadata reads at a time keeps the first page responsive and memory bounded.
+    for offset in stride(from: 0, to: detail.entries.count, by: 4) {
+      let end = min(offset + 4, detail.entries.count)
+      let batch = try await withThrowingTaskGroup(of: (Int, NativeAlbumItem).self) { group in
+        for i in offset..<end {
+          let entry = detail.entries[i], manifest = detail.manifests[i]
+          group.addTask { @MainActor in (i, try await self.photo(entry, manifestSigned: manifest, access: reading)) }
+        }
+        var values: [(Int, NativeAlbumItem)] = []
+        for try await item in group { values.append(item) }
+        return values.sorted { $0.0 < $1.0 }.map(\.1)
+      }
+      try check(captured)
+      for item in batch {
+        guard seen.insert(item.id).inserted, items.count < 1000 else { throw FotoroError("Duplicate or oversized album.") }
+        items.append(item)
+      }
+    }
+    try await membership(reading); try check(captured)
+    if let cursor = detail.nextCursor { guard cursors.insert(cursor).inserted else { throw FotoroError("Invalid album pagination.") } }
+    nextCursor = detail.nextCursor
+  }
+  func thumbnail(_ item: NativeAlbumItem) async throws -> URL? {
+    guard let reading = access, items.contains(where: { $0.id == item.id && $0.entry == item.entry && $0.signedManifest == item.signedManifest }),
+      let rep = item.photo.manifest.representations.first(where: { $0.binding.kind == "thumbnail" }),
+      let encoded = item.photo.metadata.representationKeys[rep.binding.representationId] else { return nil }
+    let bytes = try await object(rep, key: Data(b64: encoded), access: reading)
+    return try write(bytes, name: item.id + "-thumbnail.jpg", access: reading)
+  }
+  func preview(_ item: NativeAlbumItem) async throws -> URL? {
+    guard let reading = access, items.contains(where: { $0.id == item.id && $0.entry == item.entry && $0.signedManifest == item.signedManifest }) else { throw CancellationError() }
+    try await membership(reading)
+    if let rep = item.photo.manifest.representations.first(where: { $0.binding.kind == "preview" }), let encoded = item.photo.metadata.representationKeys[rep.binding.representationId] {
+      let bytes = try await object(rep, key: Data(b64: encoded), access: reading)
+      return try write(bytes, name: item.id + "-preview.jpg", access: reading)
+    }
+    return try await thumbnail(item)
+  }
+  func export(_ item: NativeAlbumItem) async throws -> [URL] {
+    guard let reading = access, items.contains(where: { $0.id == item.id && $0.entry == item.entry && $0.signedManifest == item.signedManifest }),
+      let rep = item.photo.manifest.representations.first(where: { $0.binding.kind == "original" }),
+      let encoded = item.photo.metadata.representationKeys[rep.binding.representationId] else { throw CancellationError() }
+    let bytes = try await object(rep, key: Data(b64: encoded), access: reading)
+    guard bytes.count == item.photo.metadata.originalBytes, bytes.digest == item.photo.metadata.originalSha256 else { throw FotoroError("Album original verification failed.") }
+    try await membership(reading)
+    _ = try write(Data(), name: "export-marker", access: reading)
+    let output = directory!.appendingPathComponent("original-" + Wire.id())
+    let urls = try CameraMedia.exportOriginals(bytes, metadata: item.photo.metadata, directory: output)
+    try check(reading.context); return urls
+  }
+  private func journalID(_ reading: NativeAlbumAccess) -> String {
+    "albumappend-" + Data((reading.context.origin + "|" + reading.albumID).utf8).digest
+  }
+  var hasPendingAddition: Bool {
+    guard let reading = access else { return false }
+    return (try? services.store.existingOperation(journalID(reading), as: NativeAlbumPendingAppend.self)) != nil
+  }
+  private func selected(_ photos: [LocalPhoto], reading: NativeAlbumAccess) throws -> [LocalPhoto] {
+    try check(reading.context)
+    guard !photos.isEmpty, photos.count <= 1000, Set(photos.map(\.id)).count == photos.count else { throw FotoroError("Choose 1–1000 Saved photos.") }
+    return try photos.map { photo in
+      guard let fresh = try services.consumerSavedPhoto(photo.id), fresh.manifest == photo.manifest, fresh.metadata == photo.metadata,
+        fresh.manifest.ownerAccountId == reading.context.photo.account, ["saved", "committed"].contains(fresh.transferState) else { throw FotoroError("A selected Saved photo changed. Select it again.") }
+      return fresh
+    }
+  }
+  private func existing(_ photos: [LocalPhoto], reading: NativeAlbumAccess) async throws -> Set<String> {
+    let wanted = Dictionary(uniqueKeysWithValues: photos.map { ($0.id, $0) })
+    var found = Set<String>(), seen = Set<String>(), cursor: String?, pages = 0
+    repeat {
+      pages += 1; guard pages <= 11 else { throw FotoroError("Invalid album pagination.") }
+      let detail = try await request(AlbumDetailV1.self, path: "/v1/albums/\(reading.albumID)" + (cursor.map { "?cursor=" + $0 } ?? ""), context: reading.context)
+      try validate(detail, access: reading)
+      for (entry, signed) in zip(detail.entries, detail.manifests) {
+        let (manifest, key) = try crypto.photo(entry, manifestSigned: signed, definition: reading.definition, key: reading.key)
+        if let own = wanted[manifest.photoId] {
+          guard manifest == own.manifest, key == (try services.crypto.unwrap(own.manifest.ownerWrappedMetadataKey, key: Data(b64: services.vault.requireBundle().vaultKey))) else { throw FotoroError("An existing album original changed.") }
+          found.insert(own.id)
+        }
+      }
+      cursor = detail.nextCursor
+      if let cursor { guard seen.insert(cursor).inserted else { throw FotoroError("Invalid album pagination.") } }
+    } while cursor != nil && found.count < wanted.count
+    return found
+  }
+  private func send(_ pending: NativeAlbumPendingAppend, reading: NativeAlbumAccess) async throws {
+    guard pending.version == 1, pending.origin == reading.context.origin, pending.accountId == reading.context.photo.account,
+      pending.albumId == reading.albumID, pending.definition == reading.signedDefinition else { throw FotoroError("Pending album addition belongs to another context.") }
+    guard NativeAlbumWire.uuid(pending.request.operationId), pending.request.version == 1,
+      (1...100).contains(pending.request.entries.count), pending.request.entries.count == pending.request.manifests.count else { throw FotoroError("Invalid pending album addition.") }
+    try await membership(reading)
+    // Recheck each source before retrying the exact signed bytes after a lost response.
+    for (entry, signed) in zip(pending.request.entries, pending.request.manifests) {
+      let (manifest, _) = try crypto.photo(entry, manifestSigned: signed, definition: reading.definition, key: reading.key)
+      guard let current = try services.consumerSavedPhoto(manifest.photoId), current.manifest == manifest else { throw FotoroError("A pending Saved photo changed. Its album addition cannot be retried.") }
+    }
+    let result = try await request(AlbumAppendResultV1.self, path: "/v1/albums/\(reading.albumID)/photos", context: reading.context, body: Wire.encode(pending.request))
+    guard result.version == 1, result.albumId == reading.albumID, result.operationId == pending.request.operationId,
+      (0...pending.request.entries.count).contains(result.added), (0...1000).contains(result.photoCount) else { throw FotoroError("Album contribution binding failed.") }
+    try await membership(reading); try check(reading.context)
+    let completedID = journalID(reading)
+    try await services.store.database.write { db in try db.execute(sql: "DELETE FROM operations WHERE id=?", arguments: [completedID]) }
+    try await refresh(); try await open(reading.albumID)
+  }
+  func retryAddition() async throws {
+    guard let reading = access, let pending = try services.store.existingOperation(journalID(reading), as: NativeAlbumPendingAppend.self) else { return }
+    try await send(pending, reading: reading)
+  }
+  func append(_ photos: [LocalPhoto]) async throws {
+    guard let reading = access else { throw FotoroError("Open an accepted album first.") }
+    let current = try selected(photos, reading: reading), original = reading.context
+    for offset in stride(from: 0, to: current.count, by: 100) {
+      let now = try context()
+      guard now.photo == original.photo, now.origin == original.origin, now.apiOrigin == original.apiOrigin,
+        now.cards == original.cards, now.token == original.token, now.fixture == original.fixture else { throw CancellationError() }
+      try await appendBatch(Array(current[offset..<min(offset + 100, current.count)]))
+    }
+  }
+  private func appendBatch(_ photos: [LocalPhoto]) async throws {
+    guard let reading = access else { throw FotoroError("Open an accepted album first.") }
+    if try services.store.existingOperation(journalID(reading), as: NativeAlbumPendingAppend.self) != nil {
+      throw FotoroError("Retry the previous addition before choosing more photos.")
+    }
+    try await membership(reading)
+    let current = try selected(photos, reading: reading), already = try await existing(current, reading: reading)
+    _ = try selected(current, reading: reading)
+    let missing = current.filter { !already.contains($0.id) }
+    guard !missing.isEmpty else { return }
+    let captured = reading.context, card = try services.session.requireCard(captured.photo.account), bundle = try services.vault.requireBundle()
+    var pairs: [(SignedPayloadV1, SignedPayloadV1)] = []
+    for photo in missing {
+      // Reuse the server's original signed bytes; a browser-created body can have a different JSON key order.
+      let original = try await request(SignedPayloadV1.self, path: "/v1/photos/\(photo.id)/manifest", context: captured)
+      let manifest = try NativeAlbumWire.decode(PhotoManifestV1.self, services.crypto.verify(original, card: card, kind: CameraMedia.acceptedManifestKind(original)))
+      guard manifest == photo.manifest else { throw FotoroError("Saved source changed before album addition.") }
+      _ = try selected([photo], reading: reading)
+      let pair = try crypto.append(photo, definition: reading.definition, albumKey: reading.key, card: card, bundle: bundle)
+      pairs.append((pair.0, original))
+    }
+    _ = try selected(current, reading: reading)
+    let pending = try services.store.operation(journalID(reading)) {
+      NativeAlbumPendingAppend(origin: captured.origin, accountId: captured.photo.account, albumId: reading.albumID,
+        definition: reading.signedDefinition, request: AlbumAppendV1(operationId: Wire.id(), entries: pairs.map(\.0), manifests: pairs.map(\.1)))
+    }
+    try await send(pending, reading: reading)
+  }
+}

@@ -74,6 +74,7 @@ it("Apple webcredentials association fails closed until explicit app IDs are con
     webcredentials: {apps:["ABCDEFGHIJ.cloud.fotoro.Fotoro"]},
     applinks: {details: [{appIDs:["ABCDEFGHIJ.cloud.fotoro.Fotoro"], components: [
       {"/":"/", "#":"contact=*"}, {"/":"/", "#":"moment=*"},
+      {"/":"/", "#":"album=*"},
     ]}]},
   });
   expect(configured.headers.get("content-type")).toContain("application/json");

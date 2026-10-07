@@ -1232,7 +1232,7 @@ extension ConsumerCoreTests {
       let reads = ReconciliationSourceReads()
       services.photosBackupSnapshot = { cutoff in
         XCTAssertEqual(cutoff, .distantPast)
-        return [BackupCandidate(id: "this-devices-asset", sourceRevision: "original")]
+        return [BackupCandidate(id: "this-devices-asset", capturedAt: Date(), sourceRevision: "original")]
       }
       services.importer = PhotoImport(store: services.store, sourceReader: { _ in
         await reads.record()
@@ -1283,7 +1283,7 @@ extension ConsumerCoreTests {
         var scans = 0
         services.photosBackupSnapshot = { _ in
           scans += 1
-          return [BackupCandidate(id: "not-staged", sourceRevision: "original")]
+          return [BackupCandidate(id: "not-staged", capturedAt: Date(), sourceRevision: "original")]
         }
         let reads = ReconciliationSourceReads()
         services.importer = PhotoImport(store: services.store, sourceReader: { _ in

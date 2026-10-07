@@ -5,7 +5,10 @@ import {createElement} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
 import {LocalSearch, SearchMatchDetails} from "../src/local/LocalSearch";
 import {LocalResources, type LocalPhoto} from "../src/local/resources";
+import {ConsumerPreviewResources} from "../src/library/consumer-search";
 import {PhotoSearchIndex} from "../src/local/search";
+import {withPhotoObservation} from "@fotoro/contracts/intelligence";
+import {factsWithPeople} from "@fotoro/contracts/people";
 import {addSemanticMatches} from "../src/local/semantic-find";
 import accounts from "../../../fixtures/accounts.json";
 import {ready, unb64} from "@fotoro/crypto";
@@ -19,6 +22,41 @@ test("matching photos open without acceptance or correction controls in the main
   assert.match(markup, /aria-label="Open receipt.png"/);
   assert.match(markup, /aria-label="Search details"/);
   assert.doesNotMatch(markup, /predicted|accepted|This is the photo|Pin for|Supplied label/);
+});
+
+test("a displayed Saved search preview survives background cache pressure until its consumer leaves", async () => {
+  const oldBitmap = globalThis.createImageBitmap, oldDocument = globalThis.document;
+  globalThis.createImageBitmap = (async (_blob:Blob,options:ImageBitmapOptions) => ({width:options.resizeWidth,height:options.resizeHeight,close(){}})) as any;
+  globalThis.document = {createElement:()=>({width:0,height:0,getContext:()=>({drawImage(){}}),toBlob:(done:(value:Blob)=>void)=>done(new Blob(["public raster"],{type:"image/jpeg"}))})} as any;
+  const bytes = new Uint8Array(24); bytes.set([137,80,78,71,13,10,26,10]);
+  const header = new DataView(bytes.buffer); header.setUint32(16,1600); header.setUint32(20,1600);
+  const source = (id:string):LocalPhoto => ({id,filename:"public.png",date:"2026-10-06",dateSource:"selected",previewLoader:async()=>new Blob([bytes],{type:"image/png"})});
+  const resources = new ConsumerPreviewResources(), controller = new AbortController(), leading = source("saved:leading");
+  try {
+    const displayed = await resources.lease(leading,"preview",controller.signal);
+    const cached = await resources.load(leading,"preview");
+    for(let index=0;index<4;index++) await resources.load(source("saved:background-"+index),"preview");
+    await assert.rejects(fetch(cached.url),"Background indexing should evict the ordinary cache URL");
+    assert.equal(await (await fetch(displayed.url)).text(),"public raster","The visible Search image owns a separate URL lease");
+    controller.abort(); await assert.rejects(fetch(displayed.url),"Leaving the Search image releases its URL immediately");
+  } finally {controller.abort();resources.clear();globalThis.createImageBitmap=oldBitmap;globalThis.document=oldDocument;}
+});
+
+test("search details distinguish approved People and machine observations from supplied labels and captions", () => {
+  const digest = "a".repeat(64);
+  const observation = {version:1 as const,photoId:"one",sourceRevision:digest,processor:"gemini-3.8-flash" as const,observedAt:"2026-10-06T12:00:00.000Z",
+    observations:{objects:["bicycle"],scene:[],visibleText:"Menu",uncertainty:["Maybe moonlight"]}};
+  const facts = factsWithPeople(withPhotoObservation({facts:[]},observation).facts,digest,[{personId:crypto.randomUUID(),name:"Ronald",box:[0,0,1000,1000]}]);
+  const photo: LocalPhoto = {id:"one",digest,filename:"IMG_0001.jpg",date:"2026-10-06",dateSource:"selected",facts,caption:"My exact caption",labels:["Family"]};
+  const index = new PhotoSearchIndex([photo]);
+  const render = (query:string) => renderToStaticMarkup(createElement(SearchMatchDetails,{photo,meaning:index.search(query).meaning!,coverage:"1 photo",canCorrect:true,onAccept(){},onConfirm(){},onPin(){}}));
+  assert.match(render("Ronald"),/Person · Ronald/); assert.doesNotMatch(render("Ronald"),/Supplied label|Source fact/);
+  assert.match(render("bicycle"),/Machine observation · bicycle/); assert.doesNotMatch(render("bicycle"),/Source fact|Caption ·/);
+  assert.match(render("Menu"),/Machine observation · Menu/);
+  assert.match(render("Family"),/Supplied label · Family/);
+  assert.match(render("My exact caption"),/Caption · My exact caption/);
+  assert.deepEqual(index.search("moonlight").photoIds,[]);
+  assert.equal(photo.caption,"My exact caption"); assert.deepEqual(photo.labels,["Family"]);
 });
 
 test("visual-only match details preserve evidence without unsupported acceptance or preference actions", () => {

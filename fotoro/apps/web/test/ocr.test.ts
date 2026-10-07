@@ -1,9 +1,49 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { LocalOcrQueue, localOcrOptions, OCR_PROCESSOR, type OcrWorker } from '../src/local/ocr';
+import { LocalOcrQueue, localOcrOptions, OCR_PROCESSOR, hasCurrentLocalOcr, currentOcrSource, localTextSearchStatus, type OcrWorker } from '../src/local/ocr';
+import type {LocalPhoto} from '../src/local/resources';
 const preview = async () => {const bytes=new Uint8Array(24);bytes.set([137,80,78,71,13,10,26,10]);const view=new DataView(bytes.buffer);view.setUint32(16,1600);view.setUint32(20,1000);return {blob:new Blob([bytes],{type:'image/png'}),width:1600,height:1000};};
 const deferred = <T>() => {let resolve!: (value:T)=>void;const promise=new Promise<T>(r=>{resolve=r});return {promise,resolve};};
 const worker = (recognize:OcrWorker['recognize'],terminate=async()=>{}) => ({recognize,terminate});
+
+test('OCR coverage requires current photo, revision and processor, while reopened sources may be scheduled again', () => {
+ const source: LocalPhoto = {id:'photo',digest:'revision',filename:'photo.jpg',date:'2026-10-06',dateSource:'selected',file:new File(['public fixture'],'photo.jpg')};
+ const complete = {...source,ocr:{photoID:'photo',revision:'revision',processor:OCR_PROCESSOR,status:'complete' as const,text:'RECEIPT',confidence:.9}};
+ assert.equal(hasCurrentLocalOcr(complete),true);
+ for(const stale of [{...complete,ocr:{...complete.ocr,photoID:'other'}},{...complete,ocr:{...complete.ocr,revision:''}},
+  {...complete,ocr:{...complete.ocr,processor:'previous-model'}},{...complete,ocr:{...complete.ocr,confidence:NaN}},
+  {...complete,digest:'replacement'},{...complete,current:()=>false}]) assert.equal(hasCurrentLocalOcr(stale),false);
+ assert.equal(currentOcrSource(source,[{...source,caption:'User caption'}]),true);
+ assert.equal(currentOcrSource(source,[{...source,file:new File(['reopened'],'photo.jpg')}]),false);
+ assert.equal(currentOcrSource(source,[{...source,digest:'replacement'}]),false);
+ assert.equal(currentOcrSource(source,[{...source,current:()=>false}]),false);
+ assert.equal(localTextSearchStatus([source],true,'receipt'),'indexing');
+ assert.equal(localTextSearchStatus([complete],true,'receipt'),undefined);
+ assert.equal(localTextSearchStatus([{...source,previewAvailable:false}],true,'receipt'),'incomplete');
+ const failed = {...complete,ocr:{...complete.ocr,status:'failed' as const,text:'',confidence:0}};
+ assert.equal(localTextSearchStatus([failed],true,'receipt'),'incomplete');
+ assert.equal(localTextSearchStatus([failed],true,'receipt',undefined,true),'indexing','An explicit retry must describe active reading rather than a finished failure');
+ assert.equal(localTextSearchStatus([{...failed,ocr:{...failed.ocr,revision:'old'}}],true,'receipt'),'indexing','A failure from an older revision must not suppress a current attempt');
+ for(const query of ['', 'today','2026-10-06']) assert.equal(localTextSearchStatus([source],true,query),undefined);
+ assert.equal(localTextSearchStatus([source],true,'family','label:family'),undefined);
+ assert.equal(localTextSearchStatus([source],true,'family 2026-10-06','dated:'+JSON.stringify([null,null,'label:family'])),undefined);
+ assert.equal(localTextSearchStatus([{...source,dateSource:'exif',date:'2026-10-05'}],true,'receipt 2026-10-06'),undefined,'Unread photos outside the capture period cannot delay this query');
+ assert.equal(localTextSearchStatus([{...source,dateSource:'exif',date:new Date(2026,9,6,12).toISOString()}],true,'receipt 2026-10-06'),'indexing');
+ assert.equal(localTextSearchStatus([source],false,'receipt'),undefined);
+});
+
+test('replacing a same-ID preview source while OCR waits suppresses the old completion', async () => {
+ const source: LocalPhoto = {id:'photo',digest:'revision',filename:'photo.jpg',date:'2026-10-06',dateSource:'selected',file:new File(['first'],'photo.jpg')};
+ let latest = [source], created = 0;
+ const held = deferred<{blob:Blob;width:number;height:number}>();
+ const queue = new LocalOcrQueue({origin:'http://localhost',createWorker:async()=>{created++; return worker(async()=>({data:{text:'obsolete',confidence:95}}));}});
+ const pending = queue.recognize(source.id,source.digest!,()=>held.promise,()=>currentOcrSource(source,latest));
+ await Promise.resolve();
+ latest = [{...source,file:new File(['replacement'],'photo.jpg')}];
+ held.resolve(await preview());
+ assert.equal(await pending,undefined); assert.equal(created,0);
+ await queue.cancel();
+});
 
 test('OCR runtime worker/core/language paths are explicitly same-origin and language caching stores no trial data',()=>{
  const options=localOcrOptions('https://fotoro.example');

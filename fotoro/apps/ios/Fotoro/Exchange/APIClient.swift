@@ -227,6 +227,9 @@ enum APIURLPolicy {
       if endpoint == .auth { r.timeoutInterval = 20 }
       r.setValue("application/json", forHTTPHeaderField: "Content-Type")
       r.setValue(origin, forHTTPHeaderField: "Origin")
+      if endpoint != .auth, let account = session.accountId {
+        r.setValue(account, forHTTPHeaderField: "X-Fotoro-Account-Id")
+      }
       if session.fixture {
         guard ["127.0.0.1", "localhost"].contains(baseURL.host ?? ""),
           ["127.0.0.1", "localhost"].contains(url.host ?? "")

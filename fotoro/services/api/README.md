@@ -99,3 +99,57 @@ Account-private annotations use signed, revision-checked encrypted updates and
 change pages. The server cannot search photo pixels, OCR text or local vectors.
 Production error diagnostics emit fixed phases/classes, status/code and UUID
 request references; invocation logging is disabled to avoid capability URLs.
+
+Optional Gemini photo understanding is off by default. `/v1/intelligence/capabilities`
+and `/v1/intelligence/observe` require the existing authenticated account session
+and origin checks. Each capability check and observation request also carries the
+captured vault's expected account ID. The service rejects a changed session account
+before allocating work or contacting Google, including shared-cookie changes in
+another tab. Local-only library users without an account session cannot use
+this route. The client must consent to sending this individual preview to Google
+for each analysis; this is separate from keeping a result or saving account changes.
+The client re-encodes the visible preview as JPEG, stripping source metadata and
+limiting its longest edge to 1024 pixels and its bytes to 512 KiB. The API checks
+actual JPEG dimensions and rejects EXIF/IPTC/comment segments; it accepts no image
+URL, object ID, original download instruction, caption, prompt, or client API key.
+It never reads R2 or decrypts a server-stored photo. The pixels travel as plaintext
+inside HTTPS to the Worker and Google; E2EE photo storage remains separate.
+Google’s [API data terms](https://ai.google.dev/gemini-api/terms) apply to this
+optional processing. Fotoro does not log or persist previews or provider results.
+
+To enable in a reviewed environment, apply migration `0007_cloud_inference_work.sql`,
+set the server-only `GEMINI_API_KEY` secret, and set all three Worker variables:
+`CLOUD_INTELLIGENCE_ENABLED=true`, `CLOUD_INTELLIGENCE_DAILY_ACCOUNT_REQUESTS`
+(a positive integer at most 1000), and `CLOUD_INTELLIGENCE_DAILY_GLOBAL_REQUESTS`
+(a positive integer at most 10000). No value is provisioned by the repository.
+Missing, invalid, or absent ledger configuration fails closed. Atomic D1 claims
+count every admitted attempt, including provider failures and canceled browser
+requests; claims are never refunded. UTC calendar-day limits apply per account
+and globally, with fixed per-minute caps of 2 per account and 20 globally. The
+ledger stores only scope, window, expiry and counts. Expired rows are removed on
+later admitted work. Switching account IDs cannot bypass the global limit.
+
+The allowlist is `gemini-3.8-flash` (default observation) and
+`gemini-3.5-flash-lite` (cheaper extraction). Each request carries one inline
+preview, a fixed instruction, no tools, one candidate and `maxOutputTokens=1024`;
+the Worker aborts after 30 seconds and bounds the provider envelope at 64 KiB.
+The strict observation schema separates objects, scene terms, visible text and
+uncertainty. Runtime checks reject malformed, excessive, truncated or blocked
+output. Results carry their photo ID, source revision, model and observation time;
+clients must reject stale bindings and review evidence separately from personal
+captions, labels and OCR. Retention is a client decision, never a server side effect.
+These are hard work limits, **not a dollar spending guarantee**: provider billing,
+thinking and image-token accounting can vary, and a timeout need not cancel
+provider billing. Configure and monitor provider billing separately.
+
+Model and REST behavior were verified against Google’s official
+[3.8 Flash model](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash),
+[3.5 Flash-Lite model](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite),
+[structured output REST](https://ai.google.dev/gemini-api/docs/generate-content/structured-output)
+and [image understanding REST](https://ai.google.dev/gemini-api/docs/generate-content/image-understanding)
+documentation on October 6, 2026. The API uses REST without a provider SDK.
+[Gemini Embedding 2](https://ai.google.dev/gemini-api/docs/embeddings) supports
+multimodal embeddings, but this release does not send embedding requests or mix
+those vectors with the independent on-device index. A future integration needs
+its own consent, model/version binding, quota accounting and retrieval evaluation.
+Tests mock provider requests and never use a real key or send user photos.

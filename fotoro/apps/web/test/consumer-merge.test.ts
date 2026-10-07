@@ -72,6 +72,14 @@ test("lock or stale snapshot removes saved date evidence even from a previously 
   assert.equal(displayed[0].dateSource, "selected");
   assert.deepEqual(new PhotoSearchIndex(displayed).search("today", {now}).photoIds, []);
 });
+test("saved original availability survives annotation-only catalog replacement but ends when its source is unavailable",()=>{
+ const {snapshot,invalidate}=matchingCapture();let sourceAvailable=true;
+ snapshot.sourceCurrent=()=>sourceAvailable;
+ const adapted=savedSearchPhotos(snapshot,[])[0];assert.equal(adapted.current?.(),true);
+ invalidate();assert.equal(snapshot.current(),false);assert.equal(adapted.current?.(),true);
+ assert.deepEqual(savedSearchPhotos(snapshot,[]),[],"A stale snapshot still cannot create new search projections");
+ sourceAvailable=false;assert.equal(adapted.current?.(),false);
+});
 
 test("capture overlay rejects changed files, digests, invalid dates and unverified same-ID records", () => {
   const {local, saved, snapshot} = matchingCapture(), adapted = savedSearchPhotos(snapshot, [local]);

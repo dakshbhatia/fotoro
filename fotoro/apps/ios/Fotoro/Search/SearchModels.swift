@@ -141,14 +141,36 @@ enum SearchVisualPolicy {
   }
   #endif
 }
+enum PeopleSearchMatch: String, CaseIterable, Identifiable, Sendable {
+  case any, everyone
+  var id: String { rawValue }
+  var title: String { self == .any ? "Any selected people" : "Everyone selected" }
+}
+struct PeopleSearchSelection: Equatable, Sendable {
+  var personIDs: Set<String> = []
+  var match = PeopleSearchMatch.any
+  var isEmpty: Bool { personIDs.isEmpty }
+  var canonicalIDs: [String] { Set(personIDs.compactMap { UUID(uuidString: $0)?.uuidString.lowercased() }).sorted() }
+  var valid: Bool { personIDs.count <= 64 && personIDs.allSatisfy { UUID(uuidString: $0) != nil } }
+  var key: String { isEmpty ? "" : match.rawValue + ":" + canonicalIDs.joined(separator: ",") + (valid ? "" : ":invalid") }
+  func matches(_ confirmedIDs: Set<String>) -> Bool {
+    guard valid else { return false }
+    guard !isEmpty else { return true }
+    let selected = Set(canonicalIDs)
+    let present = Set(confirmedIDs.compactMap { UUID(uuidString: $0)?.uuidString.lowercased() })
+    return match == .everyone ? selected.isSubset(of: present) : !selected.isDisjoint(with: present)
+  }
+}
 struct SearchScope: Equatable, Sendable {
   var source = "photos"
   var from: Date?
   var through: Date?
   var until: Date?
+  var people = PeopleSearchSelection()
   var key: String {
     let base = "\(source)|\(from?.timeIntervalSince1970.description ?? "")|\(through?.timeIntervalSince1970.description ?? "")"
-    return until.map { base + "|before:\($0.timeIntervalSince1970)" } ?? base
+    let dates = until.map { base + "|before:\($0.timeIntervalSince1970)" } ?? base
+    return people.isEmpty ? dates : dates + "|people:" + people.key
   }
 }
 struct SearchMeaning: Identifiable, Equatable, Sendable {

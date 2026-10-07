@@ -174,6 +174,19 @@ final class LibraryStore: @unchecked Sendable {
       return try Wire.decode(AutomaticPhotoSyncPreference.self, bytes)
     }
   }
+  func automaticPhotoSyncIntake(origin: String) throws -> AutomaticPhotoSyncIntake? {
+    try database.read { db in
+      guard let value = try String.fetchOne(db, sql: "SELECT value FROM state WHERE key=?",
+        arguments: ["automaticPhotoSyncIntake:" + origin]), let bytes = Data(base64Encoded: value) else { return nil }
+      return try Wire.decode(AutomaticPhotoSyncIntake.self, bytes)
+    }
+  }
+  func setAutomaticPhotoSyncIntake(_ intake: AutomaticPhotoSyncIntake, origin: String) throws {
+    try database.write { db in
+      try db.execute(sql: "INSERT INTO state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        arguments: ["automaticPhotoSyncIntake:" + origin, try Wire.encode(intake).base64EncodedString()])
+    }
+  }
   func setAutomaticPhotoSyncPreference(_ preference: AutomaticPhotoSyncPreference,
     uploadsPaused: Bool? = nil) throws {
     try database.write { db in

@@ -26,10 +26,15 @@ before it. Opening Saved reads the account library and does not start a Save.
   and open the same saved originals on another device.
 - **Search:** one visible field; dates, supplied labels, recognized text and
   local visual matches help reach the right photo. Browsing stays usable while
-  intelligence prepares. Named people and arbitrary place understanding are open.
+  intelligence prepares. Reviewed People filters support any selected person or
+  everyone in the same photo, combined with the query. Separate portraits across
+  trips can satisfy Any; they do not establish that everyone visited a place.
+  Arbitrary landmark recognition and retrieval quality remain open.
 - **Share:** select a moment and use the system share sheet. Private Fotoro
   invitations are an additional route with accepted recipient identity and
-  recipient-owned Save. First-contact friction still needs qualification.
+  recipient-owned Save. A live album has a fixed invited roster: accepted members
+  can add chosen Saved originals over time, and the owner can end access.
+  First-contact friction still needs qualification.
 
 Photos is the browsing surface; Picks suggests useful shots; Saved is the
 other-device library. These are views, not three separate collections to organize.
@@ -38,8 +43,11 @@ other-device library. These are views, not three separate collections to organiz
 
 First use shows personal value before asking for storage setup. Turn on sync
 carries the chosen action through account entry. The current account uses one
-Fotoro password; returning iPhone access is remembered securely. Sign in with
-Apple is not delivered and is not a requirement for browsing.
+Fotoro password or a compatible passkey; returning iPhone access is remembered
+securely. Returning browsers with a matching cached account and PRF wrapper can
+sign in and unlock through one passkey request. Fresh-browser discovery still
+needs a second selected-credential request to unlock encrypted keys. Unsupported
+PRF keeps the password path. Sign in with Apple is not delivered.
 
 Reasons to return are concrete: new permitted photos available after sync,
 a useful shot found quickly, a highlight worth opening, or photos someone shared.
@@ -49,6 +57,14 @@ carousel, daily streak or forced invitation is not part of this journey.
 Sharing should finish the user’s existing intent. A recipient gets a useful set,
 can open it, and can deliberately keep a copy. Measure that journey before adding
 invitation campaigns or contact import.
+
+Live albums reuse encrypted Saved originals without sending private annotation
+or reviewed People facts. Album search currently uses filenames and dates;
+private People, OCR and location search remain in the account's own finder.
+Original files retain their existing embedded metadata. Albums allow 12 fixed
+members, 1,000 photos and 50 accepted active albums per account. Invitations need
+explicit acceptance, and downloaded originals cannot be recalled by ending
+access. These functional bounds do not establish cross-device acceptance.
 
 ## What we measure next
 

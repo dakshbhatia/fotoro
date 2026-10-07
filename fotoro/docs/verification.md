@@ -1,9 +1,218 @@
-# Verification — October 5, 2026
+# Verification — October 7, 2026
 
 This is the current evidence record. [The backlog](product-backlog.md) owns next
 work; [product](product.md) owns the intended experience. Earlier measurements and
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
+
+## October 7 family, album and returning-account implementation checks
+
+Current source combines reviewed, source-bound People IDs with the search query.
+Any includes separate photos containing at least one chosen person; Everyone
+requires all chosen people in the same photo. Filtering precedes lexical limits
+and constrains visual inputs. Select results replaces selection with the current
+eligible result IDs. These rules do not infer travel attendance or identify a
+landmark across trips. Public fixtures establish functional behavior, not general
+identity or retrieval accuracy.
+
+Live albums use an immutable signed definition, a fresh random album key sealed
+to a fixed roster and an encrypted title. Invited members explicitly accept;
+accepted members add chosen owned Saved originals, preserving their existing
+signed manifest bytes. No private annotation or People-name overlay is shared.
+Album search is currently filename/date only; native filtering applies to loaded
+pages, with explicit Load more for the remaining photos. Private People, OCR and
+location queries remain in the account finder. Shared originals retain embedded metadata.
+The bounds are 12 roster members including the owner, 1,000 photos per album,
+100-photo append/pages, 100 inbox results and 50 accepted active albums per
+account. Pending invitations do not consume accepted quota. The owner ends
+access for everyone; previously downloaded files cannot be recalled.
+
+Sixteen core album tests and TypeScript pass with real public-fixture crypto,
+including three members opening the same key, contributions by each member,
+signature/context tampering, strict invitation parsing and unchanged legacy
+manifest bytes. Twelve focused Worker album tests and API TypeScript pass with
+local D1/R2: acceptance and object authorization, pagination/capacity, concurrent
+creation/append/end, operation retry identity, atomic acceptance quota, malformed
+or oversized requests and revocation during an R2 read. Captured vault-account
+expectations reject a changed authenticated account before any object read.
+
+Returning-browser PRF inputs are restricted to the cached account's fresh
+server-authorized credential list. One matching assertion can sign in and unlock;
+fresh-browser discovery retains a second selected-credential assertion. Tests
+fence credential/account/public-key/salt changes, stale output and cancellation.
+Password recovery remains available; Sign in with Apple is not implemented.
+These simulated ceremonies do not qualify physical passkeys or promise one
+shared session across Safari and native apps.
+
+Client review verifies membership and account fences around media reads, disposal
+of open previews on lifecycle changes, original component export and exact
+signed-manifest contribution retries. Final local verification passes 516 web
+tests, 92 API tests, core checks, five isolated encrypted-exchange cases and the
+real pinned-model visual smoke case. Full native verification executes 415 tests:
+414 pass and one existing Vision test is skipped. The isolated Photos preview
+executes 113 tests: 112 pass with the same skip. Native album tests pass 14/14.
+
+Actual browser QA against isolated local D1/R2 uses three disposable public-test
+accounts and a public NASA fixture. It verifies owner review, explicit invitation
+acceptance, three members' contributions, duplicate suppression, filename search,
+new album creation, explicit owner end and large-photo navigation. Photo-first
+album screens use compact contributor/date tags, with account details under More.
+Responsive checks cover 320×568, 390×844 and 1280×720; the 320-pixel page has no
+horizontal overflow, one dialog and 44-pixel primary controls. These observations
+do not establish full accessibility conformance. Original preparation completes,
+but the embedded browser never produces a download event or verified file, even
+after a fresh synchronous click and connected link. File export remains a real
+browser/device acceptance gate; no UI download-success claim is made.
+
+This section does not claim build 42 availability,
+deployment, physical-device acceptance or enabled cloud inference. Build 41's
+verified internal availability and the earlier production checkpoint remain
+recorded below until new release evidence is added.
+
+## October 6 foundation implementation checks
+
+The follow-up foundation pass makes optional passkeys reachable from existing
+account access on iOS and web. Enrollment preserves the same account keys and
+verified password recovery. PRF-enabled credentials that cannot evaluate during
+creation use a selected-credential assertion before wrapping keys. Browser
+discovery leaves per-credential PRF inputs out of its unbounded request and then
+evaluates the selected credential; native discovery also omits cached PRF inputs,
+then uses remembered local keys or a selected assertion for the same account.
+Fresh native access follows the same account
+and credential binding. Unsupported PRF keeps the password path. Back, lock,
+account/origin replacement and native task cancellation fence publication. Native
+ceremony cancellation releases the controller and ignores late callbacks from
+older operations. These checks use simulated credential responses and real local
+cryptography, not qualified physical passkeys.
+
+Search distinguishes missing previews, unavailable inference, partial visual
+coverage and unfinished/failed OCR from a completed empty result. Saved OCR
+retains its source revision while adapting its display photo ID. Reopened source
+files can retry OCR, and Picks rechecks per-photo access through ranking. Search
+details distinguish reviewed People and kept machine observations from supplied
+text. Mounted Search/viewer/thumbnail leases survive cache eviction and release
+on cleanup; Saved browsing requires derivatives rather than silently fetching an
+original. Saved thumbnails restart on page return. Native previews expose retry
+after terminal PhotoKit errors, still viewers support bounded zoom/pan, accessible
+navigation remains available, and offscreen motion loading/playback stops.
+
+Final web verification passes 488 tests, TypeScript and the production build.
+Thirteen browser passkey regressions cover identity/recovery preservation, supported and
+unsupported PRF, account selection and cancellation. A fresh built startup check
+passes all three cases at 417,908 bytes in one static JavaScript chunk. Earlier
+unchanged core/API/release checks pass: 33 core and 80 API tests, search/Picks
+fixtures, preview artifact checks and nine release orchestration cases. The
+isolated Photos preview passes 112 of 113 tests with its existing Vision skip.
+Final full native verification passes 395 of 396 tests with the same existing
+Vision skip and no failures, including 46 recovery tests. A native CI compiler
+limit in the Saved viewer's lifecycle expression was repaired with an explicitly
+typed scene-phase callback and small cleanup helpers.
+[CI run 37553744702](https://github.com/dakshbhatia/fotoro/actions/runs/37553744702)
+passes on release source `55ec36a5e24e0461d62280e1fee119a1b042d3ac`, including
+the final native discovery repair. CI executes 396 full native tests with five
+Photos-permission skips and no failures (391 passed), including all 46 recovery
+tests; the isolated preview executes 113 with four permission skips and no
+failures (109 passed). These CI skips differ from the single local Vision skip.
+The read-only live service check also passes authenticated API and signed-app
+passkey/universal-link association checks; it does not qualify device behavior.
+
+Build 41 (0.1.0) archives that exact source, with all 143 recorded native input
+hashes matched. After the existing Xcode account was refreshed, the same archive
+and distribution-signed IPA passed the full release audit and upload succeeded.
+Apple completed processing on October 6; compliance declares standard algorithms
+outside Apple's OS and preserves the approved France exclusion. App Store Connect
+readback shows build 41 `Testing` in Fotoro Internal, with the owner's existing
+one-tester account. What to Test notes show `Saved` and the expected instructions.
+Private logs, screenshots, audit and source hashes are retained under the ignored
+local build 41 distribution directory. This establishes internal availability,
+not physical installation or personal-library acceptance. Build 40 is the prior
+candidate and does not contain these follow-up fixes. Production web remains at
+the earlier checkpoint below.
+
+Rendered checks use the Codex in-app browser at `http://127.0.0.1:4310`, with public
+fixtures, at 1280×900 and 320×740. Grid/table Home/End reaches virtualized offscreen
+photos; table arrow navigation, sorting, exact two-photo selection, Columns
+Escape focus restoration and rapid viewer navigation/close/reopen pass. The
+optional passkey button is present on account entry. Page identity, nonblank
+content, absence of framework overlays, console health and horizontal overflow
+checks pass. Screenshots remain outside the repository. Native gestures,
+VoiceOver, physical background/iCloud behavior, cross-device PRF and general
+Search/Picks/People quality still need device or held-out evidence. The
+[ten-foundation queue](product-backlog.md) records these gates; Sign in with Apple
+remains unimplemented and Gemini enablement remains off.
+
+The current local implementation adds durable last-10-days initial Sync intake,
+explicit expansion, optional browser photo tables, reviewed local People groups
+and optional per-photo Gemini observations. These changes have not yet replaced
+the production checkpoint below.
+
+Final local `pnpm check` passes: 33 core, 80 API and 454 web tests, plus 20 search
+fixture cases, seven Picks cases, 24 full release artifact cases, 24 preview
+artifact cases, release orchestration checks and the web build. A fresh built
+startup check measures 412,566 bytes in one static
+JavaScript chunk, within the 500 KiB budget. Isolated encrypted exchange passes
+all five tests. The pinned TinyCLIP public-image inference smoke passes.
+
+Browser checks at 1280×900 and 320×740 exercise table sorting, extra columns,
+selection and the same viewer without page overflow or unexpected errors.
+Actual YuNet/SFace inference on a public example finds 16 faces with finite
+normalized 128-value templates. People checks exercise explicit naming, merging,
+separating and finding the reviewed name. Public weights and runtime requests
+carry no authorization or referrer; no photo or template is uploaded. Browser
+lifecycle checks cancel work and clear provisional groups.
+
+Saved People checks use disposable accounts, public JPEGs and real local
+encrypted D1/R2 storage. Naming 16 groups, separating one face, finding the
+reviewed name, explicit Save changes and restoring names in a fresh browser
+context pass. Acknowledged annotation edits refresh current sources without
+discarding reviewed groups; unrelated source or account changes still invalidate
+them. These checks use Chrome, not Safari.
+
+Full native verification passes 377 of 378 tests with the existing Vision skip.
+Eight People regressions include actual pinned YuNet/SFace inference, a public
+NASA portrait rotation case and PhotoKit naming/search/rejection. The aligned
+portrait rotation exceeds 0.99 cosine similarity; this single fixture does not
+qualify general identity accuracy. Corrections recheck current per-asset access
+and revisions, adjusted-current boxes stay local, and a legal 64-fact GPS
+annotation remains hydratable after search-term expansion.
+
+The isolated Photos preview passes 112 of 113 tests with its existing Vision
+skip; all 24 preview artifact checks pass. Its generated graph excludes People,
+ONNX and face weights. Simulator UI input could not be automated; that is not a
+manual native UI or physical-device acceptance result.
+
+A rendered Gemini component check uses a synthetic JPEG and mocked provider
+responses. Analyze needs separate preview consent and stages a review without
+keeping anything. Keep, Discard and lock clearing pass without page errors.
+Encrypted annotation regressions verify current source binding, preservation of
+newer supplied/People/location facts, local-to-owned digest rebinding and removal
+of obsolete categories. No paid provider call was made. Default cloud enablement
+remains off; live provider behavior, personal-library quality, physical phone
+performance and complete cross-device acceptance remain unqualified.
+
+Cloud capabilities and inference require the unlocked vault's expected account
+to match the authenticated server account. A real shared-cookie regression
+rejects an account switch before allocating work or dispatching a provider call.
+
+After the existing Xcode account was restored, build 39 exported through CLI and
+Organizer and uploaded successfully. Apple then rejected processing with 90208:
+the ONNX framework plist declared iOS 15.1 while Xcode's generated empty binary
+required iOS 26.0. The earlier artifact audit missed this metadata mismatch.
+
+Replacement build 40 uses a final full-app archive phase that waits for implicit
+framework copying and signing, sets the copied framework minimum OS to the app's
+deployment target, and re-signs it before app signing. The real build log confirms
+that ordering. Both archive and signed IPA declare iOS 26.0 and pass the full
+artifact audit; the strengthened audit rejects the actual build 39 archive.
+All nine release orchestration, 31 full artifact and 24 preview artifact cases
+pass. Project regeneration is stable. Apple completed build 40's processing on
+October 6. App Store Connect readback shows 0.1.0 (40) `Testing` in Fotoro Internal,
+with the owner's existing tester account in the group. Encryption answers select
+standard algorithms outside Apple's OS and the approved France exclusion. What
+to Test notes were saved and read back. Private screenshots and artifact/input
+hash evidence are retained under the ignored local distribution-fix directory.
+This establishes internal TestFlight availability; physical installation,
+device acceptance and production web acceptance remain unverified.
 
 ## Qualified source and live web
 
@@ -229,9 +438,11 @@ data are excluded from repository documentation.
 - Automatic native Sync requires opt-in and foreground/unlocked preparation. iOS
   can finish scheduled ciphertext PUTs; this is not continuous locked-phone backup.
   Browser uploads stay explicit.
-- Search, picks, photo GPS and confirmed Timeline imports operate locally. Named
-  people and cross-device contact sync are open. Scene publication remains disabled
-  for reader compatibility. Local vectors and raw Timeline imports do not upload.
+- Search, picks, photo GPS, reviewed People and confirmed Timeline imports operate
+  locally. General identity/retrieval quality and cross-device contact convergence
+  remain open. Album search is filename/date only; private evidence stays in the
+  account finder. Scene publication remains disabled for reader compatibility.
+  Local vectors and raw Timeline imports do not upload.
 - Full first-use/returning-account acceptance, two-person sharing completion,
   interruption/relaunch restoration, accessibility and realistic library performance
   still need physical-device evidence. Apple ID login is not delivered.

@@ -1,7 +1,7 @@
 import {useLayoutEffect, useMemo, useRef, useState} from "react";
 import type {LocalPhoto} from "./resources";
 import type {SearchResult} from "./search";
-import {SemanticFindSession, addSemanticMatches, eligibleSemanticPhotos, subscribeSemanticLifecycle} from "./semantic-find";
+import {SemanticFindSession, addSemanticMatches, eligibleSemanticPhotos, semanticPreviewStatus, subscribeSemanticLifecycle} from "./semantic-find";
 export function useSemanticFind(photos: LocalPhoto[], base: SearchResult, active: boolean, source: unknown, committedMeaning?: string) {
   const session = useRef<SemanticFindSession | null>(null);
   const [foreground, setForeground] = useState(0);
@@ -39,7 +39,10 @@ export function useSemanticFind(photos: LocalPhoto[], base: SearchResult, active
     const current = result?.input === input;
     const matched = canSearch && current && result.scores ? addSemanticMatches(base, result.scores,
       new Set(photos.filter(photo => photo.current?.() !== false).map(photo => photo.id)), committedMeaning) : base;
+    const visualStatus = canSearch && current ? result.visualStatus
+      : active && !invalidated.current && !committedMeaning && (typeof document === "undefined" || document.visibilityState !== "hidden")
+        ? semanticPreviewStatus(photos, base.query) : undefined;
     return canSearch && (!current || result.pending) ? {...matched, searching: true}
-      : canSearch && current && result.visualStatus ? {...matched, visualStatus: result.visualStatus} : matched;
+      : visualStatus ? {...matched, visualStatus} : matched;
   }, [result, input, canSearch, base, photos, committedMeaning]);
 }

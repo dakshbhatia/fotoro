@@ -12,7 +12,6 @@ import { all, get, atomic, put } from "./cache";
 import {
   api,
   ApiError,
-  base,
   fixtureMode,
   resolveUploadURL,
   isPublicDemoAccount,

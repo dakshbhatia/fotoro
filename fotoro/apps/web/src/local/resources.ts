@@ -10,6 +10,8 @@ export interface LocalPhoto {
   originalSize?: number;
   preview?: Blob;
   previewLoader?: () => Promise<Blob>;
+  /* Stable identity for a verified saved loader returning fresh Blob instances. */
+  rasterIdentity?: object;
   previewAvailable?: boolean;
   previewSize?: number;
   labels?: string[];
@@ -90,26 +92,35 @@ interface Raster {
 }
 function rasterSource(photo: LocalPhoto) {
   const source = photo.file ?? photo.preview ?? photo.previewLoader;
-  return {source: source ? new WeakRef<object>(source) : undefined, digest: photo.digest, width: photo.width, height: photo.height, available: photo.previewAvailable};
+  return {source: source ? new WeakRef<object>(photo.rasterIdentity ?? source) : undefined, digest: photo.digest, width: photo.width, height: photo.height, available: photo.previewAvailable};
 }
 /* File references stay in memory. Raster generation is sequential and caches are bounded. */
 export class LocalResources {
   private cache = new Map<string, Raster>();
   private queue: Promise<unknown> = Promise.resolve();
   private pending = new Map<string, Promise<Raster>>();
+  private demand = new Map<string, Set<AbortSignal | undefined>>();
+  private leases = new Map<string, Set<string>>();
   private generation = 0;
   private sources = new Map<string, ReturnType<typeof rasterSource>>();
   async load(
     photo: LocalPhoto,
     kind: "thumbnail" | "preview",
+    signal?: AbortSignal,
   ): Promise<Raster> {
+    signal?.throwIfAborted();
     const source = rasterSource(photo), previous = this.sources.get(photo.id);
     if (!previous || previous.source?.deref() !== source.source?.deref() || previous.digest !== source.digest || previous.width !== source.width || previous.height !== source.height || previous.available !== source.available) {
       this.sources.set(photo.id, source);
       for (const kind of ["thumbnail", "preview"]) {
         const key = photo.id + ":" + kind, old = this.cache.get(key);
         if (old) URL.revokeObjectURL(old.url);
+        const leased = this.leases.get(key);
+        for (const url of leased ?? []) URL.revokeObjectURL(url);
+        leased?.clear();
+        this.leases.delete(key);
         this.cache.delete(key); this.pending.delete(key);
+        this.demand.delete(key);
       }
     }
     const identity = this.sources.get(photo.id);
@@ -121,12 +132,18 @@ export class LocalResources {
       return found;
     }
     const pending = this.pending.get(key);
-    if (pending) return pending;
+    if (pending) {this.demand.get(key)?.add(signal); return pending;}
     const generation = this.generation;
+    const demand = new Set<AbortSignal | undefined>([signal]);
+    this.demand.set(key, demand);
     const promise = this.queue.then(async () => {
       if (generation !== this.generation || this.sources.get(photo.id) !== identity)
         throw new Error("Photos were cleared.");
-      const check = () => {if (generation !== this.generation || this.sources.get(photo.id) !== identity) throw new Error("Photos were cleared.");};
+      const check = () => {
+        if (generation !== this.generation || this.sources.get(photo.id) !== identity) throw new Error("Photos were cleared.");
+        if (photo.current?.() === false || ![...demand].some(signal => !signal?.aborted)) throw new DOMException("Photo request cancelled", "AbortError");
+      };
+      check();
       let raster: Awaited<ReturnType<typeof photoPreview>>;
       try {
         if (!photo.width || !photo.height) throw new Error("Photo dimensions are unavailable.");
@@ -173,14 +190,36 @@ export class LocalResources {
     try {
       return await promise;
     } finally {
-      if (this.pending.get(key) === promise) this.pending.delete(key);
+      if (this.pending.get(key) === promise) {this.pending.delete(key); this.demand.delete(key);}
     }
+  }
+  // Mounted views own their URL lifetime; cache eviction cannot break a visible image.
+  // Virtualized view cleanup releases these leases, while Clear revokes them immediately.
+  async lease(photo: LocalPhoto, kind: "thumbnail" | "preview", signal: AbortSignal) {
+    const generation = this.generation;
+    const value = await this.load(photo, kind, signal);
+    signal.throwIfAborted();
+    const identity = photo.rasterIdentity ?? photo.file ?? photo.preview ?? photo.previewLoader;
+    if (generation !== this.generation || this.sources.get(photo.id)?.source?.deref() !== identity || photo.current?.() === false) throw new DOMException("Photo request cancelled", "AbortError");
+    const key = photo.id + ":" + kind, url = URL.createObjectURL(value.blob);
+    const urls = this.leases.get(key) ?? new Set<string>();
+    urls.add(url); this.leases.set(key, urls);
+    const release = () => {
+      if (!urls.delete(url)) return;
+      URL.revokeObjectURL(url);
+      if (!urls.size && this.leases.get(key) === urls) this.leases.delete(key);
+    };
+    signal.addEventListener("abort", release, {once: true});
+    return {...value, url};
   }
   clear() {
     this.generation++;
     for (const value of this.cache.values()) URL.revokeObjectURL(value.url);
     this.cache.clear();
     this.pending.clear();
+    this.demand.clear();
+    for (const urls of this.leases.values()) {for (const url of urls) URL.revokeObjectURL(url); urls.clear();}
+    this.leases.clear();
     this.sources.clear();
   }
   get decodedBytes() {

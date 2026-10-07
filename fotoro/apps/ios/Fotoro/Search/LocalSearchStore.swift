@@ -10,7 +10,7 @@ struct SearchAnalysisProgress: Equatable, Sendable {
 }
 
 @MainActor @Observable final class LocalSearchStore: NSObject, PHPhotoLibraryChangeObserver {
-  typealias QueryExecutor = @Sendable (SearchIndex, String, String?, SearchResponse, UInt64) async throws -> SearchResponse
+  typealias QueryExecutor = @Sendable (SearchIndex, String, SearchScope, String?, SearchResponse, UInt64) async throws -> SearchResponse
   private(set) var response = SearchResponse()
   private(set) var assets: [String: RecentPhoto] = [:]
   private(set) var indexing = false
@@ -18,6 +18,9 @@ struct SearchAnalysisProgress: Equatable, Sendable {
   private(set) var analysisProgress: SearchAnalysisProgress?
   private(set) var libraryGeneration: UInt64 = 0
   private(set) var query = ""
+  private(set) var peopleSelection = PeopleSearchSelection()
+  private(set) var selectedPeopleNames: [String: String] = [:]
+  var hasSearch: Bool { !SearchNormalization.text(query).isEmpty || !peopleSelection.isEmpty }
   private(set) var acceptedMeaningID: String?
   private(set) var displayedID: String?
   var error: String?
@@ -35,9 +38,9 @@ struct SearchAnalysisProgress: Equatable, Sendable {
   @ObservationIgnored private let images = PHImageManager()
   @ObservationIgnored private let processor = VisionTextProcessor()
   @ObservationIgnored private var imageRequest: SearchImageRequest?
-  @ObservationIgnored private var queryExecutor: QueryExecutor = { index, value, accepted, previous, generation in
+  @ObservationIgnored private var queryExecutor: QueryExecutor = { index, value, scope, accepted, previous, generation in
     let lexical = try await Task.detached(priority: .userInitiated) {
-      try index.search(value, acceptedMeaningID: accepted, previous: previous, generation: generation)
+      try index.search(value, scope: scope, acceptedMeaningID: accepted, previous: previous, generation: generation)
     }.value
     #if FOTORO_LOCAL_PREVIEW
       return lexical
@@ -416,15 +419,29 @@ struct SearchAnalysisProgress: Equatable, Sendable {
     let queryToken = queryGeneration
     let previous = response
     let accepted = acceptedMeaningID
-    let next = try await queryExecutor(index, value, accepted, previous, queryToken)
+    let scope = SearchScope(people: peopleSelection)
+    let next = try await queryExecutor(index, value, scope, accepted, previous, queryToken)
     try Task.checkCancellation()
     guard ready, token == work.generation, library == libraryGeneration else { return [] }
     guard queryToken == queryGeneration else { throw CancellationError() }
-    return next.results.filter { (try? index.record($0.id)) != nil }
+    return next.results.compactMap { hit in
+      let current = ([hit.id] + hit.children).filter { (try? consumerRecord($0)) != nil }
+      guard let first = current.first else { return nil }
+      var permitted = hit
+      permitted.id = first
+      permitted.children = Array(current.dropFirst())
+      return permitted
+    }
   }
   func consumerRecord(_ id: String) throws -> SearchRecord? {
-    guard ready else { return nil }
-    return try index?.record(id)
+    guard ready, let record = try index?.record(id) else { return nil }
+    #if !FOTORO_LOCAL_PREVIEW
+    if !peopleSelection.isEmpty {
+      guard canEditPeoplePhoto(id, revision: record.revision),
+        peopleSelection.matches(Set(PhotoPeopleFacts.read(record.facts, enforceWireLimits: false).map(\.p))) else { return nil }
+    }
+    #endif
+    return record
   }
   func updateQuery(_ value: String) {
     let normalized = SearchNormalization.text(value)
@@ -437,7 +454,7 @@ struct SearchAnalysisProgress: Equatable, Sendable {
     if let displayedID, let at = previous.results.firstIndex(where: { $0.id == displayedID }) {
       previous.results.insert(previous.results.remove(at: at), at: 0)
     }
-    if normalized.isEmpty {
+    if normalized.isEmpty && peopleSelection.isEmpty {
       acceptedMeaningID = nil
       displayedID = nil
       sessionID = UUID().uuidString
@@ -457,9 +474,10 @@ struct SearchAnalysisProgress: Equatable, Sendable {
     searching = true
     let accepted = acceptedMeaningID
     let execute = queryExecutor
+    let scope = SearchScope(people: peopleSelection)
     queryTask = Task {
       do {
-        let next = try await execute(index, value, accepted, previous, generation)
+        let next = try await execute(index, value, scope, accepted, previous, generation)
         guard generation == queryGeneration, !Task.isCancelled else { return }
         if accepted != nil, next.meaning?.id != accepted { acceptedMeaningID = nil }
         response = next
@@ -475,6 +493,21 @@ struct SearchAnalysisProgress: Equatable, Sendable {
   }
   var hasCurrentResponse: Bool {
     response.generation != 0 && SearchNormalization.text(response.query) == SearchNormalization.text(query)
+      && response.scope.people == peopleSelection
+  }
+  func setPeopleSelection(_ selection: PeopleSearchSelection, names: [String: String] = [:]) {
+    guard selection != peopleSelection else {
+      if !names.isEmpty { selectedPeopleNames = names.filter { selection.personIDs.contains($0.key) } }
+      return
+    }
+    peopleSelection = selection
+    selectedPeopleNames = names.filter { selection.personIDs.contains($0.key) }
+    acceptedMeaningID = nil
+    displayedID = nil
+    priorPermittedResponse = nil
+    response = SearchResponse()
+    sessionID = UUID().uuidString
+    updateQuery(query)
   }
   var displayedHit: SearchHit? {
     response.results.first { $0.id == displayedID } ?? response.leading
@@ -592,3 +625,54 @@ private final class SearchImageRequest: @unchecked Sendable {
     if let requestID { manager.cancelImageRequest(requestID) }
   }
 }
+
+#if !FOTORO_LOCAL_PREVIEW
+extension LocalSearchStore {
+  var peopleSnapshotReady: Bool { ready }
+  var peopleIndex: SearchIndex? { index }
+  func canEditPeoplePhoto(_ id: String, revision: String) -> Bool {
+    guard ready, assets[id]?.sourceRevision == revision,
+      RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+      let current = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject,
+      !current.isHidden else { return false }
+    return RecentPhoto.sourceRevision(current) == revision
+  }
+  func publishPeopleEdit(_ record: SearchRecord) throws {
+    guard canEditPeoplePhoto(record.id, revision: record.revision) else { throw FotoroError("This photo changed or is no longer permitted.") }
+    try onRecordChanged?(record, true)
+    updateQuery(query)
+  }
+  func analyzePeople(_ record: SearchRecord) async throws -> Bool {
+    let token = work.generation
+    guard let index, let photo = assets[record.id], photo.sourceRevision == record.revision,
+      RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)) else { return false }
+    // An independent PhotoKit request cannot displace metadata/OCR indexing's cancellation handle.
+    let manager = PHImageManager()
+    let request = SearchImageRequest(manager: manager)
+    let options = PHImageRequestOptions()
+    options.isNetworkAccessAllowed = false; options.deliveryMode = .highQualityFormat; options.resizeMode = .exact; options.version = .current
+    let preview = await withTaskCancellationHandler {
+      await withCheckedContinuation { continuation in
+        request.start(continuation)
+        let id = manager.requestImage(for: photo.asset, targetSize: CGSize(width: 1600, height: 1600), contentMode: .aspectFit, options: options) { image, info in
+          guard (info?[PHImageResultIsDegradedKey] as? Bool) != true else { return }
+          guard (info?[PHImageCancelledKey] as? Bool) != true, let image, let cg = image.cgImage else { request.complete(nil); return }
+          request.complete(SearchPreview(image: cg, orientation: Self.orientation(image.imageOrientation)))
+        }
+        request.setID(id)
+      }
+    } onCancel: { request.cancel() }
+    guard let preview else { return false }
+    let faces = try await PhotoFaceProcessor.shared.analyze(preview)
+    try Task.checkCancellation()
+    guard token == work.generation, assets[record.id]?.sourceRevision == record.revision,
+      RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+      let current = PHAsset.fetchAssets(withLocalIdentifiers: [record.id], options: nil).firstObject,
+      !current.isHidden, RecentPhoto.sourceRevision(current) == record.revision else { return false }
+    let worker = Task.detached(priority: .utility) {
+      try index.applyPeople(faces, photoID: record.id, revision: record.revision, generation: token)
+    }
+    return try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
+  }
+}
+#endif

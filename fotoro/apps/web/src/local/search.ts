@@ -2,6 +2,8 @@ import {parseNaturalDateQuery} from "./natural-date";
 import type {PhotoVisualV1, PhotoLocationV1} from "@fotoro/contracts";
 import {validatedVisualLabels} from "@fotoro/contracts/visual";
 import {isLocationFact, validatedPhotoLocation} from "@fotoro/contracts/location";
+import {isCloudObservationFact, observationSearchText} from "@fotoro/contracts/intelligence";
+import {isPeopleFact, peopleNames} from "@fotoro/contracts/people";
 
 export interface SearchOcr {
   photoID: string;
@@ -13,6 +15,7 @@ export interface SearchOcr {
   error?: string;
 }
 export interface SearchPhoto {
+  observationPhotoId?: string;
   id: string;
   digest?: string;
   filename: string;
@@ -37,7 +40,7 @@ export interface SearchFeedback {
   photos: Record<string, Event[]>;
   pins: Record<string, string>;
 }
-export type SearchEvidence = "label" | "keyword" | "caption" | "fact" | "filename" | "ocr" | "date" | "visual";
+export type SearchEvidence = "label" | "person" | "observation" | "keyword" | "caption" | "fact" | "filename" | "ocr" | "date" | "visual";
 export interface SearchMeaning {
   id: string;
   term: string;
@@ -53,7 +56,8 @@ export interface SearchResult {
   photoIds: string[];
   photoId?: string;
   searching?: boolean;
-  visualStatus?: "unavailable" | "incomplete";
+  visualStatus?: "unavailable" | "incomplete" | "missing-preview";
+  textStatus?: "indexing" | "incomplete";
 }
 interface IndexedMeaning {
   id: string;
@@ -72,7 +76,7 @@ export const emptyFeedback = (): SearchFeedback => ({ version: 1, meanings: {}, 
 export const normalizeSearch = (text: string) => text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().trim();
 const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 const noise = /^(?:img\d*|dsc\d*|pxl\d*|image|photo|fixture|screenshot|the|and|jpg|jpeg|png|heic)$/i;
-const tier = (source: SearchEvidence) => source === "label" || source === "date" ? 4 : source === "keyword" || source === "fact" ? 3 : source === "caption" ? 2 : source === "visual" ? 0 : 1;
+const tier = (source: SearchEvidence) => source === "label" || source === "person" || source === "date" ? 4 : source === "keyword" || source === "fact" || source === "observation" ? 3 : source === "caption" ? 2 : source === "visual" ? 0 : 1;
 const count = (events: Event[] | undefined, now: number) => (events ?? []).reduce((sum, event) => sum + Math.pow(0.5, Math.max(0, now - event.at) / (30 * 86400000)), 0);
 const photoKey = (meaning: string, id: string) => JSON.stringify([meaning, id]);
 const meaningKey = (scope: string, meaning: string) => JSON.stringify([scope, meaning]);
@@ -108,7 +112,7 @@ export class PhotoSearchIndex {
     const add = (word: string, source: SearchEvidence, photoId: string) => {
       const normalized = normalizeSearch(word);
       if (!normalized) return;
-      const id = (source === "label" ? "label:" : source === "visual" ? "visual:" : "text:") + normalized;
+      const id = (source === "label" || source === "person" ? "label:" : source === "visual" ? "visual:" : "text:") + normalized;
       let meaning = terms.get(id);
       if (!meaning) {
         meaning = { id, term: word, normalized, sources: new Map() };
@@ -132,7 +136,15 @@ export class PhotoSearchIndex {
         add(keyword, "keyword", photo.id);
         for (const word of words(keyword)) add(word, "keyword", photo.id);
       }
-      for (const fact of photo.facts ?? []) if (!isLocationFact(fact)) { add(fact, "fact", photo.id); phraseSource(fact, "fact", photo.id); }
+      for (const fact of photo.facts ?? []) if (!isLocationFact(fact) && !isCloudObservationFact(fact) && !isPeopleFact(fact)) { add(fact, "fact", photo.id); phraseSource(fact, "fact", photo.id); }
+      for (const fact of observationSearchText(photo, {photoId: photo.observationPhotoId ?? photo.id, sourceRevision: photo.digest ?? photo.id})) {
+        add(fact, "observation", photo.id); phraseSource(fact, "observation", photo.id);
+        for (const word of words(fact)) add(word, "observation", photo.id);
+      }
+      for (const name of peopleNames(photo.facts, photo.digest ?? "")) {
+        add(name, "person", photo.id); phraseSource(name, "person", photo.id);
+        for (const word of words(name)) add(word, "person", photo.id);
+      }
       const location = validatedPhotoLocation(photo.location);
       if (location) {
         add("GPS", "fact", photo.id);
@@ -223,7 +235,7 @@ export class PhotoSearchIndex {
         if (!eligible(position.photoId) || position.start + tokens.length > position.normalized.length) continue;
         if (!tokens.every((token, offset) => offset === tokens.length - 1 && !/^\d+$/.test(token) ? position.normalized[position.start + offset].startsWith(token) : position.normalized[position.start + offset] === token)) continue;
         const term = position.display.slice(position.start, position.start + tokens.length).join(" ");
-        include((position.source === "label" ? "label:" : "text:") + normalizeSearch(term), term, position.photoId, position.source);
+        include((position.source === "label" || position.source === "person" ? "label:" : "text:") + normalizeSearch(term), term, position.photoId, position.source);
       }
     }
     // Literal filenames remain available when the user types file-like syntax or digits.

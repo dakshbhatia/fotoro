@@ -1,4 +1,4 @@
-import { startAuthentication } from "@simplewebauthn/browser";
+import { startAuthentication, startRegistration } from "@simplewebauthn/browser";
 import type {
   VaultV1,
   RecoveryOptionsV1,
@@ -28,6 +28,7 @@ import {
   vaultGeneration,
 } from "./vault";
 import { formatFotoroPassword, parseFotoroPassword } from "./password";
+import {validateWire} from "@fotoro/contracts/validate";
 let browserSignOut: AbortController | undefined;
 function cancelBrowserSignOut() {browserSignOut?.abort(); browserSignOut = undefined;}
 export async function clearBrowserSession(session = requireVault()): Promise<{remote: Promise<boolean>; generation: number}> {
@@ -90,46 +91,173 @@ function publicResponse(response: any) {
     },
   };
 }
-export async function passkeyLogin() {
+export async function passkeyLogin(current = () => true, {discoverAccount = false}: {discoverAccount?: boolean} = {}) {
   cancelBrowserSignOut();
   setFixtureAccount();
-  const known = await get<string>("settings", "last-account");
-  const stored = known
-    ? await get<VaultV1>("settings", known + ":vault")
-    : undefined;
+  let generation = vaultGeneration();
+  const origin = location.origin;
+  let opened: ReturnType<typeof requireVault> | undefined;
+  const checkCurrent = () => {
+    if (!current() || vaultGeneration() !== generation || location.origin !== origin)
+      throw new DOMException("Sign-in cancelled", "AbortError");
+  };
+  checkCurrent();
+  await ready;
+  checkCurrent();
+  let remembered: VaultV1 | undefined;
+  if (!discoverAccount) {
+    const accountId = await get<unknown>("settings", "last-account");
+    checkCurrent();
+    if (typeof accountId === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(accountId)) {
+      const cached = await get<unknown>("settings", accountId + ":vault");
+      checkCurrent();
+      try {
+        const value = validateWire<VaultV1>("VaultV1", cached);
+        if (value.accountCard.accountId === accountId && value.wrappers.some(wrapper => wrapper.kind === "prf" && wrapper.credentialId && wrapper.prfSalt)) remembered = value;
+      } catch {} // Public cache corruption cannot authorize an account or key.
+    }
+  }
   const options = await api<any>("/v1/auth/login/options", {
     version: 1,
     client: "web",
-    ...(known ? { accountId: known } : {}),
+    ...(remembered ? {accountId: remembered.accountCard.accountId} : {}),
   });
-  const evalByCredential: Record<string, { first: Uint8Array }> = {};
-  for (const w of stored?.wrappers ?? []) {
-    if (w.kind === "prf" && w.credentialId && w.prfSalt)
-      evalByCredential[w.credentialId] = { first: unb64(w.prfSalt) };
+  checkCurrent();
+  if (options.options.allowCredentials?.length === 0)
+    throw new Error("NO_ACCOUNT_PASSKEY");
+  const firstSalts = new Map<string, string>();
+  if (remembered) {
+    if (!Array.isArray(options.options.allowCredentials) || !options.options.allowCredentials.length) throw new Error("NO_ACCOUNT_PASSKEY");
+    const allowed = new Set(options.options.allowCredentials.map((credential: any) => credential.id));
+    const values: Record<string, {first: Uint8Array}> = {};
+    for (const wrapper of remembered.wrappers) {
+      if (wrapper.kind !== "prf" || !wrapper.credentialId || !wrapper.prfSalt || !allowed.has(wrapper.credentialId)) continue;
+      const credential = unb64(wrapper.credentialId), salt = unb64(wrapper.prfSalt);
+      if (!credential.length || credential.length > 1024 || salt.length !== 32 || firstSalts.has(wrapper.credentialId)) throw new Error("PASSWORD_ACCOUNT_MISMATCH");
+      values[wrapper.credentialId] = {first: salt}; firstSalts.set(wrapper.credentialId, wrapper.prfSalt);
+    }
+    if (firstSalts.size) options.options.extensions = {...options.options.extensions, prf: {evalByCredential: values}};
   }
-  if (Object.keys(evalByCredential).length)
-    options.options.extensions = {
-      ...options.options.extensions,
-      prf: { evalByCredential },
-    };
-  const response = await startAuthentication({ optionsJSON: options.options });
-  const output = prfOutput(response);
-  const session = await api<any>(
-    "/v1/auth/login/verify",
-    {
-      version: 1,
-      challengeId: options.challengeId,
-      response: publicResponse(response),
-      client: "web",
-    },
-    "SessionV1",
-  );
-  configureDevice(session.deviceId);
+  let output: Uint8Array | undefined;
+  try {
+    // PRF maps require an account-bound challenge and a nonempty allowed list.
+    // Unknown accounts discover first and retain the existing follow-up ceremony.
+    const response = await startAuthentication({ optionsJSON: options.options });
+    if (firstSalts.has(response.id)) output = prfOutput(response);
+    checkCurrent();
+    if (remembered && !options.options.allowCredentials.some((credential: any) => credential.id === response.id)) throw new Error("PASSWORD_ACCOUNT_MISMATCH");
+    let session = await api<SessionV1>(
+      "/v1/auth/login/verify",
+      {
+        version: 1,
+        challengeId: options.challengeId,
+        response: publicResponse(response),
+        client: "web",
+      },
+      "SessionV1",
+    );
+    checkCurrent();
+    if (remembered && session.accountId !== remembered.accountCard.accountId) throw new Error("PASSWORD_ACCOUNT_MISMATCH");
+    configureDevice(session.deviceId);
+    const vault = await api<VaultV1>("/v1/vault", undefined, "VaultV1");
+    checkCurrent();
+    if (vault.accountCard.accountId !== session.accountId) throw new Error("PASSWORD_ACCOUNT_MISMATCH");
+    if (remembered && (vault.accountCard.boxPublicKey !== remembered.accountCard.boxPublicKey || vault.accountCard.signingPublicKey !== remembered.accountCard.signingPublicKey)) throw new Error("PASSWORD_ACCOUNT_MISMATCH");
+    // A fresh browser only learns the encrypted wrapper's salt after sign-in.
+    // Re-evaluate the selected credential rather than requiring a password when
+    // that passkey can already unlock this account on another device.
+    const wrapper = vault.wrappers.find(w => w.kind === "prf" && w.credentialId === response.id && w.prfSalt);
+    if (output && (output.length !== 32 || firstSalts.get(response.id) !== wrapper?.prfSalt)) {output.fill(0); output = undefined;}
+    if (!output && wrapper) {
+      const next = await api<any>("/v1/auth/login/options", {version: 1, client: "web", accountId: session.accountId});
+      checkCurrent();
+      next.options.allowCredentials = [{type: "public-key", id: response.id}];
+      next.options.extensions = {...next.options.extensions, prf: {eval: {first: unb64(wrapper.prfSalt!)}}};
+      const assertion = await startAuthentication({optionsJSON: next.options});
+      output = prfOutput(assertion);
+      checkCurrent();
+      if (assertion.id !== response.id) throw new Error("PASSWORD_ACCOUNT_MISMATCH");
+      const verified = await api<SessionV1>("/v1/auth/login/verify", {version: 1, challengeId: next.challengeId, response: publicResponse(assertion), client: "web"}, "SessionV1");
+      checkCurrent();
+      if (verified.accountId !== session.accountId) throw new Error("PASSWORD_ACCOUNT_MISMATCH");
+      configureDevice(verified.deviceId);
+      session = verified;
+    }
+    if (!output || output.length !== 32 || !wrapper) throw new Error("PRF_UNAVAILABLE_USE_RECOVERY");
+    configureVault(vault, output, response.id);
+    opened = await unlockVault({kind: "prf"});
+    if (!current() || vaultGeneration() !== generation + 1 || location.origin !== origin)
+      throw new DOMException("Sign-in cancelled", "AbortError");
+    generation = vaultGeneration();
+    await remember(vault, () => current() && vaultGeneration() === generation && location.origin === origin);
+    checkCurrent();
+    return session;
+  } catch (error) {
+    if (opened) closeIfCurrent(opened);
+    throw error;
+  } finally {output?.fill(0);}
+}
+export async function addPasskey(current = () => true): Promise<boolean> {
+  const session = requireVault(), generation = vaultGeneration(), origin = location.origin;
+  const checkCurrent = () => {
+    if (!current() || vaultGeneration() !== generation || location.origin !== origin || requireVault() !== session)
+      throw new DOMException("Passkey setup cancelled", "AbortError");
+  };
   const vault = await api<VaultV1>("/v1/vault", undefined, "VaultV1");
-  await remember(vault);
-  configureVault(vault, output, response.id);
-  if (output) await unlockVault({ kind: "prf" });
-  return session;
+  checkCurrent();
+  if (vault.accountCard.accountId !== session.accountId || vault.accountCard.version !== session.card.version
+    || vault.accountCard.boxPublicKey !== session.card.boxPublicKey || vault.accountCard.signingPublicKey !== session.card.signingPublicKey)
+    throw new Error("PASSWORD_ACCOUNT_MISMATCH");
+  const recovery = vault.wrappers.find(w => w.kind === "recovery" && w.verified);
+  if (!recovery) throw new Error("RECOVERY_UNAVAILABLE");
+  const options = await api<any>("/v1/auth/register/options", {version: 1, client: "web", accountId: session.accountId});
+  checkCurrent();
+  if (options.accountId !== session.accountId) throw new Error("PASSWORD_ACCOUNT_MISMATCH");
+  const salt = sodium.randombytes_buf(32);
+  options.options.extensions = {...options.options.extensions, prf: {eval: {first: salt}}};
+  const response = await startRegistration({optionsJSON: options.options});
+  let output = prfOutput(response);
+  try {
+    checkCurrent();
+    const result = await api<SessionV1>("/v1/auth/register/verify", {
+      version: 1, challengeId: options.challengeId, client: "web", response: publicResponse(response),
+      enrollment: {version: 1, accountCard: session.card, recoveryWrapper: recovery,
+        proof: signPayload("account-enrollment", session.accountId, utf8({accountCard: session.card, recoveryWrapper: recovery}), session.signingSecretKey)},
+    }, "SessionV1");
+    checkCurrent();
+    if (result.accountId !== session.accountId) throw new Error("PASSWORD_ACCOUNT_MISMATCH");
+    configureDevice(result.deviceId);
+    // Some PRF-enabled authenticators can evaluate only during assertion.
+    // Use the new credential and the same salt before saving its wrapper.
+    if ((!output || output.length !== 32) && response.clientExtensionResults?.prf?.enabled === true) {
+      output?.fill(0); output = undefined;
+      const next = await api<any>("/v1/auth/login/options", {version: 1, client: "web", accountId: session.accountId});
+      checkCurrent();
+      next.options.allowCredentials = [{type: "public-key", id: response.id}];
+      next.options.extensions = {...next.options.extensions, prf: {eval: {first: salt}}};
+      const assertion = await startAuthentication({optionsJSON: next.options});
+      output = prfOutput(assertion);
+      checkCurrent();
+      if (assertion.id !== response.id) throw new Error("PASSWORD_ACCOUNT_MISMATCH");
+      const verified = await api<SessionV1>("/v1/auth/login/verify", {
+        version: 1, challengeId: next.challengeId, response: publicResponse(assertion), client: "web",
+      }, "SessionV1");
+      checkCurrent();
+      if (verified.accountId !== session.accountId) throw new Error("PASSWORD_ACCOUNT_MISMATCH");
+      configureDevice(verified.deviceId);
+    }
+    if (!output || output.length !== 32) return false;
+    const bytes = utf8({vaultKey: b64(session.vaultKey), boxSecretKey: b64(session.boxSecretKey), signingSecretKey: b64(session.signingSecretKey)});
+    let wrappedBundle;
+    try {wrappedBundle = wrapKey(bytes, output);} finally {bytes.fill(0);}
+    const wrapper: VaultWrapperV1 = {version: 1, wrapperId: crypto.randomUUID(), kind: "prf", credentialId: response.id, prfSalt: b64(salt), wrappedBundle, verified: false};
+    try {
+      await api("/v1/vault/wrappers/" + wrapper.wrapperId, wrapper, "VaultWrapperV1", "PUT");
+    } catch {checkCurrent(); return false;}
+    checkCurrent();
+    await remember({...vault, wrappers: [...vault.wrappers, wrapper]}, () => current() && vaultGeneration() === generation && location.origin === origin);
+    return true;
+  } finally {output?.fill(0);}
 }
 export async function recover(code: string, current = () => true) {
   cancelBrowserSignOut();

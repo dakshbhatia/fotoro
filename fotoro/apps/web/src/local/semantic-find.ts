@@ -14,16 +14,24 @@ export function cosine(left: Float32Array, right: Float32Array) {
   if (left.length !== SEMANTIC_DIMENSIONS || right.length !== SEMANTIC_DIMENSIONS) return -1;
   return left.reduce((sum, value, index) => sum + value * right[index], 0);
 }
-export function eligibleSemanticPhotos(photos: LocalPhoto[], query: string, now?: number) {
+function scopedSemanticPhotos(photos: LocalPhoto[], query: string, now?: number) {
   const parsed = parseNaturalDateQuery(query, {now});
   return parsed.text.length < 3 ? [] : photos.filter(photo => {
-    if (photo.current?.() === false || photo.previewAvailable === false) return false;
+    if (photo.current?.() === false) return false;
     if (parsed.from === undefined && parsed.until === undefined) return true;
     if (photo.dateSource !== "photos" && photo.dateSource !== "exif") return false;
     const time = Date.parse(photo.date);
     return Number.isFinite(time) && (parsed.from === undefined || time >= parsed.from)
       && (parsed.until === undefined || time < parsed.until);
   });
+}
+const hasSemanticPreview = (photo: LocalPhoto) => photo.previewAvailable !== false && !!(photo.file || photo.preview || photo.previewLoader);
+export function eligibleSemanticPhotos(photos: LocalPhoto[], query: string, now?: number) {
+  return scopedSemanticPhotos(photos, query, now).filter(hasSemanticPreview);
+}
+export function semanticPreviewStatus(photos: LocalPhoto[], query: string, now?: number): SearchResult["visualStatus"] {
+  const scoped = scopedSemanticPhotos(photos, query, now), available = scoped.filter(hasSemanticPreview).length;
+  return available < scoped.length ? available ? "incomplete" : "missing-preview" : undefined;
 }
 export function addSemanticMatches(base: SearchResult, scores: ReadonlyMap<string, number>, permitted: ReadonlySet<string>, committedMeaning?: string): SearchResult {
   if (committedMeaning) return base;
@@ -54,6 +62,7 @@ export class SemanticFindSession {
   private requests = new Map<number, {resolve: (value: Float32Array) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>}>();
   private sequence = 0;
   private generation = 0;
+  private controller = new AbortController();
   private failedGeneration?: number;
   private vectors = new Map<string, {source: WeakRef<object>; digest?: string; vector: Float32Array}>();
   constructor(private createWorker = () => new Worker(new URL("./semantic-worker.ts", import.meta.url), {type: "module"}),
@@ -91,19 +100,20 @@ export class SemanticFindSession {
   async search(photos: LocalPhoto[], query: string, current: () => boolean,
     progress: (scores: ReadonlyMap<string, number>) => void): Promise<SearchResult["visualStatus"]> {
     this.cancel();
-    const token = this.generation;
+    const token = this.generation, signal = this.controller.signal;
     const valid = () => {
       if (!current()) return false;
       if (token === this.failedGeneration) throw new Error("Visual search is unavailable.");
       return token === this.generation;
     };
-    const selected = eligibleSemanticPhotos(photos, query);
-    if (!selected.length || !valid()) return;
+    const scoped = scopedSemanticPhotos(photos, query), selected = scoped.filter(hasSemanticPreview);
+    if (!valid()) return;
+    if (!selected.length) return scoped.length ? "missing-preview" : undefined;
     this.reconcile(photos);
     const text = await this.request({kind: "text", text: parseNaturalDateQuery(query).text});
     if (!valid()) return;
     const scores = new Map<string, number>();
-    let failed = 0;
+    let missingPreviews = scoped.filter(photo => !hasSemanticPreview(photo)).length, modelErrors = 0;
     const selectedByID = new Map(selected.map(photo => [photo.id, photo]));
     const emit = () => {if (valid()) progress(new Map([...scores].filter(([id]) => selectedByID.get(id)?.current?.() !== false)));};
     for (let index = 0; index < selected.length; index++) {
@@ -111,18 +121,18 @@ export class SemanticFindSession {
       if (!valid()) return;
       if (photo.current?.() === false) continue;
       const source = photo.file ?? photo.preview ?? photo.previewLoader;
-      if (!source) {failed++; continue;}
+      if (!source) {missingPreviews++; continue;}
       let cached = this.vectors.get(photo.id);
       if (!cached || (cached.digest ? cached.digest !== photo.digest : cached.source.deref() !== source)) {
         let blob: Blob | undefined;
-        try {blob = (await this.resources.load(photo, "thumbnail")).blob;} catch {
+        try {blob = (await this.resources.load(photo, "thumbnail", signal)).blob;} catch {
           if (!valid()) return;
-          if (photo.current?.() !== false) failed++;
+          if (photo.current?.() !== false) missingPreviews++;
           continue;
         }
         if (!valid()) return;
         if (photo.current?.() === false) continue;
-        if (!blob) {failed++; continue;}
+        if (!blob) {missingPreviews++; continue;}
         try {
           const vector = await this.request({kind: "image", blob});
           if (!valid()) return;
@@ -131,7 +141,7 @@ export class SemanticFindSession {
           if (this.vectors.size > 4096) {
             const oldest = this.vectors.entries().next().value!; oldest[1].vector.fill(0); this.vectors.delete(oldest[0]);
           }
-        } catch (error) {if (!valid()) throw error; if (photo.current?.() !== false) failed++; continue;}
+        } catch (error) {if (!valid()) throw error; if (photo.current?.() !== false) modelErrors++; continue;}
       }
       scores.set(photo.id, cosine(text, cached.vector));
       if ((index + 1) % 8 === 0) emit();
@@ -140,7 +150,8 @@ export class SemanticFindSession {
       if ((index + 1) % 32 === 0 && index + 1 < selected.length) await new Promise(resolve => setTimeout(resolve, 0));
     }
     emit();
-    if (valid() && failed) return [...scores.keys()].some(id => selectedByID.get(id)?.current?.() !== false) ? "incomplete" : "unavailable";
+    if (valid() && (missingPreviews || modelErrors)) return [...scores.keys()].some(id => selectedByID.get(id)?.current?.() !== false)
+      ? "incomplete" : modelErrors ? "unavailable" : "missing-preview";
   }
   private fail() {
     this.failedGeneration = this.generation;
@@ -148,6 +159,7 @@ export class SemanticFindSession {
   }
   cancel() {
     this.generation++;
+    this.controller.abort(); this.controller = new AbortController();
     try {this.worker?.postMessage({kind: "cancel", through: this.sequence});} catch {}
     for (const request of this.requests.values()) {clearTimeout(request.timer); request.reject(new DOMException("Visual search cancelled", "AbortError"));}
     this.requests.clear();
