@@ -127,7 +127,7 @@ struct PhotoViewer: View {
         .overlay(alignment: .bottom) {
           if let feedback { Text(feedback).font(.footnote).padding().background(.regularMaterial, in: .capsule).padding(.bottom, 60) }
         }
-        .onChange(of: services.vault.generation) { shareTask?.cancel(); saveTask?.cancel(); cleanupShare(); dismiss() }
+        .onChange(of: services.vault.generation) { cancelViewerWork(); dismiss() }
         .onChange(of: services.selectedGrant) {
           if receivedUnavailable {
             details = nil
@@ -140,8 +140,10 @@ struct PhotoViewer: View {
         .onChange(of: services.consumerCatalogGeneration) {
           if receivedGrant == nil, !SavedPhotosPresentationPolicy.isCurrent(photos, lookup: services.consumerSavedPhoto) { dismiss() }
         }
-        .onChange(of: scenePhase) { if scenePhase == .background { shareTask?.cancel(); saveTask?.cancel(); cleanupShare() } }
-        .onDisappear { shareTask?.cancel(); saveTask?.cancel(); cleanupShare() }
+        .onChange(of: scenePhase) { (_: ScenePhase, newPhase: ScenePhase) in
+          scenePhaseChanged(newPhase)
+        }
+        .onDisappear(perform: cancelViewerWork)
         .alert("Fotoro", isPresented: Binding(get: { services.error != nil }, set: { if !$0 { services.error = nil } })) {
           Button("OK") { services.error = nil }
         } message: { Text(services.error ?? "") }
@@ -224,6 +226,14 @@ struct PhotoViewer: View {
       savedReceivedIDs.insert(photo.id)
       feedback = "Saved in your Fotoro."
     }
+  }
+  private func scenePhaseChanged(_ phase: ScenePhase) {
+    if phase == .background { cancelViewerWork() }
+  }
+  private func cancelViewerWork() {
+    shareTask?.cancel()
+    saveTask?.cancel()
+    cleanupShare()
   }
   private func cleanupShare() {
     ConsumerShareExports.remove(originalExports)
