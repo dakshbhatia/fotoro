@@ -19,15 +19,15 @@ Cloudflare proposals become tasks here only when a consumer need admits them.
 
 | Order | Foundation and current implementation | Still needed to call it complete |
 | --- | --- | --- |
-| 1 | First photos and access: local photos before an account; password and optional passkey entry continue a chosen Save or Sync. | Fresh iPhone → allow Photos → browse → opt in once → open the same Saved photos in Safari. Qualify real PRF passkeys on iPhone, Safari and Mac; Sign in with Apple is not implemented. |
+| 1 | First photos and access: local photos before an account; password/passkey entry continues a chosen Save, Sync or invitation. A matching returning browser can sign in and unlock in one PRF request; fresh-browser discovery retains its second request. | Fresh iPhone → allow Photos → browse → opt in once → open the same Saved photos in Safari. Qualify real PRF passkeys on iPhone, Safari and Mac; Sign in with Apple is not implemented. |
 | 2 | Sync intake: durable last-10-days initial scope, explicit expansion, Pause, retry and account/source fences. | Physical background, relaunch, offline reconnect, changed permissions and edited/iCloud assets. Already scheduled ciphertext may finish in the background; new preparation needs the open, unlocked app. |
 | 3 | Original recovery: encrypted JPEG/PNG/HEIC, supported video and complete Live Photo resources, bounded staging and byte verification. | Cross-device physical restore after an interrupted transfer and relaunch. Keep the 50 MiB logical-original limit until larger-original recovery is qualified. |
 | 4 | Photo evidence: OCR, EXIF dates, observed locations, supplied labels and current revision bindings. Saved OCR now follows its consumer display ID. | Personal-library OCR/metadata coverage, correction and location acceptance. No invented date or location for missing evidence. |
-| 5 | People: opt-in local pinned models, reviewed names, merge, separate and rejection on both clients. | Held-out identity quality, Safari inference and cross-device reviewed-name acceptance. |
+| 5 | People: opt-in local pinned models, reviewed names, merge, separate and rejection on both clients. Any/Everyone-per-photo filters combine current reviewed person IDs with the query before ranking limits. | Held-out identity quality, Safari inference and cross-device reviewed-name acceptance. Separate portraits or similar places must not imply shared attendance. |
 | 6 | Search and Picks: text/date/label search, local visual retrieval, diverse suggestions and explicit incomplete-coverage feedback. | Held-out retrieval and shortlist quality against human choices; cold/warm time to the intended photo. Suggestions cannot silently select, save or delete originals. |
 | 7 | Photo delivery and return: thumbnails/previews for browsing, owned URL leases, preview retry, cancellation and bounded native zoom/pan. | Large-library frame pacing, memory, battery, motion playback and interruptions on supported phones. Missing derivatives cannot silently download originals. |
 | 8 | Organization and accessibility: optional sortable photo tables, observed columns, keyboard navigation across virtualized rows and responsive selection/viewers. | VoiceOver, Dynamic Type, physical gestures and broader hardware/browser acceptance. |
-| 9 | Share and receive: system original sharing, private invitations and recipient-owned Save. | Physical share-sheet completion and a two-person invitation through sign-in, opening and Save; first-contact friction and contact convergence. |
+| 9 | Share and receive: system original sharing, private invitations, recipient-owned Save and live albums with explicit acceptance and later chosen owned-photo additions. | Physical share-sheet completion and a three-person live album through sign-in, acceptance, contributions, refresh and ending access; first-contact friction and contact convergence. |
 | 10 | Optional understanding and operation: preview consent → Gemini review → Keep, encrypted facts, account fences, request caps and audited native release artifacts. | Deliberate provider activation and live cost/behavior evidence; current TestFlight installation and production release. Measure upload/commit failures, quota pressure, orphan allocation and restore behavior without private content in logs. |
 
 These gates qualify the current implementation. Test coverage and a public
@@ -57,10 +57,22 @@ Scene publication remains disabled for older-reader compatibility. Personal
 retrieval quality, physical media/background acceptance and large-library
 performance remain open.
 
+Live albums have a fixed owner-plus-invitee roster of at most 12, at most 1,000
+photos and a 50-accepted-active-albums allowance per account. Pending invitations
+do not consume that allowance. Each invited member explicitly accepts before
+reading or adding chosen owned Saved photos. Originals are reused, and private
+annotation/People facts do not become album search data. Album search currently
+uses filenames and dates; richer family/place search stays in the private finder.
+Original files retain their embedded metadata, and ending access cannot recall
+previous downloads. Cross-trip landmark grouping and automatic attendance are
+not implemented.
+
 Current identity is one Fotoro password with protected remembered native access.
 An open account can add a passkey; compatible PRF credentials can unlock the
-same encrypted account on another device. A fresh device may need two system
-passkey assertions to discover the account and then evaluate its wrapper salt.
+same encrypted account on another device. A returning browser can use one system
+request when its cached account, selected credential, public keys and wrapper
+salt match fresh server data. Fresh-browser discovery needs two system passkey
+requests to discover the account and then evaluate its wrapper salt.
 Providers without usable PRF retain the password path. Sign in with Apple is
 not delivered. System sharing is the main original-file
 route; private invitations require accepted contacts. Contact synchronization
@@ -86,7 +98,8 @@ permission/deletion fences. Larger originals need bounded staging, durable
 resumption, cleanup and exact restore before the size limit changes. Safe cleanup
 needs recoverable deletion, undo and convergence before freeing device storage.
 Optional cloud AI needs explicit opt-in, a spending bound and a plaintext access
-model. Share extensions, stories, saved URLs, nearby transfer and public discovery
+model; current daily request/token caps are not dollar limits. Share extensions,
+stories, saved URLs, nearby transfer and public discovery
 wait for a specific admitted journey. None is required to qualify the core loop.
 
 For every change: remove obsolete controls as their replacement works, reuse the

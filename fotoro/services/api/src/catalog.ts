@@ -55,6 +55,11 @@ export async function addPhoto(env: Env, actor: Actor, s: SignedPayloadV1) {
   }
   return m;
 }
+export async function ownedManifest(env: Env, actor: Actor, id: string) {
+  const row = await env.DB.prepare("SELECT signed FROM photos WHERE id=? AND account_id=?").bind(id, actor.accountId).first<{signed: string}>();
+  if (!row) fail("FORBIDDEN", 403);
+  return JSON.parse(row!.signed) as SignedPayloadV1;
+}
 export async function changes(
   env: Env,
   actor: Actor,

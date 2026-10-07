@@ -530,7 +530,7 @@ final class RecentPhotosTests: XCTestCase {
     enrichment.indexed = 2
     enrichment.results = [SearchHit(id: "new", evidenceClass: 1, reason: "Text")]
     XCTAssertTrue(original.permitsResults(for: enrichment))
-    for field in ["query", "library", "meaning", "catalog", "account", "vault"] {
+    for field in ["query", "library", "meaning", "catalog", "account", "vault", "people"] {
       var changed = enrichment
       switch field {
       case "query": changed.query = "beach"
@@ -538,6 +538,7 @@ final class RecentPhotosTests: XCTestCase {
       case "meaning": changed.acceptedMeaning = "another"
       case "catalog": changed.catalog = 2
       case "account": changed.account = "other"
+      case "people": changed.people = PeopleSearchSelection(personIDs: [UUID().uuidString])
       default: changed.vault = UUID()
       }
       XCTAssertFalse(original.permitsResults(for: changed), field)

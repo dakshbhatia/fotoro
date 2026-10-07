@@ -12,6 +12,9 @@ struct ConsumerSearchHit: Identifiable, Equatable, Sendable {
   var id: String { photo.id }
 }
 enum ConsumerSearchBinding {
+  static func selectionForResults(_ hits: [ConsumerSearchHit], reviewedIDs: Set<String>? = nil) -> Set<ConsumerPhotoReference> {
+    Set(hits.filter { reviewedIDs?.contains($0.id) ?? true }.map(\.photo))
+  }
   static func verifiedCopies(sources: [BackupSource], records: [String: SearchRecord]) -> [String: Set<String>] {
     var copies: [String: Set<String>] = [:]
     for source in sources {

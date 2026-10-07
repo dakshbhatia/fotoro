@@ -7,7 +7,7 @@ import { createMomentLink, parseShareLink } from "@fotoro/contracts/share-links"
 import cards from "../../../fixtures/accounts.json";
 import type { AccountCardV1 } from "@fotoro/contracts";
 
-it("associates only configured app IDs with root contact and moment fragments and keeps fixtures inaccessible", async () => {
+it("associates only configured app IDs with root contact, moment and album fragments and keeps fixtures inaccessible", async () => {
   const e = {...env, AUTH_MODE: "production", APPLE_APP_IDS: " ABCDEFGHIJ.cloud.fotoro.Fotoro,ABCDEFGHIJ.cloud.fotoro.Fotoro,ZYXWVUTSRQ.cloud.fotoro.Other ",
     ASSETS: {fetch: async () => new Response("Fotoro web")}} as any;
   const response = await app.fetch(new Request("https://fotoro.cloud/.well-known/apple-app-site-association"), e);
@@ -16,7 +16,7 @@ it("associates only configured app IDs with root contact and moment fragments an
   expect(response.headers.get("content-type")).toContain("application/json");
   expect(await response.json()).toEqual({
     webcredentials: {apps: ["ABCDEFGHIJ.cloud.fotoro.Fotoro", "ZYXWVUTSRQ.cloud.fotoro.Other"]},
-    applinks: {details: [{appIDs: ["ABCDEFGHIJ.cloud.fotoro.Fotoro", "ZYXWVUTSRQ.cloud.fotoro.Other"], components: [{"/": "/", "#": "contact=*"}, {"/": "/", "#": "moment=*"}]}]},
+    applinks: {details: [{appIDs: ["ABCDEFGHIJ.cloud.fotoro.Fotoro", "ZYXWVUTSRQ.cloud.fotoro.Other"], components: [{"/": "/", "#": "contact=*"}, {"/": "/", "#": "moment=*"}, {"/": "/", "#": "album=*"}]}]},
   });
   expect((await app.fetch(new Request("https://fotoro.cloud/__fixtures/accounts"), e)).status).toBe(404);
   expect((await app.fetch(new Request("https://fotoro.cloud/v1/grants"), e)).status).toBe(401);

@@ -282,6 +282,7 @@ struct RecentPhotosView: View {
   @State private var homeAuthenticationTask: Task<Void, Never>?
   @State private var selectedSavedPhotos = SavedPhotoSelection()
   @State private var sharedSavedPhotos: SharedPhotosPresentation?
+  @State private var albumPresentation: NativeAlbumPresentation?
   @State private var savedShareSources: [LocalPhoto] = []
   @State private var savedShareBinding: SavedLibraryOpenBinding?
   @State private var savedShareExports: [URL] = []
@@ -325,6 +326,7 @@ struct RecentPhotosView: View {
   private var hasSelectablePhotos: Bool {
     if selecting || selectedCount > 0 { return true }
     #if !FOTORO_LOCAL_PREVIEW
+      if search.hasSearch { return !currentSearchHits.isEmpty }
       if query.isEmpty, scope == .saved { return !ownedPhotos.isEmpty }
       if query.isEmpty, allPhotos { return !timelineGroups.isEmpty }
       if !savedPhotos.isEmpty { return true }
@@ -332,6 +334,7 @@ struct RecentPhotosView: View {
     return !visible.isEmpty
   }
   private var homeFilterIsActive: Bool {
+    if !search.peopleSelection.isEmpty { return true }
     guard query.isEmpty else { return false }
     #if !FOTORO_LOCAL_PREVIEW
       if scope == .saved { return savedFavoritesOnly }
@@ -375,7 +378,7 @@ struct RecentPhotosView: View {
 #endif
   }
   private var visible: [RecentPhoto] {
-    guard !query.isEmpty else { return homePhotos }
+    guard search.hasSearch else { return homePhotos }
     guard let result = bestShots.snapshot else { return searchPhotos }
     return searchPhotos.filter { result.recommendations.ids.contains("device:" + $0.id) }
   }
@@ -494,7 +497,7 @@ struct RecentPhotosView: View {
       results: search.response.results, indexed: search.response.indexed,
       response: search.response.generation, acceptedMeaning: search.acceptedMeaningID,
       catalog: services?.consumerCatalogGeneration,
-      account: services?.session.accountId, vault: services?.vault.generation)
+      account: services?.session.accountId, vault: services?.vault.generation, people: search.peopleSelection)
   }
 #endif
   var body: some View {
@@ -515,6 +518,9 @@ struct RecentPhotosView: View {
       .sheet(item: $sharedSavedPhotos) { presentation in
         if let services { ExchangeView(services: services, selected: presentation.photos) }
       }
+      .sheet(item: $albumPresentation) { presentation in
+        if let services { NativeAlbumView(services: services, selected: presentation.selected, incoming: presentation.incoming) }
+      }
       .sheet(item: $backupAccount) {
         LibraryView(services: $0.services, saveSelection: $0.selection, incomingLink: $0.incoming)
       }
@@ -524,6 +530,11 @@ struct RecentPhotosView: View {
       }
       .onOpenURL { url in
         do {
+          if url.fragment?.hasPrefix("album=") == true {
+            let incoming = try NativeAlbumLinks.parse(url, origin: services?.api.origin ?? FotoroShareLinks.origin)
+            openAlbums(incoming: incoming)
+            return
+          }
           let incoming = try FotoroShareLinks.parse(url, expectedOrigin: services?.api.origin ?? FotoroShareLinks.origin)
           if services == nil { services = try AppServices() }
           services?.bindLocalSearch(search); services?.bindRecentPhotos(store)
@@ -567,7 +578,7 @@ struct RecentPhotosView: View {
               ToolbarItem(placement: .topBarTrailing) { homeSyncButton }
             #endif
           }
-          if canSearch || !query.isEmpty {
+          if canSearch || search.hasSearch {
             DefaultToolbarItem(kind: .search, placement: .bottomBar)
           }
         }
@@ -612,11 +623,12 @@ struct RecentPhotosView: View {
           #endif
         }
         #if !FOTORO_LOCAL_PREVIEW
-        .sheet(item: $people) { _ in PhotoPeopleView(search: search) }
+        .sheet(item: $people) { _ in PhotoPeopleView(search: search, findPhotos: { queryFocused = false }) }
         #endif
         .onChange(of: query) { cancelBestShots(); search.updateQuery(query) }
         .onChange(of: search.response.generation) { cancelBestShots() }
         .onChange(of: search.acceptedMeaningID) { cancelBestShots() }
+        .onChange(of: search.peopleSelection) { cancelBestShots() }
         .onChange(of: store.status) { cancelBestShots() }
         .onChange(of: scope) {
           cancelBestShots()
@@ -683,7 +695,7 @@ struct RecentPhotosView: View {
   }
   @ViewBuilder private var content: some View {
     #if !FOTORO_LOCAL_PREVIEW
-    if scope == .saved && query.isEmpty {
+    if scope == .saved && !search.hasSearch {
       savedContent
     } else {
       deviceContent
@@ -750,7 +762,8 @@ struct RecentPhotosView: View {
               queryFocused = false
               savedViewer = SavedPhotoViewerPresentation(initial: photo, photos: savedPhotos)
             },
-            choseAlternative: { queryFocused = false })
+            choseAlternative: { queryFocused = false },
+            editPeople: { queryFocused = false; people = PhotoPeoplePresentation() }, selectResults: selectSearchResults)
 #endif
         } else {
           #if !FOTORO_LOCAL_PREVIEW
@@ -785,6 +798,7 @@ struct RecentPhotosView: View {
     }
   }
   private var contentMode: RecentPhotosContentMode {
+    if search.hasSearch { return .search }
     #if !FOTORO_LOCAL_PREVIEW
       if query.isEmpty, allPhotos, services?.photoAccountAccess != nil { return .gallery }
     #endif
@@ -831,8 +845,8 @@ struct RecentPhotosView: View {
     }
   #endif
   private var browseScrollBinding: Binding<String?> {
-    Binding(get: { query.isEmpty ? browseScrollIDs[scope] : nil }, set: {
-      if query.isEmpty { browseScrollIDs[scope] = $0 }
+    Binding(get: { !search.hasSearch ? browseScrollIDs[scope] : nil }, set: {
+      if !search.hasSearch { browseScrollIDs[scope] = $0 }
     })
   }
   private var bestShotsControls: some View {
@@ -912,7 +926,7 @@ struct RecentPhotosView: View {
       let catalog = services?.store
     #endif
     @MainActor func valid() -> Bool {
-      guard bestShotsRequest == request, scenePhase == .active, !queryToken.isEmpty,
+      guard bestShotsRequest == request, scenePhase == .active, search.hasSearch,
         query == queryToken, search.libraryGeneration == library,
         search.response.generation == response, search.acceptedMeaningID == meaning else { return false }
       #if !FOTORO_LOCAL_PREVIEW
@@ -1139,7 +1153,7 @@ struct RecentPhotosView: View {
   }
 #endif
   @ViewBuilder private var homeSearchContent: some View {
-    if canSearch || !query.isEmpty {
+    if canSearch || search.hasSearch {
       content
         .searchable(text: $query, placement: .toolbar, prompt: "Search photos")
         .searchFocused($queryFocused)
@@ -1152,9 +1166,9 @@ struct RecentPhotosView: View {
   }
   private var showsHomeNavigation: Bool {
     #if FOTORO_LOCAL_PREVIEW
-      hasBrowseAccess || !query.isEmpty
+      hasBrowseAccess || search.hasSearch
     #else
-      hasBrowseAccess || scope == .saved || !query.isEmpty
+      hasBrowseAccess || scope == .saved || search.hasSearch
     #endif
   }
   private var homeScopeMenu: some View {
@@ -1165,10 +1179,12 @@ struct RecentPhotosView: View {
       #if !FOTORO_LOCAL_PREVIEW
       Button("People", systemImage: "person.2") { queryFocused = false; people = PhotoPeoplePresentation() }
         .accessibilityIdentifier("home.people")
+      Button("Albums", systemImage: "rectangle.stack.badge.person.crop") { openAlbums() }
+        .accessibilityIdentifier("home.albums")
       #endif
       Button("Places", systemImage: "map") { queryFocused = false; places = PhotoPlacesPresentation() }
         .accessibilityIdentifier("home.places")
-      if query.isEmpty, RecentPhotosPolicy.canRead(store.status) {
+      if !search.hasSearch, RecentPhotosPolicy.canRead(store.status) {
         #if !FOTORO_LOCAL_PREVIEW
           if scope != .saved { deviceBrowseOptions }
         #else
@@ -1176,14 +1192,14 @@ struct RecentPhotosView: View {
         #endif
       }
       #if !FOTORO_LOCAL_PREVIEW
-        if query.isEmpty, scope == .saved, let services, services.photoAccountAccess != nil {
+        if !search.hasSearch, scope == .saved, let services, services.photoAccountAccess != nil {
           Toggle("Favorites", isOn: $savedFavoritesOnly)
           Button("Shared photos", systemImage: "person.2") { sharedSavedPhotos = SharedPhotosPresentation() }
           Button("Refresh", systemImage: "arrow.clockwise") { Task { await savedRefresh.refresh(services) } }
             .accessibilityIdentifier("saved.refresh")
         }
       #endif
-      if query.isEmpty, hasSelectablePhotos { selectionToggle }
+      if !search.hasSearch, hasSelectablePhotos { selectionToggle }
       Button("Settings", systemImage: "gearshape") { queryFocused = false; settings = true }
         .accessibilityIdentifier("home.settings")
     } label: {
@@ -1274,11 +1290,30 @@ struct RecentPhotosView: View {
     Button("Share", systemImage: "square.and.arrow.up", action: shareSelectedOriginals)
       .buttonStyle(.bordered).fixedSize(horizontal: true, vertical: false)
       .disabled(selectedCount == 0 || preparingShare || showShare)
+    if selectedSavedPhotos.count > 0 {
+      Button("Album", systemImage: "rectangle.stack") { openAlbums() }
+        .buttonStyle(.bordered).disabled(preparingShare || showShare)
+        .accessibilityIdentifier("selection.album")
+    }
     #else
     Button("Share", systemImage: "square.and.arrow.up", action: shareSelectedDevicePhotos)
       .buttonStyle(.bordered).fixedSize(horizontal: true, vertical: false).disabled(selected.isEmpty || preparingShare || showShare)
     #endif
   }
+  #if !FOTORO_LOCAL_PREVIEW
+  private func openAlbums(incoming: FotoroAlbumInvitation? = nil) {
+    do {
+      if services == nil { services = try AppServices() }
+      guard let services else { return }
+      services.bindLocalSearch(search); services.bindRecentPhotos(store)
+      queryFocused = false; pendingShare = nil; shareTask?.cancel(); cleanupShare()
+      settings = false; viewer = nil; savedViewer = nil; people = nil; places = nil
+      sharedSavedPhotos = nil; backupAccount = nil; photoSyncPresentation = nil
+      let selected = try selectedSavedPhotos.resolve(using: services.consumerSavedPhoto)
+      albumPresentation = NativeAlbumPresentation(selected: selected, incoming: incoming)
+    } catch { store.error = error.localizedDescription }
+  }
+  #endif
   private func shareSelectedDevicePhotos() {
     share(selectedPhotos.values.map(\.photo).sorted { ($0.capturedAt ?? .distantPast) > ($1.capturedAt ?? .distantPast) })
   }
@@ -1460,7 +1495,7 @@ struct RecentPhotosView: View {
     } catch { store.error = error.localizedDescription }
   }
   private func updateSearch() async {
-    guard !query.isEmpty else { searchHits = []; savedResults = [:]; completedSearchID = nil; return }
+    guard search.hasSearch else { searchHits = []; savedResults = [:]; completedSearchID = nil; return }
     let token = searchTaskID
     do {
       if !search.indexing { try await Task.sleep(for: .milliseconds(100)) }
@@ -1482,6 +1517,22 @@ struct RecentPhotosView: View {
       savedResults = [:]
       completedSearchID = token
       store.error = error.localizedDescription
+    }
+  }
+  private func selectSearchResults() {
+    guard !preparingShare else { return }
+    selecting = true
+    queryFocused = false
+    selectedPhotos.removeAll()
+    selectedSavedPhotos.removeAll()
+    let references = ConsumerSearchBinding.selectionForResults(currentSearchHits, reviewedIDs: bestShots.snapshot?.recommendations.ids)
+    for reference in references {
+      switch reference {
+      case .device(let id):
+        if selectedPhotos[id] == nil, let photo = search.assets[id] { toggleSelection(photo) }
+      case .saved(let id):
+        if let photo = savedResults[id] { toggleSavedSelection(photo) }
+      }
     }
   }
 #endif
@@ -1537,7 +1588,7 @@ struct RecentPhotosView: View {
         try Task.checkCancellation()
         guard store.validatePresentation(viewer: [], selection: [], share: sources).shareIsCurrent else { throw CancellationError() }
         sharing = exported
-        shareMeaning = query.isEmpty ? nil : search.response.meaning?.id
+        shareMeaning = search.hasSearch ? search.response.meaning?.id : nil
         sharedPhotoIDs = photos.map(\.id)
         showShare = true
       } catch is CancellationError { removeShareFiles(exported) }
@@ -1624,7 +1675,7 @@ struct RecentPhotosView: View {
         deviceShareExports = completed.device
         savedShareExports = completed.saved
         sharing = completed.urls
-        shareMeaning = query.isEmpty ? nil : search.response.meaning?.id
+        shareMeaning = search.hasSearch ? search.response.meaning?.id : nil
         sharedPhotoIDs = device.map(\.id)
         showShare = true
         pending = nil
@@ -1834,9 +1885,10 @@ struct ConsumerSearchPresentationID: Equatable {
   var catalog: UInt64?
   var account: String?
   var vault: UUID?
+  var people = PeopleSearchSelection()
   func permitsResults(for current: Self) -> Bool {
     query == current.query && library == current.library && acceptedMeaning == current.acceptedMeaning
-      && catalog == current.catalog && account == current.account && vault == current.vault
+      && catalog == current.catalog && account == current.account && vault == current.vault && people == current.people
   }
 }
 #endif

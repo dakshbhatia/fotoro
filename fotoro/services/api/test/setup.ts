@@ -6,6 +6,7 @@ import annotations from "../migrations/0004_private_annotations.sql?raw";
 import indexes from "../migrations/0005_account_catalog_indexes.sql?raw";
 import limits from "../migrations/0006_storage_and_auth_limits.sql?raw";
 import inference from "../migrations/0007_cloud_inference_work.sql?raw";
+import albums from "../migrations/0008_shared_albums.sql?raw";
 import { beforeAll } from "vitest";
 beforeAll(async () => {
   await env.DB.exec(schema.replace(/\n/g, " "));
@@ -15,4 +16,5 @@ beforeAll(async () => {
   await env.DB.exec(indexes.replace(/\n/g, " "));
   await env.DB.exec(limits.replace(/\n/g, " "));
   await env.DB.exec(inference.replace(/\n/g, " "));
+  await env.DB.exec(albums.replace(/\n/g, " "));
 });

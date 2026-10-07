@@ -81,6 +81,7 @@ function LocalGrid({
   onOpen,
   onFailure,
   selection,
+  resourceForPhoto,
   active = true,
 }: {
   photos: LocalPhoto[];
@@ -88,6 +89,7 @@ function LocalGrid({
   onOpen: (id: string) => void;
   onFailure: (id: string, message: string) => void;
   selection?: PickSelection;
+  resourceForPhoto?: (photo: LocalPhoto) => LocalResources;
   active?: boolean;
 }) {
   const parent = useRef<HTMLDivElement>(null),
@@ -201,7 +203,7 @@ function LocalGrid({
                 <Tile
                   key={photo.id}
                   photo={photo}
-                  resources={resources}
+                  resources={resourceForPhoto?.(photo) ?? resources}
                   onOpen={() => onOpen(photo.id)}
                   onFailure={onFailure}
                   selection={selection}

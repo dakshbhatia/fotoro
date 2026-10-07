@@ -13,7 +13,9 @@
     "./camera-media": "./src/camera-media.ts",
     "./location": "./src/location.ts",
     "./intelligence": "./src/intelligence.ts",
-    "./people": "./src/people.ts"
+    "./people": "./src/people.ts",
+    "./albums": "./src/albums.ts",
+    "./albums-links": "./src/albums-links.ts"
   },
   "dependencies": {
     "ajv": "8.18.0",

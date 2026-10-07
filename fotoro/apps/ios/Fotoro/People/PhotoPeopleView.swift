@@ -6,11 +6,15 @@ struct PhotoPeopleView: View {
   let search: LocalSearchStore
   @State private var people: PhotoPeopleStore
   @State private var names: [String: String] = [:]
+  @State private var selection: PeopleSearchSelection
+  var findPhotos: () -> Void = {}
   @Environment(\.scenePhase) private var scenePhase
   @Environment(\.dismiss) private var dismiss
-  init(search: LocalSearchStore) {
+  init(search: LocalSearchStore, findPhotos: @escaping () -> Void = {}) {
     self.search = search
+    self.findPhotos = findPhotos
     _people = State(initialValue: PhotoPeopleStore(search: search))
+    _selection = State(initialValue: search.peopleSelection)
   }
   var body: some View {
     NavigationStack {
@@ -28,6 +32,31 @@ struct PhotoPeopleView: View {
             Button("Find faces", systemImage: "arrow.clockwise") { people.scan() }.accessibilityIdentifier("people.scan")
           }
           if let error = people.error { Text(error).font(.footnote).foregroundStyle(.red) }
+        }
+        Section("Find photos") {
+          Picker("People match", selection: $selection.match) {
+            ForEach(PeopleSearchMatch.allCases) { Text($0.title).tag($0) }
+          }.accessibilityIdentifier("people.search.match")
+          Text("Everyone selected must appear in the same photo. This does not establish who visited a place.")
+            .font(.footnote).foregroundStyle(.secondary)
+          ForEach(people.groups.filter { $0.name != nil && $0.confirmedCount > 0 }) { group in
+            Toggle(group.name ?? "", isOn: Binding(get: { selection.personIDs.contains(group.id) }, set: { selected in
+              if selected { selection.personIDs.insert(group.id) } else { selection.personIDs.remove(group.id) }
+            })).accessibilityIdentifier("people.search.person." + group.id)
+          }
+          if people.groups.allSatisfy({ $0.name == nil || $0.confirmedCount == 0 }) {
+            Text("Save a name on confirmed faces below to find that person.").font(.footnote).foregroundStyle(.secondary)
+          }
+          Button("Find photos", systemImage: "magnifyingglass") {
+            let names = Dictionary(uniqueKeysWithValues: people.groups.compactMap { group in group.name.map { (group.id, $0) } })
+            search.setPeopleSelection(selection, names: names)
+            findPhotos()
+            dismiss()
+          }.disabled(selection.isEmpty || !search.peopleSnapshotReady).accessibilityIdentifier("people.search.find")
+          if !selection.isEmpty || !search.peopleSelection.isEmpty {
+            Button("Clear people") { selection = PeopleSearchSelection(); search.setPeopleSelection(selection) }
+              .accessibilityIdentifier("people.search.clear")
+          }
         }
         ForEach(people.groups) { group in
           Section {

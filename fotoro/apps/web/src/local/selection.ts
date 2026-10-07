@@ -32,3 +32,19 @@ export function ownedPhotoForLocal(snapshot: OwnedPhotoSnapshot | null, local: L
   const index = savedSearchPhotos(snapshot, [local]).findIndex(photo => photo.id === local.id);
   return index < 0 ? undefined : snapshot.photos.filter(photo => !photo.grantId && photo.manifest.ownerAccountId === snapshot.accountId)[index];
 }
+
+export function chosenAlbumPhotos(snapshot: OwnedPhotoSnapshot | null, local: readonly LocalPhoto[], saved: readonly import("../library/catalog").Photo[]) {
+  const photos = new Map<string, import("../library/catalog").Photo>();
+  let needsSave = 0;
+  if (!snapshot?.current()) return {photos: [], needsSave: local.length + saved.length};
+  for (const photo of saved) {
+    if (!photo.grantId && photo.manifest.ownerAccountId === snapshot.accountId && snapshot.photos.includes(photo)) photos.set(photo.manifest.photoId, photo);
+    else needsSave++;
+  }
+  for (const source of local) {
+    const photo = source.current?.() !== false ? ownedPhotoForLocal(snapshot, source) : undefined;
+    if (photo) photos.set(photo.manifest.photoId, photo); else needsSave++;
+  }
+  if (!snapshot.current()) return {photos: [], needsSave: local.length + saved.length};
+  return {photos: [...photos.values()], needsSave};
+}

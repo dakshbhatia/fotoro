@@ -54,5 +54,6 @@ export function usePhotoPicks(photos: LocalPhoto[], resources: LocalResources, e
   const suggested = () => setSelection(new Set(recommendations?.ids));
   const chooseAll = () => setSelection(new Set(photos.map(photo => photo.id)));
   const clearSelection = () => setSelection(new Set());
-  return {ids, recommendations, busy, done, clear, clearSelection, choose, suggested, chooseAll};
+  const replaceSelection = (ids: ReadonlySet<string>) => setSelection(availablePhotoSelection(new Set(ids), photos));
+  return {ids, recommendations, busy, done, clear, clearSelection, replaceSelection, choose, suggested, chooseAll};
 }

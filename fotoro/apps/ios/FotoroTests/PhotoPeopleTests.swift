@@ -7,6 +7,78 @@ import XCTest
 @testable import Fotoro
 
 final class PhotoPeopleTests: XCTestCase {
+  private func familyRecord(_ id: String, people: [String], names: [String]? = nil, date: Date? = nil) throws -> SearchRecord {
+    var record = SearchRecord(id: id)
+    record.capturedAt = date; record.labels = ["beach"]; record.ocrStatus = .complete
+    record.facts = try PhotoPeopleFacts.replacing([], with: people.enumerated().map { offset, person in
+      PhotoPersonAssignment(p: person, n: names?[offset] ?? "Family", b: [offset*1000,0,100,100])
+    })
+    return record
+  }
+  func testFamilyAnyEveryoneUsesReviewedIDsPerPhotoWithTextDatesAndClear() throws {
+    let a = UUID().uuidString.lowercased(), b = UUID().uuidString.lowercased()
+    let index = try SearchIndex(), now = Date(), old = now.addingTimeInterval(-90*86400)
+    var labelOnly = SearchRecord(id: "label-only"); labelOnly.labels = ["Family", "beach"]
+    try index.replacePermitted([
+      familyRecord("a", people: [a], names: ["Same name"], date: now),
+      familyRecord("b", people: [b], names: ["Same name"], date: now),
+      familyRecord("together", people: [a,b], names: ["Same name", "Same name"], date: old), labelOnly,
+    ])
+    let any = PeopleSearchSelection(personIDs: [a,b])
+    let everyone = PeopleSearchSelection(personIDs: [a,b], match: .everyone)
+    XCTAssertEqual(Set(try index.search("", scope: SearchScope(people: any)).results.map(\.id)), ["a","b","together"])
+    XCTAssertEqual(try index.search("beach", scope: SearchScope(people: everyone)).results.map(\.id), ["together"])
+    XCTAssertEqual(try index.search("beach", scope: SearchScope(from: old.addingTimeInterval(-1), until: now.addingTimeInterval(-1), people: any)).results.map(\.id), ["together"])
+    XCTAssertTrue(try index.search("forest", scope: SearchScope(people: everyone)).results.isEmpty)
+    XCTAssertTrue(try index.search("beach", scope: SearchScope(from: now.addingTimeInterval(-1), people: everyone)).results.isEmpty,
+      "Everyone is same-photo membership, never the union of separate trip photos")
+    XCTAssertEqual(Set(try index.search("beach", scope: SearchScope()).results.map(\.id)), ["a","b","together","label-only"])
+    XCTAssertTrue(try index.search("", scope: SearchScope(people: PeopleSearchSelection(personIDs: ["invalid"]))).results.isEmpty)
+  }
+  func testFamilyEligibilityPrecedesDateAndSemanticLimitsAndRejectsWrongSavedSource() throws {
+    let person = UUID().uuidString.lowercased(), now = Date(), index = try SearchIndex()
+    var records = (0..<250).map { number in
+      var record = SearchRecord(id: "new-\(number)"); record.capturedAt = now; return record
+    }
+    records.append(try familyRecord("older-family", people: [person], date: now.addingTimeInterval(-365*86400)))
+    try index.replacePermitted(records)
+    let scope = SearchScope(people: PeopleSearchSelection(personIDs: [person]))
+    XCTAssertEqual(try index.search("", scope: scope).results.map(\.id), ["older-family"])
+    var vector = [Float](repeating: 0, count: 512); vector[0] = 1
+    for record in records { try index.applySemantic(vector, photoID: record.id, revision: record.revision) }
+    XCTAssertEqual(try index.addingSemantic(vector, to: index.search("coast", scope: scope)).results.map(\.id), ["older-family"])
+    let digest = String(repeating: "a", count: 43), wrong = String(repeating: "b", count: 43)
+    var saved = try familyRecord("saved", people: [person]); saved.scope = "saved"; saved.revision = digest
+    saved.facts = try PhotoPeopleFacts.replacing([], with: PhotoPeopleFacts.read(saved.facts), originalSha256: wrong)
+    try index.put(saved)
+    XCTAssertTrue(try index.search("", scope: SearchScope(source: "saved", people: scope.people)).results.isEmpty)
+    saved.facts = try PhotoPeopleFacts.replacing([], with: PhotoPeopleFacts.read(saved.facts), originalSha256: digest)
+    try index.put(saved)
+    XCTAssertEqual(try index.search("", scope: SearchScope(source: "saved", people: scope.people)).results.map(\.id), ["saved"])
+  }
+  func testFamilyResultsRespectTentativeFacesCorrectionsAndSourceRevisionWithdrawal() throws {
+    let index = try SearchIndex(); try index.setWorkGeneration(1)
+    try index.replacePermitted([SearchRecord(id: "first"), SearchRecord(id: "suggested")])
+    try index.setPeopleEnabled(true)
+    let face = PhotoFaceEmbedding(box: [0,0,100,100], vector: vector())
+    try index.applyPeople([face], photoID: "first", revision: "1", generation: 1)
+    let person = try XCTUnwrap(index.peopleGroups().first)
+    _ = try index.namePeopleGroup(person.id, name: "Family")
+    try index.applyPeople([face], photoID: "suggested", revision: "1", generation: 1)
+    let scope = SearchScope(people: PeopleSearchSelection(personIDs: [person.id]))
+    XCTAssertEqual(try index.search("", scope: scope).results.map(\.id), ["first"])
+    _ = try index.splitPeopleFace(try XCTUnwrap(person.faces.first).id, reject: true)
+    XCTAssertTrue(try index.search("", scope: scope).results.isEmpty)
+    try index.replacePermitted([SearchRecord(id: "first", revision: "changed")], generation: 1)
+    XCTAssertTrue(try index.search("", scope: scope).results.isEmpty)
+  }
+  func testSelectFilteredResultsReplacesEarlierHiddenSelectionWithExactReferences() {
+    var selected: Set<ConsumerPhotoReference> = [.device("earlier-family"), .saved("earlier-place")]
+    let hits = [ConsumerSearchHit(photo: .device("current-family")), ConsumerSearchHit(photo: .saved("current-trip"))]
+    selected = ConsumerSearchBinding.selectionForResults(hits)
+    XCTAssertEqual(selected, [.device("current-family"), .saved("current-trip")])
+    XCTAssertEqual(ConsumerSearchBinding.selectionForResults(hits, reviewedIDs: ["saved:current-trip"]), [.saved("current-trip")])
+  }
   private func vector(_ offset: Int = 0) -> [Float] {
     var result = [Float](repeating: 0, count: 128); result[offset] = 1; return result
   }
@@ -140,8 +212,12 @@ final class PhotoPeopleTests: XCTestCase {
     let changed = try index.namePeopleGroup(group.id,name:"Public portrait fixture")
     XCTAssertEqual(changed.first?.id,id)
     XCTAssertEqual(try index.search("Public portrait fixture").results.first?.id,id)
+    local.setPeopleSelection(PeopleSearchSelection(personIDs: [group.id]), names: [group.id:"Public portrait fixture"])
+    let familyHits = try await local.consumerResults("")
+    XCTAssertTrue(familyHits.contains { $0.id == id }, "People-only results must retain a current permitted Photos revision")
     let face = try XCTUnwrap(group.faces.first)
     _ = try index.splitPeopleFace(face.id,reject:true)
+    XCTAssertNil(try local.consumerRecord(id), "A corrected face cannot remain an eligible family result while the next query is pending")
     XCTAssertTrue(try index.search("Public portrait fixture").results.isEmpty)
     print("Public People Photos preview, local inference, naming and rejection verified: \(id)")
     #else

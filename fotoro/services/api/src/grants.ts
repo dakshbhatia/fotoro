@@ -300,6 +300,8 @@ export async function contribute(env: Env, a: Actor, moment: string, i: any) {
     row.moment_id !== moment
   )
     fail("FORBIDDEN", 403);
+  const total = await env.DB.prepare("SELECT COUNT(*) AS count FROM grant_photos WHERE grant_id=?").bind(g.grantId).first<{count: number}>();
+  if ((total?.count ?? 0) + i.manifests.length > 100) fail("PHOTO_LIMIT", 413);
   const writes = [];
   for (const s of i.manifests) {
     let kind: string;
@@ -344,8 +346,8 @@ export async function contribute(env: Env, a: Actor, moment: string, i: any) {
   await batchGuard(
     env,
     activeCondition +
-      " AND EXISTS(SELECT 1 FROM grants WHERE id=? AND role='contributor')",
-    [g.grantId, a.accountId, i.expectedGrantVersion, Date.now(), g.grantId],
+      " AND EXISTS(SELECT 1 FROM grants WHERE id=? AND role='contributor') AND (SELECT COUNT(*) FROM grant_photos WHERE grant_id=?)+?<=100",
+    [g.grantId, a.accountId, i.expectedGrantVersion, Date.now(), g.grantId, g.grantId, i.manifests.length],
     [
       ...writes,
       env.DB.prepare("INSERT INTO contributions VALUES(?,?,?)").bind(

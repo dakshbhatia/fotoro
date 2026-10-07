@@ -86,14 +86,14 @@ const orderedManifest = (value: unknown): unknown => Array.isArray(value) ? valu
 const manifestIdentity = (value: Photo["manifest"]) => JSON.stringify(orderedManifest(value));
 
 // Public links survive only their own password unlock; acceptance stays explicit.
-export class IncomingShareIntent {
-  readonly link: FotoroShareLink;
+export class IncomingPublicIntent<T> {
+  readonly link: T;
   private cancelled = false;
   private session?: object;
   private authentication?: {generation: number};
   private retryLock = false;
   private expiredAccount?: string;
-  constructor(link: FotoroShareLink, session?: object) {this.link = freezePublic(structuredClone(link)); this.session = session;}
+  constructor(link: T, session?: object) {this.link = freezePublic(structuredClone(link)); this.session = session;}
   get pending() {return !this.cancelled;}
   bindInitialVault(session: object) {if (this.pending && !this.session && !this.authentication) this.session = session;}
   current(session: object) {return this.pending && this.session === session;}
@@ -116,3 +116,4 @@ export class IncomingShareIntent {
   }
   cancel() {this.cancelled = true; this.session = undefined; this.authentication = undefined;}
 }
+export class IncomingShareIntent extends IncomingPublicIntent<FotoroShareLink> {}

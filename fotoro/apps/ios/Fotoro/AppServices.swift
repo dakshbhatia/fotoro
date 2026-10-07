@@ -115,7 +115,8 @@ enum ReviewedPhotosBackupPolicy {
   private var consumerOffline = false
   private var consumerFailure: String?
   func consumerSearch(_ query: String, local: LocalSearchStore) async throws -> [ConsumerSearchHit] {
-    guard !SearchNormalization.text(query).isEmpty else { return [] }
+    let people = local.peopleSelection
+    guard !SearchNormalization.text(query).isEmpty || !people.isEmpty else { return [] }
     let account = vault.isUnlocked ? session.accountId : nil
     let generation = vault.generation
     let catalog = store
@@ -126,14 +127,15 @@ enum ReviewedPhotosBackupPolicy {
     var visualSavedIDs = Set<String>()
     if let account {
       guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account else { throw CancellationError() }
-      let lexical = try await searchCatalog(query).filter { ["committed", "saved"].contains($0.transferState) }
-      let visual = local.acceptedMeaningID == nil ? try await consumerSavedVisualSearch(query) : []
+      let lexical = try await searchCatalog(query, people: people).filter { ["committed", "saved"].contains($0.transferState) }
+      let visual = local.acceptedMeaningID == nil ? try await consumerSavedVisualSearch(query, people: people) : []
       let matched = Set(lexical.map(\.id))
       saved = lexical + visual.filter { !matched.contains($0.id) }
       visualSavedIDs = Set(visual.map(\.id)).subtracting(matched)
       guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account else { throw CancellationError() }
     } else { saved = [] }
     try Task.checkCancellation()
+    guard local.peopleSelection == people else { throw CancellationError() }
     // Recheck local permission/revision after the cloud lookup; a withdrawn device source cannot hide an owned saved copy.
     var records: [String: SearchRecord] = [:]
     var result: [ConsumerSearchHit] = []
@@ -161,7 +163,7 @@ enum ReviewedPhotosBackupPolicy {
       ["committed", "saved"].contains(photo.transferState) else { return nil }
     return photo
   }
-  private func consumerSavedVisualSearch(_ query: String) async throws -> [LocalPhoto] {
+  private func consumerSavedVisualSearch(_ query: String, people: PeopleSearchSelection = PeopleSearchSelection()) async throws -> [LocalPhoto] {
     let phrase = NaturalDateQuery.parse(query).text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard phrase.count >= 3, vault.isUnlocked, let account = session.accountId else { return [] }
     let catalog = store, generation = vault.generation
@@ -186,6 +188,7 @@ enum ReviewedPhotosBackupPolicy {
         record.filename = photo.metadata.filename
         record.capturedAt = ["photos", "exif"].contains(photo.metadata.dateSource) ? Wire.parseDate(photo.metadata.sourceDate) : nil
         record.ocrStatus = .complete; record.visualStatus = .complete
+        record.facts = annotation(photo).facts ?? []
         return record
       }
       _ = try await Task.detached(priority: .utility) { try index.replacePermitted(records) }.value
@@ -245,7 +248,7 @@ enum ReviewedPhotosBackupPolicy {
     }
     guard let vector = try? await PhotoSemanticProcessor.shared.textIfReady(phrase) else { return [] }
     let response = try await Task.detached(priority: .userInitiated) {
-      let base = try index.search(query, scope: SearchScope(source: "saved"))
+      let base = try index.search(query, scope: SearchScope(source: "saved", people: people))
       return try index.addingSemantic(vector, to: base)
     }.value
     guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account else {
@@ -1383,7 +1386,8 @@ enum ReviewedPhotosBackupPolicy {
     try reloadAnnotations()
     try hydrateLocalAnnotations()
   }
-  func searchCatalog(_ query: String, now: Date = Date(), calendar: Calendar = .current) async throws -> [LocalPhoto] {
+  func searchCatalog(_ query: String, now: Date = Date(), calendar: Calendar = .current,
+    people: PeopleSearchSelection = PeopleSearchSelection()) async throws -> [LocalPhoto] {
     let generation = vault.generation
     let catalog = store
     guard let account = session.accountId else { throw FotoroError("Sign in first") }
@@ -1412,8 +1416,10 @@ enum ReviewedPhotosBackupPolicy {
               parsed.scope.until.map({ date < $0 }) ?? true else { continue }
           }
           let value = try ledger.current(photo: photo, bundle: bundle, card: card)
+          let confirmed = PhotoPeopleFacts.read(value?.facts ?? [], originalSha256: photo.metadata.originalSha256)
+          guard people.matches(Set(confirmed.map(\.p))) else { continue }
           let scenes = SearchVisualPolicy.validated(value?.visual).map(\.label)
-          let terms = [photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + PhotoLocationFacts.userFacts(value?.facts).filter { !PhotoPeopleFacts.isReserved($0) && !$0.hasPrefix("fotoro.ai.v1:") } + PhotoPeopleFacts.read(value?.facts ?? [], originalSha256: photo.metadata.originalSha256).map(\.n) + (value?.location?.searchTerms ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""]
+          let terms = [photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + PhotoLocationFacts.userFacts(value?.facts).filter { !PhotoPeopleFacts.isReserved($0) && !$0.hasPrefix("fotoro.ai.v1:") } + confirmed.map(\.n) + (value?.location?.searchTerms ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""]
           if parsed.text.isEmpty || terms.contains(where: { SearchNormalization.text($0).contains(parsed.text) })
             || scenes.contains(where: { SearchNormalization.text($0).hasPrefix(parsed.text) }) { matches.append(photo) }
         }

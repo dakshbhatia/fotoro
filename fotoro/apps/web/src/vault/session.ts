@@ -28,6 +28,7 @@ import {
   vaultGeneration,
 } from "./vault";
 import { formatFotoroPassword, parseFotoroPassword } from "./password";
+import {validateWire} from "@fotoro/contracts/validate";
 let browserSignOut: AbortController | undefined;
 function cancelBrowserSignOut() {browserSignOut?.abort(); browserSignOut = undefined;}
 export async function clearBrowserSession(session = requireVault()): Promise<{remote: Promise<boolean>; generation: number}> {
@@ -90,7 +91,7 @@ function publicResponse(response: any) {
     },
   };
 }
-export async function passkeyLogin(current = () => true) {
+export async function passkeyLogin(current = () => true, {discoverAccount = false}: {discoverAccount?: boolean} = {}) {
   cancelBrowserSignOut();
   setFixtureAccount();
   let generation = vaultGeneration();
@@ -101,19 +102,50 @@ export async function passkeyLogin(current = () => true) {
       throw new DOMException("Sign-in cancelled", "AbortError");
   };
   checkCurrent();
+  await ready;
+  checkCurrent();
+  let remembered: VaultV1 | undefined;
+  if (!discoverAccount) {
+    const accountId = await get<unknown>("settings", "last-account");
+    checkCurrent();
+    if (typeof accountId === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(accountId)) {
+      const cached = await get<unknown>("settings", accountId + ":vault");
+      checkCurrent();
+      try {
+        const value = validateWire<VaultV1>("VaultV1", cached);
+        if (value.accountCard.accountId === accountId && value.wrappers.some(wrapper => wrapper.kind === "prf" && wrapper.credentialId && wrapper.prfSalt)) remembered = value;
+      } catch {} // Public cache corruption cannot authorize an account or key.
+    }
+  }
   const options = await api<any>("/v1/auth/login/options", {
     version: 1,
     client: "web",
+    ...(remembered ? {accountId: remembered.accountCard.accountId} : {}),
   });
   checkCurrent();
   if (options.options.allowCredentials?.length === 0)
     throw new Error("NO_ACCOUNT_PASSKEY");
-  // Discoverable authentication cannot use evalByCredential without an
-  // explicit allowed list. Learn the selected account before requesting PRF.
-  const response = await startAuthentication({ optionsJSON: options.options });
+  const firstSalts = new Map<string, string>();
+  if (remembered) {
+    if (!Array.isArray(options.options.allowCredentials) || !options.options.allowCredentials.length) throw new Error("NO_ACCOUNT_PASSKEY");
+    const allowed = new Set(options.options.allowCredentials.map((credential: any) => credential.id));
+    const values: Record<string, {first: Uint8Array}> = {};
+    for (const wrapper of remembered.wrappers) {
+      if (wrapper.kind !== "prf" || !wrapper.credentialId || !wrapper.prfSalt || !allowed.has(wrapper.credentialId)) continue;
+      const credential = unb64(wrapper.credentialId), salt = unb64(wrapper.prfSalt);
+      if (!credential.length || credential.length > 1024 || salt.length !== 32 || firstSalts.has(wrapper.credentialId)) throw new Error("PASSWORD_ACCOUNT_MISMATCH");
+      values[wrapper.credentialId] = {first: salt}; firstSalts.set(wrapper.credentialId, wrapper.prfSalt);
+    }
+    if (firstSalts.size) options.options.extensions = {...options.options.extensions, prf: {evalByCredential: values}};
+  }
   let output: Uint8Array | undefined;
   try {
+    // PRF maps require an account-bound challenge and a nonempty allowed list.
+    // Unknown accounts discover first and retain the existing follow-up ceremony.
+    const response = await startAuthentication({ optionsJSON: options.options });
+    if (firstSalts.has(response.id)) output = prfOutput(response);
     checkCurrent();
+    if (remembered && !options.options.allowCredentials.some((credential: any) => credential.id === response.id)) throw new Error("PASSWORD_ACCOUNT_MISMATCH");
     let session = await api<SessionV1>(
       "/v1/auth/login/verify",
       {
@@ -125,14 +157,17 @@ export async function passkeyLogin(current = () => true) {
       "SessionV1",
     );
     checkCurrent();
+    if (remembered && session.accountId !== remembered.accountCard.accountId) throw new Error("PASSWORD_ACCOUNT_MISMATCH");
     configureDevice(session.deviceId);
     const vault = await api<VaultV1>("/v1/vault", undefined, "VaultV1");
     checkCurrent();
     if (vault.accountCard.accountId !== session.accountId) throw new Error("PASSWORD_ACCOUNT_MISMATCH");
+    if (remembered && (vault.accountCard.boxPublicKey !== remembered.accountCard.boxPublicKey || vault.accountCard.signingPublicKey !== remembered.accountCard.signingPublicKey)) throw new Error("PASSWORD_ACCOUNT_MISMATCH");
     // A fresh browser only learns the encrypted wrapper's salt after sign-in.
     // Re-evaluate the selected credential rather than requiring a password when
     // that passkey can already unlock this account on another device.
     const wrapper = vault.wrappers.find(w => w.kind === "prf" && w.credentialId === response.id && w.prfSalt);
+    if (output && (output.length !== 32 || firstSalts.get(response.id) !== wrapper?.prfSalt)) {output.fill(0); output = undefined;}
     if (!output && wrapper) {
       const next = await api<any>("/v1/auth/login/options", {version: 1, client: "web", accountId: session.accountId});
       checkCurrent();

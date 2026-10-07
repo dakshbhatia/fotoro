@@ -7,6 +7,7 @@ import {Icon} from "../library/icons";
 import {PeopleEngine} from "./engine";
 import {assignmentsForCorrection, groupPeopleFaces, peopleSourceCurrent, type PeopleFace, type PersonGroup} from "./groups";
 import {scanPeoplePhotos} from "./scan";
+import {peopleReviewPhotos} from "./filter";
 export interface PeopleUpdate {photo: LocalPhoto; assignments: PeopleAssignment[]}
 
 function FaceThumbnail({face,photo,resources,onOpen}: {face: PeopleFace;photo: LocalPhoto;resources: LocalResources;onOpen:()=>void}) {
@@ -31,14 +32,18 @@ function GroupControls({group,groups,busy,onName,onMerge}: {group:PersonGroup;gr
     <option value="">Merge with…</option>{groups.filter(other=>other.id!==group.id).map(other=><option key={other.id} value={other.id}>{other.name??`Group ${groups.indexOf(other)+1}`}</option>)}
   </select><button disabled={busy||!target} onClick={()=>onMerge(target)}>Merge</button></div>}</div>;
 }
-export function People({photos,resources,savedResources,onClose,onOpen,onAssignments}: {
+export function People({photos,resources,savedResources,onClose,onOpen,onAssignments,onFind,selectedIDs}: {
   photos:LocalPhoto[];resources:LocalResources;savedResources?:LocalResources;onClose:()=>void;onOpen:(id:string)=>void;
   onAssignments?:(updates:PeopleUpdate[])=>Promise<void>;
+  onFind?:(personId:string)=>void;
+  selectedIDs?:ReadonlySet<string>;
 }) {
   const panel=useRef<HTMLElement>(null),latest=useRef(photos),alive=useRef(false),operation=useRef<AbortController|undefined>(undefined);
   latest.current=photos;
   const [engine]=useState(()=>new PeopleEngine()),[faces,setFaces]=useState<PeopleFace[]>([]),[groups,setGroups]=useState<PersonGroup[]>([]);
   const [busy,setBusy]=useState(false),[correcting,setCorrecting]=useState(false),[status,setStatus]=useState(""),[assessed,setAssessed]=useState(false);
+  const [selectedOnly,setSelectedOnly]=useState(false);
+  const selectedCount=peopleReviewPhotos(photos,true,selectedIDs).length;
   const currentFaces=useRef(faces);currentFaces.current=faces;
   const currentClose=useRef(onClose);currentClose.current=onClose;
   const scanned=useRef(new Map<string,LocalPhoto>());
@@ -66,7 +71,7 @@ export function People({photos,resources,savedResources,onClose,onOpen,onAssignm
   },[currentPhotos,faces,byFace,visibleFaces,visibleGroups,engine,correcting]);
   const start=async()=> {
     if(busy||correcting)return;
-    const originals=latest.current.filter(photo=>photo.digest&&photo.current?.()!==false);
+    const originals=peopleReviewPhotos(latest.current,selectedOnly,selectedIDs);
     if(originals.length>500){setStatus("Choose up to 500 photos to find people.");return;}
     operation.current?.abort();const controller=new AbortController();operation.current=controller;
     setBusy(true);setStatus("Downloading People models…");
@@ -119,10 +124,14 @@ export function People({photos,resources,savedResources,onClose,onOpen,onAssignm
   return <aside ref={panel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="People" className="sheet people-sheet">
     <div className="places-header"><div><h2>People</h2><p className="hint">Photos and face vectors stay on this device.</p></div><button aria-label="Close people" onClick={onClose}><Icon kind="close"/></button></div>
     {!assessed&&<p className="hint">Download face models and runtime to find faces. Groups may need corrections.</p>}
+    {(selectedCount>0||selectedOnly)&&<label className="people-match-mode">Review<select aria-label="Photos to review for People" value={selectedOnly?"selected":"all"} disabled={busy||correcting} onChange={event=>setSelectedOnly(event.target.value==="selected")}>
+      <option value="all">All available photos</option><option value="selected" disabled={!selectedCount}>Selected {selectedCount} photos</option>
+    </select></label>}
     <div className="actions"><button disabled={busy||correcting||!photos.length} onClick={()=>void start()}>{assessed?"Find people again":"Find people on this device"}</button>{busy&&<button onClick={()=>operation.current?.abort()}>Cancel</button>}</div>
     {status&&<p role="status" className="hint">{status}</p>}
     {visibleGroups.map((group,index)=><section key={group.id} className="people-group">
       <h3>{group.name??`Group ${index+1}`} <small>{new Set(group.faceIDs.map(id=>byFace.get(id)!.photoID)).size} photos</small></h3>
+      {group.name && onFind && <button disabled={busy||correcting} onClick={()=>onFind(group.id)}>Find photos</button>}
       <GroupControls group={group} groups={visibleGroups} busy={busy||correcting} onName={name=>void correct([group],[{...group,name}])} onMerge={target=> {
         const other=visibleGroups.find(value=>value.id===target);if(other)void correct([group,other],[{...other,name:other.name??group.name,faceIDs:[...other.faceIDs,...group.faceIDs]}]);
       }}/>

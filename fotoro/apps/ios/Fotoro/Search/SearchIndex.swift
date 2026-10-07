@@ -10,6 +10,15 @@ final class SearchIndex: @unchecked Sendable {
     var configuration = Configuration()
     configuration.prepareDatabase { db in
       #if !FOTORO_LOCAL_PREVIEW
+      db.add(function: DatabaseFunction("searchPeopleMatch", argumentCount: 3, pure: true) { values in
+        guard let bytes = Data.fromDatabaseValue(values[0]),
+          let record = try? JSONDecoder().decode(SearchRecord.self, from: bytes),
+          let ids = String.fromDatabaseValue(values[1])?.data(using: .utf8),
+          let selected = try? JSONDecoder().decode(Set<String>.self, from: ids),
+          let mode = String.fromDatabaseValue(values[2]).flatMap(PeopleSearchMatch.init(rawValue:)) else { return false }
+        let people = PhotoPeopleFacts.read(record.facts, originalSha256: record.scope == "saved" ? record.revision : nil, enforceWireLimits: false)
+        return PeopleSearchSelection(personIDs: selected, match: mode).matches(Set(people.map(\.p)))
+      })
       db.add(function: DatabaseFunction("semanticSimilarity", argumentCount: 2, pure: true) { values in
         guard let image = Data.fromDatabaseValue(values[0]).flatMap(SemanticVector.values),
           let text = Data.fromDatabaseValue(values[1]).flatMap(SemanticVector.values) else { return -1.0 }
@@ -478,6 +487,15 @@ final class SearchIndex: @unchecked Sendable {
       sql += " AND r.capture<?"
       args += [until.timeIntervalSince1970]
     }
+    if !scope.people.isEmpty {
+      #if FOTORO_LOCAL_PREVIEW
+      sql += " AND 0"
+      #else
+      let ids = String(decoding: (try? JSONEncoder().encode(scope.people.personIDs)) ?? Data(), as: UTF8.self)
+      sql += " AND searchPeopleMatch(r.value,?,?)=1"
+      args += [ids, scope.people.match.rawValue]
+      #endif
+    }
     return (sql, args)
   }
   func search(
@@ -505,7 +523,7 @@ final class SearchIndex: @unchecked Sendable {
       response.availablePreviews = coverage["previews"] ?? 0
       let q = parsed.text.trimmingCharacters(in: .whitespacesAndNewlines)
       guard !q.isEmpty else {
-        return parsed.datePhrase == nil ? response : try dateOnly(response, scope: scope, now: now, db: db)
+        return parsed.datePhrase == nil && scope.people.isEmpty ? response : try dateOnly(response, scope: scope, now: now, db: db)
       }
       // Query the full indexed prefix range before LIMIT. Scope and eligibility are applied in SQL.
       var meaningArgs: StatementArguments = [
@@ -702,7 +720,7 @@ final class SearchIndex: @unchecked Sendable {
     let photoFilter = photo.isEmpty ? "" : " AND r.id=?"
     let photoArgs: StatementArguments = photo.isEmpty ? StatementArguments() : [photo]
     if meaning.hasPrefix("date:") {
-      guard meaning == Self.dateMeaningID(scope), scope.from != nil || scope.until != nil else { return 0 }
+      guard meaning == Self.dateMeaningID(scope), scope.from != nil || scope.until != nil || !scope.people.isEmpty else { return 0 }
       return try Int.fetchOne(db, sql: "SELECT count(*) FROM searchRecords r WHERE \(condition)" + photoFilter,
         arguments: scopeArgs + photoArgs) ?? 0
     }

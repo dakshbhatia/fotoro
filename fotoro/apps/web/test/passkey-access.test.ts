@@ -237,7 +237,90 @@ test("remembered browsers allow another account without invalid discoverable PRF
     if (path === "/v1/auth/login/verify") return response(session(1));
     return response(vault(1));
   };
-  await passkeyLogin(); assert.equal(ceremonies, 2); assert.equal(requireVault().accountId, accounts.accounts[1].accountId);
+  await passkeyLogin(() => true, {discoverAccount: true}); assert.equal(ceremonies, 2); assert.equal(requireVault().accountId, accounts.accounts[1].accountId);
+}));
+
+test("returning-browser passkey evaluates cached salt once on an account-bound server challenge", async () => scoped(async credentials => {
+  const remembered = vault(); await put("settings", "last-account", remembered.accountCard.accountId); await put("settings", remembered.accountCard.accountId + ":vault", remembered);
+  let ceremonies = 0, verifies = 0, reads = 0;
+  credentials.get = async input => {
+    ceremonies++;
+    assert.deepEqual(input.publicKey.allowCredentials.map((value: any) => b64(new Uint8Array(value.id))), [credentialId]);
+    assert.equal(b64(new Uint8Array(input.publicKey.extensions.prf.evalByCredential[credentialId].first)), salt);
+    return credential(prf);
+  };
+  globalThis.fetch = async (path, init) => {
+    if (path === "/v1/auth/login/options") {
+      assert.equal(JSON.parse(String(init!.body)).accountId, remembered.accountCard.accountId);
+      return response({...options(), options: {...options().options, allowCredentials: [{type: "public-key", id: credentialId}]}});
+    }
+    if (path === "/v1/auth/login/verify") {
+      verifies++; const body = JSON.parse(String(init!.body));
+      assert.equal(body.response.id, credentialId); assert.equal(body.response.clientExtensionResults.prf.results, undefined);
+      assert.equal(String(init!.body).includes(b64(prf)), false); return response(session());
+    }
+    assert.equal(path, "/v1/vault"); reads++; return response(remembered);
+  };
+  await passkeyLogin(); assert.equal(ceremonies, 1); assert.equal(verifies, 1); assert.equal(reads, 1);
+  assert.equal(b64(requireVault().vaultKey), accounts.testSecrets[0].vaultKey);
+}));
+
+test("returning-browser first assertion cannot switch credential, account or pinned vault keys", async () => scoped(async credentials => {
+  for (const mismatch of ["credential", "account", "keys", "vault-account", "allowlist"]) {
+    const remembered = vault(); await put("settings", "last-account", remembered.accountCard.accountId); await put("settings", remembered.accountCard.accountId + ":vault", remembered);
+    let verifies = 0, ceremonies = 0;
+    credentials.get = async () => {ceremonies++; return {...credential(prf), id: mismatch === "credential" ? b64(new Uint8Array([6,7,8])) : credentialId};};
+    globalThis.fetch = async path => {
+      if (path === "/v1/auth/login/options") return response({...options(), options: {...options().options,
+        ...(mismatch === "allowlist" ? {} : {allowCredentials: [{type: "public-key", id: credentialId}]})}});
+      if (path === "/v1/auth/login/verify") {verifies++; return response(session(mismatch === "account" ? 1 : 0));}
+      if (mismatch === "vault-account") return response(vault(1));
+      return response(mismatch === "keys" ? {...remembered, accountCard: {...remembered.accountCard, boxPublicKey: accounts.accounts[1].boxPublicKey}} : remembered);
+    };
+    await assert.rejects(passkeyLogin(), mismatch === "allowlist" ? /NO_ACCOUNT_PASSKEY/ : /PASSWORD_ACCOUNT_MISMATCH/);
+    assert.equal(ceremonies, mismatch === "allowlist" ? 0 : 1); assert.equal(verifies, ["credential", "allowlist"].includes(mismatch) ? 0 : 1);
+    assert.throws(requireVault, /VAULT_LOCKED/); lockVault();
+  }
+}));
+
+test("rotated account salt discards stale first output and evaluates current wrapper once", async () => scoped(async credentials => {
+  const remembered = vault(), nextSalt = b64(new Uint8Array(32).fill(4));
+  const fresh = {...remembered, wrappers: remembered.wrappers.map(wrapper => wrapper.kind === "prf" ? {...wrapper, prfSalt: nextSalt} : wrapper)};
+  await put("settings", "last-account", remembered.accountCard.accountId); await put("settings", remembered.accountCard.accountId + ":vault", remembered);
+  let ceremonies = 0;
+  credentials.get = async input => {
+    ceremonies++;
+    assert.equal(b64(new Uint8Array(ceremonies === 1 ? input.publicKey.extensions.prf.evalByCredential[credentialId].first : input.publicKey.extensions.prf.eval.first)), ceremonies === 1 ? salt : nextSalt);
+    return credential(ceremonies === 1 ? new Uint8Array(32).fill(10) : prf);
+  };
+  globalThis.fetch = async path => response(path === "/v1/auth/login/options" ? {...options(), options: {...options().options, allowCredentials: [{type: "public-key", id: credentialId}]}} : path === "/v1/auth/login/verify" ? session() : fresh);
+  await passkeyLogin(); assert.equal(ceremonies, 2); assert.equal(b64(requireVault().vaultKey), accounts.testSecrets[0].vaultKey);
+}));
+
+test("corrupt public cache falls back to discovery and first-ceremony cancellation never verifies", async () => scoped(async credentials => {
+  await put("settings", "last-account", accounts.accounts[0].accountId); await put("settings", accounts.accounts[0].accountId + ":vault", {version: 1, accountCard: accounts.accounts[0]});
+  let ceremonies = 0;
+  credentials.get = async () => {ceremonies++; return credential(prf);};
+  globalThis.fetch = async (path, init) => {
+    if (path === "/v1/auth/login/options") {
+      assert.equal(JSON.parse(String(init!.body)).accountId, ceremonies === 0 ? undefined : accounts.accounts[0].accountId); return response(options());
+    }
+    return response(path === "/v1/auth/login/verify" ? session() : vault());
+  };
+  await passkeyLogin(); assert.equal(ceremonies, 2); lockVault();
+  const remembered = vault(); await put("settings", remembered.accountCard.accountId + ":vault", remembered);
+  for (const action of ["lock", "back", "origin"]) {
+    let current = true, verifies = 0;
+    credentials.get = async () => {
+      if (action === "lock") lockVault();
+      if (action === "back") current = false;
+      if (action === "origin") Object.defineProperty(globalThis, "location", {configurable: true, value: {origin: "https://other.invalid"}});
+      return credential(prf);
+    };
+    globalThis.fetch = async path => {if (path === "/v1/auth/login/verify") verifies++; return response({...options(), options: {...options().options, allowCredentials: [{type: "public-key", id: credentialId}]}});};
+    await assert.rejects(passkeyLogin(() => current), {name: "AbortError"}); assert.equal(verifies, 0); assert.throws(requireVault, /VAULT_LOCKED/);
+    Object.defineProperty(globalThis, "location", {configurable: true, value: {origin: "https://fotoro.cloud"}});
+  }
 }));
 
 test("authentication without PRF keeps Saved locked and offers password recovery", async () => scoped(async credentials => {
@@ -276,7 +359,10 @@ test("a late sign-in response cannot replace a newer open vault", async () => sc
 }));
 
 test("passkey sign-in is optional and never adds account setup to local/new photos", () => {
-  const props = {password: "", generatedPassword: "", busy: false, onPassword() {}, onSignIn() {}, onCreate() {}, onContinue() {}, onBack() {}, onCopy() {}, onSave() {}, onPasskey() {}};
-  assert.match(renderToStaticMarkup(createElement(AccountAccess, props)), /Use a passkey/);
-  assert.doesNotMatch(renderToStaticMarkup(createElement(AccountAccess, {...props, generatedPassword: "public fixture password"})), /Use a passkey/);
+  const props = {password: "", generatedPassword: "", busy: false, onPassword() {}, onSignIn() {}, onCreate() {}, onContinue() {}, onBack() {}, onCopy() {}, onSave() {}, onPasskey() {}, onAnotherAccount() {}};
+  const existing = renderToStaticMarkup(createElement(AccountAccess, props));
+  assert.match(existing, /Continue with a passkey/); assert.match(existing, /Use another account/);
+  const generated = renderToStaticMarkup(createElement(AccountAccess, {...props, generatedPassword: "public fixture password"}));
+  assert.doesNotMatch(generated, /Continue with a passkey|Use another account/);
+  assert.doesNotMatch(renderToStaticMarkup(createElement(AccountAccess, {...props, onAnotherAccount: undefined})), /Use another account/);
 });

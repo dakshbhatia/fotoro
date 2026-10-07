@@ -311,8 +311,8 @@ export async function cleanupUpload(env: Env, id: string) {
   /* Commit-created final objects remain until catalog removal is implemented; never delete ambiguous promotion. */ return true;
 }
 export async function getObject(env: Env, actor: Actor, id: string) {
-  const authorized = await env.DB.prepare(
-    `SELECT 1 AS ok FROM objects o WHERE o.id=? AND o.state='live' AND (o.account_id=? OR EXISTS(SELECT 1 FROM retention r WHERE r.object_id=o.id AND r.account_id=?) OR EXISTS(SELECT 1 FROM retention r JOIN grant_photos gp ON gp.photo_id=r.photo_id JOIN grants g ON g.id=gp.grant_id WHERE r.object_id=o.id AND (g.recipient=? OR g.owner=?) AND g.revoked IS NULL AND (g.expires IS NULL OR g.expires>?)))`,
+  const authorization = () => env.DB.prepare(
+    `SELECT 1 AS ok FROM objects o WHERE o.id=? AND o.state='live' AND (o.account_id=? OR EXISTS(SELECT 1 FROM retention r WHERE r.object_id=o.id AND r.account_id=?) OR EXISTS(SELECT 1 FROM retention r JOIN grant_photos gp ON gp.photo_id=r.photo_id JOIN grants g ON g.id=gp.grant_id WHERE r.object_id=o.id AND (g.recipient=? OR g.owner=?) AND g.revoked IS NULL AND (g.expires IS NULL OR g.expires>?)) OR EXISTS(SELECT 1 FROM retention r JOIN album_photos p ON p.photo_id=r.photo_id JOIN albums a ON a.id=p.album_id JOIN album_members m ON m.album_id=a.id WHERE r.object_id=o.id AND m.account_id=? AND m.status='accepted' AND a.ended IS NULL))`,
   )
     .bind(
       id,
@@ -321,11 +321,16 @@ export async function getObject(env: Env, actor: Actor, id: string) {
       actor.accountId,
       actor.accountId,
       Date.now(),
+      actor.accountId,
     )
     .first();
-  if (!authorized) fail("FORBIDDEN", 403);
+  if (!await authorization()) fail("FORBIDDEN", 403);
   const obj = await env.BUCKET.get("final/" + id);
   if (!obj) fail("NOT_FOUND", 404);
+  if (!await authorization()) {
+    await obj!.body.cancel();
+    fail("FORBIDDEN", 403);
+  }
   return new Response(obj!.body, {
     headers: {
       "Content-Type": "application/octet-stream",

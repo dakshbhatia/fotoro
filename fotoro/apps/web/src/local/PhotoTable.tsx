@@ -26,10 +26,11 @@ function PhotoRow({photo, resources, columns, onOpen, onFailure, selection, inde
   </tr>;
 }
 
-export function PhotoTable({photos, resources, onOpen, onFailure, selection, columns, active = true}: {
+export function PhotoTable({photos, resources, resourceForPhoto, onOpen, onFailure, selection, columns, active = true}: {
   photos: LocalPhoto[]; resources: LocalResources; onOpen: (id: string) => void;
   onFailure: (id: string, message: string) => void; selection?: PickSelection;
   columns: readonly PhotoColumn[]; active?: boolean;
+  resourceForPhoto?: (photo: LocalPhoto) => LocalResources;
 }) {
   const parent = useRef<HTMLDivElement>(null);
   const [sort, setSort] = useState<PhotoSort>({column: "date", descending: true});
@@ -54,7 +55,7 @@ export function PhotoTable({photos, resources, onOpen, onFailure, selection, col
       </tr></thead>
       <tbody>
         {visible.length && visible[0].start > 44 ? <tr aria-hidden="true"><td colSpan={cells} style={{height: visible[0].start - 44, padding: 0, border: 0}} /></tr> : null}
-        {visible.map(row => <PhotoRow key={row.key} index={row.index} photo={sorted[row.index]} resources={resources} columns={columns} onOpen={onOpen} onFailure={onFailure} selection={selection} />)}
+        {visible.map(row => <PhotoRow key={row.key} index={row.index} photo={sorted[row.index]} resources={resourceForPhoto?.(sorted[row.index]) ?? resources} columns={columns} onOpen={onOpen} onFailure={onFailure} selection={selection} />)}
         {visible.length ? <tr aria-hidden="true"><td colSpan={cells} style={{height: Math.max(0, virtual.getTotalSize() - (visible[visible.length - 1].end - 44)), padding: 0, border: 0}} /></tr> : null}
       </tbody>
     </table>

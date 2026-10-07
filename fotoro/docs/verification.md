@@ -1,9 +1,73 @@
-# Verification — October 6, 2026
+# Verification — October 7, 2026
 
 This is the current evidence record. [The backlog](product-backlog.md) owns next
 work; [product](product.md) owns the intended experience. Earlier measurements and
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
+
+## October 7 family, album and returning-account implementation checks
+
+Current source combines reviewed, source-bound People IDs with the search query.
+Any includes separate photos containing at least one chosen person; Everyone
+requires all chosen people in the same photo. Filtering precedes lexical limits
+and constrains visual inputs. Select results replaces selection with the current
+eligible result IDs. These rules do not infer travel attendance or identify a
+landmark across trips. Public fixtures establish functional behavior, not general
+identity or retrieval accuracy.
+
+Live albums use an immutable signed definition, a fresh random album key sealed
+to a fixed roster and an encrypted title. Invited members explicitly accept;
+accepted members add chosen owned Saved originals, preserving their existing
+signed manifest bytes. No private annotation or People-name overlay is shared.
+Album search is currently filename/date only; native filtering applies to loaded
+pages, with explicit Load more for the remaining photos. Private People, OCR and
+location queries remain in the account finder. Shared originals retain embedded metadata.
+The bounds are 12 roster members including the owner, 1,000 photos per album,
+100-photo append/pages, 100 inbox results and 50 accepted active albums per
+account. Pending invitations do not consume accepted quota. The owner ends
+access for everyone; previously downloaded files cannot be recalled.
+
+Sixteen core album tests and TypeScript pass with real public-fixture crypto,
+including three members opening the same key, contributions by each member,
+signature/context tampering, strict invitation parsing and unchanged legacy
+manifest bytes. Twelve focused Worker album tests and API TypeScript pass with
+local D1/R2: acceptance and object authorization, pagination/capacity, concurrent
+creation/append/end, operation retry identity, atomic acceptance quota, malformed
+or oversized requests and revocation during an R2 read. Captured vault-account
+expectations reject a changed authenticated account before any object read.
+
+Returning-browser PRF inputs are restricted to the cached account's fresh
+server-authorized credential list. One matching assertion can sign in and unlock;
+fresh-browser discovery retains a second selected-credential assertion. Tests
+fence credential/account/public-key/salt changes, stale output and cancellation.
+Password recovery remains available; Sign in with Apple is not implemented.
+These simulated ceremonies do not qualify physical passkeys or promise one
+shared session across Safari and native apps.
+
+Client review verifies membership and account fences around media reads, disposal
+of open previews on lifecycle changes, original component export and exact
+signed-manifest contribution retries. Final local verification passes 516 web
+tests, 92 API tests, core checks, five isolated encrypted-exchange cases and the
+real pinned-model visual smoke case. Full native verification executes 415 tests:
+414 pass and one existing Vision test is skipped. The isolated Photos preview
+executes 113 tests: 112 pass with the same skip. Native album tests pass 14/14.
+
+Actual browser QA against isolated local D1/R2 uses three disposable public-test
+accounts and a public NASA fixture. It verifies owner review, explicit invitation
+acceptance, three members' contributions, duplicate suppression, filename search,
+new album creation, explicit owner end and large-photo navigation. Photo-first
+album screens use compact contributor/date tags, with account details under More.
+Responsive checks cover 320×568, 390×844 and 1280×720; the 320-pixel page has no
+horizontal overflow, one dialog and 44-pixel primary controls. These observations
+do not establish full accessibility conformance. Original preparation completes,
+but the embedded browser never produces a download event or verified file, even
+after a fresh synchronous click and connected link. File export remains a real
+browser/device acceptance gate; no UI download-success claim is made.
+
+This section does not claim build 42 availability,
+deployment, physical-device acceptance or enabled cloud inference. Build 41's
+verified internal availability and the earlier production checkpoint remain
+recorded below until new release evidence is added.
 
 ## October 6 foundation implementation checks
 
@@ -374,9 +438,11 @@ data are excluded from repository documentation.
 - Automatic native Sync requires opt-in and foreground/unlocked preparation. iOS
   can finish scheduled ciphertext PUTs; this is not continuous locked-phone backup.
   Browser uploads stay explicit.
-- Search, picks, photo GPS and confirmed Timeline imports operate locally. Named
-  people and cross-device contact sync are open. Scene publication remains disabled
-  for reader compatibility. Local vectors and raw Timeline imports do not upload.
+- Search, picks, photo GPS, reviewed People and confirmed Timeline imports operate
+  locally. General identity/retrieval quality and cross-device contact convergence
+  remain open. Album search is filename/date only; private evidence stays in the
+  account finder. Scene publication remains disabled for reader compatibility.
+  Local vectors and raw Timeline imports do not upload.
 - Full first-use/returning-account acceptance, two-person sharing completion,
   interruption/relaunch restoration, accessibility and realistic library performance
   still need physical-device evidence. Apple ID login is not delivered.
