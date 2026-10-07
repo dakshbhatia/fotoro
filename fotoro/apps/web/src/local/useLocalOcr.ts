@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { LocalOcrQueue, hasCurrentLocalOcr, currentOcrSource, ocrSourceIdentity, type OcrResult } from "./ocr";
 import { imageDimensions, type LocalPhoto, LocalResources } from "./resources";
 export type LocalOcrPhoto = LocalPhoto;
-/* Queue on source changes, never on queries. Results are fenced against the latest permitted digest. */
-export function useLocalOcr(photos: LocalOcrPhoto[], enabled: boolean, resources: LocalResources, sourceGeneration: number, onResult: (result: OcrResult) => void) {
+/* Queue only the current metadata scope; results stay fenced to permitted original digests. */
+export function useLocalOcr(photos: LocalOcrPhoto[], enabled: boolean, resources: LocalResources, sourceGeneration: number, onResult: (result: OcrResult) => void, workScope?: string) {
   const latest = useRef({photos, enabled, sourceGeneration, onResult});
   latest.current = {photos, enabled, sourceGeneration, onResult};
   const queue = useRef<LocalOcrQueue | null>(null), scheduled = useRef(new Map<string, WeakRef<object>>()), generation = useRef(0);
@@ -23,7 +23,7 @@ export function useLocalOcr(photos: LocalOcrPhoto[], enabled: boolean, resources
       void worker.cancel();
       if (queue.current === worker) queue.current = null;
     };
-  }, [enabled, sourceGeneration]);
+  }, [enabled, sourceGeneration, workScope]);
   useEffect(() => {
     const worker = queue.current, token = generation.current;
     if (!enabled || !worker) return;

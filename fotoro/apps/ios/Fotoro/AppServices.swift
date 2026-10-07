@@ -605,10 +605,25 @@ enum ReviewedPhotosBackupPolicy {
     }
     return status(.ready, automaticPhotoSyncIncludesAll
       ? "Automatic sync is on for all permitted photos and videos while Fotoro is open. Complete originals must fit within 50 MiB."
-      : "Sync includes the last 10 days when first turned on, plus new arrivals. Complete originals must fit within 50 MiB.")
+      : "Sync includes the last \(automaticPhotoSyncWindowDays) days when first turned on, plus new arrivals. Complete originals must fit within 50 MiB.")
   }
   var automaticPhotoSyncIncludesAll: Bool {
     automaticSyncPreference.origin == BackgroundUploadPolicy.origin(api.baseURL) && automaticSyncIntake?.includesAll == true
+  }
+  var automaticPhotoSyncWindowDays: Int { automaticSyncIntake?.initialWindowDays ?? 30 }
+  func expandAutomaticPhotoSyncToThirtyDays() throws {
+    try Task.checkCancellation()
+    guard photoAccountAccess != nil, session.isSignedIn, automaticPhotoSync.enabled,
+      let origin = BackgroundUploadPolicy.origin(api.baseURL), automaticSyncPreference.origin == origin,
+      NativeBackupPolicy.allowsPrivatePhotos(accountId: session.accountId, fixture: session.fixture),
+      RecentPhotosPolicy.canRead(automaticPhotosPermission) else {
+      throw FotoroError("Open your account and allow Photos access before expanding sync.")
+    }
+    var intake = try store.automaticPhotoSyncIntake(origin: origin) ?? AutomaticPhotoSyncIntake()
+    intake.expandToThirtyDays()
+    try store.setAutomaticPhotoSyncIntake(intake, origin: origin)
+    automaticSyncIntake = intake
+    kickAutomaticPhotoSync(sourcesChanged: true)
   }
   func enableAutomaticPhotoSync() throws {
     try Task.checkCancellation()

@@ -16,6 +16,11 @@ struct SearchAnalysisProgress: Equatable, Sendable {
   private(set) var indexing = false
   private(set) var searching = false
   private(set) var analysisProgress: SearchAnalysisProgress?
+  private(set) var analysisRemaining = 0
+  private var analysisUnavailableIDs: Set<String> = []
+  var analysisUnavailable: Int { analysisUnavailableIDs.count }
+  @ObservationIgnored private var analysisScope: PhotoAnalysisScope?
+  @ObservationIgnored private var analysisCursor: PhotoAnalysisCursor?
   private(set) var libraryGeneration: UInt64 = 0
   private(set) var query = ""
   private(set) var peopleSelection = PeopleSearchSelection()
@@ -107,6 +112,7 @@ struct SearchAnalysisProgress: Equatable, Sendable {
     indexing = false
     searching = false
     analysisProgress = nil
+    analysisRemaining = 0; analysisScope = nil; analysisCursor = nil; analysisUnavailableIDs = []
   }
   func refresh(status: PHAuthorizationStatus, retryFailedOCR: Bool = true) {
     guard opened else { return }
@@ -193,20 +199,81 @@ struct SearchAnalysisProgress: Equatable, Sendable {
       guard applied, token == work.generation, !Task.isCancelled else { return }
       completePermittedSnapshotRefresh(photos: scanned.photos)
       try onSnapshotReady?()
-      // Ordinary metadata/OCR search stays available while the public model prepares.
+      await runScopedAnalysis(scope: PhotoAnalysisScope(query: query, people: peopleSelection), after: nil, retryFailed: retryFailedOCR, token: token, explicit: false)
+    } catch is CancellationError {} catch {
+      if token == work.generation { self.error = error.localizedDescription }
+    }
+    if token == work.generation { indexing = false; analysisProgress = nil }
+  }
+  private func analysisSourceCurrent(_ record: SearchRecord) -> Bool {
+    guard ready, assets[record.id]?.sourceRevision == record.revision,
+      RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+      let current = PHAsset.fetchAssets(withLocalIdentifiers: [record.id], options: nil).firstObject,
+      !current.isHidden else { return false }
+    return RecentPhoto.sourceRevision(current) == record.revision
+  }
+  private func analysisIsCurrent(_ scope: PhotoAnalysisScope, token: UInt64, explicit: Bool) -> Bool {
+    ready && token == work.generation && (!explicit || (query == scope.query && peopleSelection == scope.scope.people))
+  }
+  var canAnalyzeMetadataMatches: Bool { ready }
+  func analyzeMetadataMatches(nextBatch: Bool = false) {
+    guard ready, index != nil, !indexing else { return }
+    let priorScope = analysisScope
+    let priorCursor = analysisCursor
+    let priorUnavailable = analysisUnavailableIDs
+    pause()
+    let scope = nextBatch && priorScope?.query == query && priorScope?.scope.people == peopleSelection
+      ? priorScope! : PhotoAnalysisScope(query: query, people: peopleSelection, includesOlder: hasSearch)
+    let after = nextBatch && priorScope == scope ? priorCursor : nil
+    analysisScope = scope
+    if after != nil { analysisUnavailableIDs = priorUnavailable }
+    let token = work.generation
+    indexing = true
+    updateQuery(query)
+    refreshTask = Task {
+      await runScopedAnalysis(scope: scope, after: after, retryFailed: true, token: token, explicit: true)
+      if token == work.generation { indexing = false; analysisProgress = nil }
+    }
+  }
+  private func runScopedAnalysis(scope: PhotoAnalysisScope, after: PhotoAnalysisCursor?, retryFailed retryFailedOCR: Bool,
+    token: UInt64, explicit: Bool) async {
+    guard let localIndex = index else { return }
+    analysisScope = scope
+    do {
+      let batch = try await Task.detached(priority: .utility) {
+        (try localIndex.pendingMetadataAnalysisCount(scope: scope, after: after, retryFailed: retryFailedOCR),
+          try localIndex.pendingMetadataAnalysisRecords(scope: scope, after: after, retryFailed: retryFailedOCR))
+      }.value
+      let pending = batch.1
+      guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled else { return }
+      analysisRemaining = max(0, batch.0 - pending.count)
+      guard !pending.isEmpty else { return }
+      var attempted: [SearchRecord] = []
+      defer {
+        if analysisIsCurrent(scope, token: token, explicit: explicit) {
+          analysisRemaining += pending.count - attempted.count
+          if let last = attempted.last { analysisCursor = PhotoAnalysisCursor(last) }
+          for record in attempted {
+            guard let current = try? localIndex.record(record.id), current.revision == record.revision else { continue }
+            var incomplete = current.ocrStatus != .complete || current.visualStatus != .complete
+            #if !FOTORO_LOCAL_PREVIEW
+            incomplete = incomplete || ((try? localIndex.needsSemantic(photoID: record.id, revision: record.revision)) ?? true)
+            #endif
+            if incomplete { analysisUnavailableIDs.insert(record.id) }
+            else { analysisUnavailableIDs.remove(record.id) }
+          }
+        }
+      }
       #if !FOTORO_LOCAL_PREVIEW
         let semanticPreparation = Task { try? await PhotoSemanticProcessor.shared.prepare() }
       #endif
-      // Snapshot the retry list once: another Vision failure waits for an explicit/foreground refresh.
-      let pending = try await Task.detached { try localIndex.pendingAnalysisRecords(retryFailed: retryFailedOCR) }.value
-      guard token == work.generation, !Task.isCancelled else { return }
       analysisProgress = pending.isEmpty ? nil : SearchAnalysisProgress(processed: 0, total: pending.count)
       for record in pending {
         try Task.checkCancellation()
-        guard token == work.generation, let photo = assets[record.id] else { break }
+        guard analysisIsCurrent(scope, token: token, explicit: explicit), let photo = assets[record.id], analysisSourceCurrent(record) else { break }
         let preview = await loadPreview(photo.asset)
         try Task.checkCancellation()
-        guard token == work.generation, assets[record.id] != nil,
+        guard analysisIsCurrent(scope, token: token, explicit: explicit), analysisSourceCurrent(record),
           RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite))
         else { break }
         let needsOCR = record.ocrStatus == .pending || record.ocrStatus == .unavailable
@@ -228,14 +295,14 @@ struct SearchAnalysisProgress: Equatable, Sendable {
               #endif
             }
           }
-          guard token == work.generation, !Task.isCancelled, assets[record.id] != nil else { break }
+          guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled, analysisSourceCurrent(record) else { break }
           let visualResult = result
           let visualState = state
           _ = try await Task.detached {
             try localIndex.applyVisual(visualResult, status: visualState, photoID: record.id,
               revision: record.revision, generation: token)
           }.value
-          guard token == work.generation, !Task.isCancelled else { break }
+          guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled else { break }
           updateQuery(query)
         }
         if needsOCR {
@@ -246,7 +313,7 @@ struct SearchAnalysisProgress: Equatable, Sendable {
             catch is CancellationError { throw CancellationError() }
             catch { state = .failed }
           }
-          guard token == work.generation, !Task.isCancelled, assets[record.id] != nil else { break }
+          guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled, analysisSourceCurrent(record) else { break }
           // Both writes verify the revision and permitted generation inside the transaction.
           let ocrResult = result
           let ocrState = state
@@ -255,31 +322,33 @@ struct SearchAnalysisProgress: Equatable, Sendable {
               revision: record.revision, generation: token)
           }.value
         }
-        guard token == work.generation, !Task.isCancelled else { break }
+        guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled else { break }
         if let current = try localIndex.record(record.id), current.revision == record.revision {
           try onRecordChanged?(current, false)
         }
+        attempted.append(record)
         analysisProgress?.processed += 1
         updateQuery(query)
       }
       #if !FOTORO_LOCAL_PREVIEW
       await semanticPreparation.value
       try Task.checkCancellation()
-      guard token == work.generation else { return }
+      guard analysisIsCurrent(scope, token: token, explicit: explicit) else { return }
       if await PhotoSemanticProcessor.shared.ready {
-        let remaining = try await Task.detached { try localIndex.pendingSemanticRecords() }.value
+        let remaining = try attempted.filter { try localIndex.needsSemantic(photoID: $0.id, revision: $0.revision) }
         for record in remaining {
           try Task.checkCancellation()
-          guard token == work.generation, let photo = assets[record.id],
+          guard analysisIsCurrent(scope, token: token, explicit: explicit), let photo = assets[record.id], analysisSourceCurrent(record),
             RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)) else { break }
           guard let preview = await loadPreview(photo.asset) else { continue }
           try Task.checkCancellation()
-          guard token == work.generation, assets[record.id]?.sourceRevision == record.revision else { break }
+          guard analysisIsCurrent(scope, token: token, explicit: explicit), analysisSourceCurrent(record) else { break }
           if let vector = try? await PhotoSemanticProcessor.shared.image(preview) {
+            guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled, analysisSourceCurrent(record) else { break }
             _ = try await Task.detached {
               try localIndex.applySemantic(vector, photoID: record.id, revision: record.revision, generation: token)
             }.value
-            guard token == work.generation, !Task.isCancelled else { break }
+            guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled else { break }
             updateQuery(query)
           }
           await Task.yield()
@@ -289,7 +358,6 @@ struct SearchAnalysisProgress: Equatable, Sendable {
     } catch is CancellationError {} catch {
       if token == work.generation { self.error = error.localizedDescription }
     }
-    if token == work.generation { indexing = false; analysisProgress = nil }
   }
   private struct Scan: @unchecked Sendable {
     var photos: [RecentPhoto]
@@ -446,6 +514,8 @@ struct SearchAnalysisProgress: Equatable, Sendable {
   func updateQuery(_ value: String) {
     let normalized = SearchNormalization.text(value)
     let changed = normalized != SearchNormalization.text(query)
+    if changed, ready, indexing { pause() }
+    if changed { analysisRemaining = 0; analysisScope = nil; analysisCursor = nil; analysisUnavailableIDs = [] }
     query = value
     queryGeneration &+= 1
     queryTask?.cancel()
@@ -500,6 +570,8 @@ struct SearchAnalysisProgress: Equatable, Sendable {
       if !names.isEmpty { selectedPeopleNames = names.filter { selection.personIDs.contains($0.key) } }
       return
     }
+    if ready, indexing { pause() }
+    analysisRemaining = 0; analysisScope = nil; analysisCursor = nil; analysisUnavailableIDs = []
     peopleSelection = selection
     selectedPeopleNames = names.filter { selection.personIDs.contains($0.key) }
     acceptedMeaningID = nil
@@ -642,9 +714,11 @@ extension LocalSearchStore {
     try onRecordChanged?(record, true)
     updateQuery(query)
   }
-  func analyzePeople(_ record: SearchRecord) async throws -> Bool {
+  func analyzePeople(_ record: SearchRecord, scanScope: PhotoPeopleScanScope? = nil) async throws -> Bool {
     let token = work.generation
-    guard let index, let photo = assets[record.id], photo.sourceRevision == record.revision,
+    guard scanScope.map({ $0.query == query && $0.scope.people == peopleSelection }) ?? true,
+      canEditPeoplePhoto(record.id, revision: record.revision),
+      let index, let photo = assets[record.id], photo.sourceRevision == record.revision,
       RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)) else { return false }
     // An independent PhotoKit request cannot displace metadata/OCR indexing's cancellation handle.
     let manager = PHImageManager()
@@ -662,10 +736,13 @@ extension LocalSearchStore {
         request.setID(id)
       }
     } onCancel: { request.cancel() }
-    guard let preview else { return false }
+    guard let preview, token == work.generation,
+      scanScope.map({ $0.query == query && $0.scope.people == peopleSelection }) ?? true,
+      canEditPeoplePhoto(record.id, revision: record.revision) else { return false }
     let faces = try await PhotoFaceProcessor.shared.analyze(preview)
     try Task.checkCancellation()
-    guard token == work.generation, assets[record.id]?.sourceRevision == record.revision,
+    guard token == work.generation, scanScope.map({ $0.query == query && $0.scope.people == peopleSelection }) ?? true,
+      assets[record.id]?.sourceRevision == record.revision,
       RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
       let current = PHAsset.fetchAssets(withLocalIdentifiers: [record.id], options: nil).firstObject,
       !current.isHidden, RecentPhoto.sourceRevision(current) == record.revision else { return false }

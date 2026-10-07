@@ -918,7 +918,9 @@ main:has(.consumer-selection) .local-search { padding-bottom: calc(140px + env(s
 .people-filter-options fieldset > label { display: flex; align-items: center; gap: 8px; min-height: 44px; overflow-wrap: anywhere; }
 .people-filter-options fieldset > label > span { flex: 1; min-width: 0; }
 .people-filter-options small { flex: 0 0 auto; color: var(--photo-muted); }
-.people-match-mode { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 8px; }
+.people-match-mode { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 8px; min-height: 44px; }
+.people-reviewed button { max-width: 100%; overflow-wrap: anywhere; }
+.people-options > summary { min-height: 44px; padding: 12px 0; cursor: pointer; }
 .people-match-mode select { min-width: 0; max-width: 100%; min-height: 44px; }
 @media (max-width: 700px) { .people-find-controls { padding-left: 12px; padding-right: 12px; } }
 .albums-sheet { position: fixed; inset: 16px; z-index: 70; max-width: 1040px; margin: auto; color: var(--photo-text); background: var(--photo-background); border: 1px solid var(--photo-selected); border-radius: 20px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 16px 80px #000b; }

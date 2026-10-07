@@ -24,12 +24,29 @@ struct PhotoPeopleView: View {
             .accessibilityIdentifier("people.enable")
           Text("Find suggested face groups locally. Review matches before saving a name. Face templates stay on this device.")
             .font(.footnote).foregroundStyle(.secondary)
+          Toggle("Include older photos", isOn: Binding(get: { people.includesOlder }, set: { people.setIncludesOlder($0) }))
+            .accessibilityIdentifier("people.scan.older")
+          Text(search.query.isEmpty
+            ? (people.includesOlder ? "Check permitted photos, including older and undated photos." : "Check photos from the last 30 days.")
+            : (people.includesOlder || NaturalDateQuery.parse(search.query).datePhrase != nil
+              ? "Check photos matching the current metadata and date search."
+              : "Check the last 30 days matching the current metadata search."))
+            .font(.footnote).foregroundStyle(.secondary)
           if people.busy {
             ProgressView(value: Double(people.processed), total: Double(max(1, people.total)))
-            Text("\(people.processed) of \(people.total) photos checked").font(.caption)
+            Text("\(people.processed) of \(people.total) photos attempted").font(.caption)
             Button("Pause People") { people.stop() }
           } else if people.enabled {
-            Button("Find faces", systemImage: "arrow.clockwise") { people.scan() }.accessibilityIdentifier("people.scan")
+            Button(people.unavailable > 0 && people.remaining == 0 ? "Retry unavailable photos" : "Find faces", systemImage: "arrow.clockwise") { people.scan() }.accessibilityIdentifier("people.scan")
+            if people.remaining > 0 {
+              Text("\(people.remaining) matching photos unattempted").font(.caption).foregroundStyle(.secondary)
+              Button("Next batch", systemImage: "arrow.forward") { people.scan(nextBatch: true) }
+                .accessibilityIdentifier("people.scan.next")
+            }
+          }
+          if people.unavailable > 0 {
+            Text("\(people.unavailable) photos unavailable for face analysis. Retry after the remaining batches.")
+              .font(.caption).foregroundStyle(.secondary)
           }
           if let error = people.error { Text(error).font(.footnote).foregroundStyle(.red) }
         }
@@ -98,7 +115,9 @@ struct PhotoPeopleView: View {
       }.navigationTitle("People").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         .task { people.refresh() }
-        .onChange(of: search.libraryGeneration) { people.stop(); people.refresh() }
+        .onChange(of: search.query) { people.invalidateScope() }
+        .onChange(of: search.peopleSelection) { people.invalidateScope() }
+        .onChange(of: search.libraryGeneration) { people.invalidateScope(); people.refresh() }
         .onChange(of: search.peopleSnapshotReady) { people.refresh() }
         .onChange(of: scenePhase) { if scenePhase != .active { people.stop() } }
         .onDisappear { people.stop() }

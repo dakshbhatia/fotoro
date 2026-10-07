@@ -168,8 +168,14 @@ struct PhotoSyncView: View {
                 Section("Photos to sync") {
                   Text(services.automaticPhotoSyncIncludesAll
                     ? "All permitted photos and videos"
-                    : "Last 10 days at first sync, plus new arrivals")
+                    : "Last \(services.automaticPhotoSyncWindowDays) days at first sync, plus new arrivals")
                     .font(.footnote).foregroundStyle(.secondary)
+                  if !services.automaticPhotoSyncIncludesAll, services.automaticPhotoSyncWindowDays < 30 {
+                    Button("Expand to 30 days", systemImage: "calendar.badge.plus") {
+                      do { try services.expandAutomaticPhotoSyncToThirtyDays() }
+                      catch { services.error = error.localizedDescription }
+                    }.accessibilityIdentifier("sync.expand30")
+                  }
                   if !services.automaticPhotoSyncIncludesAll {
                     Button("Sync all permitted photos and videos", systemImage: "photo.stack") {
                       do { try services.expandAutomaticPhotoSyncToAll() }

@@ -17,6 +17,8 @@ struct PhotoPeopleGroup: Identifiable, Sendable {
   var faces: [PhotoPeopleFace]
   var confirmedCount: Int { faces.filter(\.confirmed).count }
 }
+typealias PhotoPeopleScanScope = PhotoAnalysisScope
+
 extension SearchIndex {
   func preparePeopleTables() throws {
     try database.write { db in
@@ -37,14 +39,24 @@ extension SearchIndex {
     try preparePeopleTables()
     try database.write { try $0.execute(sql: "INSERT INTO peopleState(key,value) VALUES('enabled',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", arguments: [enabled ? "1" : "0"]) }
   }
-  func pendingPeopleRecords() throws -> [SearchRecord] {
+  private func pendingPeopleQuery(_ scope: PhotoPeopleScanScope, after: PhotoAnalysisCursor?) -> (String, StatementArguments) {
+    let (condition, arguments) = metadataAnalysisFilter(scope, after: after)
+    return ("FROM searchRecords r LEFT JOIN peopleScans p ON p.photo=r.id WHERE " + condition +
+      " AND (p.photo IS NULL OR p.revision!=json_extract(r.value,'$.revision') OR p.processor!=?)", arguments + [PhotoFaceVector.processor])
+  }
+  func pendingPeopleCount(scope: PhotoPeopleScanScope, after: PhotoAnalysisCursor? = nil) throws -> Int {
     try preparePeopleTables()
+    let (sql, arguments) = pendingPeopleQuery(scope, after: after)
+    return try database.read { try Int.fetchOne($0, sql: "SELECT count(*) "+sql, arguments: arguments) ?? 0 }
+  }
+  func pendingPeopleRecords(scope: PhotoPeopleScanScope = PhotoPeopleScanScope(), after: PhotoAnalysisCursor? = nil, limit: Int? = nil) throws -> [SearchRecord] {
+    try preparePeopleTables()
+    let (sql, arguments) = pendingPeopleQuery(scope, after: after)
     return try database.read { db in
-      try Row.fetchAll(db, sql: """
-        SELECT r.value FROM searchRecords r LEFT JOIN peopleScans p ON p.photo=r.id
-        WHERE p.photo IS NULL OR p.revision!=json_extract(r.value,'$.revision') OR p.processor!=?
-        ORDER BY r.capture DESC,r.id
-        """, arguments: [PhotoFaceVector.processor]).map { try JSONDecoder().decode(SearchRecord.self, from: $0["value"] as Data) }
+      // SQL eligibility precedes the optional explicit batch; the count remains uncapped.
+      let limitSQL = limit.map { " LIMIT \(max(0, $0))" } ?? ""
+      return try Row.fetchAll(db, sql: "SELECT r.value "+sql+" ORDER BY r.capture DESC,r.id"+limitSQL,
+        arguments: arguments).map { try JSONDecoder().decode(SearchRecord.self, from: $0["value"] as Data) }
     }
   }
   func peopleGroups() throws -> [PhotoPeopleGroup] {

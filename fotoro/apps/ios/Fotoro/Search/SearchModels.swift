@@ -173,6 +173,40 @@ struct SearchScope: Equatable, Sendable {
     return people.isEmpty ? dates : dates + "|people:" + people.key
   }
 }
+struct PhotoAnalysisScope: Equatable, Sendable {
+  var query: String
+  var metadataText: String
+  var scope: SearchScope
+  var includesOlder: Bool
+  init(query: String = "", people: PeopleSearchSelection = PeopleSearchSelection(), includesOlder: Bool = false,
+    now: Date = Date(), calendar: Calendar = .current) {
+    let parsed = NaturalDateQuery.parse(query, scope: SearchScope(people: people), now: now, calendar: calendar)
+    self.query = query; metadataText = parsed.text; scope = parsed.scope; self.includesOlder = includesOlder
+    // An explicit date query can target an older trip without scanning the whole library.
+    if !includesOlder, parsed.datePhrase == nil { scope.from = RecentPhotosPolicy.cutoff(now: now, calendar: calendar) }
+    scope.through = min(scope.through ?? now, now)
+  }
+  static func matchesMetadata(_ record: SearchRecord, text: String) -> Bool {
+    func words(_ value: String) -> [String] {
+      SearchNormalization.text(value).split { !$0.isLetter && !$0.isNumber }.map(String.init)
+    }
+    let requested = words(text)
+    guard let last = requested.last else { return true }
+    let facts = record.facts.filter { !$0.hasPrefix("fotoro:people-source:v1:") && !$0.hasPrefix("fotoro:person:v1:") && !$0.hasPrefix("fotoro.ai.v1:") }
+    let source = record.labels + record.captions + record.keywords + facts + [record.filename,
+      record.favorite ? "favorite" : "", record.capturedAt?.formatted(date: .complete, time: .omitted) ?? ""]
+    let tokens = Set(words(source.joined(separator: " ")))
+    return requested.dropLast().allSatisfy { tokens.contains($0) }
+      && tokens.contains { last.contains(where: \.isLetter) ? $0.hasPrefix(last) : $0 == last }
+  }
+}
+
+struct PhotoAnalysisCursor: Equatable, Sendable {
+  var capturedAt: Date?
+  var id: String
+  init(_ record: SearchRecord) { capturedAt = record.capturedAt; id = record.id }
+}
+
 struct SearchMeaning: Identifiable, Equatable, Sendable {
   var id: String
   var term: String

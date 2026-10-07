@@ -3,6 +3,49 @@ import XCTest
 @testable import Fotoro
 
 final class SearchStoreTests: XCTestCase {
+  func testHeavyAnalysisMetadataFilterPrecedesExplicitBatchAndPreservesCompletedHistory() throws {
+    let index = try SearchIndex(), now = Date()
+    var records = (0..<601).map { number in
+      var value = SearchRecord(id: "match-\(number)"); value.capturedAt = now; value.filename = "Singapore-\(number).jpg"; return value
+    }
+    var old = SearchRecord(id: "old-pending"); old.capturedAt = now.addingTimeInterval(-90 * 86400); old.filename = "Singapore-old.jpg"
+    var historical = old; historical.id = "old-complete"; historical.ocrStatus = .complete; historical.ocrText = "historical receipt"
+    historical.visualStatus = .complete
+    var ocrOnly = SearchRecord(id: "ocr-only"); ocrOnly.capturedAt = now; ocrOnly.filename = "IMG.jpg"; ocrOnly.ocrStatus = .complete; ocrOnly.ocrText = "Singapore"
+    var unknown = old; unknown.id = "unknown"; unknown.capturedAt = nil
+    var future = old; future.id = "future"; future.capturedAt = now.addingTimeInterval(60)
+    records += [old, historical, ocrOnly, unknown, future]
+    try index.replacePermitted(records)
+    #if !FOTORO_LOCAL_PREVIEW
+    var vector = [Float](repeating: 0, count: 512); vector[0] = 1
+    XCTAssertTrue(try index.applySemantic(vector, photoID: historical.id, revision: historical.revision))
+    #endif
+    let recent = PhotoAnalysisScope(query: "Singapore", now: now)
+    XCTAssertEqual(try index.pendingMetadataAnalysisCount(scope: recent), 601)
+    let first = try index.pendingMetadataAnalysisRecords(scope: recent)
+    XCTAssertEqual(first.count, 500)
+    let cursor = PhotoAnalysisCursor(try XCTUnwrap(first.last))
+    XCTAssertEqual(try index.pendingMetadataAnalysisCount(scope: recent, after: cursor), 101)
+    let second = try index.pendingMetadataAnalysisRecords(scope: recent, after: cursor)
+    XCTAssertEqual(second.count, 101)
+    XCTAssertTrue(Set(first.map(\.id)).isDisjoint(with: Set(second.map(\.id))))
+    let unavailable = try XCTUnwrap(first.first)
+    XCTAssertTrue(try index.applyOCR(nil, status: .failed, photoID: unavailable.id, revision: unavailable.revision))
+    XCTAssertTrue(try index.applyVisual(nil, status: .unavailable, photoID: unavailable.id, revision: unavailable.revision))
+    let end = PhotoAnalysisCursor(try XCTUnwrap(second.last))
+    XCTAssertEqual(try index.pendingMetadataAnalysisCount(scope: recent, after: end, retryFailed: true), 0,
+      "The exhausted cursor counts unattempted work, not successful coverage")
+    XCTAssertTrue(try index.pendingMetadataAnalysisRecords(scope: recent, retryFailed: true).contains { $0.id == unavailable.id },
+      "Retry starts before the cursor so an unavailable earlier source remains retryable")
+    let expanded = PhotoAnalysisScope(query: "Singapore", includesOlder: true, now: now)
+    XCTAssertEqual(try index.pendingMetadataAnalysisCount(scope: expanded), 603)
+    XCTAssertFalse(try index.pendingMetadataAnalysisRecords(scope: expanded, after: PhotoAnalysisCursor(unknown)).contains { $0.id == unknown.id })
+    XCTAssertEqual(try index.search("historical receipt").results.map(\.id), [historical.id])
+    #if !FOTORO_LOCAL_PREVIEW
+    XCTAssertFalse(try index.needsSemantic(photoID: historical.id, revision: historical.revision))
+    XCTAssertTrue(try index.needsSemantic(photoID: historical.id, revision: "changed"))
+    #endif
+  }
   #if !FOTORO_LOCAL_PREVIEW
   @MainActor func testPeopleOnlySearchFencesLateSelectionAndClearWithoutLosingText() async throws {
     let index = try SearchIndex(), a = UUID().uuidString.lowercased(), b = UUID().uuidString.lowercased()

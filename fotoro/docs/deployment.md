@@ -17,12 +17,18 @@ Hono Worker with D1 and private R2. The upstream Ente application is a reference
   require separate preview consent and explicitly configured provider/work limits;
   that route remains disabled by default.
 
-The last verified active Worker is `2ca15bc9-614b-4b21-a115-f3748c60bbc4`
-at 100%, deployment `7a474426-4b3b-4d7c-baf7-026bfd36e090` (2026-10-05,
-merged [PR 43](https://github.com/dakshbhatia/fotoro/pull/43)). All 35 non-HTML
-asset digests match the qualified build; Photos and Saved HTML routes reference
-the expected entry assets. The preceding qualified version is
-`e6a09961-6ddb-42c5-9fc0-fabaf195d9b0`. Read the current deployment back before
+The last verified active Worker is `8777a26f-ac52-4f7a-95ae-f2bdd94a188e`
+at 100%, deployment `8bbe9d36-e5ea-43ff-9e8e-f46ac0468526` (2026-10-07,
+merged [PR 46](https://github.com/dakshbhatia/fotoro/pull/46)). All 45 non-HTML
+asset digests match the qualified build; Photos and Saved HTML routes match the
+built HTML. All 23 checks passed or skipped for qualified head `8311a8639801ad99fe80c42449bab41b1b7f1eab`;
+the guarded merge `a092848097c07ec304835c3c09ada27c17cdf705` has the same tree.
+Migrations 0007 and 0008 are applied, with schema and ledger read back and no
+pending migrations. A private staging copy removed 0007's leading comment after
+Wrangler rejected its semicolon; the qualified SQL statements were unchanged.
+Production bindings were preserved, and optional inference remains disabled.
+The preceding qualified version is `2ca15bc9-614b-4b21-a115-f3748c60bbc4`.
+Read the current deployment back before
 changing traffic; preserve the preceding qualified version for rollback.
 
 Documentation-only edits do not change this runtime checkpoint and need no Worker
@@ -77,17 +83,22 @@ personal-account sync or original restoration on a physical phone.
 
 ## Native distribution
 
-The last verified TestFlight build is 41 (0.1.0), shown as `Complete` in build
-uploads and `Testing` in the existing Fotoro Internal group on October 6. The
-owner's existing tester account has access. Its archive and distribution IPA
-were audited before upload; physical installation and acceptance remain unverified.
-The existing signed-in Xcode account supplied signing and upload authentication.
-Its source is `55ec36a5e24e0461d62280e1fee119a1b042d3ac`, with all 143 native
-input hashes matched and all 23 PR checks successful or skipped. What to Test
-notes were saved and read back. Encryption answers preserve standard algorithms
-outside Apple's OS and the approved France exclusion. This internal candidate
-includes the foundation fixes in draft PR 46; it does not establish a PR merge
-or production web deployment. Build 40 is the preceding TestFlight candidate.
+The last verified TestFlight build is 42 (0.1.0), processed `VALID` and
+`IN_BETA_TESTING` in the same existing internal group as build 41 on October 7.
+The existing tester has access; no testers or permissions were added. Its archive
+and distribution IPA were audited before upload. Physical installation and
+acceptance remain unverified. CLI export lacked an available account; Xcode
+Organizer used the existing cloud-managed distribution identity to export and
+upload the same immutable archive. Its native source is
+`d218a02fcb8d9cfb63a7e8865900b60685b6b4e2`, with all 147 native/tool input hashes
+matched and identical native inputs in qualified head `8311a8639801ad99fe80c42449bab41b1b7f1eab`.
+What to Test notes were saved and independently read back. The resource-framework
+dSYM warning did not prevent Apple's accepted processing; the main static runtime
+and binary/dSYM pairing pass the release audit. App Store Connect's documentation
+exemption metadata preserves the known standard algorithms outside Apple's OS
+and approved France exclusion; the binary encryption declaration is unchanged.
+Build 41 is the preceding verified internal candidate. Build 42 contains PR 46's
+family albums and access changes; the later 30-day processing follow-up is separate.
 
 Build 38 archives the qualified PR 43 source and passes the full archive audit
 with all 69 native input hashes matched. It is development-signed; no IPA was

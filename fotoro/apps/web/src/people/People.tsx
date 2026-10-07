@@ -7,7 +7,8 @@ import {Icon} from "../library/icons";
 import {PeopleEngine} from "./engine";
 import {assignmentsForCorrection, groupPeopleFaces, peopleSourceCurrent, type PeopleFace, type PersonGroup} from "./groups";
 import {scanPeoplePhotos} from "./scan";
-import {peopleReviewPhotos} from "./filter";
+import {peopleReviewPhotos, reviewedPeople} from "./filter";
+import {peopleReviewPlan} from "./review-plan";
 export interface PeopleUpdate {photo: LocalPhoto; assignments: PeopleAssignment[]}
 
 function FaceThumbnail({face,photo,resources,onOpen}: {face: PeopleFace;photo: LocalPhoto;resources: LocalResources;onOpen:()=>void}) {
@@ -32,23 +33,29 @@ function GroupControls({group,groups,busy,onName,onMerge}: {group:PersonGroup;gr
     <option value="">Merge with…</option>{groups.filter(other=>other.id!==group.id).map(other=><option key={other.id} value={other.id}>{other.name??`Group ${groups.indexOf(other)+1}`}</option>)}
   </select><button disabled={busy||!target} onClick={()=>onMerge(target)}>Merge</button></div>}</div>;
 }
-export function People({photos,resources,savedResources,onClose,onOpen,onAssignments,onFind,selectedIDs}: {
+export function People({photos,resources,savedResources,onClose,onOpen,onAssignments,onFind,selectedIDs,eligibleIDs,scopeLabel = "Current filters",onExpand}: {
   photos:LocalPhoto[];resources:LocalResources;savedResources?:LocalResources;onClose:()=>void;onOpen:(id:string)=>void;
   onAssignments?:(updates:PeopleUpdate[])=>Promise<void>;
   onFind?:(personId:string)=>void;
   selectedIDs?:ReadonlySet<string>;
+  eligibleIDs?:ReadonlySet<string>;scopeLabel?:string;onExpand?:()=>void;
 }) {
   const panel=useRef<HTMLElement>(null),latest=useRef(photos),alive=useRef(false),operation=useRef<AbortController|undefined>(undefined);
   latest.current=photos;
   const [engine]=useState(()=>new PeopleEngine()),[faces,setFaces]=useState<PeopleFace[]>([]),[groups,setGroups]=useState<PersonGroup[]>([]);
   const [busy,setBusy]=useState(false),[correcting,setCorrecting]=useState(false),[status,setStatus]=useState(""),[assessed,setAssessed]=useState(false);
-  const [selectedOnly,setSelectedOnly]=useState(false);
-  const selectedCount=peopleReviewPhotos(photos,true,selectedIDs).length;
+  const [selectedOnly,setSelectedOnly]=useState(false),[reassess,setReassess]=useState(false);
+  const latestEligible=useRef(eligibleIDs);latestEligible.current=eligibleIDs;
+  const selectedCount=peopleReviewPhotos(photos,true,selectedIDs,eligibleIDs).length;
+  const eligibleCount=peopleReviewPhotos(photos,false,undefined,eligibleIDs).length;
+  const reviewed=useMemo(()=>reviewedPeople(photos),[photos]);
   const currentFaces=useRef(faces);currentFaces.current=faces;
   const currentClose=useRef(onClose);currentClose.current=onClose;
   const scanned=useRef(new Map<string,LocalPhoto>());
+  const attempted=useRef(new Map<string,LocalPhoto>());
   useDialogFocus(panel,onClose);
   useEffect(()=> {alive.current=true;return()=> {alive.current=false;operation.current?.abort();engine.clear();for(const face of currentFaces.current)face.vector.fill(0);};},[engine]);
+  useEffect(()=>()=>{operation.current?.abort();engine.clear();},[eligibleIDs,engine]);
   useEffect(()=> {
     const clear=()=> {
       operation.current?.abort();engine.clear();for(const face of currentFaces.current)face.vector.fill(0);
@@ -59,34 +66,44 @@ export function People({photos,resources,savedResources,onClose,onOpen,onAssignm
     return()=> {window.removeEventListener("pagehide",clear);window.removeEventListener("fotoro-lock",clear);document.removeEventListener("visibilitychange",hide);};
   },[engine]);
   const currentPhotos=useMemo(()=>new Map(photos.map(photo=>[photo.id,photo])),[photos]);
-  const visibleFaces=useMemo(()=>faces.filter(face=>peopleSourceCurrent(scanned.current.get(face.photoID)!,currentPhotos.get(face.photoID))),[faces,currentPhotos]);
+  const visibleFaces=useMemo(()=>faces.filter(face=>(!eligibleIDs||eligibleIDs.has(face.photoID))&&peopleSourceCurrent(scanned.current.get(face.photoID)!,currentPhotos.get(face.photoID))),[faces,currentPhotos,eligibleIDs]);
   const byFace=useMemo(()=>new Map(visibleFaces.map(face=>[face.id,face])),[visibleFaces]);
   const visibleGroups=useMemo(()=>groups.map(group=>({...group,faceIDs:group.faceIDs.filter(id=>byFace.has(id))})).filter(group=>group.faceIDs.length),[groups,byFace]);
   useEffect(()=> {
-    if (!correcting && faces.some(face=>!peopleSourceCurrent(scanned.current.get(face.photoID)!,currentPhotos.get(face.photoID)))) {
+    if (!correcting && faces.some(face=>!byFace.has(face.id))) {
       operation.current?.abort();engine.clear();
-      for (const face of faces) if(!byFace.has(face.id))face.vector.fill(0);
+      for (const face of faces) if(!byFace.has(face.id)){face.vector.fill(0);scanned.current.delete(face.photoID);}
       setFaces(visibleFaces);setGroups(visibleGroups);
     }
   },[currentPhotos,faces,byFace,visibleFaces,visibleGroups,engine,correcting]);
   const start=async()=> {
     if(busy||correcting)return;
-    const originals=peopleReviewPhotos(latest.current,selectedOnly,selectedIDs);
-    if(originals.length>500){setStatus("Choose up to 500 photos to find people.");return;}
+    const options={eligibleIDs:latestEligible.current,selectedOnly,selectedIDs,scanned:scanned.current,attempted:attempted.current,reassess};
+    const plan=peopleReviewPlan(latest.current,options);
+    const originals=plan.batch;
+    if(!originals.length){setStatus(plan.reused.length?"Reviewed names and current session results are reused. No new photos to assess in this scope.":"No available photos match this scope.");return;}
     operation.current?.abort();const controller=new AbortController();operation.current=controller;
-    setBusy(true);setStatus("Downloading People models…");
+    const batchLabel=`${originals.length} ${originals.length===1?"photo":"photos"} in this batch`;
+    setBusy(true);setStatus(`Preparing People · ${batchLabel}${plan.remaining?` · ${plan.remaining} more matching photos remain`:""}`);
     try {
       const {faces:detected,sources,skipped}=await scanPeoplePhotos(originals,controller.signal,{
-        current:photo=>peopleSourceCurrent(photo,latest.current.find(value=>value.id===photo.id)),
+        current:photo=>(!latestEligible.current||latestEligible.current.has(photo.id))&&peopleSourceCurrent(photo,latest.current.find(value=>value.id===photo.id)),
         preview:async photo=>{
           const manager=photo.id.startsWith("saved:")?savedResources??resources:resources;
           return (await manager.load(photo,"preview",controller.signal)).blob;
-        },analyze:blob=>engine.analyze(blob,controller.signal),progress:(completed,total)=>setStatus(`Finding people · ${completed} of ${total}`),
+        },analyze:blob=>engine.analyze(blob,controller.signal),progress:(completed,total)=>setStatus(`Finding people · ${completed} of ${total} in this batch${plan.remaining?` · ${plan.remaining} more matching photos remain`:""}`),
       });
       if(!alive.current||controller.signal.aborted){for(const face of detected)face.vector.fill(0);return;}
-      const current=detected.filter(face=>peopleSourceCurrent(sources.get(face.photoID)!,latest.current.find(photo=>photo.id===face.photoID)));
-      for(const face of faces)face.vector.fill(0);scanned.current=sources;setFaces(current);setGroups(groupPeopleFaces(current,latest.current));setAssessed(true);
-      setStatus(skipped?`${skipped} photos could not be assessed. You can try again.`:current.length?"Groups are suggestions. Review before naming.":"No faces found.");
+      const current=detected.filter(face=>(!latestEligible.current||latestEligible.current.has(face.photoID))&&peopleSourceCurrent(sources.get(face.photoID)!,latest.current.find(photo=>photo.id===face.photoID)));
+      const reusedIDs=new Set(plan.reused.map(photo=>photo.id));
+      const retained=visibleFaces.filter(face=>reusedIDs.has(face.photoID)&&(!latestEligible.current||latestEligible.current.has(face.photoID))&&peopleSourceCurrent(scanned.current.get(face.photoID)!,latest.current.find(photo=>photo.id===face.photoID)));
+      if(retained.length+current.length>2000){for(const face of detected)face.vector.fill(0);throw new Error("People group limit reached for this session. Narrow the photo filters before continuing.");}
+      for(const face of [...faces,...detected])if(!retained.includes(face)&&!current.includes(face))face.vector.fill(0);
+      for(const photo of plan.reused)if(scanned.current.has(photo.id))sources.set(photo.id,photo);
+      for(const photo of originals)if(peopleSourceCurrent(photo,latest.current.find(value=>value.id===photo.id)))attempted.current.set(photo.id,photo);
+      scanned.current=sources;const combined=[...retained,...current];setFaces(combined);setGroups(groupPeopleFaces(combined,latest.current));setAssessed(true);
+      const remaining=peopleReviewPlan(latest.current,{...options,scanned:sources}).pending.length;
+      setStatus(`${batchLabel}${skipped?`; ${skipped} could not be assessed`:""}. ${remaining?`${remaining} matching photos remain; choose Find more people to continue.`:current.length?"Groups are suggestions. Review before naming.":"No new faces found in this scope."}`);
     }catch(error){if(alive.current)setStatus(controller.signal.aborted?"Finding people cancelled.":error instanceof Error?error.message:"People are unavailable. Try again.");}
     finally {engine.clear();if(alive.current)setBusy(false);}
   };
@@ -123,14 +140,20 @@ export function People({photos,resources,savedResources,onClose,onOpen,onAssignm
   };
   return <aside ref={panel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="People" className="sheet people-sheet">
     <div className="places-header"><div><h2>People</h2><p className="hint">Photos and face vectors stay on this device.</p></div><button aria-label="Close people" onClick={onClose}><Icon kind="close"/></button></div>
-    {!assessed&&<p className="hint">Download face models and runtime to find faces. Groups may need corrections.</p>}
+    {reviewed.length>0&&<section className="people-reviewed"><h3>Reviewed people</h3><div className="people-filter-bar">{reviewed.map(person=><button key={person.id} disabled={busy||correcting||!onFind} onClick={()=>onFind?.(person.id)}>{person.names.join(" / ")} · {person.photoCount} {person.photoCount===1?"photo":"photos"}</button>)}</div></section>}
+    <p className="hint" role="status">{scopeLabel} · {eligibleCount} available {eligibleCount===1?"photo":"photos"}. Face analysis covers only this scope.</p>
+    <div className="actions"><button disabled={busy||correcting||!eligibleCount} onClick={()=>void start()}>{assessed||reviewed.length?"Find more people":"Find people on this device"}</button>{busy&&<button onClick={()=>operation.current?.abort()}>Cancel</button>}</div>
+    <details className="people-options"><summary>Options</summary>
+    <p className="hint">Face analysis downloads models and runtime on this device. Groups may need corrections.</p>
+    {onExpand&&<button disabled={busy||correcting} onClick={onExpand}>Include older photos</button>}
     {(selectedCount>0||selectedOnly)&&<label className="people-match-mode">Review<select aria-label="Photos to review for People" value={selectedOnly?"selected":"all"} disabled={busy||correcting} onChange={event=>setSelectedOnly(event.target.value==="selected")}>
-      <option value="all">All available photos</option><option value="selected" disabled={!selectedCount}>Selected {selectedCount} photos</option>
+      <option value="all">Matching {eligibleCount} photos</option><option value="selected" disabled={!selectedCount}>Selected {selectedCount} matching photos</option>
     </select></label>}
-    <div className="actions"><button disabled={busy||correcting||!photos.length} onClick={()=>void start()}>{assessed?"Find people again":"Find people on this device"}</button>{busy&&<button onClick={()=>operation.current?.abort()}>Cancel</button>}</div>
+    <label className="people-match-mode"><input type="checkbox" checked={reassess} disabled={busy||correcting} onChange={event=>setReassess(event.target.checked)}/>Reassess reviewed photos in this scope</label>
+    </details>
     {status&&<p role="status" className="hint">{status}</p>}
-    {visibleGroups.map((group,index)=><section key={group.id} className="people-group">
-      <h3>{group.name??`Group ${index+1}`} <small>{new Set(group.faceIDs.map(id=>byFace.get(id)!.photoID)).size} photos</small></h3>
+    {visibleGroups.map((group,index)=>{const photoCount=new Set(group.faceIDs.map(id=>byFace.get(id)!.photoID)).size;return <section key={group.id} className="people-group">
+      <h3>{group.name??`Group ${index+1}`} <small>{photoCount} {photoCount===1?"photo":"photos"}</small></h3>
       {group.name && onFind && <button disabled={busy||correcting} onClick={()=>onFind(group.id)}>Find photos</button>}
       <GroupControls group={group} groups={visibleGroups} busy={busy||correcting} onName={name=>void correct([group],[{...group,name}])} onMerge={target=> {
         const other=visibleGroups.find(value=>value.id===target);if(other)void correct([group,other],[{...other,name:other.name??group.name,faceIDs:[...other.faceIDs,...group.faceIDs]}]);
@@ -140,7 +163,7 @@ export function People({photos,resources,savedResources,onClose,onOpen,onAssignm
         <div>{group.faceIDs.length>1&&<button disabled={busy||correcting} onClick={()=>void correct([group],[{...group,faceIDs:group.faceIDs.filter(value=>value!==id)},{id:crypto.randomUUID(),faceIDs:[id]}])}>Separate</button>}
         <button disabled={busy||correcting} onClick={()=>void correct([group],[{...group,faceIDs:group.faceIDs.filter(value=>value!==id)}])}>Not a face</button></div>
       </div>;})}</div>
-    </section>)}
+    </section>;})}
     <details className="people-model-notices"><summary>Models and licenses</summary><p>YuNet face detection · MIT. SFace face recognition · Apache 2.0.</p><a href={new URL("./licenses/YuNet-LICENSE.txt",import.meta.url).href} target="_blank" rel="noreferrer">YuNet license</a>{" · "}<a href={new URL("./licenses/SFace-LICENSE.txt",import.meta.url).href} target="_blank" rel="noreferrer">SFace license</a></details>
   </aside>;
 }

@@ -9,6 +9,12 @@ final class SearchIndex: @unchecked Sendable {
   init(root: URL? = nil) throws {
     var configuration = Configuration()
     configuration.prepareDatabase { db in
+      db.add(function: DatabaseFunction("photoMetadataMatch", argumentCount: 2, pure: true) { values in
+        guard let bytes = Data.fromDatabaseValue(values[0]),
+          let record = try? JSONDecoder().decode(SearchRecord.self, from: bytes),
+          let text = String.fromDatabaseValue(values[1]) else { return false }
+        return PhotoAnalysisScope.matchesMetadata(record, text: text)
+      })
       #if !FOTORO_LOCAL_PREVIEW
       db.add(function: DatabaseFunction("searchPeopleMatch", argumentCount: 3, pure: true) { values in
         guard let bytes = Data.fromDatabaseValue(values[0]),
@@ -114,6 +120,10 @@ final class SearchIndex: @unchecked Sendable {
         ORDER BY r.favorite DESC,r.capture DESC,r.id
         """, arguments: [SemanticVector.processor]).map(decode)
     }
+  }
+  func needsSemantic(photoID: String, revision: String) throws -> Bool {
+    try database.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM searchVectors WHERE photo=? AND revision=? AND processor=?",
+      arguments: [photoID, revision, SemanticVector.processor]) == 0 }
   }
   @discardableResult func applySemantic(_ vector: [Float], photoID: String, revision: String,
     generation: UInt64? = nil) throws -> Bool {
@@ -270,6 +280,51 @@ final class SearchIndex: @unchecked Sendable {
         arguments: [retryFailed]
       ).map(decode)
     }
+  }
+  func metadataAnalysisFilter(_ scope: PhotoAnalysisScope, after: PhotoAnalysisCursor? = nil) -> (String, StatementArguments) {
+    var conditions = ["r.scope='photos'"]
+    var arguments = StatementArguments()
+    if !scope.metadataText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      conditions.append("photoMetadataMatch(r.value,?)=1"); arguments += [scope.metadataText]
+    }
+    if let from = scope.scope.from { conditions.append("r.capture>=?"); arguments += [from.timeIntervalSince1970] }
+    if let through = scope.scope.through { conditions.append("(r.capture IS NULL OR r.capture<=?)"); arguments += [through.timeIntervalSince1970] }
+    if let until = scope.scope.until { conditions.append("r.capture<?"); arguments += [until.timeIntervalSince1970] }
+    if !scope.scope.people.isEmpty {
+      #if FOTORO_LOCAL_PREVIEW
+      conditions.append("0")
+      #else
+      conditions.append("searchPeopleMatch(r.value,?,?)=1")
+      arguments += [String(decoding: (try? JSONEncoder().encode(scope.scope.people.personIDs)) ?? Data(), as: UTF8.self), scope.scope.people.match.rawValue]
+      #endif
+    }
+    if let after {
+      if let date = after.capturedAt {
+        conditions.append("(r.capture<? OR r.capture IS NULL OR (r.capture=? AND r.id>?))")
+        arguments += [date.timeIntervalSince1970, date.timeIntervalSince1970, after.id]
+      } else { conditions.append("r.capture IS NULL AND r.id>?"); arguments += [after.id] }
+    }
+    return (conditions.joined(separator: " AND "), arguments)
+  }
+  private func scopedAnalysisQuery(_ scope: PhotoAnalysisScope, after: PhotoAnalysisCursor?, retryFailed: Bool) -> (String, StatementArguments) {
+    let (condition, arguments) = metadataAnalysisFilter(scope, after: after)
+    var pending = "r.ocrState IN ('pending','unavailable') OR r.visualState IN ('pending','unavailable')"
+    if retryFailed { pending += " OR r.ocrState='failed' OR r.visualState='failed'" }
+    #if !FOTORO_LOCAL_PREVIEW
+    pending += " OR v.photo IS NULL OR v.processor!=? OR v.revision!=json_extract(r.value,'$.revision')"
+    return ("FROM searchRecords r LEFT JOIN searchVectors v ON v.photo=r.id WHERE "+condition+" AND ("+pending+")", arguments + [SemanticVector.processor])
+    #else
+    return ("FROM searchRecords r WHERE "+condition+" AND ("+pending+")", arguments)
+    #endif
+  }
+  func pendingMetadataAnalysisCount(scope: PhotoAnalysisScope, after: PhotoAnalysisCursor? = nil, retryFailed: Bool = false) throws -> Int {
+    let (sql, arguments) = scopedAnalysisQuery(scope, after: after, retryFailed: retryFailed)
+    return try database.read { try Int.fetchOne($0, sql: "SELECT count(*) "+sql, arguments: arguments) ?? 0 }
+  }
+  func pendingMetadataAnalysisRecords(scope: PhotoAnalysisScope, after: PhotoAnalysisCursor? = nil, retryFailed: Bool = false, limit: Int = 500) throws -> [SearchRecord] {
+    let (sql, arguments) = scopedAnalysisQuery(scope, after: after, retryFailed: retryFailed)
+    return try database.read { try Row.fetchAll($0, sql: "SELECT r.value "+sql+" ORDER BY r.capture DESC,r.id LIMIT ?",
+      arguments: arguments + [min(500, max(0, limit))]).map(decode) }
   }
   func pendingAnalysisRecords(retryFailed: Bool = false) throws -> [SearchRecord] {
     try database.read { db in

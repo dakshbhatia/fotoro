@@ -24,7 +24,7 @@ export async function readPickSignals(photo: LocalPhoto, resources: LocalResourc
   } finally {image.close(); canvas.width = 0; canvas.height = 0;}
 }
 
-export function usePhotoPicks(photos: LocalPhoto[], resources: LocalResources, enabled: boolean, sourceGeneration = 0) {
+export function usePhotoPicks(photos: LocalPhoto[], resources: LocalResources, enabled: boolean, sourceGeneration = 0, analysisPhotos = photos) {
   const [analyzer] = useState(() => new PickAnalyzer());
   const [recommendations, setRecommendations] = useState<PhotoRecommendations>();
   const [busy, setBusy] = useState(false), [done, setDone] = useState(0);
@@ -40,10 +40,10 @@ export function usePhotoPicks(photos: LocalPhoto[], resources: LocalResources, e
     let alive = true;
     if (!photos.length) {clear(); return;}
     setRecommendations(undefined); setBusy(enabled); setDone(0);
-    if (enabled) void analyzer.run(photos, (photo, signal) => readPickSignals(photo, resources, signal), completed => {if (alive) setDone(completed);})
+    if (enabled) void analyzer.run(analysisPhotos, (photo, signal) => readPickSignals(photo, resources, signal), completed => {if (alive) setDone(completed);})
       .then(result => {if (alive && result) {setRecommendations(result); setBusy(false);}});
     return () => {alive = false; analyzer.cancel();};
-  }, [photos, resources, analyzer, enabled, clear, sourceGeneration]);
+  }, [analysisPhotos, resources, analyzer, enabled, clear, sourceGeneration]);
   const ids = useMemo(() => availablePhotoSelection(selection, photos), [photos, selection]);
   useEffect(() => {setSelection(current => availablePhotoSelection(current, photos));}, [photos, selection]);
   const choose = (id: string, checked: boolean) => setSelection(current => {

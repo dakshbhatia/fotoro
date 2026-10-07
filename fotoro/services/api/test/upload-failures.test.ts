@@ -81,7 +81,7 @@ it.each(["rejection", "throw"])("an early storage write %s cancels its body and 
     await stillReserved(reserved.uploadId);
     const records = emitted.mock.calls.map(call => JSON.parse(String(call[0])));
     expect(records).toEqual([{
-      event: "api.error", requestId: error.requestId, method: "PUT", status: 500, code: "INTERNAL_ERROR",
+      event: "api.error", requestId: error.requestId, method: "PUT", status: 500, code: "INTERNAL_ERROR", area: "sync",
       phase: "upload.staging", errorClass: "storage",
     }]);
     expect(JSON.stringify(records)).not.toMatch(/PRIVATE_|cap=|staging\/|authorization/);
@@ -114,7 +114,7 @@ it("storage failure while promoting leaves verified uploaded bytes available for
     const row = await env.DB.prepare("SELECT state FROM uploads WHERE id=?").bind(reserved.uploadId).first<{ state: string }>();
     expect(row?.state).toBe("uploaded");
     expect(emitted.mock.calls.map(call => JSON.parse(String(call[0])))).toEqual([{
-      event: "api.error", requestId: error.requestId, method: "POST", status: 500, code: "INTERNAL_ERROR",
+      event: "api.error", requestId: error.requestId, method: "POST", status: 500, code: "INTERNAL_ERROR", area: "sync",
       phase: "upload.commit", errorClass: "storage",
     }]);
     expect((await http(0, `/v1/uploads/${reserved.uploadId}/commit`, "POST")).status).toBe(200);

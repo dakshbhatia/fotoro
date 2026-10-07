@@ -193,7 +193,7 @@ export async function stageImport(
 export async function pendingImports() {
   const session = requireVault();
   const id = session.accountId;
-  const records = await all<WrappedKeyV1>("journal");
+  const records = await all<WrappedKeyV1>("journal", id + ":");
   assertVault(session);
   return records
     .filter(([key]) => key.startsWith(id + ":"))

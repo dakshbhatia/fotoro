@@ -140,12 +140,21 @@ test("saved search joins local ordering and deduplicates only a matching origina
   assert.equal(result.photoId, local.id);
   assert.equal(savedSearchPhotos({...snapshot, current: () => false}, [local]).length, 0);
 });
-test("recent browser browsing uses the ten-day boundary but preserves undated selected originals", async () => {
-  const {inRecentSelectedRange} = await import("../src/local/consumer-range");
+test("recent browser browsing uses the thirty-day boundary and capture provenance while preserving undated selected originals", async () => {
+  const {inRecentSelectedRange, recentBrowseActive} = await import("../src/local/consumer-range");
   const now = Date.parse("2026-10-01T12:00:00Z");
-  assert.equal(inRecentSelectedRange({date: "2026-09-21T12:00:00Z", dateSource: "exif"}, now), true);
-  assert.equal(inRecentSelectedRange({date: "2026-09-21T11:59:59Z", dateSource: "exif"}, now), false);
+  for (const dateSource of ["exif", "photos"] as const) {
+    assert.equal(inRecentSelectedRange({date: "2026-09-01T12:00:00Z", dateSource}, now), true);
+    assert.equal(inRecentSelectedRange({date: "2026-09-01T11:59:59Z", dateSource}, now), false);
+    assert.equal(inRecentSelectedRange({date: "2026-10-01T12:00:01Z", dateSource}, now), false);
+    assert.equal(inRecentSelectedRange({date: "invalid", dateSource}, now), false);
+  }
   assert.equal(inRecentSelectedRange({date: "2000-01-01", dateSource: "selected"}, now), true);
+  assert.equal(inRecentSelectedRange({date: "invalid", dateSource: "selected"}, now), true);
+  assert.equal(recentBrowseActive(true, "Paris"), true);
+  assert.equal(recentBrowseActive(true, "Paris in 2018"), false);
+  assert.equal(recentBrowseActive(true, "Paris on 2018-02-31"), true);
+  assert.equal(recentBrowseActive(false, "Paris"), false);
 });
 test("joining saved hits preserves local ranking, preferred default and engine result caps", async () => {
   const {combineConsumerSearch} = await import("../src/library/consumer-search");

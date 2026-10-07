@@ -77,7 +77,8 @@ import {currentTimelineCandidates} from "./local/places";
 import type {TimelineCandidate} from "./local/google-timeline";
 import {ConsumerPreviewResources} from "./library/consumer-search";
 import {PeopleFilter, usePeopleFilter} from "./people/PeopleFilter";
-import {peopleMatchingPhotoIDs, peopleFilteredResult} from "./people/filter";
+import {peopleMatchingPhotoIDs, peopleFilteredResult, peopleMetadataMatches} from "./people/filter";
+import {inRecentSelectedRange, recentBrowseActive} from "./local/consumer-range";
 import {peopleSourceCurrent} from "./people/groups";
 import type {PeopleUpdate} from "./people/People";
 import type {IncomingAlbumIntent} from "./albums/intent";
@@ -670,11 +671,15 @@ export default function CloudApp({
   const searchable = received ?? photos;
   const peopleRecords = useMemo(() => cloudSearchRecords(searchable), [searchable]);
   const peopleFind = usePeopleFilter(peopleRecords, receivedContext ?? ownedSnapshot?.token ?? account);
+  const [recentOnly, setRecentOnly] = useState(true);
+  useEffect(() => {setRecentOnly(true);}, [account]);
+  const recentActive = !received && recentBrowseActive(recentOnly, query);
   const familyFilter = peopleFind.filter.ids.size > 0;
-  const permitted = useMemo(() => peopleMatchingPhotoIDs(peopleRecords, peopleFind.filter), [peopleRecords, peopleFind.filter]);
+  const permitted = useMemo(() => peopleMatchingPhotoIDs(peopleRecords.filter(photo => !recentActive || inRecentSelectedRange(photo)), peopleFind.filter), [peopleRecords, peopleFind.filter, recentActive]);
   const index = useMemo(() => new PhotoSearchIndex(peopleRecords), [peopleRecords]);
   const lexicalSearchResult = useMemo(() => index.search(query, {scope: "account:" + account, allowedIds: permitted, committedMeaning}), [index, query, account, committedMeaning, permitted]);
   const peoplePhotos = useMemo(() => savedSearchPhotos(ownedSnapshot, []), [ownedSnapshot]);
+  const peopleEligibleIDs = useMemo(() => new Set([...(normalizeSearch(query) ? peopleMetadataMatches(lexicalSearchResult) : permitted)].map(id => "saved:" + id)), [query, lexicalSearchResult, permitted]);
   const latestPeoplePhotos = useRef(peoplePhotos); latestPeoplePhotos.current = peoplePhotos;
   const findPhotos = useMemo(() => peoplePhotos.map(photo => ({...photo, id: photo.id.slice(6)})).filter(photo => permitted.has(photo.id)), [peoplePhotos, permitted]);
   const semanticSearchResult = useSemanticFind(findPhotos, lexicalSearchResult, active && unlocked && !received, ownedSnapshot?.token, committedMeaning);
@@ -1000,6 +1005,7 @@ export default function CloudApp({
               disabled={preparingOriginals || sharingOriginals} onReview={!publicDemo ? () => setPeopleOpen(true) : undefined} />
               {(familyFilter || normalizeSearch(query)) && <button disabled={preparingOriginals || sharingOriginals || searchResult.searching || bestShots.busy || !shown.length} onClick={selectResults}>Select these {shown.length}</button>}
             </div>}
+            {!received && photos.length > 0 && recentBrowseActive(true, query) && <button className="local-filter" aria-label={recentOnly ? "Show all photos" : "Browse the last 30 days"} onClick={() => setRecentOnly(current => !current)}>{recentOnly ? "Last 30 days ×" : "All photos"}</button>}
             {!received && (busy || localCount > 0 || summary.pending > 0 || summary.failed > 0 || needsAttention || annotationPending.length > 0) && <section className={"consumer-save-progress state-" + consumerSummary.state} aria-label="Save progress">
               <div><p role="status">{status || syncStateLabel[consumerSummary.state]}</p>{consumerSummary.detail && <p className="hint">{consumerSummary.detail}</p>}</div>
               <div className="actions">
@@ -1048,10 +1054,11 @@ export default function CloudApp({
                     ? "No matching photos"
                     : received
                       ? "No received photos"
-                      : "Your Saved photos will appear here")}
+                      : recentActive && photos.length ? "No photos in the last 30 days" : "Your Saved photos will appear here")}
                 </p>
                 {bestShots.active && <p className="hint">All matches remain available. You choose what to Share.</p>}
-                {!query && !familyFilter && !received && <button onClick={onBack}>Choose photos to Save</button>}
+                {recentActive && photos.length > 0 && <button onClick={() => setRecentOnly(false)}>Show all photos</button>}
+                {!query && !familyFilter && !received && !photos.length && <button onClick={onBack}>Choose photos to Save</button>}
                 {query && (
                   <button onClick={() => setQuery("")}>Clear search</button>
                 )}
@@ -1224,9 +1231,9 @@ export default function CloudApp({
         onApplyLocations={!publicDemo ? applyTimelineLocations : undefined} onOpen={id => {
           setPlacesOpen(false); setReceived(null); setReceivedContext(null); setQuery(""); setCommittedMeaning(undefined); peopleFind.change({...peopleFind.filter, ids: new Set()}); setViewer(id);
         }} />}
-      {active && peopleOpen && unlocked && <Suspense fallback={<aside className="settings-panel" role="dialog" aria-modal="true" aria-label="People"><button autoFocus onClick={() => setPeopleOpen(false)}>Close</button><p role="status">Opening People…</p></aside>}><People photos={peoplePhotos} selectedIDs={new Set([...selected].map(id=>"saved:"+id))} resources={placeResources}
-        onClose={() => setPeopleOpen(false)} onAssignments={!publicDemo ? applyPeople : undefined} onFind={id => {peopleFind.change({ids: new Set([id]), mode: "any"}); setPeopleOpen(false);}}
-        onOpen={id => {setPeopleOpen(false); setReceived(null); setReceivedContext(null); setQuery(""); setCommittedMeaning(undefined); peopleFind.change({...peopleFind.filter, ids: new Set()}); setViewer(id.slice(6));}} /></Suspense>}
+      {active && peopleOpen && unlocked && <Suspense fallback={<aside className="settings-panel" role="dialog" aria-modal="true" aria-label="People"><button autoFocus onClick={() => setPeopleOpen(false)}>Close</button><p role="status">Opening People…</p></aside>}><People photos={peoplePhotos} eligibleIDs={peopleEligibleIDs} onExpand={recentActive ? () => setRecentOnly(false) : undefined} scopeLabel={recentActive ? "Last 30 days and current filters" : "Current filters"} selectedIDs={new Set([...selected].map(id=>"saved:"+id))} resources={placeResources}
+        onClose={() => setPeopleOpen(false)} onAssignments={!publicDemo ? applyPeople : undefined} onFind={id => {peopleFind.change({ids: new Set([id]), mode: "any"}); setRecentOnly(false); setPeopleOpen(false);}}
+        onOpen={id => {setPeopleOpen(false); setRecentOnly(false); setReceived(null); setReceivedContext(null); setQuery(""); setCommittedMeaning(undefined); peopleFind.change({...peopleFind.filter, ids: new Set()}); setViewer(id.slice(6));}} /></Suspense>}
       {active && exchange && unlocked && (
         <Exchange
           key={exchangeVersion}

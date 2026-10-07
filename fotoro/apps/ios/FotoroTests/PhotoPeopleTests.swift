@@ -7,6 +7,69 @@ import XCTest
 @testable import Fotoro
 
 final class PhotoPeopleTests: XCTestCase {
+  func testPeopleMetadataIntakeDefaultsToThirtyDaysFiltersBeforeInferenceAndCanTargetOlderDates() throws {
+    let index = try SearchIndex(), now = Date(timeIntervalSince1970: 1_800_000_000)
+    var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    let cutoff = RecentPhotosPolicy.cutoff(now: now, calendar: calendar)
+    func record(_ id: String, date: Date?, name: String = "Singapore-trip.jpg") -> SearchRecord {
+      var value = SearchRecord(id: id); value.capturedAt = date; value.filename = name; return value
+    }
+    var ocrOnly = record("ocr-only", date: now, name: "IMG.jpg"); ocrOnly.ocrStatus = .complete; ocrOnly.ocrText = "Singapore"
+    var inferredOnly = record("inferred-only", date: now, name: "IMG.jpg"); inferredOnly.visualStatus = .complete
+    inferredOnly.visualLabels = SearchVisualPolicy.labels([("beach", 0.99)])
+    let older = record("older", date: cutoff.addingTimeInterval(-86400))
+    var foreign = record("saved", date: now); foreign.scope = "saved"
+    try index.replacePermitted([record("boundary", date: cutoff), record("recent", date: now), older,
+      record("undated", date: nil), record("future", date: now.addingTimeInterval(1)), ocrOnly, inferredOnly])
+    try index.put(foreign)
+    let scope = PhotoPeopleScanScope(query: "Singapore", now: now, calendar: calendar)
+    XCTAssertEqual(Set(try index.pendingPeopleRecords(scope: scope).map(\.id)), ["boundary", "recent"])
+    XCTAssertTrue(try index.pendingPeopleRecords(scope: PhotoPeopleScanScope(query: "beach", now: now, calendar: calendar)).isEmpty,
+      "Inference-only search evidence must not cause a broad scan before metadata matches")
+    let expanded = PhotoPeopleScanScope(query: "Singapore", includesOlder: true, now: now, calendar: calendar)
+    XCTAssertEqual(Set(try index.pendingPeopleRecords(scope: expanded).map(\.id)), ["boundary", "recent", "older", "undated"])
+    let year = calendar.component(.year, from: older.capturedAt!)
+    let month = calendar.component(.month, from: older.capturedAt!)
+    let dated = PhotoPeopleScanScope(query: "Singapore \(year)-\(String(format: "%02d", month))", now: now, calendar: calendar)
+    XCTAssertNotNil(dated.scope.from)
+    XCTAssertTrue(try index.pendingPeopleRecords(scope: dated).contains { $0.id == "older" })
+    try index.setPeopleEnabled(true); try index.setWorkGeneration(1)
+    XCTAssertTrue(try index.applyPeople([], photoID: "recent", revision: "1", generation: 1))
+    XCTAssertEqual(try index.pendingPeopleRecords(scope: scope).map(\.id), ["boundary"], "Completed scans are reused")
+    var changed = record("recent", date: now); changed.revision = "changed"; try index.put(changed)
+    XCTAssertEqual(Set(try index.pendingPeopleRecords(scope: scope).map(\.id)), ["boundary", "recent"], "Changed sources must be scanned again within the same scope")
+  }
+  func testPeopleMetadataIntakeDoesNotCapEligiblePhotosOrRescanReviewedOlderGroups() throws {
+    let index = try SearchIndex(), now = Date()
+    var records = (0..<601).map { i in
+      var r = SearchRecord(id: "match-\(i)"); r.capturedAt = now; r.facts = ["Singapore"]; return r
+    }
+    var old = SearchRecord(id: "reviewed-old"); old.capturedAt = now.addingTimeInterval(-90 * 86400); records.append(old)
+    try index.replacePermitted(records); try index.setWorkGeneration(1); try index.setPeopleEnabled(true)
+    XCTAssertTrue(try index.applyPeople([PhotoFaceEmbedding(box: [0,0,100,100], vector: vector())], photoID: old.id, revision: "1", generation: 1))
+    let group = try XCTUnwrap(index.peopleGroups().first)
+    _ = try index.namePeopleGroup(group.id, name: "Family")
+    XCTAssertEqual(try index.pendingPeopleRecords(scope: PhotoPeopleScanScope(query: "Singapore", now: now)).count, 601)
+    let scope = PhotoPeopleScanScope(query: "Singapore", now: now)
+    XCTAssertEqual(try index.pendingPeopleCount(scope: scope), 601)
+    let first = try index.pendingPeopleRecords(scope: scope, limit: 500)
+    XCTAssertEqual(first.count, 500)
+    let cursor = PhotoAnalysisCursor(try XCTUnwrap(first.last))
+    XCTAssertEqual(try index.pendingPeopleCount(scope: scope, after: cursor), 101)
+    let next = try index.pendingPeopleRecords(scope: scope, after: cursor, limit: 500)
+    XCTAssertEqual(next.count, 101)
+    XCTAssertTrue(Set(first.map(\.id)).isDisjoint(with: Set(next.map(\.id))))
+    let unavailable = try XCTUnwrap(first.first)
+    let completed = first[1]
+    XCTAssertTrue(try index.applyPeople([], photoID: completed.id, revision: completed.revision, generation: 1))
+    XCTAssertEqual(try index.pendingPeopleCount(scope: scope, after: PhotoAnalysisCursor(try XCTUnwrap(next.last))), 0,
+      "No unattempted photos beyond the cursor does not mean all previews succeeded")
+    let retry = try index.pendingPeopleRecords(scope: scope, limit: 500)
+    XCTAssertTrue(retry.contains { $0.id == unavailable.id }, "Unavailable previews are not committed as completed scans")
+    XCTAssertFalse(retry.contains { $0.id == completed.id }, "A retry reuses completed zero-face scans")
+    XCTAssertEqual(try index.peopleGroups().first?.name, "Family")
+    XCTAssertEqual(try index.search("", scope: SearchScope(people: PeopleSearchSelection(personIDs: [group.id]))).results.map(\.id), [old.id])
+  }
   private func familyRecord(_ id: String, people: [String], names: [String]? = nil, date: Date? = nil) throws -> SearchRecord {
     var record = SearchRecord(id: id)
     record.capturedAt = date; record.labels = ["beach"]; record.ocrStatus = .complete
