@@ -2,6 +2,251 @@ import XCTest
 @testable import Fotoro
 
 final class NativeAlbumTests: XCTestCase {
+  func testSharedAlbumFactsAuthenticateContributorContextAndOriginalWithoutPrivateFields() throws {
+    let server = try AlbumTestServer(), access = try factsAccess(server)
+    let item = NativeAlbumItem(entry: server.entry, signedManifest: server.manifest, photo: server.source)
+    let location = PhotoLocationV1(latitude: 1.3, longitude: 103.8, source: "photos", name: "Singapore")
+    let signed = try NativeAlbumFacts.make(item: item, access: access, people: ["Mom", "Dad"], location: location,
+      revision: 1, card: server.cards[0], bundle: server.bundles[0])
+    let value = try NativeAlbumFacts.read(signed, item: item, access: access)
+    XCTAssertEqual(value.people, ["Mom", "Dad"]); XCTAssertEqual(value.location, location)
+    XCTAssertEqual(value.originalSha256, item.photo.metadata.originalSha256)
+    let outer = try NativeAlbumWire.signedBody(AlbumPhotoFactsV1.self, signed, kind: NativeAlbumFacts.kind)
+    let plain = try CryptoAdapter().unwrap(outer.encrypted, key: access.key)
+    let keys = try XCTUnwrap(JSONSerialization.jsonObject(with: plain) as? [String: Any]).keys
+    XCTAssertEqual(Set(keys), ["version", "albumId", "photoId", "ownerAccountId", "definitionSignature", "revision", "originalSha256", "people", "location"])
+    XCTAssertFalse(String(decoding: try Data(b64: signed.body), as: UTF8.self).contains("Mom"))
+    var other = item.photo; other.metadata.originalSha256 = Data("another original".utf8).digest
+    XCTAssertThrowsError(try NativeAlbumFacts.read(signed, item: NativeAlbumItem(entry: item.entry, signedManifest: item.signedManifest, photo: other), access: access))
+    var forged = signed; forged.accountId = server.cards[1].accountId
+    XCTAssertThrowsError(try NativeAlbumFacts.read(forged, item: item, access: access))
+    XCTAssertThrowsError(try NativeAlbumFacts.make(item: item, access: access, people: ["Mom"], location: nil, revision: 1, card: server.cards[1], bundle: server.bundles[1]))
+    XCTAssertThrowsError(try NativeAlbumFacts.make(item: item, access: access, people: ["Mom"], location: nil, revision: 1, card: server.cards[0], bundle: server.bundles[1]))
+    let distinctSpellings = ["\u{e9}", "e\u{301}"]
+    let exact = try NativeAlbumFacts.make(item: item, access: access, people: distinctSpellings, location: nil,
+      revision: 2, card: server.cards[0], bundle: server.bundles[0])
+    let exactFacts = try NativeAlbumFacts.read(exact, item: item, access: access)
+    XCTAssertEqual(exactFacts.people.map { Data($0.utf8) }, distinctSpellings.map { Data($0.utf8) })
+    XCTAssertEqual(NativeAlbumSearch.choices(items: [item], facts: [item.id: exactFacts]).count, 2)
+  }
+  func testSharedAlbumFactsRejectUnknownDuplicateAndChangedEncryptedContext() throws {
+    let server = try AlbumTestServer(), access = try factsAccess(server)
+    let item = NativeAlbumItem(entry: server.entry, signedManifest: server.manifest, photo: server.source)
+    let signed = try NativeAlbumFacts.make(item: item, access: access, people: ["Mom"], location: nil,
+      revision: 1, card: server.cards[0], bundle: server.bundles[0])
+    let crypto = CryptoAdapter()
+    let outer = try NativeAlbumWire.signedBody(AlbumPhotoFactsV1.self, signed, kind: NativeAlbumFacts.kind)
+    let plain = try crypto.unwrap(outer.encrypted, key: access.key)
+    var object = try XCTUnwrap(JSONSerialization.jsonObject(with: plain) as? [String: Any])
+    for change in ["caption", "revision", "albumId", "photoId", "definitionSignature"] {
+      var altered = object
+      if change == "revision" { altered[change] = 2 }
+      else { altered[change] = change == "definitionSignature" ? Data(repeating: 0, count: 64).b64 : Wire.id() }
+      var envelope = outer; envelope.encrypted = try crypto.wrap(JSONSerialization.data(withJSONObject: altered), key: access.key)
+      let forged = try crypto.sign(envelope, kind: NativeAlbumFacts.kind, accountId: server.cards[0].accountId, secret: Data(b64: server.bundles[0].signingSecretKey))
+      XCTAssertThrowsError(try NativeAlbumFacts.read(forged, item: item, access: access), change)
+    }
+    let duplicate = Data((String(decoding: plain, as: UTF8.self).dropLast() + ",\"people\":[]}").utf8)
+    var envelope = outer; envelope.encrypted = try crypto.wrap(duplicate, key: access.key)
+    let forged = try crypto.sign(envelope, kind: NativeAlbumFacts.kind, accountId: server.cards[0].accountId, secret: Data(b64: server.bundles[0].signingSecretKey))
+    XCTAssertThrowsError(try NativeAlbumFacts.read(forged, item: item, access: access))
+    object["people"] = ["Mom", "Mom"]
+    XCTAssertThrowsError(try NativeAlbumFacts.validate(NativeAlbumWire.decode(AlbumPhotoFactsContentV1.self, JSONSerialization.data(withJSONObject: object))))
+  }
+  func testFamilyAlbumSearchIntersectsContributorNamesPlaceAndGenuineCaptureRangeBeforeGrouping() throws {
+    let server = try AlbumTestServer(), access = try factsAccess(server)
+    var photo = server.source; photo.metadata.sourceDate = "2026-01-20T12:00:00.000Z"; photo.metadata.dateSource = "photos"
+    let item = NativeAlbumItem(entry: server.entry, signedManifest: server.manifest, photo: photo)
+    let facts = AlbumPhotoFactsContentV1(albumId: access.albumID, photoId: item.id, ownerAccountId: photo.manifest.ownerAccountId,
+      definitionSignature: access.signedDefinition.signature, revision: 1, originalSha256: photo.metadata.originalSha256,
+      people: ["Mom", "Dad"], location: PhotoLocationV1(latitude: 1.3, longitude: 103.8, source: "photos", name: "Singapore"))
+    let mom = NativeAlbumPersonChoice(contributor: photo.manifest.ownerAccountId, name: "Mom")
+    let dad = NativeAlbumPersonChoice(contributor: photo.manifest.ownerAccountId, name: "Dad")
+    var filter = NativeAlbumSearchFilter(query: "from 2026-01-01 through 2026-01-31", place: "Singapore", people: [mom.id, dad.id], match: .everyone)
+    XCTAssertTrue(filter.includes(item, facts: facts))
+    filter.query = "Mom Singapore 2026"; XCTAssertTrue(filter.includes(item, facts: facts), "Explicit shared evidence can match across fields of the same photo")
+    filter.query = "from 2026-01-01 through 2026-01-31"
+    var incomplete = facts; incomplete.people = ["Mom"]
+    XCTAssertFalse(filter.includes(item, facts: incomplete))
+    filter.match = .any; XCTAssertTrue(filter.includes(item, facts: incomplete))
+    filter.place = "Paris"; XCTAssertFalse(filter.includes(item, facts: facts))
+    filter.place = "Singapore"; var imported = photo; imported.metadata.dateSource = "import"
+    XCTAssertFalse(filter.includes(NativeAlbumItem(entry: item.entry, signedManifest: item.signedManifest, photo: imported), facts: facts))
+    filter.query = "2026-02"; XCTAssertFalse(filter.includes(item, facts: facts))
+    filter.query = "2026-01"; filter.match = .everyone
+    var copy = photo; copy.photoId = Wire.id(); copy.manifest.photoId = copy.id; copy.manifest.ownerAccountId = server.cards[1].accountId
+    let other = NativeAlbumItem(entry: item.entry, signedManifest: item.signedManifest, photo: copy)
+    var otherFacts = facts; otherFacts.people = ["Dad"]; otherFacts.ownerAccountId = copy.manifest.ownerAccountId; otherFacts.photoId = copy.id
+    let matching = [item, other].filter { filter.includes($0, facts: $0.id == item.id ? incomplete : otherFacts) }
+    XCTAssertTrue(NativeAlbumSearch.groups(matching).isEmpty, "Separate copies cannot combine names to satisfy Everyone")
+    let choices = NativeAlbumSearch.choices(items: [item, other], facts: [item.id: facts, other.id: otherFacts])
+    XCTAssertEqual(choices.filter { $0.name == "Dad" }.count, 2, "Same-name labels remain contributor-scoped")
+  }
+  func testExactAlbumDuplicateGroupsRetainEveryCopyAndRespectBytesAndMediaType() throws {
+    let server = try AlbumTestServer()
+    let first = NativeAlbumItem(entry: server.entry, signedManifest: server.manifest, photo: server.source)
+    var duplicate = server.source; duplicate.photoId = Wire.id(); duplicate.manifest.photoId = duplicate.id; duplicate.manifest.ownerAccountId = server.cards[1].accountId
+    let second = NativeAlbumItem(entry: first.entry, signedManifest: first.signedManifest, photo: duplicate)
+    var changed = duplicate; changed.photoId = Wire.id(); changed.metadata.originalBytes += 1
+    var motion = duplicate; motion.photoId = Wire.id(); motion.metadata.mediaType = "video/mp4"
+    let groups = NativeAlbumSearch.groups([first, second, NativeAlbumItem(entry: first.entry, signedManifest: first.signedManifest, photo: changed), NativeAlbumItem(entry: first.entry, signedManifest: first.signedManifest, photo: motion)])
+    XCTAssertEqual(groups.count, 3); XCTAssertEqual(groups[0].copies.map(\.id), [first.id, second.id])
+    XCTAssertEqual(Set(groups[0].copies.map { $0.photo.manifest.ownerAccountId }), Set(server.cards.map(\.accountId)))
+  }
+  @MainActor func testOptionalSharedDetailsFallbackAndRetryPreserveOriginalAlbums() async throws {
+    for status in [404, 501, 503] {
+      try await withAlbum { _, server, model in
+        server.factsCapabilityStatus = status
+        try await model.refresh(); try await model.open(server.definition.albumId)
+        XCTAssertEqual(model.items.count, 1)
+        XCTAssertTrue(model.sharedFacts.isEmpty)
+        XCTAssertEqual(server.factsPageReads, 0)
+        if status == 503 {
+          XCTAssertNotNil(model.factsError); XCTAssertNil(model.factsSupported)
+          server.factsCapabilityStatus = 200
+          try server.setFacts(server.source, people: ["Mom"])
+          try await model.loadMoreSharedDetails()
+          XCTAssertEqual(model.sharedFacts[server.source.id]?.people, ["Mom"])
+        } else { XCTAssertEqual(model.factsSupported, false); XCTAssertNil(model.factsError) }
+      }
+    }
+  }
+  @MainActor func testPagedSharedDetailsDeferUnloadedSourcesAndPreservePageBounds() async throws {
+    try await withAlbum { _, server, model in
+      server.factsCapabilityStatus = 200
+      let extras = try server.extraOwnedPhotos(count: 101)
+      try server.contribute(extras)
+      for photo in extras { try server.setFacts(photo, people: ["Reviewed name"]) }
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      XCTAssertEqual(model.items.count, 100)
+      XCTAssertEqual(model.sharedFacts.count, 99, "Unmatched facts remain unpublished until their own photo loads")
+      XCTAssertEqual(server.factsPageReads, 1)
+      XCTAssertNotNil(model.factsNextCursor)
+      try await model.loadMore()
+      XCTAssertEqual(model.items.count, 102); XCTAssertEqual(model.sharedFacts.count, 100)
+      XCTAssertNil(model.sharedFacts[extras.last!.id])
+      try await model.loadMoreSharedDetails()
+      XCTAssertEqual(model.sharedFacts.count, 101); XCTAssertNil(model.factsNextCursor)
+      XCTAssertEqual(server.factsPageReads, 2)
+      XCTAssertEqual(server.factsIndividualReads, 0, "Browsing uses pages, not one request per photo")
+    }
+  }
+  @MainActor func testSharedDetailsWrongDigestAndEndedReadCannotPublishFacts() async throws {
+    for interruption in ["digest", "ended"] {
+      try await withAlbum { _, server, model in
+        server.factsCapabilityStatus = 200
+        try server.setFacts(server.source, people: ["Mom"], wrongDigest: interruption == "digest")
+        server.endOnFacts = interruption == "ended"
+        try await model.refresh()
+        if interruption == "ended" {
+          do { try await model.open(server.definition.albumId); XCTFail("Ended album read reported success") }
+          catch { XCTAssertTrue(error is CancellationError, "Losing album access invalidates the captured context") }
+        } else { try await model.open(server.definition.albumId) }
+        XCTAssertTrue(model.sharedFacts.isEmpty)
+        if interruption == "digest" { XCTAssertEqual(model.items.count, 1); XCTAssertNotNil(model.factsError) }
+        else { XCTAssertTrue(model.items.isEmpty); XCTAssertNil(model.opened) }
+      }
+    }
+  }
+  @MainActor func testSharedDetailsReviewPublishesOnlyChosenOwnFactsAndCanClear() async throws {
+    try await withAlbum(owner: true) { services, server, model in
+      server.factsCapabilityStatus = 200
+      try services.store.put(server.source)
+      let location = PhotoLocationV1(latitude: 1.3, longitude: 103.8, source: "photos", name: "Singapore")
+      var value = PhotoAnnotationsV1(photoId: server.source.id, originalSha256: server.source.metadata.originalSha256)
+      value.caption = "Private caption"; value.labels = ["Private label"]
+      value.facts = try PhotoPeopleFacts.replacing(["Private user fact"], with: [PhotoPersonAssignment(p: Wire.id(), n: "Mom", b: [0,0,2000,2000]), PhotoPersonAssignment(p: Wire.id(), n: "Dad", b: [3000,0,2000,2000])], originalSha256: value.originalSha256)
+      try value.setLocation(location)
+      try services.annotations.ledger.edit(value, photo: server.source, bundle: server.bundles[0], card: server.cards[0])
+      try services.reload(); try await model.refresh(); try await model.open(server.definition.albumId)
+      let item = try XCTUnwrap(model.items.first), review = try await model.prepareSharedDetails(item)
+      XCTAssertEqual(Set(review.people), ["Mom", "Dad"]); XCTAssertEqual(review.location, location)
+      XCTAssertEqual(server.factsWriteBodies.count, 0, "Opening review never shares details")
+      try await model.shareDetails(review, names: ["Mom"], includeLocation: false)
+      let shared = try XCTUnwrap(model.sharedFacts[item.id])
+      XCTAssertEqual(shared.people, ["Mom"]); XCTAssertNil(shared.location)
+      let json = String(decoding: try Wire.encode(shared), as: UTF8.self)
+      for privateText in ["Private caption", "Private label", "Private user fact", "Dad", "ocr", "facts"] { XCTAssertFalse(json.contains(privateText)) }
+      let updated = try await model.prepareSharedDetails(item)
+      try await model.shareDetails(updated, names: [], includeLocation: false)
+      XCTAssertEqual(model.sharedFacts[item.id]?.people, []); XCTAssertNil(model.sharedFacts[item.id]?.location)
+      XCTAssertEqual(services.annotation(server.source), value, "Shared edits do not rewrite private annotations")
+    }
+  }
+  @MainActor func testSharedDetailsCorrectionSourceAndAccountChangesFenceWrites() async throws {
+    for change in ["annotation", "original", "account", "cancel", "end"] {
+      try await withAlbum(owner: true) { services, server, model in
+        server.factsCapabilityStatus = 200
+        try services.store.put(server.source); try services.reload()
+        try await model.refresh(); try await model.open(server.definition.albumId)
+        let review = try await model.prepareSharedDetails(XCTUnwrap(model.items.first))
+        if change == "annotation" { try services.setLabels(["Changed private source"], photo: server.source) }
+        if change == "original" { var changed = server.source; changed.metadata.originalSha256 = Data("changed".utf8).digest; try services.store.put(changed) }
+        if change == "account" { services.session.accountId = server.cards[1].accountId }
+        if change == "end" { server.ended = true }
+        if change == "cancel" {
+          let task = Task { try await model.shareDetails(review, names: [], includeLocation: false) }
+          task.cancel()
+          do { try await task.value; XCTFail("Cancelled details write completed") } catch {}
+        } else {
+          do { try await model.shareDetails(review, names: [], includeLocation: false); XCTFail("Changed \(change) source wrote details") } catch {}
+        }
+        XCTAssertTrue(server.factsWriteBodies.isEmpty, change)
+      }
+    }
+  }
+  @MainActor func testSharedDetailsRevisionConflictRefreshesForExplicitReview() async throws {
+    try await withAlbum(owner: true) { services, server, model in
+      server.factsCapabilityStatus = 200; try services.store.put(server.source); try services.reload()
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let item = try XCTUnwrap(model.items.first), review = try await model.prepareSharedDetails(item)
+      try server.setFacts(server.source, people: ["Another device's reviewed label"])
+      do { try await model.shareDetails(review, names: [], includeLocation: false); XCTFail("Stale review overwrote newer details") }
+      catch let error as FotoroError { XCTAssertTrue(error.message.contains("Refresh and review")) }
+      XCTAssertEqual(model.sharedFacts[item.id]?.people, ["Another device's reviewed label"])
+      let refreshed = try await model.prepareSharedDetails(item)
+      XCTAssertEqual(refreshed.revision, 1)
+      try await model.shareDetails(refreshed, names: [], includeLocation: false)
+      XCTAssertEqual(model.sharedFacts[item.id]?.revision, 2)
+    }
+  }
+  @MainActor func testLateSharedDetailsReadCannotPublishAfterAccountLockOriginOrCancellation() async throws {
+    for change in ["account", "lock", "origin", "cancel"] {
+      let gate = AlbumFactsRequestGate(started: expectation(description: "Shared facts read " + change))
+      defer { gate.release.signal() }
+      try await withAlbum { services, server, model in
+        server.factsCapabilityStatus = 200; try server.setFacts(server.source, people: ["Mom"])
+        server.factsGate = gate
+        try await model.refresh()
+        let opening = Task { try await model.open(server.definition.albumId) }
+        await fulfillment(of: [gate.started], timeout: 3)
+        if change == "account" {
+          XCTAssertEqual(services.session.accountId, server.cards[1].accountId)
+          services.session.accountId = server.cards[0].accountId
+        }
+        else if change == "lock" { services.vault.lock() }
+        else if change == "origin" { services.api.baseURL = URL(string: "http://localhost:8798")! }
+        else { opening.cancel() }
+        gate.release.signal()
+        do { try await opening.value; XCTFail("Late shared details survived " + change) } catch {}
+        XCTAssertTrue(model.sharedFacts.isEmpty, change)
+      }
+    }
+  }
+  @MainActor func testLostSharedDetailsReplyRequiresFreshReviewOfCommittedRevision() async throws {
+    try await withAlbum(owner: true) { services, server, model in
+      server.factsCapabilityStatus = 200; try services.store.put(server.source); try services.reload()
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let item = try XCTUnwrap(model.items.first), review = try await model.prepareSharedDetails(item)
+      server.loseFactsWriteResponse = true
+      do { try await model.shareDetails(review, names: [], includeLocation: false); XCTFail("Lost reply reported confirmed success") } catch {}
+      XCTAssertEqual(server.factsWriteBodies.count, 1)
+      let refreshed = try await model.prepareSharedDetails(item)
+      XCTAssertEqual(refreshed.revision, 1, "The caller must inspect the committed result before choosing another update")
+      try await model.shareDetails(refreshed, names: [], includeLocation: false)
+      XCTAssertEqual(model.sharedFacts[item.id]?.revision, 2)
+    }
+  }
   func testIncomingAlbumInvitationDoesNotResolveUnrelatedStaleSavedSelection() throws {
     let accounts = try fixture(FixtureAccounts.self, "accounts")
     let incoming = FotoroAlbumInvitation(albumId: Wire.id(), ownerCard: accounts.accounts[0])
@@ -328,6 +573,21 @@ private actor AlbumPickerReadGate {
   func finish(_ photos: [LocalPhoto]) { continuation?.resume(returning: photos); continuation = nil }
 }
 
+private func factsAccess(_ server: AlbumTestServer) throws -> NativeAlbumAccess {
+  let (_, key, _) = try NativeAlbumCrypto().open(server.signed, expectedID: server.definition.albumId,
+    trustedOwner: server.cards[0], recipient: server.cards[0], bundle: server.bundles[0], trusted: [:])
+  let context = NativeAlbumContext(photo: PhotoAccountAccess(account: server.cards[0].accountId, vault: UUID(), catalog: ObjectIdentifier(server)),
+    origin: "http://127.0.0.1:8798", apiOrigin: "http://localhost:4310", cards: Dictionary(uniqueKeysWithValues: server.cards.map { ($0.accountId, $0) }),
+    token: nil, fixture: true, epoch: UUID())
+  return NativeAlbumAccess(context: context, albumID: server.definition.albumId, signedDefinition: server.signed, definition: server.definition, key: key)
+}
+
+private final class AlbumFactsRequestGate: @unchecked Sendable {
+  let started: XCTestExpectation
+  let release = DispatchSemaphore(value: 0)
+  init(started: XCTestExpectation) { self.started = started }
+}
+
 private final class AlbumTestServer: @unchecked Sendable {
   let cards: [AccountCardV1]; let bundles: [AccountBundle]; var signed: SignedPayloadV1; var definition: AlbumDefinitionV1
   let source: LocalPhoto; let metadataKey: Data; let entry: SignedPayloadV1; let manifest: SignedPayloadV1
@@ -340,6 +600,13 @@ private final class AlbumTestServer: @unchecked Sendable {
   private var owned: [String: SignedPayloadV1] = [:]
   var creationBodies: [Data] = []; var loseCreateResponse = false; var failInbox = false
   var accountMismatchCount = 0; var authAccountHeader: String?
+  var factsCapabilityStatus = 404
+  var endOnFacts = false
+  var factsPageReads = 0; var factsIndividualReads = 0
+  var factsWriteBodies: [Data] = []
+  var factsGate: AlbumFactsRequestGate?
+  var loseFactsWriteResponse = false
+  private var sharedDetails: [String: SignedPayloadV1] = [:]
   private let lock = NSLock(); private var objectCount = 0; private var accessCount = 0
   var objectReads: Int { lock.lock(); defer { lock.unlock() }; return objectCount }
   var accessReads: Int { lock.lock(); defer { lock.unlock() }; return accessCount }
@@ -387,6 +654,23 @@ private final class AlbumTestServer: @unchecked Sendable {
     }
     return photos
   }
+  func contribute(_ photos: [LocalPhoto]) throws {
+    let access = try factsAccess(self)
+    for photo in photos {
+      let entry = try NativeAlbumCrypto().append(photo, definition: definition, albumKey: access.key, card: cards[0], bundle: bundles[0]).0
+      contributions.append((entry, try XCTUnwrap(owned[photo.id])))
+    }
+  }
+  func setFacts(_ photo: LocalPhoto, people: [String], wrongDigest: Bool = false) throws {
+    let access = try factsAccess(self)
+    let signedManifest = owned[photo.id] ?? manifest
+    let entry = try NativeAlbumCrypto().append(photo, definition: definition, albumKey: access.key, card: cards[0], bundle: bundles[0]).0
+    var source = photo
+    if wrongDigest { source.metadata.originalSha256 = Data("wrong digest".utf8).digest }
+    let item = NativeAlbumItem(entry: entry, signedManifest: signedManifest, photo: source)
+    let prior = try sharedDetails[photo.id].map { try NativeAlbumWire.signedBody(AlbumPhotoFactsV1.self, $0, kind: NativeAlbumFacts.kind).revision } ?? 0
+    sharedDetails[photo.id] = try NativeAlbumFacts.make(item: item, access: access, people: people, location: nil, revision: prior + 1, card: cards[0], bundle: bundles[0])
+  }
   func response(_ request: URLRequest) throws -> (Int, Data) {
     lock.lock(); defer { lock.unlock() }
     let path = request.url!.path
@@ -409,6 +693,36 @@ private final class AlbumTestServer: @unchecked Sendable {
     }
     let all = (included ? [(entry, manifest)] : []) + contributions
     let overview = AlbumOverviewV1(definition: signed, membership: accepted ? "accepted" : "invited", endedAt: ended ? NativeAlbumWire.date() : nil, photoCount: all.count)
+    if path == "/v1/album-photo-facts/capabilities" {
+      return factsCapabilityStatus == 200 ? (200, try Wire.encode(AlbumFactsCapabilitiesV1(version: 1, albumFactsVersion: 1))) : (factsCapabilityStatus, Data())
+    }
+    if path.contains("/photo-facts") {
+      if let gate = factsGate { factsGate = nil; gate.started.fulfill(); _ = gate.release.wait(timeout: .now() + 5) }
+      if endOnFacts { ended = true }
+      guard accepted && !ended else { return (403, Data("{\"code\":\"ALBUM_INACTIVE\"}".utf8)) }
+      if path.hasSuffix("/photo-facts") {
+        factsPageReads += 1
+        let cursor = Int(URLComponents(url: request.url!, resolvingAgainstBaseURL: true)?.queryItems?.first(where: { $0.name == "cursor" })?.value ?? "0") ?? 0
+        let rows = try all.enumerated().compactMap { offset, pair -> (Int, SignedPayloadV1)? in
+          let photo = try NativeAlbumWire.signedBody(PhotoManifestV1.self, pair.1, kind: pair.1.kind)
+          guard offset + 1 > cursor, let value = sharedDetails[photo.photoId] else { return nil }
+          return (offset + 1, value)
+        }
+        let page = Array(rows.prefix(100)), more = rows.count > 100
+        return (200, try Wire.encode(AlbumPhotoFactsPageV1(version: 1, facts: page.map(\.1), nextCursor: more ? String(page.last!.0) : nil, hasMore: more)))
+      }
+      let id = request.url!.lastPathComponent
+      if request.httpMethod == "PUT" {
+        let bytes = body(), update = try NativeAlbumWire.decode(AlbumPhotoFactsRequestV1.self, bytes)
+        factsWriteBodies.append(bytes)
+        let next = try NativeAlbumWire.signedBody(AlbumPhotoFactsV1.self, update.facts, kind: NativeAlbumFacts.kind)
+        let previous = try sharedDetails[id].map { try NativeAlbumWire.signedBody(AlbumPhotoFactsV1.self, $0, kind: NativeAlbumFacts.kind).revision } ?? 0
+        if next.revision != previous + 1 { return (409, Data("{\"code\":\"VERSION_CONFLICT\"}".utf8)) }
+        sharedDetails[id] = update.facts
+        if loseFactsWriteResponse { loseFactsWriteResponse = false; throw URLError(.networkConnectionLost) }
+      } else { factsIndividualReads += 1 }
+      return (200, try Wire.encode(AlbumPhotoFactsReplyV1(version: 1, facts: sharedDetails[id])))
+    }
     if path.hasSuffix("/capabilities") { return (200, try Wire.encode(AlbumCapabilitiesV1(version: 1, albumsVersion: 1, maxMembers: 12, maxPhotos: 1000, pageSize: 100))) }
     if path == "/v1/albums" { if failInbox { throw URLError(.notConnectedToInternet) }; return (200, try Wire.encode(AlbumInboxV1(version: 1, albums: [overview]))) }
     if path.hasSuffix("/accept") { accepted = true; var value = overview; value.membership = "accepted"; return (200, try Wire.encode(value)) }

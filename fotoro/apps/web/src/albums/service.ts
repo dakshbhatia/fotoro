@@ -1,3 +1,7 @@
+import {makeAlbumPhotoFacts, openAlbumPhotoFacts} from "@fotoro/crypto/album-photo-facts";
+import {readAlbumPhotoFacts, validateAlbumPhotoFactsPage, validateAlbumPhotoFactsReply, type AlbumPhotoFactsContentV1} from "@fotoro/contracts/album-photo-facts";
+import {ApiError} from "../exchange/api-errors";
+import type {OwnedAlbumDetails} from "./details";
 import {diagnose, type DiagnosticContext} from "../diagnostics";
 import type {AccountCardV1, SignedPayloadV1} from "@fotoro/contracts";
 import {acceptedPhotoManifestKind} from "@fotoro/contracts/camera-media";
@@ -113,6 +117,8 @@ export class AlbumAccess {
   get signal() {return this.cancellation.signal;}
   private disposed = false;
   private photos = new Set<Photo>();
+  private photoSources = new Map<Photo, {entry: SignedPayloadV1; manifest: SignedPayloadV1}>();
+  private pendingFacts = new Map<string, {signature: string; signed: SignedPayloadV1}>();
   private constructor(readonly overview: AlbumOverviewV1, opened: ReturnType<typeof openAlbumDefinition>, readonly scope: ShareScope, readonly owner: AccountCardV1) {
     this.key = opened.albumKey; this.title = opened.title; this.definition = opened.definition;
     this.albumId = opened.definition.albumId; this.identity = albumDefinitionIdentity(overview);
@@ -127,7 +133,7 @@ export class AlbumAccess {
   }
   current() {try {this.check(); return true;} catch {return false;}}
   private check() {try {check(this.session, this.scope); if (this.disposed) throw new DOMException("Album closed", "AbortError");} catch (error) {this.dispose(); throw error;}}
-  dispose() {if (this.disposed) return; this.disposed = true; this.key.fill(0); for (const photo of this.photos) photo.metadataKey.fill(0); this.photos.clear(); this.cancellation.abort();}
+  dispose() {if (this.disposed) return; this.disposed = true; this.key.fill(0); for (const photo of this.photos) photo.metadataKey.fill(0); this.photos.clear(); this.photoSources.clear(); this.pendingFacts.clear(); this.cancellation.abort();}
   private async trusted() {
     this.check(); const card = await trustedCard(this.owner.accountId, this.session, this.scope); this.check();
     if (!sameIdentity(card, this.owner)) {this.dispose(); throw new Error("ACCOUNT_KEYS_CHANGED_RENEW_TRUST");}
@@ -168,7 +174,7 @@ export class AlbumAccess {
   }
   loadPhotos() {return diagnose("album", diagnostic => this.loadPhotosAction(diagnostic), "refresh");}
   private async loadPhotosAction(diagnostic: DiagnosticContext) {
-    const loaded: Photo[] = [], ids = new Set<string>(), cursors = new Set<string>();
+    const loaded: Photo[] = [], ids = new Set<string>(), cursors = new Set<string>(), sources = new Map<Photo, {entry: SignedPayloadV1; manifest: SignedPayloadV1}>();
     try {
       let page: AlbumDetailV1 = await this.detail(undefined, diagnostic);
       for (;;) {
@@ -183,7 +189,7 @@ export class AlbumAccess {
             await this.assertAccess(diagnostic);
             photo = await readPhoto(manifest, metadataKey, undefined, this.scope.signal, diagnostic); this.check();
             try {await this.assertAccess(diagnostic);} catch (error) {photo.metadataKey.fill(0); throw error;}
-            ids.add(manifest.photoId); loaded.push(photo);
+            ids.add(manifest.photoId); loaded.push(photo); sources.set(photo, {entry: page.entries[n], manifest: page.manifests[n]});
           } catch (error) {metadataKey.fill(0); throw error;}
         }
         if (!page.hasMore) break;
@@ -191,9 +197,70 @@ export class AlbumAccess {
         cursors.add(page.nextCursor); page = await this.detail(page.nextCursor, diagnostic);
       }
       await this.assertAccess(diagnostic);
-      for (const photo of loaded) this.photos.add(photo);
+      for (const photo of loaded) {this.photos.add(photo); this.photoSources.set(photo, sources.get(photo)!);}
       return loaded;
     } catch (error) {for (const photo of loaded) photo.metadataKey.fill(0); this.dispose(); throw error;}
+  }
+  private factsSource(photo: Photo) {
+    this.check(); const source = this.photoSources.get(photo);
+    if (!source || !this.photos.has(photo)) throw new Error("ALBUM_PHOTO_CHANGED");
+    return {signedDefinition: this.overview.definition, trustedOwner: this.owner, ...source,
+      originalSha256: photo.metadata.originalSha256, albumKey: this.key};
+  }
+  async loadFacts(): Promise<{supported: boolean; facts: Map<string, AlbumPhotoFactsContentV1>; unmatched: number}> {
+    await this.assertAccess();
+    const facts = new Map<string, AlbumPhotoFactsContentV1>(), cursors = new Set<string>(), seen = new Set<string>(), photos = new Map([...this.photos].map(photo => [photo.manifest.photoId, photo]));
+    let unmatched = 0;
+    try {
+      this.check();
+      const capability = await api<{version: number; albumFactsVersion: number}>("/v1/album-photo-facts/capabilities", undefined, undefined, "GET", this.scope.signal); this.check();
+      if (capability.version !== 1 || capability.albumFactsVersion !== 1) throw new Error("ALBUM_FACTS_UPDATE_REQUIRED");
+      let cursor: string | undefined;
+      do {
+        this.check();
+        const page = validateAlbumPhotoFactsPage(await api("/v1/albums/" + this.albumId + "/photo-facts" + (cursor ? "?cursor=" + encodeURIComponent(cursor) : ""), undefined, undefined, "GET", this.scope.signal)); this.check();
+        for (const signed of page.facts) {
+          const outer = readAlbumPhotoFacts(signed), photo = photos.get(outer.photoId);
+          if (seen.has(outer.photoId) || outer.albumId !== this.albumId || outer.definitionSignature !== this.overview.definition.signature || !this.definition.members.some(member => member.card.accountId === outer.ownerAccountId)) throw new Error("ALBUM_FACTS_BINDING_MISMATCH");
+          seen.add(outer.photoId);
+          if (!photo) {unmatched++; continue;}
+          facts.set(outer.photoId, openAlbumPhotoFacts({...this.factsSource(photo), signed}));
+        }
+        if (!page.hasMore) break;
+        if (!page.nextCursor || cursors.has(page.nextCursor) || cursors.size >= 9 || seen.size >= 1000) throw new Error("ALBUM_FACTS_PAGE_MISMATCH");
+        cursor = page.nextCursor; cursors.add(cursor);
+      } while (true);
+      await this.assertAccess(); return {supported: true, facts, unmatched};
+    } catch (error) {
+      this.check();
+      if (error instanceof ApiError && ["NOT_FOUND", "HTTP_404", "HTTP_501"].includes(error.code)) {await this.assertAccess(); return {supported: false, facts: new Map(), unmatched: 0};}
+      throw error;
+    }
+  }
+  async readFactsFor(photo: Photo) {
+    this.factsSource(photo); await this.assertAccess(); this.check();
+    const reply = validateAlbumPhotoFactsReply(await api("/v1/albums/" + this.albumId + "/photo-facts/" + photo.manifest.photoId, undefined, undefined, "GET", this.scope.signal)); this.check();
+    const content = reply.facts ? openAlbumPhotoFacts({...this.factsSource(photo), signed: reply.facts}) : undefined;
+    await this.assertAccess(); this.check(); return content;
+  }
+  async shareDetails(photo: Photo, source: OwnedAlbumDetails, selected: {people: boolean | readonly string[]; location: boolean}, revision: number) {
+    const checkSource = () => {this.check(); if (photo.manifest.ownerAccountId !== this.session.accountId || source.ownerAccountId !== this.session.accountId || source.photoId !== photo.manifest.photoId || source.originalSha256 !== photo.metadata.originalSha256 || !source.current()) throw new Error("ALBUM_SELECTION_CHANGED");};
+    checkSource(); await this.assertAccess(); checkSource();
+    const people = Array.isArray(selected.people) ? [...selected.people] : selected.people ? source.people : [];
+    if (people.some(name => !source.people.includes(name))) throw new Error("ALBUM_SELECTION_CHANGED");
+    const location = selected.location ? source.location : undefined;
+    const signature = JSON.stringify([revision, people, location]);
+    let retained = this.pendingFacts.get(photo.manifest.photoId);
+    if (!retained || retained.signature !== signature) {
+      retained = {signature, signed: makeAlbumPhotoFacts({...this.factsSource(photo), revision, people, ...(location ? {location} : {}), signingSecretKey: this.session.signingSecretKey})};
+      this.pendingFacts.set(photo.manifest.photoId, retained);
+    }
+    checkSource();
+    const reply = validateAlbumPhotoFactsReply(await api("/v1/albums/" + this.albumId + "/photo-facts/" + photo.manifest.photoId, {version: 1, facts: retained.signed}, undefined, "PUT", this.scope.signal)); checkSource();
+    if (!reply.facts || JSON.stringify(ordered(reply.facts)) !== JSON.stringify(ordered(retained.signed))) throw new Error("ALBUM_FACTS_BINDING_MISMATCH");
+    const content = openAlbumPhotoFacts({...this.factsSource(photo), signed: reply.facts});
+    checkSource(); await this.assertAccess(); checkSource();
+    this.pendingFacts.delete(photo.manifest.photoId); return content;
   }
   async bytes(photo: Photo, kind: "thumbnail" | "preview" | "original", signal: AbortSignal) {
     signal.throwIfAborted(); this.check();

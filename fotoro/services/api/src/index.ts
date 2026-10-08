@@ -6,6 +6,7 @@ import * as catalog from "./catalog";
 import * as devices from "./devices";
 import * as grants from "./grants";
 import * as albums from "./albums";
+import * as albumPhotoFacts from "./album-photo-facts";
 import { savePhoto } from "./saves";
 import * as annotations from "./annotations";
 import * as intelligence from "./intelligence";
@@ -248,6 +249,10 @@ app.post("/v1/moments/:id/grants", async (c) =>
     ),
   ),
 );
+app.get("/v1/album-photo-facts/capabilities", (c) => {c.header("Cache-Control", "no-store"); return c.json(albumPhotoFacts.capabilities());});
+app.get("/v1/albums/:id/photo-facts", async (c) => {c.header("Cache-Control", "no-store"); return c.json(await albumPhotoFacts.list(c.env, c.get("actor"), c.req.param("id"), c.req.query("cursor")));});
+app.get("/v1/albums/:id/photo-facts/:photoId", async (c) => {c.header("Cache-Control", "no-store"); return c.json(await albumPhotoFacts.get(c.env, c.get("actor"), c.req.param("id"), c.req.param("photoId")));});
+app.put("/v1/albums/:id/photo-facts/:photoId", async (c) => {c.header("Cache-Control", "no-store"); return c.json(await albumPhotoFacts.put(c.env, c.get("actor"), c.req.param("id"), c.req.param("photoId"), await readJson(c.req.raw, 32 * 1024)));});
 app.get("/v1/albums/capabilities", (c) => {c.header("Cache-Control", "no-store"); return c.json(albums.capabilities());});
 app.post("/v1/albums", async (c) => {c.header("Cache-Control", "no-store"); return c.json(await albums.create(c.env, c.get("actor"), await readJson(c.req.raw)));});
 app.get("/v1/albums", async (c) => {c.header("Cache-Control", "no-store"); return c.json(await albums.inbox(c.env, c.get("actor")));});

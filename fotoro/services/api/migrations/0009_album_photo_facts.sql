@@ -1,0 +1,1 @@
+CREATE TABLE album_photo_facts(album_id TEXT NOT NULL,photo_id TEXT NOT NULL,owner TEXT NOT NULL REFERENCES accounts(id),revision INTEGER NOT NULL CHECK(revision>=1),signed TEXT NOT NULL,PRIMARY KEY(album_id,photo_id),FOREIGN KEY(album_id,photo_id) REFERENCES album_photos(album_id,photo_id));

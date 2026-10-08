@@ -4,10 +4,13 @@ import {type ReactElement} from "react";
 import cards from "../../../fixtures/accounts.json";
 import {createAlbumLink, parseAlbumLink} from "@fotoro/contracts/albums-links";
 import {IncomingAlbumIntent} from "../src/albums/intent";
+import {AlbumEntryRevision} from "../src/albums/entry";
+import {AlbumContinuation} from "../src/albums/AlbumContinuation";
+import {AlbumNameChoices} from "../src/albums/AlbumNameChoices";
 import {AlbumPanel} from "../src/albums/AlbumPanel";
 import type {Photo} from "../src/library/catalog";
 
-function navigation() {
+function navigation(onChoice?: (albumId: string) => void) {
   const session = {accountId: cards.accounts[1].accountId};
   const incoming = new IncomingAlbumIntent(parseAlbumLink(createAlbumLink(crypto.randomUUID(), cards.accounts[0])), session);
   let open = true, selecting = false, completed = 0, selection: Photo[] = [];
@@ -15,7 +18,7 @@ function navigation() {
   const render = () => AlbumPanel({selection, currentPhotos: () => currentPhotos, incoming,
     onClose() {open = false; selection = [];},
     onIncomingDone() {completed++; incoming.cancel();},
-    onChoosePhotos() {selecting = true;},
+    onChoosePhotos(albumId) {selecting = true; onChoice?.(albumId);},
   });
   return {session, incoming, render, currentPhotos,
     state: () => ({open, selecting, completed, selection}),
@@ -95,4 +98,57 @@ test("a retained invitation resumes only after its original expired account unlo
   assert.equal(flow.incoming.current(renewed), true);
   assert.equal(flow.incoming.current(flow.session), false);
   assert.equal(albums(flow.reopen([])).incoming, flow.incoming);
+});
+
+
+test("Choose photos → one chosen Saved photo → direct continuation passes exact album and selection to the panel", () => {
+  let destination: string | undefined;
+  const flow = navigation(id => {destination = id;});
+  // Invoke the production panel's callback, not an independently recreated route.
+  albums(flow.render()).onChoosePhotos(flow.incoming.link.albumId);
+  assert.equal(destination, flow.incoming.link.albumId);
+  const selected = {manifest: {photoId: crypto.randomUUID()}} as Photo;
+  let current = true, reopened: ReturnType<typeof AlbumPanel> | undefined, opens = 0;
+  const button = AlbumContinuation({destination: {albumId: destination!, current: () => current}, photos: [selected], onContinue: (photos, id) => {
+    opens++; assert.equal(id, destination); reopened = AlbumPanel({selection: photos, initialAlbumId: id, incoming: flow.incoming,
+      currentPhotos: () => [selected], onClose: () => {}, onChoosePhotos: () => {}});
+  }})!;
+  button.props.onClick();
+  assert.equal(opens, 1);
+  assert.deepEqual(albums(reopened!).selection, [selected]);
+  assert.equal(albums(reopened!).initialAlbumId, destination);
+  assert.equal(albums(reopened!).incoming, flow.incoming);
+  current = false; button.props.onClick(); assert.equal(opens, 1, "A captured continuation cannot reopen after lock/account change");
+  assert.equal(AlbumContinuation({destination: {albumId: destination!, current: () => false}, photos: [selected], onContinue: () => assert.fail()}), null);
+});
+
+test("reviewed names are individually opt-in and a photo with 13 names can share any selected subset up to12", () => {
+  const names = Array.from({length: 13}, (_, index) => "Reviewed " + index);
+  let selected: string[] = [];
+  const render = () => AlbumNameChoices({names, selected, onChange: next => {selected = next;}});
+  const inputs = () => (render().props.children[2] as ReactElement<any>[]).map(label => label.props.children[0]);
+  assert.equal(inputs().every(input => input.props.checked === false), true);
+  inputs()[12].props.onChange({target: {checked: true}});
+  assert.deepEqual(selected, [names[12]], "No first12 truncation or automatic name choice");
+  for (let index = 0; index < 11; index++) inputs()[index].props.onChange({target: {checked: true}});
+  assert.equal(selected.length, 12); assert.equal(inputs()[11].props.disabled, true);
+  inputs()[11].props.onChange({target: {checked: true}}); assert.equal(selected.length, 12);
+  inputs()[0].props.onChange({target: {checked: false}}); assert.equal(selected.length, 11);
+  assert.equal(inputs()[11].props.disabled, false);
+});
+
+
+test("same-page invitation replacement remounts the entry and cannot inherit the prior album's chosen snapshot", () => {
+  const entry = new AlbumEntryRevision(), a = navigation(), b = navigation();
+  const keyA = entry.key(a.incoming), chosen = {manifest: {photoId: crypto.randomUUID()}} as Photo;
+  const selectionA = entry.capture([chosen]);
+  assert.equal(entry.key(a.incoming), keyA); assert.deepEqual(entry.photos(selectionA), [chosen]);
+  const keyB = entry.key(b.incoming); assert.notEqual(keyB, keyA);
+  assert.deepEqual(entry.photos(selectionA), [], "The new panel's first render must not capture A's old choices before passive effects clear them");
+  const continuationB = entry.capture([chosen]);
+  assert.equal(entry.key(b.incoming), keyB); assert.deepEqual(entry.photos(continuationB), [chosen], "Ordinary Choose → Continue leaves the same entry revision and preserves explicit choices");
+  const replacement = new IncomingAlbumIntent(b.incoming.link, b.session);
+  b.incoming.cancel(); assert.equal(b.incoming.current(b.session), false);
+  assert.notEqual(entry.key(replacement), keyB, "A fresh link to the same album also needs a new lifetime because the prior scope was cancelled");
+  assert.deepEqual(entry.photos(continuationB), []);
 });

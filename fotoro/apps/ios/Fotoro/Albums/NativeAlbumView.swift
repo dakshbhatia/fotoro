@@ -18,7 +18,9 @@ struct NativeAlbumView: View {
   let incoming: FotoroAlbumInvitation?
   @State private var model: NativeAlbumService
   @State private var title = ""
-  @State private var albumQuery = ""
+  @State private var familyFilter = NativeAlbumSearchFilter()
+  @State private var groupDuplicates = true
+  @State private var showFamilyFilters = false
   @State private var memberIDs = Set<String>()
   @State private var operation: Task<Void, Never>?
   @State private var operationID: UUID?
@@ -45,9 +47,10 @@ struct NativeAlbumView: View {
       + ((try? Wire.encode(services.session.pinnedCards).digest) ?? "") + String(describing: scenePhase)
   }
   private var filteredItems: [NativeAlbumItem] {
-    let query = albumQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !query.isEmpty else { return model.items }
-    return model.items.filter { $0.photo.metadata.filename.localizedStandardContains(query) || $0.photo.metadata.sourceDate.localizedStandardContains(query) }
+    model.items.filter { familyFilter.includes($0, facts: model.sharedFacts[$0.id]) }
+  }
+  private var photoGroups: [NativeAlbumDuplicateGroup] {
+    groupDuplicates ? NativeAlbumSearch.groups(filteredItems) : filteredItems.map { NativeAlbumDuplicateGroup(copies: [$0]) }
   }
   private var contacts: [AccountCardV1] {
     services.session.pinnedCards.values.filter { $0.accountId != services.session.accountId }
@@ -93,7 +96,7 @@ struct NativeAlbumView: View {
         }
       }
       .task(id: binding) {
-        stop(); model.clear(); invitationPrepared = false; title = ""; memberIDs = []; feedback = nil
+        stop(); model.clear(); invitationPrepared = false; title = ""; memberIDs = []; feedback = nil; familyFilter = NativeAlbumSearchFilter()
         guard services.photoAccountAccess != nil, scenePhase == .active else { return }
         do { try await model.refresh(); try prepareInvitation() }
         catch is CancellationError { return }
@@ -115,7 +118,7 @@ struct NativeAlbumView: View {
       .onChange(of: scenePhase) { _, phase in
         if phase != .active { stop(); authenticationTask?.cancel(); authenticationTask = nil; model.clear() }
       }
-      .onChange(of: model.opened?.id) { _, id in if id == nil { viewer = nil; link = nil } }
+      .onChange(of: model.opened?.id) { _, id in if id == nil { viewer = nil; link = nil; showFamilyFilters = false } }
       .onDisappear { stop(); authenticationTask?.cancel(); authenticationTask = nil; model.clear() }
       .sheet(isPresented: $showCreation) {
         NavigationStack {
@@ -144,6 +147,11 @@ struct NativeAlbumView: View {
         showPicker = false; run { try await model.append(photos); feedback = "Photos added." }
       } }
       .sheet(item: $viewer) { item in NativeAlbumPhotoView(model: model, item: item).presentationDetents([.large]) }
+      .sheet(isPresented: $showFamilyFilters) {
+        NativeAlbumFamilyFilters(filter: $familyFilter,
+          choices: NativeAlbumSearch.choices(items: model.items, facts: model.sharedFacts),
+          memberName: { account in model.opened.map { memberName(account, in: $0.definition) } ?? "Member" })
+      }
       .confirmationDialog("End album access for everyone?", isPresented: $ending, titleVisibility: .visible) {
         Button("End access", role: .destructive) { if let id = model.opened?.id { run { try await model.end(id) } } }
       } message: { Text("Previously downloaded originals cannot be recalled.") }
@@ -242,14 +250,40 @@ struct NativeAlbumView: View {
         }
       }.scrollIndicators(.hidden)
       if model.hasPendingAddition { Button("Retry pending addition") { run { try await model.retryAddition(); feedback = "Photos added." } }.disabled(busy) }
-      TextField("Filter filenames or YYYY-MM-DD", text: $albumQuery).textFieldStyle(.roundedBorder)
+      TextField("Search shared details, filenames or dates", text: $familyFilter.query).textFieldStyle(.roundedBorder)
         .accessibilityIdentifier("albums.filter")
-      if !albumQuery.isEmpty { Button("Clear filter") { albumQuery = "" } }
-      Text("\(filteredItems.count) of \(model.items.count) loaded photos").font(.subheadline).foregroundStyle(.secondary)
+      HStack {
+        Button("People, place and dates", systemImage: "line.3.horizontal.decrease") { showFamilyFilters = true }
+          .accessibilityIdentifier("albums.family.filters")
+        if familyFilter.hasFilters { Button("Clear filters") { familyFilter = NativeAlbumSearchFilter() } }
+      }
+      Toggle("Group identical originals", isOn: $groupDuplicates).font(.subheadline)
+      Text("\(filteredItems.count) matching contributions in \(model.items.count) loaded photos").font(.subheadline).foregroundStyle(.secondary)
+      if model.nextCursor != nil { Text("More album photos are available below. Filters apply to loaded photos.").font(.caption).foregroundStyle(.secondary) }
+      if model.factsSupported == false {
+        Text("Shared photo details are unavailable on this server. Photo dates and filenames still work.").font(.caption).foregroundStyle(.secondary)
+      } else {
+        Text("Shared details loaded for \(model.sharedFacts.count) photos. Names are contributor-reviewed labels, not linked identities.")
+          .font(.caption).foregroundStyle(.secondary)
+        if let error = model.factsError { Text(error).font(.caption).foregroundStyle(.secondary) }
+        if model.factsNextCursor != nil || model.factsError != nil {
+          Button(model.factsError == nil ? "Load more shared details" : "Retry shared details") { run { try await model.loadMoreSharedDetails() } }
+            .disabled(busy).accessibilityIdentifier("albums.details.loadMore")
+        }
+      }
       LazyVGrid(columns: [GridItem(.adaptive(minimum: 96))], spacing: 4) {
-        ForEach(filteredItems) { item in
-          Button { viewer = item } label: { NativeAlbumThumbnail(model: model, item: item) }
-            .buttonStyle(.plain).accessibilityLabel(NativeAlbumPhotoAccessibility.label(item.photo, member: memberName(item.photo.manifest.ownerAccountId, in: album.definition)))
+        ForEach(photoGroups) { group in
+          VStack {
+            Button { viewer = group.representative } label: { NativeAlbumThumbnail(model: model, item: group.representative) }
+              .buttonStyle(.plain).accessibilityLabel(NativeAlbumPhotoAccessibility.label(group.representative.photo, member: memberName(group.representative.photo.manifest.ownerAccountId, in: album.definition)))
+            if group.copies.count > 1 {
+              Menu("\(group.copies.count) copies") {
+                ForEach(group.copies) { item in
+                  Button(memberName(item.photo.manifest.ownerAccountId, in: album.definition) + " · " + item.photo.metadata.filename) { viewer = item }
+                }
+              }.font(.caption).accessibilityLabel("Open a contributing copy")
+            }
+          }
         }
       }
       if model.nextCursor != nil { Button("Load more photos") { run { try await model.loadMore() } }.disabled(busy) }
@@ -285,7 +319,7 @@ struct NativeAlbumView: View {
     if album.overview.endedAt != nil { feedback = "Album access has ended." }
     else { feedback = album.overview.membership == "invited" ? "Accept the album invitation below." : "Open the album below." }
   }
-  private func stop() { operation?.cancel(); operation = nil; operationID = nil; viewer = nil; showPicker = false; link = nil; albumQuery = ""; showCreation = false; showDetails = false; trustCandidate = nil }
+  private func stop() { operation?.cancel(); operation = nil; operationID = nil; viewer = nil; showPicker = false; link = nil; familyFilter = NativeAlbumSearchFilter(); showFamilyFilters = false; showCreation = false; showDetails = false; trustCandidate = nil }
   private func run(_ action: @escaping @MainActor () async throws -> Void) {
     operation?.cancel(); let id = UUID(); operationID = id; feedback = nil
     operation = Task {
@@ -483,6 +517,7 @@ private struct NativeAlbumPhotoView: View {
   @State private var feedback: String?
   @State private var operation: Task<Void, Never>?
   @State private var loading = false
+  @State private var showDetailsEditor = false
   @Environment(\.scenePhase) private var scenePhase
   @Environment(\.dismiss) private var dismiss
   var body: some View {
@@ -497,9 +532,17 @@ private struct NativeAlbumPhotoView: View {
           }.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         Text(item.photo.metadata.sourceDate).font(.caption).foregroundStyle(.secondary)
+        if let facts = model.sharedFacts[item.id] {
+          if !facts.people.isEmpty { Text(facts.people.joined(separator: ", ")).font(.caption) }
+          if let location = facts.location { Text(location.displayName + " · " + location.provenance).font(.caption) }
+        }
       }.navigationTitle(item.photo.metadata.filename).navigationBarTitleDisplayMode(.inline)
       .toolbar {
         ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
+        if model.factsSupported == true, item.photo.manifest.ownerAccountId == model.services.session.accountId {
+          ToolbarItem(placement: .topBarTrailing) { Button("Share details", systemImage: "tag") { showDetailsEditor = true }
+            .accessibilityIdentifier("albums.details.edit") }
+        }
         if CameraMedia.isMotion(item.photo.metadata.mediaType) {
           ToolbarItem(placement: .bottomBar) { Button(item.photo.metadata.mediaType == CameraMedia.liveType ? "Play Live Photo" : "Play video", systemImage: "play.fill") {
             operation?.cancel(); loading = true
@@ -525,6 +568,7 @@ private struct NativeAlbumPhotoView: View {
       }
       .task(id: item.id) { do { preview = try await model.preview(item) } catch is CancellationError {} catch { feedback = error.localizedDescription } }
       .sheet(isPresented: $showShare, onDismiss: cleanup) { OriginalShareSheet(urls: exports) { _ in cleanup() } }
+      .sheet(isPresented: $showDetailsEditor) { NativeAlbumSharedDetailsEditor(model: model, item: item) }
       .onChange(of: scenePhase) { _, phase in if phase != .active { operation?.cancel(); cleanup(); cleanupMotion(); preview = nil; dismiss() } }
       .onDisappear { operation?.cancel(); cleanup(); cleanupMotion(); preview = nil }
     }

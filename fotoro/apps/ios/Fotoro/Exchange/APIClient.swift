@@ -64,7 +64,7 @@ enum NativeDiagnosticEndpoint: String, Codable, Sendable {
     case "auth", "recovery", "sessions": self = .auth
     case "accounts", "vault": self = .account
     case "changes", "photos", "representations", "objects": self = .catalog
-    case "albums": self = .albums
+    case "albums", "album-photo-facts": self = .albums
     case "uploads", "staging": self = .upload
     case "background": self = parts.count > 2 && parts[2] == "uploads" ? .upload : .other
     case "annotations": self = .annotations
@@ -361,7 +361,8 @@ enum APIURLPolicy {
       throw FotoroError(
         failure?.code ?? "Network request failed (\((response as? HTTPURLResponse)?.statusCode ?? 0))",
         requestId: failureRequestId,
-        retryable: failure?.retryable ?? false)
+        retryable: failure?.retryable ?? false,
+        statusCode: (response as? HTTPURLResponse)?.statusCode)
     }
     NativeDiagnosticTrace.current?.completed(.response)
     let value: T
