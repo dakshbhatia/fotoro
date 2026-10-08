@@ -8,6 +8,7 @@ import type {
   ChangePageV1,
   WrappedKeyV1,
   PhotoAnnotationsV1,
+  PhotoAnnotationsReplyV1,
 } from "@fotoro/contracts";
 import { validateWire } from "@fotoro/contracts/validate";
 import {
@@ -24,7 +25,7 @@ import { api, scopedApi, fetchCipher } from "../exchange/api";
 import { get, all, atomic, cacheCipher, boundedRows } from "../exchange/cache";
 import { requireVault, encryptPrivate, decryptPrivate, type UnlockedVault } from "../vault/vault";
 import {assertVault} from "../vault/scope";
-import { annotationCacheWrite, readAnnotations, serializeAnnotationWrites } from "../exchange/annotations";
+import { annotationCacheWrite, readAnnotations, serializeAnnotationWrites, verifyAnnotations, type AnnotationIdentity } from "../exchange/annotations";
 export interface Photo {
   manifest: PhotoManifestV1;
   metadata: PhotoMetadataV1;
@@ -141,6 +142,52 @@ export async function photoBytes(
   } catch (error) {bytes.fill(0); throw error;}
   return bytes;
 }
+export interface OwnedPhotoDetailsSource extends AnnotationIdentity {manifest: PhotoManifestV1}
+const orderedSource = (value: unknown): unknown => Array.isArray(value) ? value.map(orderedSource) : value && typeof value === "object"
+  ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, orderedSource(item)])) : value;
+/* Read only the selected owner's signed records; hydration remains bounded by the caller. */
+export async function cacheOwnedPhotoDetails(source: OwnedPhotoDetailsSource, signal?: AbortSignal, diagnostic?: DiagnosticContext): Promise<void> {
+  const session = requireVault(), origin = typeof location === "undefined" ? undefined : location.origin;
+  const identity: AnnotationIdentity = {ownerAccountId: source.ownerAccountId, photoId: source.photoId, originalSha256: source.originalSha256};
+  const expected = JSON.stringify(orderedSource(source.manifest));
+  const check = () => {
+    assertVault(session); signal?.throwIfAborted();
+    if (origin !== (typeof location === "undefined" ? undefined : location.origin)) throw new Error("CATALOG_SOURCE_CHANGED");
+    if (JSON.stringify(orderedSource(source.manifest)) !== expected || source.ownerAccountId !== identity.ownerAccountId || source.photoId !== identity.photoId || source.originalSha256 !== identity.originalSha256) throw new Error("CATALOG_SOURCE_CHANGED");
+  };
+  check();
+  if (identity.ownerAccountId !== session.accountId || source.manifest.ownerAccountId !== session.accountId || source.manifest.photoId !== identity.photoId) throw new Error("CATALOG_BINDING_MISMATCH");
+  const request = diagnostic ? scopedApi(diagnostic) : api;
+  const path = "/v1/photos/" + encodeURIComponent(identity.photoId);
+  const signed = await request<SignedPayloadV1>(path + "/manifest", undefined, "SignedPayloadV1", "GET", signal);
+  check();
+  if (signed.accountId !== session.accountId) throw new Error("CATALOG_BINDING_MISMATCH");
+  acceptedPhotoManifestKind(signed.kind);
+  const bytes = verifyPayload(signed, unb64(session.card.signingPublicKey));
+  let manifest: PhotoManifestV1;
+  try {manifest = validateWire<PhotoManifestV1>("PhotoManifestV1", JSON.parse(new TextDecoder().decode(bytes)));}
+  finally {bytes.fill(0);}
+  if (manifest.ownerAccountId !== session.accountId || manifest.photoId !== identity.photoId) throw new Error("CATALOG_BINDING_MISMATCH");
+  if (JSON.stringify(orderedSource(manifest)) !== expected) throw new Error("CATALOG_SOURCE_CHANGED");
+  const response = await request<PhotoAnnotationsReplyV1>(path + "/annotations", undefined, "PhotoAnnotationsReplyV1", "GET", signal);
+  check();
+  if (response.annotations) verifyAnnotations(response.annotations, identity, session);
+  await serializeAnnotationWrites(session, async () => {
+    check();
+    const annotation = response.annotations ? await annotationCacheWrite(response.annotations, identity.photoId, session) : undefined;
+    check();
+    const key = session.accountId + ":" + identity.photoId;
+    const stored = await get<WrappedKeyV1>("catalog", key);
+    check();
+    if (stored) {
+      const previous = decryptPrivate<SignedPayloadV1>(stored);
+      if (previous.body !== signed.body || previous.signature !== signed.signature || previous.kind !== signed.kind || previous.accountId !== signed.accountId) throw new Error("CATALOG_SOURCE_CHANGED");
+    }
+    await atomic([{store: "catalog", key, value: stored ?? encryptPrivate(signed)}, ...(annotation ? [annotation] : [])]);
+    check();
+  });
+}
+
 export async function applyChanges(
   page: ChangePageV1,
   session = requireVault(),

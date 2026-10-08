@@ -7,7 +7,7 @@ import type {AccountCardV1, SignedPayloadV1} from "@fotoro/contracts";
 import {acceptedPhotoManifestKind} from "@fotoro/contracts/camera-media";
 import {validateWire} from "@fotoro/contracts/validate";
 import {ALBUM_DEFINITION_KIND, ALBUM_PHOTO_KIND, readAlbumSignedBody, validateAlbumPhoto, validateAlbumDefinition, validateAlbumInbox, validateAlbumDetail, validateAlbumOverview, validateAlbumTitle, validateAlbumAppendResult, validateAlbumAppend, type AlbumAppendV1, type AlbumOverviewV1, type AlbumDetailV1} from "@fotoro/contracts/albums";
-import {makeAlbumDefinition, openAlbumDefinition, makeAlbumAction, makeAlbumPhoto, openAlbumPhoto} from "@fotoro/crypto/albums";
+import {makeAlbumDefinition, openAlbumDefinition, makeAlbumAction, makeAlbumPhoto, openAlbumPhoto, verifyAlbumPhoto} from "@fotoro/crypto/albums";
 import {ready, verifyPayload, unb64, utf8, wrapKey, unwrapKey} from "@fotoro/crypto";
 import {api, scopedApi} from "../exchange/api";
 import {trustedCard, type ShareScope} from "../exchange/share-service";
@@ -57,6 +57,7 @@ async function albumInboxAction(scope: ShareScope) {
   const inbox = validateAlbumInbox(await request("/v1/albums", undefined, undefined, "GET", scope.signal)); check(session, scope);
   return inbox.albums;
 }
+export interface AlbumPhotoPage {photos: Photo[]; nextCursor?: string; hasMore: boolean; photoCount: number}
 export interface AlbumCreationDraft {signed?: SignedPayloadV1;}
 export async function albumOriginalFiles(access: AlbumAccess, photo: Photo, signal: AbortSignal) {
   const bytes = await access.bytes(photo, "original", signal);
@@ -118,6 +119,11 @@ export class AlbumAccess {
   private disposed = false;
   private photos = new Set<Photo>();
   private photoSources = new Map<Photo, {entry: SignedPayloadV1; manifest: SignedPayloadV1}>();
+  private loadingKeys = new Set<Uint8Array>();
+  private pageIds = new Set<string>();
+  private pageCursors = new Set<string>();
+  private nextPhotoCursor?: string;
+  private pageLoading = false;
   private pendingFacts = new Map<string, {signature: string; signed: SignedPayloadV1}>();
   private constructor(readonly overview: AlbumOverviewV1, opened: ReturnType<typeof openAlbumDefinition>, readonly scope: ShareScope, readonly owner: AccountCardV1) {
     this.key = opened.albumKey; this.title = opened.title; this.definition = opened.definition;
@@ -133,7 +139,7 @@ export class AlbumAccess {
   }
   current() {try {this.check(); return true;} catch {return false;}}
   private check() {try {check(this.session, this.scope); if (this.disposed) throw new DOMException("Album closed", "AbortError");} catch (error) {this.dispose(); throw error;}}
-  dispose() {if (this.disposed) return; this.disposed = true; this.key.fill(0); for (const photo of this.photos) photo.metadataKey.fill(0); this.photos.clear(); this.photoSources.clear(); this.pendingFacts.clear(); this.cancellation.abort();}
+  dispose() {if (this.disposed) return; this.disposed = true; this.key.fill(0); for (const key of this.loadingKeys) key.fill(0); this.loadingKeys.clear(); for (const photo of this.photos) photo.metadataKey.fill(0); this.photos.clear(); this.photoSources.clear(); this.pendingFacts.clear(); this.cancellation.abort();}
   private async trusted() {
     this.check(); const card = await trustedCard(this.owner.accountId, this.session, this.scope); this.check();
     if (!sameIdentity(card, this.owner)) {this.dispose(); throw new Error("ACCOUNT_KEYS_CHANGED_RENEW_TRUST");}
@@ -172,34 +178,56 @@ export class AlbumAccess {
     if (albumDefinitionIdentity(result) !== this.identity || result.endedAt === null) throw new Error("ALBUM_BINDING_MISMATCH");
     this.dispose(); return result;
   }
-  loadPhotos() {return diagnose("album", diagnostic => this.loadPhotosAction(diagnostic), "refresh");}
-  private async loadPhotosAction(diagnostic: DiagnosticContext) {
-    const loaded: Photo[] = [], ids = new Set<string>(), cursors = new Set<string>(), sources = new Map<Photo, {entry: SignedPayloadV1; manifest: SignedPayloadV1}>();
+  loadPhotoPage(cursor?: string): Promise<AlbumPhotoPage> {return diagnose("album", diagnostic => this.loadPhotoPageAction(cursor, diagnostic), "refresh");}
+  private async loadPhotoPageAction(cursor: string | undefined, diagnostic: DiagnosticContext): Promise<AlbumPhotoPage> {
+    // One traversal at a time: callers publish each page before requesting its continuation.
+    if (this.pageLoading) throw new Error("ALBUM_PAGE_LOADING");
+    this.pageLoading = true;
+    const loaded: Photo[] = [], keys: Uint8Array[] = [];
     try {
-      let page: AlbumDetailV1 = await this.detail(undefined, diagnostic);
-      for (;;) {
-        for (let n = 0; n < page.entries.length; n++) {
-          this.check();
-          const metadataKey = openAlbumPhoto({definition: this.definition, entry: page.entries[n], manifest: page.manifests[n], albumKey: this.key});
-          let photo: Photo | undefined;
-          try {
-            const {verifyAlbumPhoto} = await import("@fotoro/crypto/albums"); this.check();
-            const manifest = verifyAlbumPhoto({definition: this.definition, entry: page.entries[n], manifest: page.manifests[n]}).manifest;
-            if (ids.has(manifest.photoId)) throw new Error("ALBUM_DUPLICATE_PHOTO");
-            await this.assertAccess(diagnostic);
-            photo = await readPhoto(manifest, metadataKey, undefined, this.scope.signal, diagnostic); this.check();
-            try {await this.assertAccess(diagnostic);} catch (error) {photo.metadataKey.fill(0); throw error;}
-            ids.add(manifest.photoId); loaded.push(photo); sources.set(photo, {entry: page.entries[n], manifest: page.manifests[n]});
-          } catch (error) {metadataKey.fill(0); throw error;}
-        }
-        if (!page.hasMore) break;
-        if (!page.nextCursor || cursors.has(page.nextCursor) || loaded.length >= 1000) throw new Error("ALBUM_PAGE_MISMATCH");
-        cursors.add(page.nextCursor); page = await this.detail(page.nextCursor, diagnostic);
-      }
+      this.check();
+      if (cursor === undefined) {this.pageIds.clear(); this.pageCursors.clear(); this.nextPhotoCursor = undefined;}
+      else if (cursor !== this.nextPhotoCursor || this.pageCursors.has(cursor)) throw new Error("ALBUM_PAGE_MISMATCH");
+      const page = await this.detail(cursor, diagnostic);
+      if (cursor !== undefined) this.pageCursors.add(cursor);
+      if ((page.hasMore && (!page.entries.length || !page.nextCursor || this.pageCursors.has(page.nextCursor))) || this.pageIds.size + page.entries.length > Math.min(page.photoCount, 1000)) throw new Error("ALBUM_PAGE_MISMATCH");
+      const ids = new Set(this.pageIds);
+      // Verify the complete bounded page before starting any encrypted metadata reads.
+      const verified = page.entries.map((entry, n) => {
+        const signedManifest = page.manifests[n];
+        const manifest = verifyAlbumPhoto({definition: this.definition, entry, manifest: signedManifest}).manifest;
+        if (ids.has(manifest.photoId)) throw new Error("ALBUM_DUPLICATE_PHOTO");
+        ids.add(manifest.photoId);
+        const key = openAlbumPhoto({definition: this.definition, entry, manifest: signedManifest, albumKey: this.key}); keys.push(key); this.loadingKeys.add(key);
+        return {manifest, key, entry, signedManifest};
+      });
+      // Metadata is one bounded publication unit. Membership/account/trust are fenced
+      // around the page; original and derivative media retain their per-read fences.
       await this.assertAccess(diagnostic);
-      for (const photo of loaded) {this.photos.add(photo); this.photoSources.set(photo, sources.get(photo)!);}
-      return loaded;
-    } catch (error) {for (const photo of loaded) photo.metadataKey.fill(0); this.dispose(); throw error;}
+      const signal = this.scope.signal ? AbortSignal.any([this.signal, this.scope.signal]) : this.signal;
+      let next = 0;
+      const workers = Array.from({length: Math.min(4, verified.length)}, async () => {
+        try {
+          for (;;) {
+            this.check(); const n = next++; if (n >= verified.length) return;
+            const item = verified[n];
+            const photo = await readPhoto(item.manifest, item.key, undefined, signal, diagnostic);
+            loaded[n] = photo; this.check();
+          }
+        } catch (error) {this.dispose(); throw error;}
+      });
+      const results = await Promise.allSettled(workers);
+      const failed = results.find(result => result.status === "rejected");
+      if (failed?.status === "rejected") throw failed.reason;
+      await this.assertAccess(diagnostic); this.check();
+      for (let n = 0; n < loaded.length; n++) {
+        const photo = loaded[n], item = verified[n];
+        this.photos.add(photo); this.photoSources.set(photo, {entry: item.entry, manifest: item.signedManifest});
+      }
+      this.pageIds = ids; this.nextPhotoCursor = page.nextCursor ?? undefined;
+      return {photos: loaded, nextCursor: this.nextPhotoCursor, hasMore: page.hasMore, photoCount: page.photoCount};
+    } catch (error) {for (const key of keys) key.fill(0); for (const photo of loaded) photo?.metadataKey.fill(0); this.dispose(); throw error;}
+    finally {for (const key of keys) this.loadingKeys.delete(key); this.pageLoading = false;}
   }
   private factsSource(photo: Photo) {
     this.check(); const source = this.photoSources.get(photo);

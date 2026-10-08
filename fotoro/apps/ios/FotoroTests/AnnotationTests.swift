@@ -5,6 +5,27 @@ import XCTest
 @testable import Fotoro
 
 final class AnnotationTests: XCTestCase {
+  func testFactsMergeCategoriesAndRetainsRemoteChangesWhenChoosingLocal() {
+    var base = PhotoAnnotationsV1(photoId: "photo", originalSha256: "digest")
+    base.facts = ["supplied", "fotoro:people-source:v1:base", "fotoro.location.v1:base"]
+    var local = base, remote = base
+    local.facts = ["supplied", "fotoro.location.v1:base"]
+    remote.facts = ["supplied", "fotoro:people-source:v1:base", "fotoro.location.v1:remote", "fotoro.capture.v1:new"]
+    let independent = AnnotationMerge.merge(base: base, local: local, remote: remote)
+    XCTAssertTrue(independent.conflicts.isEmpty)
+    XCTAssertEqual(independent.local.facts, ["supplied", "fotoro.location.v1:remote", "fotoro.capture.v1:new"])
+    local.facts = ["supplied", "fotoro:people-source:v1:mine", "fotoro.location.v1:base"]
+    remote.facts = ["remote supplied", "fotoro:people-source:v1:theirs", "fotoro.location.v1:remote"]
+    let collision = AnnotationMerge.merge(base: base, local: local, remote: remote)
+    XCTAssertEqual(collision.conflicts, ["facts.people"])
+    XCTAssertEqual(collision.local.facts, ["remote supplied", "fotoro:people-source:v1:mine", "fotoro.location.v1:remote"])
+    XCTAssertEqual(AnnotationMerge.choosingRemote(collision.conflicts, local: collision.local, remote: remote).facts, remote.facts)
+    XCTAssertEqual(AnnotationMerge.stillConflicting(collision.conflicts, local: collision.local, remote: remote), ["facts.people"])
+    base.facts = ["fotoro.future.v2:base"]; local.facts = []; remote.facts = ["fotoro.future.v2:remote"]
+    XCTAssertEqual(AnnotationMerge.merge(base: base, local: local, remote: remote).conflicts, ["facts.reserved"])
+    base.facts = ["supplied"]; local.facts = nil; remote.facts = ["changed supplied"]
+    XCTAssertEqual(AnnotationMerge.merge(base: base, local: local, remote: remote).conflicts, ["facts.supplied"])
+  }
   func testRemoteCaptureOverlayKeepsCurrentLocalOriginalHeadersUntilSourceChanges() throws {
     let index = try SearchIndex()
     var record = SearchRecord(id: "asset", revision: "current")

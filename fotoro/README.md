@@ -76,15 +76,12 @@ See the [API guide](services/api/README.md) for service and storage boundaries.
 ```sh
 pnpm check
 pnpm test:search:visual
-pnpm test:exchange:isolated
 ```
 
-The isolated exchange runner creates and removes its own D1/R2 state. Native
-checks require the local API at 8787 and fixtures at 8790; CI starts both. Use
+Native checks require the local API at 8787 and fixtures at 8790; CI starts both. Use
 `pnpm test:ios` for the full app and `pnpm test:ios --local-preview` for the separate
 Photos preview. See the [native guide](apps/ios/README.md).
 
 Current release procedures and evidence belong to Deployment and Verification.
 Exact-head CI, audited artifacts and production readback qualify rollout;
-physical acceptance is a separate gate. Dated documents under
-`../docs/ai-photos/` and `../docs/superpowers/` are historical or canonical pointers.
+physical acceptance is a separate gate.

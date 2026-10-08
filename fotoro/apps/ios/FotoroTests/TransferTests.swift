@@ -64,6 +64,10 @@ final class TransferTests: XCTestCase {
     XCTAssertEqual(restored.metadata.originalSha256, photo.metadata.originalSha256)
   }
 
+  @MainActor func testCancelledCommitRetainsJournalAndRestoresWithoutStagedBytes() async throws {
+    try await assertPromotedCommitRetry(failure: .cancelled)
+  }
+
   @MainActor func testPromotedCommit503KeepsFailureAndRestoresWithoutStagedBytes() async throws {
     try await assertPromotedCommitRetry(failure: .unavailable)
   }
@@ -117,14 +121,20 @@ final class TransferTests: XCTestCase {
       networkConfiguration: configuration, diagnostics: diagnostics)
     let restarted = TransferJournal(store: s.store, api: api, vault: s.vault)
 
-    await restarted.resumePending()
+    let outcome = await restarted.resumePending()
+    XCTAssertEqual(outcome, failure == .cancelled ? .cancelled : .finished)
     let retained = try XCTUnwrap(restarted.entries().first)
     XCTAssertEqual(retained.reservations[target.binding.representationId]?.uploadId, receipt.uploadId)
     XCTAssertNil(retained.commits[target.binding.representationId])
     XCTAssertEqual(retained.commits.count, entry.commits.count)
-    XCTAssertEqual(restarted.errors[photo.photoId], failure.localizedDescription)
+    if failure == .cancelled {
+      XCTAssertTrue(restarted.errors.isEmpty, "Cancellation must leave durable work pending without a failure")
+    } else {
+      XCTAssertEqual(restarted.errors[photo.photoId], failure.localizedDescription)
+    }
     XCTAssertNil(try s.store.photos().first { $0.photoId == photo.photoId })
     let firstEvents = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: diagnostics.exportJSON())
+    XCTAssertEqual(firstEvents.last?.outcome, failure == .cancelled ? .cancelled : .failed)
     XCTAssertEqual(firstEvents.filter { $0.outcome == .started && $0.endpoint == .upload }.count, 1,
       "A transient commit failure must not reserve or upload again")
 
@@ -159,12 +169,13 @@ private struct TransferStorageSnapshot: Decodable, Equatable {
 }
 
 private enum CommitRetryFailure: Sendable {
-  case unavailable, offline
+  case unavailable, offline, cancelled
   var localizedDescription: String {
     switch self {
     case .unavailable:
       FotoroError("INTERNAL_ERROR", requestId: "12345678-1234-4234-8234-123456789abc", retryable: true).localizedDescription
     case .offline: URLError(.notConnectedToInternet).localizedDescription
+    case .cancelled: URLError(.cancelled).localizedDescription
     }
   }
 }
@@ -192,6 +203,7 @@ private final class CommitRetryProtocol: URLProtocol, @unchecked Sendable {
     }
     switch failure {
     case .offline: client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
+    case .cancelled: client?.urlProtocol(self, didFailWithError: URLError(.cancelled))
     case .unavailable:
       let response = HTTPURLResponse(url: url, statusCode: 503, httpVersion: nil,
         headerFields: ["Content-Type": "application/json", "X-Request-Id": "12345678-1234-4234-8234-123456789abc"])!

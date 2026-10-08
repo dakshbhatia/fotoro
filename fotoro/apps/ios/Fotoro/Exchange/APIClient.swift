@@ -339,6 +339,11 @@ enum APIURLPolicy {
         outcome: .failure(for: error, taskCancelled: Task.isCancelled),
         endpoint: endpoint, method: method, elapsed: ProcessInfo.processInfo.systemUptime - started,
         networkError: error as? URLError, step: .request, reason: Task.isCancelled ? .cancelled : .failure(error)))
+      // URLSession reports cancellation as URLError rather than CancellationError.
+      // Normalize it before retrying callers can mistake an interrupted request for a failure.
+      if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled {
+        throw CancellationError()
+      }
       throw error
     }
     let responseRequestId = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "x-request-id")

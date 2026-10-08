@@ -99,6 +99,17 @@ enum AnnotationCrypto {
 }
 
 enum AnnotationMerge {
+  static let factCategories = ["supplied", "people", "location", "capture", "observation", "reserved"]
+  static func factCategory(_ fact: String) -> String {
+    if PhotoPeopleFacts.isReserved(fact) { return "people" }
+    if PhotoLocationFacts.isReserved(fact) { return "location" }
+    if PhotoCaptureFacts.isReserved(fact) { return "capture" }
+    if fact.hasPrefix("fotoro.ai.v1:") { return "observation" }
+    return fact.hasPrefix("fotoro.") || fact.hasPrefix("fotoro:") ? "reserved" : "supplied"
+  }
+  static func factGroup(_ facts: [String]?, _ category: String) -> [String] {
+    (facts ?? []).filter { factCategory($0) == category }
+  }
   struct Result { var local: PhotoAnnotationsV1; var remote: PhotoAnnotationsV1; var conflicts: [String] }
   static func merge(base: PhotoAnnotationsV1, local: PhotoAnnotationsV1, remote: PhotoAnnotationsV1) -> Result {
     var mine = local
@@ -113,7 +124,15 @@ enum AnnotationMerge {
     (mine.labels, theirs.labels) = field(base.labels, local.labels, remote.labels, "labels")
     (mine.caption, theirs.caption) = field(base.caption, local.caption, remote.caption, "caption")
     (mine.keywords, theirs.keywords) = field(base.keywords, local.keywords, remote.keywords, "keywords")
-    (mine.facts, theirs.facts) = field(base.facts, local.facts, remote.facts, "facts")
+    if local.facts == base.facts { mine.facts = remote.facts; theirs.facts = remote.facts }
+    else if remote.facts == base.facts || local.facts == remote.facts { mine.facts = local.facts; theirs.facts = local.facts }
+    else {
+      mine.facts = []; theirs.facts = []
+      for category in factCategories {
+        let (localGroup, remoteGroup) = field(factGroup(base.facts, category), factGroup(local.facts, category), factGroup(remote.facts, category), "facts." + category)
+        mine.facts?.append(contentsOf: localGroup); theirs.facts?.append(contentsOf: remoteGroup)
+      }
+    }
     (mine.favorite, theirs.favorite) = field(base.favorite, local.favorite, remote.favorite, "favorite")
     (mine.ocr, theirs.ocr) = field(base.ocr, local.ocr, remote.ocr, "ocr")
     (mine.visual, theirs.visual) = field(base.visual, local.visual, remote.visual, "visual")
@@ -129,7 +148,9 @@ enum AnnotationMerge {
       case "favorite": return local.favorite != remote.favorite
       case "ocr": return local.ocr != remote.ocr
       case "visual": return local.visual != remote.visual
-      default: return false
+      default:
+        if $0.hasPrefix("facts.") { return factGroup(local.facts, String($0.dropFirst(6))) != factGroup(remote.facts, String($0.dropFirst(6))) }
+        return false
       }
     }
   }
@@ -139,6 +160,12 @@ enum AnnotationMerge {
     if fields.contains("caption") { value.caption = remote.caption }
     if fields.contains("keywords") { value.keywords = remote.keywords }
     if fields.contains("facts") { value.facts = remote.facts }
+    else {
+      let categories = factCategories.filter { fields.contains("facts." + $0) }
+      if !categories.isEmpty {
+        value.facts = factCategories.flatMap { factGroup(categories.contains($0) ? remote.facts : local.facts, $0) }
+      }
+    }
     if fields.contains("favorite") { value.favorite = remote.favorite }
     if fields.contains("ocr") { value.ocr = remote.ocr }
     if fields.contains("visual") { value.visual = remote.visual }

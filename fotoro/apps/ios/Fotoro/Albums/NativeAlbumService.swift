@@ -59,6 +59,8 @@ struct NativeAlbumAccess {
   private var pendingFacts: [String: AlbumPhotoFactsContentV1] = [:]
   private var factsCursors = Set<String>()
   private var factsListedIDs = Set<String>()
+  private var factsLoadedPages = 0
+  private var refreshingFacts: UUID?
   private var epoch = UUID()
   private let crypto = NativeAlbumCrypto()
   private static var cleanedStaleCaches = false
@@ -117,6 +119,7 @@ struct NativeAlbumAccess {
   func refresh() async throws {
     do { try await refreshInbox() }
     catch { clearOpen(); throw error }
+    try await refreshSharedDetails()
   }
   private func refreshInbox() async throws {
     let captured = try context()
@@ -143,7 +146,7 @@ struct NativeAlbumAccess {
   }
   private func clearFacts() {
     sharedFacts = [:]; pendingFacts = [:]; factsCursors = []; factsListedIDs = []; factsNextCursor = nil
-    factsSupported = nil; factsError = nil; factsPageLoaded = false
+    factsSupported = nil; factsError = nil; factsPageLoaded = false; factsLoadedPages = 0; refreshingFacts = nil
   }
   private func creationID(_ captured: NativeAlbumContext) -> String { "albumcreate-" + Data(captured.origin.utf8).digest }
   var hasPendingCreation: Bool {
@@ -206,14 +209,17 @@ struct NativeAlbumAccess {
       detail.entries.count == detail.manifests.count, detail.entries.count <= 100, detail.entries.count <= detail.photoCount,
       detail.hasMore == (detail.nextCursor != nil), detail.nextCursor.map({ !$0.isEmpty && $0.utf8.count <= 256 && $0.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil }) ?? true else { throw FotoroError("Album access has ended or changed.") }
   }
-  private func membership(_ access: NativeAlbumAccess) async throws {
+  private func membership(_ access: NativeAlbumAccess, preservingTransientFailure: Bool = false) async throws {
     do {
       let value = try await request(AlbumOverviewV1.self, path: "/v1/albums/\(access.albumID)/access", context: access.context)
       _ = try NativeAlbumWire.overview(value)
       guard value.definition == access.signedDefinition, value.membership == "accepted", value.endedAt == nil else { throw FotoroError("Album access has ended or changed.") }
       try check(access.context)
     } catch {
-      if isCurrent(access.context) { clearOpen() }
+      let status = (error as? FotoroError)?.statusCode ?? 0
+      let transient = (error as? URLError).map { $0.code != .cancelled } ?? (status == 408 || status == 429 || (500...599).contains(status))
+      if preservingTransientFailure && transient { try check(access.context) }
+      else if isCurrent(access.context) { clearOpen() }
       throw error
     }
   }
@@ -302,13 +308,36 @@ struct NativeAlbumAccess {
     catch { sharedFacts = [:]; pendingFacts = [:]; factsError = error.localizedDescription }
   }
   private func bindSharedDetails() throws {
+    sharedFacts = try boundSharedDetails(pendingFacts)
+  }
+  private func boundSharedDetails(_ facts: [String: AlbumPhotoFactsContentV1]) throws -> [String: AlbumPhotoFactsContentV1] {
     var values: [String: AlbumPhotoFactsContentV1] = [:]
     for item in items {
-      if let value = pendingFacts[item.id] { try NativeAlbumFacts.bind(value, to: item); values[item.id] = value }
+      if let value = facts[item.id] { try NativeAlbumFacts.bind(value, to: item); values[item.id] = value }
     }
-    sharedFacts = values
+    return values
+  }
+  private func readFactsPage(_ reading: NativeAlbumAccess, cursor: String?, cursors: Set<String>,
+    listed: Set<String>, values: [String: AlbumPhotoFactsContentV1]) async throws
+    -> (values: [String: AlbumPhotoFactsContentV1], listed: Set<String>, cursor: String?) {
+    let path = "/v1/albums/\(reading.albumID)/photo-facts" + (cursor.map { "?cursor=" + $0 } ?? "")
+    let page = try await request(AlbumPhotoFactsPageV1.self, path: path, context: reading.context)
+    guard page.version == 1, page.facts.count <= 100, page.hasMore == (page.nextCursor != nil),
+      page.nextCursor.map({ $0.range(of: "^[1-9][0-9]{0,14}$", options: .regularExpression) != nil && !page.facts.isEmpty
+        && (Int($0) ?? 0) > (Int(cursor ?? "0") ?? 0) && !cursors.contains($0) }) ?? true
+    else { throw FotoroError("Invalid shared details pagination.") }
+    var next = values, ids = listed
+    for signed in page.facts {
+      let value = try NativeAlbumFacts.readEnvelope(signed, access: reading)
+      guard ids.insert(value.photoId).inserted, next[value.photoId] != nil || next.count < 1000
+      else { throw FotoroError("Duplicate or oversized shared details.") }
+      if let item = items.first(where: { $0.id == value.photoId }) { try NativeAlbumFacts.bind(value, to: item) }
+      if (next[value.photoId]?.revision ?? 0) <= value.revision { next[value.photoId] = value }
+    }
+    return (next, ids, page.nextCursor)
   }
   func loadMoreSharedDetails() async throws {
+    guard refreshingFacts == nil else { return }
     guard let reading = access else { throw FotoroError("Open an accepted album first.") }
     do {
       if factsSupported == nil {
@@ -322,26 +351,45 @@ struct NativeAlbumAccess {
       }
       guard factsSupported == true, !factsPageLoaded || factsNextCursor != nil else { return }
       try await membership(reading)
-      let path = "/v1/albums/\(reading.albumID)/photo-facts" + (factsNextCursor.map { "?cursor=" + $0 } ?? "")
-      let page = try await request(AlbumPhotoFactsPageV1.self, path: path, context: reading.context)
-      guard page.version == 1, page.facts.count <= 100, page.hasMore == (page.nextCursor != nil),
-        page.nextCursor.map({ $0.range(of: "^[1-9][0-9]{0,14}$", options: .regularExpression) != nil && !page.facts.isEmpty
-          && (Int($0) ?? 0) > (Int(factsNextCursor ?? "0") ?? 0) && !factsCursors.contains($0) }) ?? true
-      else { throw FotoroError("Invalid shared details pagination.") }
-      var next = pendingFacts
-      var pageIDs = Set<String>()
-      for signed in page.facts {
-        let value = try NativeAlbumFacts.readEnvelope(signed, access: reading)
-        guard pageIDs.insert(value.photoId).inserted, !factsListedIDs.contains(value.photoId),
-          next[value.photoId] != nil || next.count < 1000 else { throw FotoroError("Duplicate or oversized shared details.") }
-        if let item = items.first(where: { $0.id == value.photoId }) { try NativeAlbumFacts.bind(value, to: item) }
-        if (next[value.photoId]?.revision ?? 0) <= value.revision { next[value.photoId] = value }
-      }
+      let page = try await readFactsPage(reading, cursor: factsNextCursor, cursors: factsCursors,
+        listed: factsListedIDs, values: pendingFacts)
       try await membership(reading); try check(reading.context)
-      pendingFacts = next; factsPageLoaded = true; factsNextCursor = page.nextCursor
-      factsListedIDs.formUnion(pageIDs)
-      if let cursor = page.nextCursor { factsCursors.insert(cursor) }
+      pendingFacts = page.values; factsPageLoaded = true; factsLoadedPages += 1; factsNextCursor = page.cursor
+      factsListedIDs = page.listed
+      if let cursor = page.cursor { factsCursors.insert(cursor) }
       try bindSharedDetails(); factsError = nil
+    } catch {
+      if isCurrent(reading.context) { factsError = error.localizedDescription }
+      throw error
+    }
+  }
+  // Refresh only the already loaded facts window; keep verified results until every
+  // replacement page and the final membership check have succeeded.
+  private func refreshSharedDetails() async throws {
+    guard let reading = access, factsSupported == true, factsLoadedPages > 0, refreshingFacts == nil else { return }
+    let refreshID = UUID()
+    refreshingFacts = refreshID
+    defer { if refreshingFacts == refreshID { refreshingFacts = nil } }
+    let previous = pendingFacts, pageLimit = factsLoadedPages
+    var replacement: [String: AlbumPhotoFactsContentV1] = [:]
+    var listed = Set<String>(), seenCursors = Set<String>(), cursor: String?
+    var loaded = 0
+    do {
+      try await membership(reading, preservingTransientFailure: true)
+      for _ in 0..<pageLimit {
+        let page = try await readFactsPage(reading, cursor: cursor, cursors: seenCursors, listed: listed, values: replacement)
+        replacement = page.values; listed = page.listed; loaded += 1; cursor = page.cursor
+        if let cursor { seenCursors.insert(cursor) } else { break }
+      }
+      try await membership(reading, preservingTransientFailure: true); try check(reading.context)
+      // A confirmed local write that completed during these reads must survive.
+      for (id, value) in pendingFacts where value.revision > (previous[id]?.revision ?? 0) {
+        if value.revision > (replacement[id]?.revision ?? 0) { replacement[id] = value }
+      }
+      let bound = try boundSharedDetails(replacement)
+      pendingFacts = replacement; sharedFacts = bound
+      factsListedIDs = listed; factsCursors = seenCursors; factsNextCursor = cursor
+      factsLoadedPages = loaded; factsPageLoaded = true; factsError = nil
     } catch {
       if isCurrent(reading.context) { factsError = error.localizedDescription }
       throw error

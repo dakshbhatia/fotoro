@@ -8,6 +8,7 @@ struct TransferEntry: Codable {
   var reservations: [String: UploadReservationV1] = [:]
   var commits: [String: UploadCommitV1] = [:]
 }
+enum TransferResumeOutcome: Equatable { case idle, finished, cancelled }
 @MainActor @Observable final class TransferJournal {
   let store: LibraryStore
   let api: APIClient
@@ -94,8 +95,8 @@ struct TransferEntry: Codable {
       }
     }
   }
-  func resumePending(only allowedPhotoIDs: Set<String>? = nil) async {
-    guard vault.isUnlocked, !running else { return }
+  @discardableResult func resumePending(only allowedPhotoIDs: Set<String>? = nil) async -> TransferResumeOutcome {
+    guard vault.isUnlocked, !running else { return .idle }
     running = true
     defer {
       running = false
@@ -171,7 +172,9 @@ struct TransferEntry: Codable {
                   try await api.upload(bytes, to: reservation.stagingUrl)
                 }
               }
-              do { try await upload(reservation) } catch {
+              do { try await upload(reservation) } catch is CancellationError {
+                throw CancellationError()
+              } catch {
                 try fence()
                 let renewed: UploadReservationV1 = try await api.post(
                   "/v1/uploads/reserve",
@@ -215,10 +218,11 @@ struct TransferEntry: Codable {
           if let account { try? background.forget(accountId: account, photoId: e.photo.photoId) }
           for url in e.photo.staged.values { try? FileManager.default.removeItem(at: url) }
           errors[e.photo.photoId] = nil
-        } catch is CancellationError { return } catch {
+        } catch is CancellationError { return .cancelled } catch {
           errors[e.photo.photoId] = error.localizedDescription
         }
       }
-    } catch { errors["journal"] = error.localizedDescription }
+    } catch is CancellationError { return .cancelled } catch { errors["journal"] = error.localizedDescription }
+    return .finished
   }
 }

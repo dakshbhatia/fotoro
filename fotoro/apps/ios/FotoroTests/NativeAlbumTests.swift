@@ -131,6 +131,29 @@ final class NativeAlbumTests: XCTestCase {
       XCTAssertEqual(server.factsIndividualReads, 0, "Browsing uses pages, not one request per photo")
     }
   }
+  @MainActor func testSameCountSharedDetailsRefreshHandlesEditsAndTransientAccessFailures() async throws {
+    try await withAlbum { _, server, model in
+      server.factsCapabilityStatus = 200
+      try server.setFacts(server.source, people: ["Mom"])
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let objectReads = server.objectReads
+      for people in [["Dad"], [], ["Mom"]] {
+        try server.setFacts(server.source, people: people); try await model.refresh()
+        XCTAssertEqual(model.sharedFacts[server.source.id]?.people, people)
+        XCTAssertEqual(model.items.count, 1)
+      }
+      XCTAssertEqual(server.objectReads, objectReads, "Metadata refresh cannot fetch media")
+      for status in [0, 408, 429, 503] {
+        server.accessStatus = status
+        do { try await model.refresh(); XCTFail("Failed access refresh reported success") } catch {}
+        XCTAssertEqual(model.sharedFacts[server.source.id]?.people, ["Mom"])
+        XCTAssertEqual(model.items.count, 1); XCTAssertNotNil(model.opened)
+      }
+      server.accessStatus = 403
+      do { try await model.refresh(); XCTFail("Denied access refresh reported success") } catch {}
+      XCTAssertTrue(model.sharedFacts.isEmpty); XCTAssertTrue(model.items.isEmpty); XCTAssertNil(model.opened)
+    }
+  }
   @MainActor func testSharedDetailsWrongDigestAndEndedReadCannotPublishFacts() async throws {
     for interruption in ["digest", "ended"] {
       try await withAlbum { _, server, model in
@@ -325,6 +348,67 @@ final class NativeAlbumTests: XCTestCase {
       model.clear(); XCTAssertTrue(model.items.isEmpty); XCTAssertNil(model.opened)
       XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
       XCTAssertGreaterThanOrEqual(server.accessReads, 8)
+    }
+  }
+  @MainActor func testReviewedFirstContactJoinPinsAcceptsAndOpensExactAlbum() async throws {
+    try await withAlbum(invited: true) { services, server, model in
+      services.session.pinnedCards.removeValue(forKey: server.cards[0].accountId)
+      try await model.refresh()
+      let reviewed = try XCTUnwrap(model.albums.first)
+      XCTAssertTrue(reviewed.needsTrust)
+      XCTAssertFalse(server.accepted)
+      XCTAssertEqual(server.objectReads, 0)
+      try await NativeAlbumReviewedJoin.join(reviewed, incoming: FotoroAlbumInvitation(albumId: reviewed.id, ownerCard: server.cards[0]), services: services, model: model)
+      XCTAssertEqual(services.session.pinnedCards[server.cards[0].accountId], server.cards[0])
+      XCTAssertTrue(server.accepted)
+      XCTAssertEqual(model.opened?.id, reviewed.id)
+    }
+  }
+  @MainActor func testReviewedJoinRejectsLinkMismatchBeforeTrustOrAcceptance() async throws {
+    try await withAlbum(invited: true) { services, server, model in
+      services.session.pinnedCards.removeValue(forKey: server.cards[0].accountId)
+      try await model.refresh()
+      let reviewed = try XCTUnwrap(model.albums.first)
+      do {
+        try await NativeAlbumReviewedJoin.join(reviewed, incoming: FotoroAlbumInvitation(albumId: reviewed.id, ownerCard: server.cards[1]), services: services, model: model)
+        XCTFail("Mismatched link joined")
+      } catch {}
+      XCTAssertNil(services.session.pinnedCards[server.cards[0].accountId])
+      XCTAssertFalse(server.accepted)
+      XCTAssertEqual(server.objectReads, 0)
+    }
+  }
+  @MainActor func testReviewedJoinRejectsWithdrawnReviewBeforePinning() async throws {
+    try await withAlbum(invited: true) { services, server, model in
+      services.session.pinnedCards.removeValue(forKey: server.cards[0].accountId)
+      try await model.refresh()
+      let reviewed = try XCTUnwrap(model.albums.first)
+      model.clear()
+      do {
+        try await NativeAlbumReviewedJoin.join(reviewed, incoming: nil, services: services, model: model)
+        XCTFail("Withdrawn review joined")
+      } catch {}
+      XCTAssertNil(services.session.pinnedCards[server.cards[0].accountId])
+      XCTAssertFalse(server.accepted)
+    }
+  }
+  @MainActor func testReviewedJoinRejectsChangedDefinitionAndCanRetryAfterReview() async throws {
+    try await withAlbum(invited: true) { services, server, model in
+      services.session.pinnedCards.removeValue(forKey: server.cards[0].accountId)
+      try await model.refresh()
+      let reviewed = try XCTUnwrap(model.albums.first)
+      server.definition.createdAt = "2026-01-01T00:00:00.000Z"
+      server.signed = try CryptoAdapter().sign(server.definition, kind: "album-v1", accountId: server.cards[0].accountId, secret: Data(b64: server.bundles[0].signingSecretKey))
+      do {
+        try await NativeAlbumReviewedJoin.join(reviewed, incoming: nil, services: services, model: model)
+        XCTFail("Changed definition joined")
+      } catch {}
+      XCTAssertFalse(server.accepted)
+      XCTAssertEqual(server.objectReads, 0)
+      let fresh = try XCTUnwrap(model.albums.first)
+      try await NativeAlbumReviewedJoin.join(fresh, incoming: nil, services: services, model: model)
+      XCTAssertTrue(server.accepted)
+      XCTAssertEqual(model.opened?.id, fresh.id)
     }
   }
   @MainActor func testInvitedRosterRequiresExplicitAcceptBeforeAnyObjectRead() async throws {
@@ -599,6 +683,7 @@ private final class AlbumTestServer: @unchecked Sendable {
   private var extraObjects: [String: Data] = [:]
   private var owned: [String: SignedPayloadV1] = [:]
   var creationBodies: [Data] = []; var loseCreateResponse = false; var failInbox = false
+  var accessStatus: Int?
   var accountMismatchCount = 0; var authAccountHeader: String?
   var factsCapabilityStatus = 404
   var endOnFacts = false
@@ -749,7 +834,7 @@ private final class AlbumTestServer: @unchecked Sendable {
       if loseAppendResponse { loseAppendResponse = false; throw URLError(.networkConnectionLost) }
       return (200, try Wire.encode(result))
     }
-    if path.hasSuffix("/access") { accessCount += 1; return accepted && !ended ? (200, try Wire.encode(overview)) : (403, Data("{\"code\":\"ALBUM_INACTIVE\"}".utf8)) }
+    if path.hasSuffix("/access") { accessCount += 1; if let accessStatus { if accessStatus == 0 { throw URLError(.timedOut) }; return (accessStatus, Data()) }; return accepted && !ended ? (200, try Wire.encode(overview)) : (403, Data("{\"code\":\"ALBUM_INACTIVE\"}".utf8)) }
     if path.hasPrefix("/v1/objects/") {
       objectCount += 1; if endOnObject { ended = true }
       return (extraObjects[request.url!.lastPathComponent] ?? objects[request.url!.lastPathComponent]).map { (200, $0) } ?? (404, Data())

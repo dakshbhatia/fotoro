@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import accounts from "../../../fixtures/accounts.json";
 import type {MediaBinding, PhotoManifestV1, RepresentationV1} from "@fotoro/contracts";
 import {ready, b64, unb64, sodium, utf8, wrapKey, encryptMedia, signPayload, encodeLivePhoto} from "@fotoro/crypto";
-import {makeAlbumDefinition, makeAlbumPhoto, verifyAlbumAction, verifyAlbumPhoto} from "@fotoro/crypto/albums";
+import {makeAlbumDefinition, openAlbumDefinition, makeAlbumPhoto, verifyAlbumAction, verifyAlbumPhoto} from "@fotoro/crypto/albums";
 import {ALBUM_DEFINITION_KIND, readAlbumSignedBody, validateAlbumDefinition, validateAlbumAppend, type AlbumOverviewV1} from "@fotoro/contracts/albums";
 import {configureVault, unlockVault, lockVault, requireVault} from "../src/vault/vault";
 import {clearAccount, all} from "../src/exchange/cache";
@@ -78,7 +78,7 @@ test("a recipient must explicitly accept before reading, reads authenticated ori
   };
   const invited = await AlbumAccess.open(overview(data, "invited"), {}); assert.equal(objectsRead, 0);
   const active = await invited.accept(); assert.equal(active.membership, "accepted");
-  const [photo] = await invited.loadPhotos(); assert.equal(photo.annotations, undefined); assert.equal(photo.grantId, undefined);
+  const [photo] = (await invited.loadPhotoPage()).photos; assert.equal(photo.annotations, undefined); assert.equal(photo.grantId, undefined);
   assert.equal(photo.metadata.filename, data.photo.metadata.filename);
   assert.deepEqual(await invited.bytes(photo, "original", new AbortController().signal), data.original);
   const files = await albumOriginalFiles(invited, photo, new AbortController().signal); assert.equal(files[0].name, photo.metadata.filename); assert.deepEqual(new Uint8Array(await files[0].arrayBuffer()), data.original);
@@ -96,7 +96,7 @@ test("ended membership rejects even cached media and immediately wipes published
     }
     objectReads++; return new Response(new Uint8Array(data.objects.get(String(path).split("/").at(-1)!)!));
   };
-  const access = await AlbumAccess.open(overview(data), {}), [photo] = await access.loadPhotos();
+  const access = await AlbumAccess.open(overview(data), {}), [photo] = (await access.loadPhotoPage()).photos;
   await access.bytes(photo, "thumbnail", new AbortController().signal); const previousReads = objectReads;
   ended = true; await assert.rejects(access.bytes(photo, "thumbnail", new AbortController().signal), /ALBUM_INACTIVE/);
   assert.equal(objectReads, previousReads); assert.ok(photo.metadataKey.every(byte => byte === 0)); assert.equal(access.current(), false); assert.equal(access.signal.aborted, true);
@@ -110,7 +110,7 @@ test("an accepted-member cookie swap fails the captured account header before ca
     if (String(path).startsWith("/v1/albums/")) return response(String(path).endsWith("/access") ? overview(data) : {...overview(data), version: 1, entries: [data.entry], manifests: [data.signed], nextCursor: null, hasMore: false});
     reads++; return new Response(new Uint8Array(data.objects.get(String(path).split("/").at(-1)!)!));
   };
-  const access = await AlbumAccess.open(overview(data), {}), [photo] = await access.loadPhotos();
+  const access = await AlbumAccess.open(overview(data), {}), [photo] = (await access.loadPhotoPage()).photos;
   await access.bytes(photo, "thumbnail", new AbortController().signal); const previousReads = reads;
   mismatched = true; await assert.rejects(access.bytes(photo, "thumbnail", new AbortController().signal), /ACCOUNT_MISMATCH/);
   assert.equal(reads, previousReads); assert.equal(access.signal.aborted, true); assert.ok(photo.metadataKey.every(byte => byte === 0));
@@ -126,7 +126,7 @@ test("access ending during an original read cannot return plaintext, and missing
     if (String(path).endsWith(data.photo.manifest.representations[0].objectId)) ended = true;
     return new Response(new Uint8Array(data.objects.get(String(path).split("/").at(-1)!)!));
   };
-  const access = await AlbumAccess.open(overview(data), {}), [photo] = await access.loadPhotos();
+  const access = await AlbumAccess.open(overview(data), {}), [photo] = (await access.loadPhotoPage()).photos;
   await assert.rejects(access.bytes(photo, "preview", new AbortController().signal), /PREVIEW_UNAVAILABLE/); assert.equal(ended, false);
   await assert.rejects(access.bytes(photo, "original", new AbortController().signal), /ALBUM_INACTIVE/); assert.ok(photo.metadataKey.every(byte => byte === 0));
 }));
@@ -199,4 +199,105 @@ test("capabilities and album sessions cannot publish after account/scope change"
   await assert.rejects(albumCapabilities({current: () => current}), {name: "AbortError"});
   current = true; const access = await AlbumAccess.open(overview(data), {current: () => current});
   await open(1); assert.equal(access.current(), false); assert.equal(access.signal.aborted, true);
+}));
+
+
+test("album first page returns without fetching its continuation", () => scoped(async () => {
+  const data = await fixture(); let detailReads = 0, accessReads = 0;
+  globalThis.fetch = async path => {
+    const url = String(path);
+    if (url.endsWith("/access")) {accessReads++; return response({...overview(data), photoCount: 2});}
+    if (url.startsWith("/v1/albums/")) {detailReads++; return response({...overview(data), photoCount: 2, version: 1, entries: [data.entry], manifests: [data.signed], nextCursor: "next_1", hasMore: true});}
+    return new Response(new Uint8Array(data.objects.get(url.split("/").at(-1)!)!));
+  };
+  const access = await AlbumAccess.open(overview(data), {}), first = await access.loadPhotoPage();
+  assert.equal(detailReads, 1); assert.equal(first.photos.length, 1); assert.equal(first.nextCursor, "next_1"); assert.equal(first.photoCount, 2); assert.equal(accessReads, 2);
+  await assert.rejects(access.loadPhotoPage(first.nextCursor), /ALBUM_(DUPLICATE_PHOTO|PAGE_MISMATCH)/);
+  assert.ok(first.photos[0].metadataKey.every(byte => byte === 0)); assert.equal(access.current(), false);
+}));
+
+async function albumPages(count = 6) {
+  const data = await fixture(), items = [data];
+  const opened = openAlbumDefinition({signed: data.made.signed, trustedOwner: data.owner.card, recipientCard: data.owner.card, recipientSecretKey: data.owner.boxSecretKey, expectedAlbumId: data.made.definition.albumId});
+  try {
+    for (let n = 1; n < count; n++) {
+      const item = await fixture();
+      item.entry = makeAlbumPhoto({definition: data.made.definition, manifest: item.signed, metadataKey: item.photo.metadataKey, albumKey: opened.albumKey, signingSecretKey: item.owner.signingSecretKey});
+      for (const [id, bytes] of item.objects) data.objects.set(id, bytes);
+      items.push(item);
+    }
+  } finally {opened.albumKey.fill(0);}
+  const active = {...overview(data), photoCount: count};
+  const page = (indices: number[], nextCursor: string | null) => ({...active, version: 1, entries: indices.map(n => items[n].entry), manifests: indices.map(n => items[n].signed), nextCursor, hasMore: nextCursor !== null});
+  return {data, items, active, page};
+}
+
+test("album pages bound metadata concurrency at four, preserve order and refresh without erasing displayed keys", () => scoped(async () => {
+  const {data, items, active, page} = await albumPages(); let inFlight = 0, peak = 0; const details: string[] = [];
+  globalThis.fetch = async path => {
+    const url = String(path);
+    if (url.endsWith("/access")) return response(active);
+    if (url.startsWith("/v1/albums/")) {details.push(url); return response(url.includes("?") ? page([5], null) : page([0, 1, 2, 3, 4], "next_1"));}
+    peak = Math.max(peak, ++inFlight); await new Promise(resolve => setTimeout(resolve, 5)); inFlight--;
+    return new Response(new Uint8Array(data.objects.get(url.split("/").at(-1)!)!));
+  };
+  const access = await AlbumAccess.open(active, {}), first = await access.loadPhotoPage(), second = await access.loadPhotoPage(first.nextCursor);
+  assert.equal(peak, 4); assert.deepEqual([...first.photos, ...second.photos].map(photo => photo.manifest.photoId), items.map(item => item.photo.manifest.photoId));
+  assert.ok(details[1].endsWith("?cursor=next_1")); assert.equal(second.nextCursor, undefined); assert.equal(second.hasMore, false);
+  const refreshed = await access.loadPhotoPage(); assert.equal(refreshed.photos.length, 5); assert.ok(first.photos[0].metadataKey.some(byte => byte !== 0));
+  access.dispose(); for (const photo of [...first.photos, ...second.photos, ...refreshed.photos]) assert.ok(photo.metadataKey.every(byte => byte === 0));
+}));
+
+test("album pages reject unexpected, repeated, empty continuations and malformed manifest pairings", () => scoped(async () => {
+  for (const bad of ["unexpected", "repeated", "empty", "malformed", "manifest", "signature"]) {
+    const {data, active, page} = await albumPages(2);
+    globalThis.fetch = async path => {
+      const url = String(path);
+      if (url.endsWith("/access")) return response(active);
+      if (url.startsWith("/v1/albums/")) return response(!url.includes("?") ? page([0], "next_1") : bad === "malformed" ? {...page([1], null), manifests: []} : bad === "manifest" ? {...page([1], null), manifests: [data.signed]} : bad === "signature" ? {...page([1], null), entries: [{...page([1], null).entries[0], signature: b64(new Uint8Array(64))}]} : page(bad === "empty" ? [] : [1], "next_1"));
+      return new Response(new Uint8Array(data.objects.get(url.split("/").at(-1)!)!));
+    };
+    const access = await AlbumAccess.open(active, {}), first = await access.loadPhotoPage();
+    await assert.rejects(access.loadPhotoPage(bad === "unexpected" ? "wrong" : first.nextCursor));
+    assert.equal(access.current(), false); assert.ok(first.photos[0].metadataKey.every(byte => byte === 0));
+  }
+}));
+
+test("metadata page publication is fenced against revocation, cancellation, lock and account changes", () => scoped(async () => {
+  for (const change of ["revoked", "cancelled", "locked", "account"]) {
+    const {data, active, page} = await albumPages(2); const controller = new AbortController(); let changed = false;
+    globalThis.fetch = async path => {
+      const url = String(path);
+      if (url.endsWith("/access")) return changed && change === "revoked" ? response({code: "ALBUM_INACTIVE"}, 403) : response(active);
+      if (url.startsWith("/v1/albums/")) return response(page([0, 1], null));
+      if (!changed) {
+        changed = true;
+        if (change === "cancelled") controller.abort();
+        if (change === "locked") lockVault();
+        if (change === "account") await open(1);
+      }
+      return new Response(new Uint8Array(data.objects.get(url.split("/").at(-1)!)!));
+    };
+    const access = await AlbumAccess.open(active, {signal: controller.signal});
+    await assert.rejects(access.loadPhotoPage()); assert.equal(access.current(), false); assert.equal(access.signal.aborted, true);
+  }
+}));
+
+test("overlapping album page requests cannot corrupt the active traversal", () => scoped(async () => {
+  const {data, active, page} = await albumPages(2);
+  let release!: () => void, started!: () => void;
+  const waiting = new Promise<void>(resolve => {release = resolve;}), reading = new Promise<void>(resolve => {started = resolve;});
+  globalThis.fetch = async path => {
+    const url = String(path);
+    if (url.endsWith("/access")) return response(active);
+    if (url.startsWith("/v1/albums/")) return response(url.includes("?") ? page([1], null) : page([0], "next_1"));
+    started(); await waiting;
+    return new Response(new Uint8Array(data.objects.get(url.split("/").at(-1)!)!));
+  };
+  const access = await AlbumAccess.open(active, {}), firstRequest = access.loadPhotoPage();
+  await reading; await assert.rejects(access.loadPhotoPage(), /ALBUM_PAGE_LOADING/);
+  assert.equal(access.current(), true); release();
+  const first = await firstRequest, second = await access.loadPhotoPage(first.nextCursor);
+  assert.equal(first.photos.length, 1); assert.equal(second.photos.length, 1); assert.equal(second.hasMore, false);
+  assert.ok(first.photos[0].metadataKey.some(byte => byte !== 0)); access.dispose();
 }));

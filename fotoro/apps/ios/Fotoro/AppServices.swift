@@ -925,7 +925,7 @@ enum ReviewedPhotosBackupPolicy {
     }
     backup.start(
       snapshot: {
-        if !automatic { await uploadJournal.resumePending() }
+        if !automatic, await uploadJournal.resumePending() == .cancelled { throw CancellationError() }
         try Task.checkCancellation()
         guard self.session.isSignedIn, self.vault.generation == generation, self.session.accountId == account,
           self.store === catalog, BackgroundUploadPolicy.origin(self.api.baseURL) == origin,
@@ -1041,7 +1041,8 @@ enum ReviewedPhotosBackupPolicy {
       },
       upload: { source in
         guard sourceCurrent(source) else { throw CancellationError() }
-        await uploadJournal.resumePending(only: automatic ? [source.photoId] : nil)
+        let outcome = await uploadJournal.resumePending(only: automatic ? [source.photoId] : nil)
+        if outcome == .cancelled { throw CancellationError() }
         try Task.checkCancellation()
         guard let photo = try catalog.backupPhoto(source.photoId),
           ["committed", "saved"].contains(photo.transferState)
@@ -1719,7 +1720,7 @@ enum ReviewedPhotosBackupPolicy {
     if NativeBackupPolicy.allowsPrivatePhotos(
       accountId: session.accountId, fixture: session.fixture)
     {
-      await journal.resumePending()
+      if await journal.resumePending() == .cancelled { throw CancellationError() }
       return
     }
     #if DEBUG
@@ -1734,7 +1735,7 @@ enum ReviewedPhotosBackupPolicy {
             && $0.photo.metadata.mediaType == "image/jpeg"
             && $0.photo.metadata.filename == "singapore.jpg"
         }.map { $0.photo.photoId })
-      await journal.resumePending(only: allowed)
+      if await journal.resumePending(only: allowed) == .cancelled { throw CancellationError() }
       if entries.contains(where: { !allowed.contains($0.photo.photoId) }) {
         throw FotoroError(
           "Private imports remain paused in this public test account. They have not been uploaded. Use a real account for your photos."

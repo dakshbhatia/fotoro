@@ -16,11 +16,23 @@ Native live-album selection reads the locally available encrypted-account catalo
 in explicit 200-record pages rather than stopping at the first 1,000 Saved records.
 Selection persists across pages and validates current sources before adding; at
 most 100 owned photos are selected per contribution. Each album retains its fixed
-roster of at most 12 and total limit of 1,000 photos. Album search uses filenames
-and dates; private People, OCR and location facts are not contributed. Native
-Saved People choices also use explicit 200-record local pages, with visible partial
+roster of at most 12 and total limit of 1,000 photos. Contributors can explicitly
+publish up to 12 reviewed names and optional location as separate signed,
+encrypted album facts. Album search intersects contributor-scoped names, place
+and recorded capture dates on each copy before optional exact-original grouping.
+Import dates do not satisfy capture-date filters; private annotations and OCR
+remain private. First-contact sender review ends with Join album: the action pins
+the reviewed owner, refreshes, checks the same signed definition, accepts and opens
+the exact album. A mismatched link or changed invitation requires another review.
+Native Saved People choices also use explicit 200-record local pages, with visible partial
 coverage and account/vault/catalog/source fences. Loading these names does not
 read PhotoKit pixels or fetch originals.
+
+Private annotation sync merges People, location, capture details, observations,
+supplied text and unknown reserved facts by category. Independent category edits
+merge, same-category incompatible edits require a choice, and explicit deletions
+survive. Choosing local preserves unrelated remote category changes. The existing
+encrypted facts format is unchanged.
 
 iOS Places clusters available location metadata and offers optional Look up area
 names. Each explicit action sends at most eight unnamed marker coordinates to
@@ -40,7 +52,7 @@ can recover and retry without another asset revision change. Replacing synced
 OCR with absent or incompatible OCR restores the local index's existing OCR
 text, confidence and status instead of retaining obsolete remote text.
 
-Backgrounding or vault lock stops new Photos preparation at durable boundaries. iOS may finish already scheduled ciphertext staging uploads using bounded, expiring capabilities, without account credentials or plaintext in the background daemon. Commit and catalog publication require foreground authenticated reconciliation. Pause/disable/sign-out and account/origin changes cancel or fence work; this is not a promise that a closed app imports new Photos. Public fixture mode and the two seeded public account IDs cannot sync device Photos, including when authenticated by recovery. Safari can read the same account’s committed encrypted changes; camera-media negotiation preserves older-reader compatibility. Production allowance is 10 GiB of reserved/stored ciphertext; the client’s saved-original summary counts logical original bytes.
+Backgrounding or vault lock stops new Photos preparation at durable boundaries. iOS may finish already scheduled ciphertext staging uploads using bounded, expiring capabilities, without account credentials or plaintext in the background daemon. Commit and catalog publication require foreground authenticated reconciliation. URLSession cancellation is normalized to a cancellation outcome. Pause cancels active foreground transfer work and retains its durable retry rather than recording a transfer failure. Pause/disable/sign-out and account/origin changes cancel or fence work; this is not a promise that a closed app imports new Photos. Public fixture mode and the two seeded public account IDs cannot sync device Photos, including when authenticated by recovery. Safari can read the same account’s committed encrypted changes; camera-media negotiation preserves older-reader compatibility. Production allowance is 10 GiB of reserved/stored ciphertext; the client’s saved-original summary counts logical original bytes.
 
 From `fotoro/`, prepare the public local accounts with `pnpm seed:local`, run `pnpm dev:fixtures` on 8790, and run `pnpm --filter @fotoro/api dev:native-test` on 8787. The latter runs the real bundled Worker directly against local D1/R2 without the development proxy. Run `pnpm test:ios`; the helper discovers an available iOS 26+ iPhone Simulator. Optionally set `FOTORO_SIMULATOR_ID=<discovered-UDID>` to choose one. For a direct invocation from `fotoro/apps/ios/`:
 
@@ -55,7 +67,7 @@ Leave Simulator ad-hoc signing enabled. `CODE_SIGNING_ALLOWED=NO` makes Keychain
 
 Tests cover frozen JS/libsodium vectors; native signature equality; wrong binding/key/signature/version, reordered/truncated/trailing media; original byte retention; edited/iCloud read faults; GRDB journal restart and ambiguous commit; receive/save/contribute and retention after grant removal; lost save receipt after revocation; real Worker recovery-session authentication and signed device enrollment/replay rejection. The crypto test writes `Documents/native-interop.json` in the Simulator app container for reverse JavaScript decryption.
 
-Physical passkey/PRF ceremonies, real iCloud conditions, Photos edits, large-library performance and OS background completion require their own device evidence; Simulator tests do not establish them. See the canonical verification record for what actually ran. Device-approval challenge/sealed-bundle helpers are exercised by tests; consumer transfer, paste and camera QR scanning are not shipped. Exporting received cloud photos into Photos remains open. Larger originals, contact convergence, album People facts, cross-trip family/landmark matching, recoverable deletion/undo and safe storage garbage collection remain open.
+Physical passkey/PRF ceremonies, real iCloud conditions, Photos edits, large-library performance and OS background completion require their own device evidence; Simulator tests do not establish them. See the canonical verification record for what actually ran. Device-approval challenge/sealed-bundle helpers are exercised by tests; consumer transfer, paste and camera QR scanning are not shipped. Exporting received cloud photos into Photos remains open. Larger originals, contact convergence, shared person identity across contributors, global family Find, a native Mac client, cross-trip family/landmark matching, recoverable deletion/undo and safe storage garbage collection remain open.
 
 Full builds record bounded runtime diagnostics in OSLog (`cloud.fotoro.Fotoro`, category `runtime`) and protected `Library/Application Support/FotoroDiagnostics/runtime.jsonl`. Launch, pick-analysis duration, Photos consent, sync state changes and API outcomes use fixed categories, counts, status/network codes and UUID request references. The file keeps at most 160 events and 64 KiB, writes on a utility queue and is excluded from device backup. It excludes photo contents, filenames, paths, account/photo identifiers, queries, keys, recovery codes and raw error descriptions. The separate local-preview target does not compile this account diagnostics implementation.
 
