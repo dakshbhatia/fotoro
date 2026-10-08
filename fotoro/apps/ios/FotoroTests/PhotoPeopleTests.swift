@@ -7,6 +7,21 @@ import XCTest
 @testable import Fotoro
 
 final class PhotoPeopleTests: XCTestCase {
+  func testPeopleSearchChoicesMergeSameUUIDWithoutMergingSameNamesOrSuggestedFaces() {
+    let shared = Wire.id(), other = Wire.id(), suggested = Wire.id()
+    let face = PhotoPeopleFace(id: Wire.id(), photoID: "local", revision: "current", groupID: shared,
+      box: [0,0,100,100], vector: [], confirmed: true)
+    var unconfirmed = face; unconfirmed.groupID = suggested; unconfirmed.confirmed = false
+    let local = [PhotoPeopleGroup(id: shared.uppercased(), name: "Current name", faces: [face]),
+      PhotoPeopleGroup(id: suggested, name: "Suggested", faces: [unconfirmed])]
+    let choices = PhotoPeopleSearchChoice.merged(local: local, saved: [
+      PhotoPeopleSearchChoice(id: shared, name: "Previous name"), PhotoPeopleSearchChoice(id: other, name: "Current name")])
+    XCTAssertEqual(Set(choices.map(\.id)), [shared, other])
+    XCTAssertEqual(choices.map(\.name), ["Current name", "Current name"])
+    XCTAssertTrue(PhotoPeopleSearchChoice.canFind(PeopleSearchSelection(personIDs: [shared.uppercased(), other]), choices: choices))
+    XCTAssertFalse(PhotoPeopleSearchChoice.canFind(PeopleSearchSelection(personIDs: [suggested]), choices: choices))
+    XCTAssertFalse(PhotoPeopleSearchChoice.canFind(PeopleSearchSelection(), choices: choices))
+  }
   func testFaceCountDistinguishesNotAnalyzedZeroAndChangedSources() throws {
     let index = try SearchIndex()
     let record = SearchRecord(id: "photo", revision: "current")

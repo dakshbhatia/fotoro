@@ -476,7 +476,8 @@ enum ReviewedPhotosBackupPolicy {
     observeConsumerSync()
   }
   private func recordConsumerSyncFailure(_ error: Error) {
-    guard !(error is CancellationError), vault.isUnlocked else { return }
+    guard NativeDiagnosticOutcome.failure(for: error, taskCancelled: Task.isCancelled) != .cancelled,
+      vault.isUnlocked else { return }
     consumerOffline = (error as? URLError)?.code == .notConnectedToInternet
     consumerFailure = consumerOffline ? "You’re offline. Your queued photos are kept." : "Sync needs attention. Your originals are unchanged."
     refreshConsumerSyncSummary()
@@ -1519,6 +1520,7 @@ enum ReviewedPhotosBackupPolicy {
     let bundle = try vault.requireBundle()
     let card = try session.requireCard(account)
     var value = try annotations.ledger.current(photo: photo, bundle: bundle, card: card) ?? PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+    let priorPeopleFacts = (value.facts ?? []).filter(PhotoPeopleFacts.isReserved)
     var hasCompletedDerivedResult = false
     if value.location == nil, RecentPhotosPolicy.canRead(automaticPhotosPermission),
       source.originalSha256 == photo.metadata.originalSha256,
@@ -1571,6 +1573,9 @@ enum ReviewedPhotosBackupPolicy {
     guard !derivedOnly || hasCompletedDerivedResult else { return }
     try annotations.ledger.edit(value, photo: photo, bundle: bundle, card: card)
     photoAnnotations[photo.id] = value
+    if labelsChanged, priorPeopleFacts != (value.facts ?? []).filter(PhotoPeopleFacts.isReserved) {
+      consumerCatalogGeneration &+= 1
+    }
     if refreshSummary { refreshConsumerSyncSummary() }
   }
   private func captureLocalAnnotations(derivedOnly: Bool = false) throws {

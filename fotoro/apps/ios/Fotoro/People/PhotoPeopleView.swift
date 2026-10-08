@@ -2,19 +2,102 @@ import Photos
 import SwiftUI
 
 struct PhotoPeoplePresentation: Identifiable { let id = UUID() }
+
+struct PhotoPeopleSearchChoice: Identifiable, Equatable {
+  var id: String
+  var name: String
+  static func merged(local: [PhotoPeopleGroup], saved: [Self]) -> [Self] {
+    var choices: [String: Self] = [:]
+    for choice in saved { choices[choice.id] = choice }
+    for group in local where group.confirmedCount > 0 {
+      guard let name = group.name, let id = UUID(uuidString: group.id)?.uuidString.lowercased() else { continue }
+      choices[id] = Self(id: id, name: name)
+    }
+    return choices.values.sorted {
+      let order = $0.name.localizedStandardCompare($1.name)
+      return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
+    }
+  }
+  static func canFind(_ selection: PeopleSearchSelection, choices: [Self]) -> Bool {
+    selection.valid && !selection.isEmpty && Set(selection.canonicalIDs).isSubset(of: Set(choices.map(\.id)))
+  }
+}
+
+struct SavedPeopleSearchContext: Equatable {
+  let access: PhotoAccountAccess
+  let origin: String
+  let catalogGeneration: UInt64
+  let cards: [String: AccountCardV1]
+  @MainActor static func current(_ services: AppServices) -> Self? {
+    guard let access = services.photoAccountAccess else { return nil }
+    return Self(access: access, origin: services.api.baseURL.absoluteString,
+      catalogGeneration: services.consumerCatalogGeneration, cards: services.session.pinnedCards)
+  }
+}
+
+struct SavedPeopleSearchSnapshot {
+  let context: SavedPeopleSearchContext
+  let choices: [PhotoPeopleSearchChoice]
+  private let sources: [LocalPhoto]
+  @MainActor func isCurrent(_ services: AppServices, checkingSources: Bool = true) -> Bool {
+    SavedPeopleSearchContext.current(services) == context
+      && (!checkingSources || SavedPhotoSelection.isCurrent(sources, lookup: services.consumerSavedPhoto))
+  }
+  @MainActor static func load(_ services: AppServices) async throws -> Self? {
+    guard let context = SavedPeopleSearchContext.current(services) else { return nil }
+    // Read existing encrypted annotations only; no PhotoKit access or new face analysis.
+    let photos = try await services.searchCatalog("")
+    var choices: [String: PhotoPeopleSearchChoice] = [:]
+    var sources: [LocalPhoto] = []
+    for (offset, photo) in photos.enumerated() {
+      try Task.checkCancellation()
+      guard SavedPeopleSearchContext.current(services) == context else { throw CancellationError() }
+      guard let current = try services.consumerSavedPhoto(photo.id),
+        current.metadata == photo.metadata, current.manifest == photo.manifest else { continue }
+      let assignments = PhotoPeopleFacts.read(services.annotation(current).facts ?? [],
+        originalSha256: current.metadata.originalSha256)
+      if !assignments.isEmpty { sources.append(current) }
+      for assignment in assignments {
+        guard let id = UUID(uuidString: assignment.p)?.uuidString.lowercased() else { continue }
+        // Catalog order chooses the newest reviewed name for an existing person UUID.
+        if choices[id] == nil { choices[id] = PhotoPeopleSearchChoice(id: id, name: assignment.n) }
+      }
+      if offset % 100 == 99 { await Task.yield() }
+    }
+    try Task.checkCancellation()
+    let snapshot = Self(context: context, choices: PhotoPeopleSearchChoice.merged(local: [], saved: Array(choices.values)), sources: sources)
+    guard snapshot.isCurrent(services) else { throw CancellationError() }
+    return snapshot
+  }
+}
 struct PhotoPeopleView: View {
   let search: LocalSearchStore
+  let services: AppServices?
+  @State private var savedPeople: SavedPeopleSearchSnapshot?
+  @State private var savedPeopleError: String?
   @State private var people: PhotoPeopleStore
   @State private var names: [String: String] = [:]
   @State private var selection: PeopleSearchSelection
   var findPhotos: () -> Void = {}
   @Environment(\.scenePhase) private var scenePhase
   @Environment(\.dismiss) private var dismiss
-  init(search: LocalSearchStore, findPhotos: @escaping () -> Void = {}) {
+  init(search: LocalSearchStore, services: AppServices? = nil, findPhotos: @escaping () -> Void = {}) {
     self.search = search
+    self.services = services
     self.findPhotos = findPhotos
     _people = State(initialValue: PhotoPeopleStore(search: search))
     _selection = State(initialValue: search.peopleSelection)
+  }
+  private var savedContext: SavedPeopleSearchContext? {
+    guard scenePhase == .active, let services else { return nil }
+    return SavedPeopleSearchContext.current(services)
+  }
+  private var choices: [PhotoPeopleSearchChoice] { searchChoices() }
+  private func searchChoices(checkingSources: Bool = false) -> [PhotoPeopleSearchChoice] {
+    let saved = services.flatMap { services in
+      savedPeople.flatMap { $0.isCurrent(services, checkingSources: checkingSources) ? $0.choices : nil }
+    } ?? []
+    return PhotoPeopleSearchChoice.merged(local: search.peopleSnapshotReady ? people.groups : [], saved: saved)
   }
   var body: some View {
     NavigationStack {
@@ -56,20 +139,29 @@ struct PhotoPeopleView: View {
           }.accessibilityIdentifier("people.search.match")
           Text("Everyone selected must appear in the same photo. This does not establish who visited a place.")
             .font(.footnote).foregroundStyle(.secondary)
-          ForEach(people.groups.filter { $0.name != nil && $0.confirmedCount > 0 }) { group in
-            Toggle(group.name ?? "", isOn: Binding(get: { selection.personIDs.contains(group.id) }, set: { selected in
-              if selected { selection.personIDs.insert(group.id) } else { selection.personIDs.remove(group.id) }
-            })).accessibilityIdentifier("people.search.person." + group.id)
+          ForEach(choices) { choice in
+            Toggle(choice.name, isOn: Binding(get: { selection.canonicalIDs.contains(choice.id) }, set: { selected in
+              selection.personIDs = Set(selection.canonicalIDs)
+              if selected { selection.personIDs.insert(choice.id) } else { selection.personIDs.remove(choice.id) }
+            })).accessibilityIdentifier("people.search.person." + choice.id)
           }
-          if people.groups.allSatisfy({ $0.name == nil || $0.confirmedCount == 0 }) {
-            Text("Save a name on confirmed faces below to find that person.").font(.footnote).foregroundStyle(.secondary)
+          if choices.isEmpty {
+            if savedContext != nil, savedPeople == nil, savedPeopleError == nil {
+              ProgressView("Loading saved names…")
+            } else {
+              Text("Save a name on confirmed faces below to find that person.").font(.footnote).foregroundStyle(.secondary)
+            }
           }
+          if let savedPeopleError { Text(savedPeopleError).font(.footnote).foregroundStyle(.red) }
           Button("Find photos", systemImage: "magnifyingglass") {
-            let names = Dictionary(uniqueKeysWithValues: people.groups.compactMap { group in group.name.map { (group.id, $0) } })
+            let current = searchChoices(checkingSources: true)
+            guard PhotoPeopleSearchChoice.canFind(selection, choices: current) else { return }
+            let names = Dictionary(uniqueKeysWithValues: current.map { ($0.id, $0.name) })
+            selection.personIDs = Set(selection.canonicalIDs)
             search.setPeopleSelection(selection, names: names)
             findPhotos()
             dismiss()
-          }.disabled(selection.isEmpty || !search.peopleSnapshotReady).accessibilityIdentifier("people.search.find")
+          }.disabled(!PhotoPeopleSearchChoice.canFind(selection, choices: choices)).accessibilityIdentifier("people.search.find")
           if !selection.isEmpty || !search.peopleSelection.isEmpty {
             Button("Clear people") { selection = PeopleSearchSelection(); search.setPeopleSelection(selection) }
               .accessibilityIdentifier("people.search.clear")
@@ -115,6 +207,17 @@ struct PhotoPeopleView: View {
       }.navigationTitle("People").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         .task { people.refresh() }
+        .task(id: savedContext) {
+          savedPeople = nil; savedPeopleError = nil
+          guard let services, let expected = savedContext else { return }
+          do {
+            let snapshot = try await SavedPeopleSearchSnapshot.load(services)
+            try Task.checkCancellation()
+            guard savedContext == expected else { return }
+            savedPeople = snapshot
+          } catch is CancellationError { return }
+          catch { if savedContext == expected { savedPeopleError = error.localizedDescription } }
+        }
         .onChange(of: search.query) { people.invalidateScope() }
         .onChange(of: search.peopleSelection) { people.invalidateScope() }
         .onChange(of: search.libraryGeneration) { people.invalidateScope(); people.refresh() }

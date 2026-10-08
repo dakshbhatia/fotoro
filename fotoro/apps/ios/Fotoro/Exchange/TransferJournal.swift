@@ -150,6 +150,7 @@ struct TransferEntry: Codable {
             let commit: UploadCommitV1
             do { commit = try await api.commit(reservation.uploadId) } catch {
               try fence()
+              guard (error as? FotoroError)?.message == "UPLOAD_INCOMPLETE" else { throw error }
               guard let path = e.photo.staged[id] else {
                 throw FotoroError("Pending ciphertext missing; reselect original")
               }
