@@ -476,7 +476,8 @@ enum ReviewedPhotosBackupPolicy {
     observeConsumerSync()
   }
   private func recordConsumerSyncFailure(_ error: Error) {
-    guard !(error is CancellationError), vault.isUnlocked else { return }
+    guard NativeDiagnosticOutcome.failure(for: error, taskCancelled: Task.isCancelled) != .cancelled,
+      vault.isUnlocked else { return }
     consumerOffline = (error as? URLError)?.code == .notConnectedToInternet
     consumerFailure = consumerOffline ? "You’re offline. Your queued photos are kept." : "Sync needs attention. Your originals are unchanged."
     refreshConsumerSyncSummary()

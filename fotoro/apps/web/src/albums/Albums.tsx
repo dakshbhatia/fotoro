@@ -48,7 +48,7 @@ function AlbumImage({access, photo, preview = false, onOpen}: {access: AlbumAcce
   const image = url ? <img src={url} alt={preview ? photo.metadata.filename : ""} onError={() => setError("Preview unavailable.")} /> : <span>{error || "Loading photo…"}</span>;
   return <div ref={element} className={preview ? "album-preview-image" : "album-thumbnail"}>{preview ? error || image : <button className="photo" onClick={onOpen} aria-label={"Open " + photo.metadata.filename}>{error || image}</button>}</div>;
 }
-export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incoming, onRetryAccount}: {selection: readonly Photo[]; currentPhotos: () => readonly Photo[]; onClose: () => void; onChoosePhotos: () => void; incoming?: IncomingAlbumIntent; onRetryAccount?: () => void}) {
+export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incoming, onRetryAccount}: {selection: readonly Photo[]; currentPhotos: () => readonly Photo[]; onClose: () => void; onChoosePhotos: (albumId: string) => void; incoming?: IncomingAlbumIntent; onRetryAccount?: () => void}) {
   const [session] = useState(requireVault), [controller] = useState(() => new AbortController());
   const [chosenSnapshot] = useState(() => new ShareSelection([...selection]));
   const creationDraft = useRef<AlbumCreationDraft>({});
@@ -196,7 +196,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
             <button className="primary-action" disabled={busy} onClick={() => void action(async () => {const accepted = await access.accept(); await open(accepted); await loadInbox();})}>Accept invitation</button>
           </> : <>
             <div className="album-toolbar"><input type="search" aria-label="Search album filenames or dates" placeholder="Search album" value={query} onChange={event => setQuery(event.target.value)} />
-              {chosen ? <button className="primary-action" disabled={busy} onClick={() => void action(async () => {const added = await access.add(chosenSnapshot.photos, currentPhotos); const list = await loadInbox(); const updated = list?.find(item => item.definition.body === access.overview.definition.body); if (updated) await open(updated); setNotice(added ? `${added} ${added === 1 ? "photo added" : "photos added"}.` : "Already in this album.");})}>Add {chosen} {chosen === 1 ? "photo" : "photos"}</button> : <button disabled={busy} onClick={onChoosePhotos}>Choose photos</button>}
+              {chosen ? <button className="primary-action" disabled={busy} onClick={() => void action(async () => {const added = await access.add(chosenSnapshot.photos, currentPhotos); const list = await loadInbox(); const updated = list?.find(item => item.definition.body === access.overview.definition.body); if (updated) await open(updated); setNotice(added ? `${added} ${added === 1 ? "photo added" : "photos added"}.` : "Already in this album.");})}>Add {chosen} {chosen === 1 ? "photo" : "photos"}</button> : <button disabled={busy} onClick={() => onChoosePhotos(access.albumId)}>Choose photos</button>}
             </div>
             {busy && !photos.length && <p className="hint" role="status">Loading photos…</p>}
             {query && <p role="status">{shown.length} matching {shown.length === 1 ? "photo" : "photos"}</p>}

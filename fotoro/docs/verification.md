@@ -8,7 +8,9 @@ No speed, accuracy, cost or adoption claim is inferred from a passing smoke test
 ## October 8 family-loop reliability qualification
 
 Browser Choose photos preserves the exact incoming live-album destination through
-Saved selection and reopening. Explicit Close still completes the incoming intent;
+Saved selection and reopening. Choosing from a different active album completes
+the original invitation so it cannot redirect the next opening. Explicit Close
+still completes the incoming intent;
 lock, expiry and account replacement retain their existing fences. Native album
 invitations no longer resolve unrelated selected Saved photos before opening.
 Native People choices include source-bound reviewed names from owned Saved photos,
@@ -17,14 +19,18 @@ reviewed People facts invalidate an open Saved-name snapshot.
 
 Native transfer reconciliation stages bytes only after `UPLOAD_INCOMPLETE`.
 Transient commit failures preserve the original error and pending journal for Retry.
+Cancelled catalog requests use the same cancellation classification as diagnostics,
+so a cancelled URLSession read does not create a false needs-attention state. Real
+network and HTTP failures still require Retry. The controlled catalog regression
+fails before this guard and passes after it, without catalog/cursor/journal writes.
 Two fault-injected regressions promote actual ciphertext, remove staged files, then
 recover after a 503 or offline response without another reserve/PUT, extra allocation
 or duplicate catalog change. Removing the guard reproduces both failures. Removing
 the People correction invalidation reproduces the stale-choice regression.
 
-Final local full native qualification executes 456 tests: 454 pass, two opt-in/Vision
+Final local full native qualification executes 457 tests: 455 pass, two opt-in/Vision
 cases skip and none fail. Isolated preview executes 134: 132 pass and two skip.
-Browser qualification passes 547 tests, TypeScript and the production build; API
+Browser qualification passes 548 tests, TypeScript and the production build; API
 passes 108 and core/release checks pass. Startup remains 440,288 bytes across nine
 static chunks. All five isolated encrypted-exchange cases and the pinned public
 visual-inference smoke pass; neither establishes personal-library retrieval quality.

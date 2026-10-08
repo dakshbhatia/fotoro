@@ -28,7 +28,7 @@ const albums = (panel: ReturnType<typeof AlbumPanel>) => (panel.props as {childr
 test("Choose photos preserves the exact invitation through selection and reopening without contributing", () => {
   const flow = navigation(), original = flow.incoming.link;
   const initial = albums(flow.render());
-  initial.onChoosePhotos();
+  initial.onChoosePhotos(original.albumId);
   assert.deepEqual(flow.state(), {open: false, selecting: true, completed: 0, selection: []});
   assert.equal(flow.incoming.current(flow.session), true);
   assert.equal(flow.incoming.link, original);
@@ -40,6 +40,22 @@ test("Choose photos preserves the exact invitation through selection and reopeni
   assert.deepEqual(reopened.selection, [selected]);
   assert.equal(reopened.currentPhotos(), flow.currentPhotos);
   assert.equal(flow.state().completed, 0);
+});
+
+test("choosing photos from another active album completes the original invitation before reopening", () => {
+  const flow = navigation(), otherAlbumId = crypto.randomUUID();
+  assert.notEqual(otherAlbumId, flow.incoming.link.albumId);
+  albums(flow.render()).onChoosePhotos(otherAlbumId);
+  assert.deepEqual(flow.state(), {open: false, selecting: true, completed: 1, selection: []});
+  assert.equal(flow.incoming.pending, false);
+  assert.equal(flow.incoming.current(flow.session), false);
+  const selected = {manifest: {photoId: crypto.randomUUID()}} as Photo;
+  flow.currentPhotos.push(selected);
+  const reopened = albums(flow.reopen([selected]));
+  assert.equal(reopened.incoming, undefined, "Reopening must not redirect from the selected album to the original invitation");
+  assert.deepEqual(reopened.selection, [selected]);
+  assert.equal(reopened.currentPhotos(), flow.currentPhotos);
+  assert.equal(flow.state().completed, 1);
 });
 
 test("explicit Close completes the invitation from both the loaded panel and loading fallback", () => {
@@ -58,7 +74,7 @@ test("explicit Close completes the invitation from both the loaded panel and loa
 
 test("a retained invitation cannot return after manual lock or an expired-account swap", () => {
   for (const expired of [false, true]) {
-    const flow = navigation(); albums(flow.render()).onChoosePhotos();
+    const flow = navigation(); albums(flow.render()).onChoosePhotos(flow.incoming.link.albumId);
     flow.incoming.vaultLocked(expired ? "expired" : "manual", flow.session.accountId);
     assert.equal(flow.incoming.current(flow.session), false);
     if (expired) {
@@ -71,7 +87,7 @@ test("a retained invitation cannot return after manual lock or an expired-accoun
 });
 
 test("a retained invitation resumes only after its original expired account unlocks", () => {
-  const flow = navigation(); albums(flow.render()).onChoosePhotos();
+  const flow = navigation(); albums(flow.render()).onChoosePhotos(flow.incoming.link.albumId);
   assert.equal(flow.incoming.current({...flow.session}), false, "Same account IDs cannot substitute a different vault session");
   flow.incoming.vaultLocked("expired", flow.session.accountId);
   const ticket = flow.incoming.beginAuthentication(8), renewed = {...flow.session};

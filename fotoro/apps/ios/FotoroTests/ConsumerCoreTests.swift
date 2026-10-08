@@ -1356,6 +1356,7 @@ extension ConsumerCoreTests {
       XCTAssertFalse(refresh.isRefreshing)
       XCTAssertEqual(refresh.error, "CONTROLLED_CATALOG_UNAVAILABLE")
       XCTAssertEqual(refresh.failureDetails(services), "CONTROLLED_CATALOG_UNAVAILABLE")
+      XCTAssertEqual(services.consumerSyncSummary.state, .needsAttention)
       XCTAssertFalse(refresh.requiresAuthentication(services))
       XCTAssertNil(try services.consumerSavedPhoto(server.photoID))
       await refresh.refresh(services)
@@ -1367,6 +1368,39 @@ extension ConsumerCoreTests {
       XCTAssertFalse(services.automaticPhotoSync.enabled, "Catalog retry does not opt into automatic uploads")
       XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" })
       XCTAssertEqual(server.requests.filter { $0.path == "/v1/changes" }.count, 2)
+    }
+  }
+  @MainActor func testCancelledCatalogReadDoesNotRequireAttentionButNetworkFailureDoes() async throws {
+    for code in [URLError.Code.cancelled, .networkConnectionLost] {
+      try await withSavedLibrary(networkFailure: code) { services, server in
+        XCTAssertEqual(services.consumerSyncSummary.state, .notStarted)
+        let initialDetail = services.consumerSyncSummary.detail
+        do {
+          try await services.sync()
+          XCTFail("The controlled network failure must propagate")
+        } catch let error as URLError {
+          XCTAssertEqual(error.code, code)
+        }
+        XCTAssertNil(try services.store.cursor())
+        XCTAssertTrue(try services.store.photos().isEmpty)
+        XCTAssertTrue(try services.journal.entries().isEmpty)
+        if code == .cancelled {
+          XCTAssertEqual(services.consumerSyncSummary.state, .notStarted,
+            "A cancelled URLSession read must not become a failed Sync status")
+          XCTAssertEqual(services.consumerSyncSummary.detail, initialDetail)
+        } else {
+          XCTAssertEqual(services.consumerSyncSummary.state, .needsAttention,
+            "A genuine network failure must still require Retry")
+          XCTAssertNotNil(services.consumerSyncSummary.detail)
+        }
+        XCTAssertEqual(server.requests.map(\.path), ["/v1/changes"])
+        try await services.sync()
+        XCTAssertEqual(services.consumerSyncSummary.state, .upToDate)
+        XCTAssertNotNil(try services.consumerSavedPhoto(server.photoID))
+        XCTAssertTrue(try services.journal.entries().isEmpty)
+        XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" })
+        XCTAssertEqual(server.requests.filter { $0.path == "/v1/changes" }.count, 2)
+      }
     }
   }
   @MainActor func testRejectedSavedSessionNeedsExplicitAccountOpeningWithoutDiscardingLocalPhotos() async throws {
@@ -1536,6 +1570,7 @@ extension ConsumerCoreTests {
   }
   @MainActor private func withSavedLibrary(gate: SavedLibraryRequestGate? = nil, failFirst: Bool = false,
     failureCode: String = "CONTROLLED_CATALOG_UNAVAILABLE",
+    networkFailure: URLError.Code? = nil,
     original: Data? = nil, mediaVersion: Int? = 1,
     check: @MainActor (AppServices, SavedLibraryServer) async throws -> Void) async throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
@@ -1544,7 +1579,8 @@ extension ConsumerCoreTests {
     var card = accounts.accounts[0]; card.accountId = Wire.id()
     let secret = accounts.testSecrets[0]
     let server = try SavedLibraryServer(card: card, secret: secret, gate: gate, failFirst: failFirst,
-      failureCode: failureCode, original: original ?? Data("jpg".utf8), mediaVersion: mediaVersion)
+      failureCode: failureCode, networkFailure: networkFailure,
+      original: original ?? Data("jpg".utf8), mediaVersion: mediaVersion)
     SavedLibraryProtocol.server = server
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [SavedLibraryProtocol.self]
@@ -1610,13 +1646,15 @@ private final class SavedLibraryServer: @unchecked Sendable {
   private var recorded: [Request] = []
   private let gate: SavedLibraryRequestGate?
   private var failFirst: Bool
+  private var networkFailure: URLError.Code?
   private let failureCode: String
   private let page: Data
   private let metadata: Data
   init(card: AccountCardV1, secret: FixtureSecrets, gate: SavedLibraryRequestGate?, failFirst: Bool,
-    failureCode: String, original: Data, mediaVersion: Int?) throws {
+    failureCode: String, networkFailure: URLError.Code?, original: Data, mediaVersion: Int?) throws {
     self.gate = gate; self.failFirst = failFirst
     self.failureCode = failureCode
+    self.networkFailure = networkFailure
     let crypto = CryptoAdapter(), key = crypto.randomKey()
     let binding = MediaBinding(photoId: photoID, representationId: Wire.id(), kind: "metadata")
     let value = PhotoMetadataV1(filename: "remote-receipt.jpg", mediaType: "image/jpeg", sourceDate: Wire.date(),
@@ -1638,8 +1676,12 @@ private final class SavedLibraryServer: @unchecked Sendable {
     let mediaAware = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?
       .contains { $0.name == "media" && $0.value == "1" } == true
     lock.lock(); recorded.append(Request(method: "GET", path: path, mediaAware: mediaAware)); let first = recorded.count == 1
-    let fail = failFirst && path == "/v1/changes"; if fail { failFirst = false }; lock.unlock()
+    let fail = failFirst && path == "/v1/changes"; if fail { failFirst = false }
+    let networkError = path == "/v1/changes" ? networkFailure : nil
+    if networkError != nil { networkFailure = nil }
+    lock.unlock()
     if first, let gate { gate.started.fulfill(); _ = gate.release.wait(timeout: .now() + 5) }
+    if let networkError { throw URLError(networkError) }
     if fail {
       return (failureCode == "UNAUTHENTICATED" ? 401 : 503,
         try JSONSerialization.data(withJSONObject: ["code": failureCode, "retryable": true]))
