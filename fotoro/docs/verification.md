@@ -7,8 +7,7 @@ No speed, accuracy, cost or adoption claim is inferred from a passing smoke test
 
 ## October 8 bounded foundation follow-up — source qualification pending
 
-This batch follows the released PR 50/build 46 checkpoint below. Its combined
-final checks, hosted CI and shipping remain pending; these changes are not claimed
+This batch follows the released PR 50/build 46 checkpoint below. Its hosted CI and shipping remain pending; these changes are not claimed
 as deployed or available in a new TestFlight build.
 
 Browser Saved now opens a 100-record hydrated window and retrieves bounded change
@@ -56,12 +55,18 @@ charged because a late-write race prevents a safe automatic refund.
 Local full native qualification reported 468 tests: 466 pass and two skip.
 The isolated preview reports 138 tests: 136 pass and two skip. Actual browser QA
 opens the first 100 Saved records, loads the remaining page and preserves the
-chosen item without console errors.
+chosen item without console errors. Photos search retains its 72 chosen items as
+Load more expands 72 matches to 105. This synthetic metadata/selection fixture
+contains an oversized preview that the existing dimension guard rejects, so it
+does not qualify viewer delivery. Original recovery passes the separate five
+isolated encrypted-exchange cases.
 API qualification passes 111 tests across 20 files and TypeScript; the final focused
 inference suite passes 13. Full API output includes the existing deliberately
-injected upload-disconnect/network-loss warnings and exits successfully. Combined
-final web/build/startup and release evidence will be recorded
-after they actually complete. All ten foundations retain their physical quality,
+injected upload-disconnect/network-loss warnings and exits successfully. The final full browser suite passes 553 tests, the focused paging/selection suite
+passes 112, and TypeScript/production build pass. All three startup checks pass
+at 442,116 bytes across nine static chunks. The pinned public visual-inference
+smoke case passes. Hosted and release evidence will be recorded after they
+actually complete. All ten foundations retain their physical quality,
 performance and cross-device restore gates in the backlog.
 
 ## October 8 family-loop reliability qualification
