@@ -42,7 +42,9 @@ Retry reconciles ambiguous R2/D1 outcomes. The 50 MiB complete-original limit st
 server reservations have a separate 55 MiB ciphertext cap. Production allowance is
 10 GiB of reserved/stored ciphertext; client summaries count logical original bytes.
 
-Error diagnostics use fixed phases/classes, status/code and request references.
+API diagnostics use fixed phases/classes, status/code, duration and request references;
+ephemeral action IDs link client events to requests. See [diagnostics](diagnostics.md)
+for collection, bounded summaries and evidence limits.
 Worker observability is configured with invocation logging disabled to avoid
 capability URLs. Source-photo deletion and final-object GC are not implemented;
 expired-staging cleanup is limited, and abandoned finals/superseded staging can

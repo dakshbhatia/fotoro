@@ -1,10 +1,11 @@
+import {diagnose, type DiagnosticContext} from "../diagnostics";
 import type {AccountCardV1, SignedPayloadV1} from "@fotoro/contracts";
 import {acceptedPhotoManifestKind} from "@fotoro/contracts/camera-media";
 import {validateWire} from "@fotoro/contracts/validate";
 import {ALBUM_DEFINITION_KIND, ALBUM_PHOTO_KIND, readAlbumSignedBody, validateAlbumPhoto, validateAlbumDefinition, validateAlbumInbox, validateAlbumDetail, validateAlbumOverview, validateAlbumTitle, validateAlbumAppendResult, validateAlbumAppend, type AlbumAppendV1, type AlbumOverviewV1, type AlbumDetailV1} from "@fotoro/contracts/albums";
 import {makeAlbumDefinition, openAlbumDefinition, makeAlbumAction, makeAlbumPhoto, openAlbumPhoto} from "@fotoro/crypto/albums";
 import {ready, verifyPayload, unb64, utf8, wrapKey, unwrapKey} from "@fotoro/crypto";
-import {api} from "../exchange/api";
+import {api, scopedApi} from "../exchange/api";
 import {trustedCard, type ShareScope} from "../exchange/share-service";
 import {sameIdentity} from "../exchange/sharing";
 import {requireVault, type UnlockedVault} from "../vault/vault";
@@ -45,9 +46,11 @@ export async function albumCapabilities(scope: ShareScope) {
   if (value.version !== 1 || value.albumsVersion !== 1 || value.maxMembers !== 12 || value.maxPhotos !== 1000 || value.pageSize !== 100) throw new Error("ALBUM_UPDATE_REQUIRED");
   return value;
 }
-export async function albumInbox(scope: ShareScope) {
+export function albumInbox(scope: ShareScope) {return diagnose("album", diagnostic => albumInboxAction({...scope, diagnostic}), "refresh");}
+async function albumInboxAction(scope: ShareScope) {
+  const request = scope.diagnostic ? scopedApi(scope.diagnostic) : api;
   const session = requireVault(); check(session, scope);
-  const inbox = validateAlbumInbox(await api("/v1/albums", undefined, undefined, "GET", scope.signal)); check(session, scope);
+  const inbox = validateAlbumInbox(await request("/v1/albums", undefined, undefined, "GET", scope.signal)); check(session, scope);
   return inbox.albums;
 }
 export interface AlbumCreationDraft {signed?: SignedPayloadV1;}
@@ -56,7 +59,9 @@ export async function albumOriginalFiles(access: AlbumAccess, photo: Photo, sign
   try {const files = await cameraOriginalFiles(bytes, photo.metadata); await access.assertAccess(); signal.throwIfAborted(); return files;}
   finally {bytes.fill(0);}
 }
-export async function createAlbum(title: string, cards: readonly AccountCardV1[], scope: ShareScope, draft?: AlbumCreationDraft) {
+export function createAlbum(title: string, cards: readonly AccountCardV1[], scope: ShareScope, draft?: AlbumCreationDraft) {return diagnose("album", diagnostic => createAlbumAction(title, cards, {...scope, diagnostic}, draft), "create");}
+async function createAlbumAction(title: string, cards: readonly AccountCardV1[], scope: ShareScope, draft?: AlbumCreationDraft) {
+  const request = scope.diagnostic ? scopedApi(scope.diagnostic) : api;
   const session = requireVault(); await ready; check(session, scope); validateAlbumTitle(title);
   if (!cards.length || cards.length > 11) throw new Error("CHOOSE_1_TO_11_CONTACTS");
   for (const card of cards) {const trusted = await trustedCard(card.accountId, session, scope); check(session, scope); if (!sameIdentity(card, trusted)) throw new Error("ACCOUNT_KEYS_CHANGED_RENEW_TRUST");}
@@ -70,7 +75,7 @@ export async function createAlbum(title: string, cards: readonly AccountCardV1[]
   try {
     if (opened.title !== title || opened.definition.ownerAccountId !== session.accountId || JSON.stringify(ordered(opened.definition.members.map(member => member.card).sort((left, right) => left.accountId.localeCompare(right.accountId)))) !== JSON.stringify(ordered([session.card, ...cards].sort((left, right) => left.accountId.localeCompare(right.accountId))))) throw new Error("ALBUM_SELECTION_CHANGED");
     for (const card of cards) {const trusted = await trustedCard(card.accountId, session, scope); check(session, scope); if (!sameIdentity(card, trusted)) throw new Error("ACCOUNT_KEYS_CHANGED_RENEW_TRUST");}
-    const result = validateAlbumOverview(await api("/v1/albums", {version: 1, definition: signed}, undefined, "POST", scope.signal)); check(session, scope);
+    const result = validateAlbumOverview(await request("/v1/albums", {version: 1, definition: signed}, undefined, "POST", scope.signal)); check(session, scope);
     if (albumDefinitionIdentity(result) !== albumDefinitionIdentity({...result, definition: signed}) || !albumReadable(result, session.accountId)) throw new Error("ALBUM_BINDING_MISMATCH");
     if (draft) draft.signed = undefined;
     return result;
@@ -127,38 +132,45 @@ export class AlbumAccess {
     this.check(); const card = await trustedCard(this.owner.accountId, this.session, this.scope); this.check();
     if (!sameIdentity(card, this.owner)) {this.dispose(); throw new Error("ACCOUNT_KEYS_CHANGED_RENEW_TRUST");}
   }
-  private async detail(cursor?: string) {
+  private async detail(cursor?: string, diagnostic?: DiagnosticContext) {
+    const request = diagnostic ? scopedApi(diagnostic) : api;
     this.check(); await this.trusted();
-    const result = validateAlbumDetail(await api("/v1/albums/" + this.albumId + (cursor === undefined ? "" : "?cursor=" + encodeURIComponent(cursor)), undefined, undefined, "GET", this.scope.signal)); this.check();
+    const result = validateAlbumDetail(await request("/v1/albums/" + this.albumId + (cursor === undefined ? "" : "?cursor=" + encodeURIComponent(cursor)), undefined, undefined, "GET", this.scope.signal)); this.check();
     if (!albumReadable(result, this.session.accountId, this.identity)) {this.dispose(); throw new Error("ALBUM_ACCESS_ENDED");}
     await this.trusted(); return result;
   }
-  async assertAccess() {
+  async assertAccess(diagnostic?: DiagnosticContext) {
+    const request = diagnostic ? scopedApi(diagnostic) : api;
     try {
       this.check(); await this.trusted();
-      const value = validateAlbumOverview(await api("/v1/albums/" + this.albumId + "/access", undefined, undefined, "GET", this.scope.signal)); this.check();
+      const value = validateAlbumOverview(await request("/v1/albums/" + this.albumId + "/access", undefined, undefined, "GET", this.scope.signal)); this.check();
       if (!albumReadable(value, this.session.accountId, this.identity)) throw new Error("ALBUM_ACCESS_ENDED");
       await this.trusted(); return value;
     } catch (error) {this.dispose(); throw error;}
   }
-  async accept() {
+  accept() {return diagnose("album", diagnostic => this.acceptAction(diagnostic), "accept");}
+  private async acceptAction(diagnostic: DiagnosticContext) {
+    const request = scopedApi(diagnostic);
     this.check(); await this.trusted();
     const action = makeAlbumAction({signedDefinition: this.overview.definition, trustedOwner: this.owner, memberCard: this.session.card, signingSecretKey: this.session.signingSecretKey, action: "accept"});
-    const result = validateAlbumOverview(await api("/v1/albums/" + this.albumId + "/accept", {version: 1, action}, undefined, "POST", this.scope.signal)); this.check();
+    const result = validateAlbumOverview(await request("/v1/albums/" + this.albumId + "/accept", {version: 1, action}, undefined, "POST", this.scope.signal)); this.check();
     if (!albumReadable(result, this.session.accountId, this.identity)) throw new Error("ALBUM_BINDING_MISMATCH");
-    await this.assertAccess(); return result;
+    await this.assertAccess(diagnostic); return result;
   }
-  async end() {
-    await this.assertAccess();
+  end() {return diagnose("album", diagnostic => this.endAction(diagnostic), "end");}
+  private async endAction(diagnostic: DiagnosticContext) {
+    const request = scopedApi(diagnostic);
+    await this.assertAccess(diagnostic);
     const action = makeAlbumAction({signedDefinition: this.overview.definition, trustedOwner: this.owner, memberCard: this.session.card, signingSecretKey: this.session.signingSecretKey, action: "end"});
-    const result = validateAlbumOverview(await api("/v1/albums/" + this.albumId + "/end", {version: 1, action}, undefined, "POST", this.scope.signal)); this.check();
+    const result = validateAlbumOverview(await request("/v1/albums/" + this.albumId + "/end", {version: 1, action}, undefined, "POST", this.scope.signal)); this.check();
     if (albumDefinitionIdentity(result) !== this.identity || result.endedAt === null) throw new Error("ALBUM_BINDING_MISMATCH");
     this.dispose(); return result;
   }
-  async loadPhotos() {
+  loadPhotos() {return diagnose("album", diagnostic => this.loadPhotosAction(diagnostic), "refresh");}
+  private async loadPhotosAction(diagnostic: DiagnosticContext) {
     const loaded: Photo[] = [], ids = new Set<string>(), cursors = new Set<string>();
     try {
-      let page: AlbumDetailV1 = await this.detail();
+      let page: AlbumDetailV1 = await this.detail(undefined, diagnostic);
       for (;;) {
         for (let n = 0; n < page.entries.length; n++) {
           this.check();
@@ -168,17 +180,17 @@ export class AlbumAccess {
             const {verifyAlbumPhoto} = await import("@fotoro/crypto/albums"); this.check();
             const manifest = verifyAlbumPhoto({definition: this.definition, entry: page.entries[n], manifest: page.manifests[n]}).manifest;
             if (ids.has(manifest.photoId)) throw new Error("ALBUM_DUPLICATE_PHOTO");
-            await this.assertAccess();
-            photo = await readPhoto(manifest, metadataKey, undefined, this.scope.signal); this.check();
-            try {await this.assertAccess();} catch (error) {photo.metadataKey.fill(0); throw error;}
+            await this.assertAccess(diagnostic);
+            photo = await readPhoto(manifest, metadataKey, undefined, this.scope.signal, diagnostic); this.check();
+            try {await this.assertAccess(diagnostic);} catch (error) {photo.metadataKey.fill(0); throw error;}
             ids.add(manifest.photoId); loaded.push(photo);
           } catch (error) {metadataKey.fill(0); throw error;}
         }
         if (!page.hasMore) break;
         if (!page.nextCursor || cursors.has(page.nextCursor) || loaded.length >= 1000) throw new Error("ALBUM_PAGE_MISMATCH");
-        cursors.add(page.nextCursor); page = await this.detail(page.nextCursor);
+        cursors.add(page.nextCursor); page = await this.detail(page.nextCursor, diagnostic);
       }
-      await this.assertAccess();
+      await this.assertAccess(diagnostic);
       for (const photo of loaded) this.photos.add(photo);
       return loaded;
     } catch (error) {for (const photo of loaded) photo.metadataKey.fill(0); this.dispose(); throw error;}
@@ -192,16 +204,18 @@ export class AlbumAccess {
     const bytes = await photoBytes(photo, kind === "original" ? kind : derivative!.binding.kind as "thumbnail" | "preview", signal);
     try {await this.assertAccess(); signal.throwIfAborted(); this.check(); return bytes;} catch (error) {bytes.fill(0); throw error;}
   }
-  async add(chosen: readonly Photo[], latest: () => readonly Photo[]) {
-    albumOwnedSelection(chosen, this.session, latest()); await this.assertAccess();
+  add(chosen: readonly Photo[], latest: () => readonly Photo[]) {return diagnose("album", diagnostic => this.addAction(diagnostic, chosen, latest), "add");}
+  private async addAction(diagnostic: DiagnosticContext, chosen: readonly Photo[], latest: () => readonly Photo[]) {
+    const requestApi = scopedApi(diagnostic);
+    albumOwnedSelection(chosen, this.session, latest()); await this.assertAccess(diagnostic);
     // Never generate a different immutable envelope for a contribution already present.
-    const existing = new Set<string>(); let page = await this.detail(); const cursors = new Set<string>();
+    const existing = new Set<string>(); let page = await this.detail(undefined, diagnostic); const cursors = new Set<string>();
     for (;;) {
       const {verifyAlbumPhoto} = await import("@fotoro/crypto/albums"); this.check();
       for (let n = 0; n < page.entries.length; n++) existing.add(verifyAlbumPhoto({definition: this.definition, entry: page.entries[n], manifest: page.manifests[n]}).photo.photoId);
       if (!page.hasMore) break;
       if (!page.nextCursor || cursors.has(page.nextCursor) || existing.size >= 1000) throw new Error("ALBUM_PAGE_MISMATCH");
-      cursors.add(page.nextCursor); page = await this.detail(page.nextCursor);
+      cursors.add(page.nextCursor); page = await this.detail(page.nextCursor, diagnostic);
     }
     const pending = chosen.filter(photo => !existing.has(photo.manifest.photoId)).slice().sort((left, right) => left.manifest.photoId.localeCompare(right.manifest.photoId));
     let added = 0;
@@ -211,7 +225,7 @@ export class AlbumAccess {
       const manifests: SignedPayloadV1[] = [];
       for (const photo of batch) {
         this.check(); albumOwnedSelection(chosen, this.session, latest());
-        const signed = validateWire<SignedPayloadV1>("SignedPayloadV1", await api("/v1/photos/" + photo.manifest.photoId + "/manifest", undefined, undefined, "GET", this.scope.signal)); this.check();
+        const signed = validateWire<SignedPayloadV1>("SignedPayloadV1", await requestApi("/v1/photos/" + photo.manifest.photoId + "/manifest", undefined, undefined, "GET", this.scope.signal)); this.check();
         acceptedPhotoManifestKind(signed.kind);
         if (signed.accountId !== this.session.accountId) throw new Error("ALBUM_SELECTION_CHANGED");
         const bytes = verifyPayload(signed, unb64(this.session.card.signingPublicKey));
@@ -223,10 +237,10 @@ export class AlbumAccess {
       }
       const entries = batch.map((photo, n) => makeAlbumPhoto({definition: this.definition, manifest: manifests[n], metadataKey: photo.metadataKey, albumKey: this.key, signingSecretKey: this.session.signingSecretKey}));
       const request = await retainAppend({version: 1, operationId, entries, manifests}, this.albumId, this.session, this.scope);
-      await this.assertAccess(); albumOwnedSelection(chosen, this.session, latest());
-      const result = validateAlbumAppendResult(await api("/v1/albums/" + this.albumId + "/photos", request, undefined, "POST", this.scope.signal)); this.check();
+      await this.assertAccess(diagnostic); albumOwnedSelection(chosen, this.session, latest());
+      const result = validateAlbumAppendResult(await requestApi("/v1/albums/" + this.albumId + "/photos", request, undefined, "POST", this.scope.signal)); this.check();
       if (result.albumId !== this.albumId || result.operationId !== request.operationId || result.added > batch.length) throw new Error("ALBUM_BINDING_MISMATCH");
-      await this.assertAccess(); added += result.added;
+      await this.assertAccess(diagnostic); added += result.added;
     }
     return added;
   }

@@ -1,9 +1,32 @@
-# Verification — October 7, 2026
+# Verification — October 8, 2026
 
 This is the current evidence record. [The backlog](product-backlog.md) owns next
 work; [product](product.md) owns the intended experience. Earlier measurements and
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
+
+## October 8 action diagnostics qualification
+
+Local full native qualification executes 448 tests: 446 pass, two opt-in/Vision
+cases skip and none fail. The isolated preview passes 132, with two such skips.
+New regressions verify concurrent trace separation, cancellation, malformed 200
+decoding, backwards-compatible bounded exports and header-first support references.
+API qualification passes 108 tests and TypeScript, including early authorization,
+CORS, independent request references, duration, redaction and byte-intact streamed
+ciphertext. Browser qualification passes 543 tests and the production build/typecheck;
+startup passes all three checks at 440,288 bytes across nine static chunks.
+Five offline-reader tests cover correlated failures, redaction, truncated windows,
+CLI envelopes and malformed records that must never synthesize success. Core checks
+and release-artifact regressions pass.
+
+The available older Simulator ring reports three upload conflicts on build 40;
+it does not describe the installed physical app. The phone connection reset before
+diagnostics could be read. A live production tail observed the intentional 401
+read-only probe; historical log-query access returned 403. Build 44 remains independently
+`VALID` and `IN_BETA_TESTING`, and the PR 48 production Worker remains at 100%
+at this pre-release checkpoint. See [diagnostics](diagnostics.md) for collection,
+safe summaries and the limits of this evidence. Real-device family acceptance
+remains open.
 
 ## October 7 production PR 48 and TestFlight 44 checkpoint
 

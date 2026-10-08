@@ -27,10 +27,11 @@
     "test:release-artifact": "node --experimental-vm-modules --test tools/build-testflight.test.mjs && node --experimental-vm-modules tools/check-ios-release.test.mjs",
     "test:asc-metadata": "node --test tools/asc-metadata.test.mjs",
     "test": "tsx --test tests/*.test.ts",
-    "check:core": "tsc --noEmit && pnpm test && pnpm test:search:fixtures && pnpm test:picks:fixtures && pnpm test:ios-preview-audit && pnpm test:asc-metadata && pnpm test:release-artifact",
+    "check:core": "tsc --noEmit && pnpm test:diagnostics && pnpm test && pnpm test:search:fixtures && pnpm test:picks:fixtures && pnpm test:ios-preview-audit && pnpm test:asc-metadata && pnpm test:release-artifact",
     "check:api": "pnpm --filter @fotoro/api check && pnpm test:api",
     "build:web": "pnpm --filter @fotoro/web build",
-    "check": "pnpm check:core && pnpm check:api && pnpm test:web && pnpm build:web"
+    "check": "pnpm check:core && pnpm check:api && pnpm test:web && pnpm build:web",
+    "test:diagnostics": "node --test tools/diagnostics.test.mjs"
   },
   "dependencies": {
     "ajv": "8.18.0",

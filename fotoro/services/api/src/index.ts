@@ -9,10 +9,21 @@ import * as albums from "./albums";
 import { savePhoto } from "./saves";
 import * as annotations from "./annotations";
 import * as intelligence from "./intelligence";
-import {diagnosticArea, diagnosticMethod, diagnosticPhase, diagnosticErrorClass} from "./diagnostics";
+import {beginDiagnostic, diagnosticFailure, finalDiagnostic, type RequestDiagnostic} from "./diagnostics";
 import { readJson } from "./requests";
 import {accountStorage, throttleAuth} from "./limits";
-const app = new Hono<{ Bindings: Env; Variables: { actor: Actor } }>();
+const app = new Hono<{ Bindings: Env; Variables: { actor: Actor; requestDiagnostic: RequestDiagnostic } }>();
+app.use("/v1/*", async (c, next) => {
+  const diagnostic = beginDiagnostic(c.req.header("X-Fotoro-Trace-Id"));
+  c.set("requestDiagnostic", diagnostic);
+  await next();
+  c.header("X-Request-Id", diagnostic.requestId);
+  const record = finalDiagnostic(diagnostic, c.req.method, c.req.path, c.res.status);
+  const text = JSON.stringify(record);
+  if (c.res.status >= 500) console.error(text);
+  else if (c.res.status >= 400) console.warn(text);
+  else console.info(text);
+});
 app.onError((error, c) => {
   const e =
     error instanceof ApiError
@@ -25,14 +36,10 @@ app.onError((error, c) => {
             ? 400
             : 500,
         );
-  const requestId = crypto.randomUUID();
-  const method = diagnosticMethod(c.req.method);
-  const phase = e.diagnostic?.phase ?? diagnosticPhase(c.req.path);
-  const errorClass = e.diagnostic?.errorClass ?? diagnosticErrorClass(e.code, e.status);
-  const diagnostic = JSON.stringify({event: "api.error", requestId, method, status: e.status, code: e.code, area: diagnosticArea(c.req.path), phase, errorClass});
+  const diagnostic = c.get("requestDiagnostic");
+  const requestId = diagnostic?.requestId ?? crypto.randomUUID();
+  if (diagnostic) diagnostic.failure = diagnosticFailure(e.code, e.status, c.req.path, e.diagnostic);
   if (e.retryAfterSeconds) c.header("Retry-After", String(e.retryAfterSeconds));
-  if (e.status >= 500) console.error(diagnostic);
-  else console.warn(diagnostic);
   return c.json(
     {
       version: 1,
@@ -69,10 +76,11 @@ app.use("/v1/*", async (c, next) => {
   if (o) {
     c.header("Access-Control-Allow-Origin", o);
     c.header("Access-Control-Allow-Credentials", "true");
+    c.header("Access-Control-Expose-Headers", "X-Request-Id");
     c.header("Vary", "Origin");
   }
   if (c.req.method === "OPTIONS") {
-    c.header("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Fotoro-Account-Id");
+    c.header("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Fotoro-Account-Id,X-Fotoro-Trace-Id");
     c.header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
     return c.body(null, 204);
   }
@@ -285,7 +293,7 @@ app.notFound(async (c) => {
       version: 1,
       code: "NOT_FOUND",
       retryable: false,
-      requestId: crypto.randomUUID(),
+      requestId: c.get("requestDiagnostic")?.requestId ?? crypto.randomUUID(),
     },
     404,
   );

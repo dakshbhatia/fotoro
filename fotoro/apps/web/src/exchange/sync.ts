@@ -1,3 +1,4 @@
+import {diagnose, type DiagnosticContext} from "../diagnostics";
 import type { PendingImport } from "./journal";
 import { pendingImports, resumePendingImports } from "./journal";
 import { cachedCatalog, syncCatalog } from "../library/catalog";
@@ -113,9 +114,9 @@ export async function clearSkipped(session: UnlockedVault, file: File) {
   await put("settings", key, encryptPrivate(sources));
   assertVault(session);
 }
-export async function cachedSync(session = requireVault()) {
+export async function cachedSync(session = requireVault(), diagnostic?: DiagnosticContext) {
   assertVault(session);
-  const photos = await cachedCatalog();
+  const photos = await cachedCatalog(diagnostic);
   assertVault(session);
   const pending = await pendingImports();
   assertVault(session);
@@ -127,38 +128,43 @@ export async function cachedSync(session = requireVault()) {
   assertVault(session);
   return { photos, pending, annotations, lastSuccessfulSync, skipped };
 }
-async function performRefresh(session: UnlockedVault, signal?: AbortSignal) {
+async function performRefresh(session: UnlockedVault, signal?: AbortSignal, diagnostic?: DiagnosticContext) {
   assertVault(session);
-  await syncCatalog(signal);
+  await syncCatalog(signal, diagnostic);
   assertVault(session);
   signal?.throwIfAborted();
   const lastSuccessfulSync = new Date().toISOString();
   await put("settings", session.accountId + ":last-checked", encryptPrivate(lastSuccessfulSync));
   assertVault(session);
-  return cachedSync(session);
+  const result = await cachedSync(session, diagnostic);
+  assertVault(session); signal?.throwIfAborted();
+  return result;
 }
-async function performSave(session: UnlockedVault, signal: AbortSignal) {
+async function performSave(session: UnlockedVault, signal: AbortSignal, diagnostic?: DiagnosticContext) {
   assertVault(session);
   signal.throwIfAborted();
-  await resumePendingImports(signal);
+  await resumePendingImports(signal, diagnostic);
   assertVault(session);
   signal.throwIfAborted();
-  await syncCatalog(signal);
+  await syncCatalog(signal, diagnostic);
   assertVault(session);
   signal.throwIfAborted();
-  await flushAnnotations(session, signal);
+  await flushAnnotations(session, signal, diagnostic);
   assertVault(session);
   signal.throwIfAborted();
   const lastSuccessfulSync = new Date().toISOString();
   await put("settings", session.accountId + ":last-checked", encryptPrivate(lastSuccessfulSync));
   assertVault(session);
-  return cachedSync(session);
+  const result = await cachedSync(session, diagnostic);
+  assertVault(session); signal.throwIfAborted();
+  if (result.pending.some(item => item.state !== "committed") || result.annotations.length) diagnostic?.incomplete("unavailable");
+  return result;
 }
 // Viewing the account can read saved photos, but never drains locally queued uploads or edits.
 export function refreshSync(session = requireVault()) {
-  return readFlight.run(session, () => serializeSync(session, () => performRefresh(session)));
+  return readFlight.run(session, () => serializeSync(session, () => diagnose("catalog", context => performRefresh(session, undefined, context), "refresh")));
 }
-export function saveSync(session = requireVault(), signal?: AbortSignal) {
+export function saveSync(session = requireVault(), signal?: AbortSignal, diagnostic?: DiagnosticContext) {
   signal?.throwIfAborted();
   return saveFlight.run(session, () => {
     const controller = new AbortController();
@@ -166,7 +172,8 @@ export function saveSync(session = requireVault(), signal?: AbortSignal) {
     signal?.addEventListener("abort", abort, {once: true});
     if (signal?.aborted) controller.abort();
     controllers.set(session, controller);
-    return serializeSync(session, () => performSave(session, controller.signal)).finally(() => {
+    return serializeSync(session, () => diagnostic ? performSave(session, controller.signal, diagnostic)
+      : diagnose("sync", context => performSave(session, controller.signal, context), "save")).finally(() => {
       signal?.removeEventListener("abort", abort);
       if (controllers.get(session) === controller) controllers.delete(session);
     });

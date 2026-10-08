@@ -77,12 +77,13 @@ it.each(["rejection", "throw"])("an early storage write %s cancels its body and 
     expect(response.status).toBe(500);
     const error = await response.json() as any;
     expect(error).toMatchObject({ code: "INTERNAL_ERROR", retryable: true });
+    expect(response.headers.get("X-Request-Id")).toBe(error.requestId);
     expect(cancelled).toBe(true);
     await stillReserved(reserved.uploadId);
     const records = emitted.mock.calls.map(call => JSON.parse(String(call[0])));
     expect(records).toEqual([{
       event: "api.error", requestId: error.requestId, method: "PUT", status: 500, code: "INTERNAL_ERROR", area: "sync",
-      phase: "upload.staging", errorClass: "storage",
+      phase: "upload.staging", errorClass: "storage", outcome: "server_error", elapsedMS: expect.any(Number),
     }]);
     expect(JSON.stringify(records)).not.toMatch(/PRIVATE_|cap=|staging\/|authorization/);
     expect(JSON.stringify(records)).not.toContain(actors[0].accountId);
@@ -111,11 +112,12 @@ it("storage failure while promoting leaves verified uploaded bytes available for
     expect(response.status).toBe(500);
     const error = await response.json() as any;
     expect(error).toMatchObject({ code: "INTERNAL_ERROR", retryable: true });
+    expect(response.headers.get("X-Request-Id")).toBe(error.requestId);
     const row = await env.DB.prepare("SELECT state FROM uploads WHERE id=?").bind(reserved.uploadId).first<{ state: string }>();
     expect(row?.state).toBe("uploaded");
     expect(emitted.mock.calls.map(call => JSON.parse(String(call[0])))).toEqual([{
       event: "api.error", requestId: error.requestId, method: "POST", status: 500, code: "INTERNAL_ERROR", area: "sync",
-      phase: "upload.commit", errorClass: "storage",
+      phase: "upload.commit", errorClass: "storage", outcome: "server_error", elapsedMS: expect.any(Number),
     }]);
     expect((await http(0, `/v1/uploads/${reserved.uploadId}/commit`, "POST")).status).toBe(200);
   } finally {

@@ -147,13 +147,13 @@ final class BackgroundUploadTests: XCTestCase {
 final class APIClientErrorTests: XCTestCase {
   private let reference = "12345678-1234-4234-8234-123456789abc"
 
-  @MainActor private func client() -> APIClient {
+  @MainActor private func client(diagnostics: NativeDiagnostics = .shared) -> APIClient {
     let account = AccountSession()
     account.fixture = false
     account.bearerToken = nil
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [FailureResponseProtocol.self]
-    return APIClient(session: account, baseURL: URL(string: "https://api-errors.invalid")!, networkConfiguration: configuration)
+    return APIClient(session: account, baseURL: URL(string: "https://api-errors.invalid")!, networkConfiguration: configuration, diagnostics: diagnostics)
   }
 
   @MainActor func testJSONFailureKeepsConflictCodeAndPresentsOnlyOpaqueReference() async throws {
@@ -178,6 +178,24 @@ final class APIClientErrorTests: XCTestCase {
       XCTAssertEqual(error.requestId, reference)
       XCTAssertEqual(error.retryable, true)
       XCTAssertTrue(error.localizedDescription.contains(reference))
+    }
+  }
+  @MainActor func testValidatedHeaderSupportReferenceWinsAndUsesSameLowercaseUIAndDiagnosticIdentity() async throws {
+    let headerReference = "abcdefab-1234-4234-8234-123456789abc"
+    for path in ["/header-only", "/header-first", "/invalid-header"] {
+      let diagnostics = NativeDiagnostics(fileURL: nil, emitSystemLog: false)
+      let expected = path == "/invalid-header" ? reference : headerReference
+      do {
+        _ = try await client(diagnostics: diagnostics).request(path)
+        XCTFail("Expected HTTP failure")
+      } catch let error as FotoroError {
+        XCTAssertEqual(error.requestId, expected)
+        XCTAssertEqual(error.localizedDescription, "FORBIDDEN (reference: \(expected))")
+        let events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: diagnostics.exportJSON())
+        XCTAssertEqual(events.last?.requestId, UUID(uuidString: expected))
+        XCTAssertEqual(events.last?.reason, .http)
+        XCTAssertFalse(String(decoding: diagnostics.exportJSON(), as: UTF8.self).contains("PRIVATE_"))
+      }
     }
   }
 
@@ -219,6 +237,7 @@ private final class FailureResponseProtocol: URLProtocol, @unchecked Sendable {
     let reference = "12345678-1234-4234-8234-123456789abc"
     let status: Int
     let body: String
+    var headers = ["Content-Type": "application/json"]
     switch request.url!.path {
     case "/conflict":
       status = 409; body = "{\"version\":1,\"code\":\"VERSION_CONFLICT\",\"retryable\":true,\"requestId\":\"\(reference)\",\"private\":\"PRIVATE_SERVER_BODY\"}"
@@ -230,12 +249,21 @@ private final class FailureResponseProtocol: URLProtocol, @unchecked Sendable {
       status = 403; body = "{\"code\":\"FORBIDDEN\",\"retryable\":1,\"requestId\":\"12345678123442348234123456789abc\"}"
     case "/false-retryable":
       status = 403; body = "{\"code\":\"FORBIDDEN\",\"retryable\":false}"
+    case "/header-only":
+      status = 403; body = "{\"code\":\"FORBIDDEN\"}"
+      headers["X-Request-Id"] = "ABCDEFAB-1234-4234-8234-123456789ABC"
+    case "/header-first":
+      status = 403; body = "{\"code\":\"FORBIDDEN\",\"requestId\":\"\(reference)\"}"
+      headers["X-Request-Id"] = "ABCDEFAB-1234-4234-8234-123456789ABC"
+    case "/invalid-header":
+      status = 403; body = "{\"code\":\"FORBIDDEN\",\"requestId\":\"\(reference)\"}"
+      headers["X-Request-Id"] = "PRIVATE_INVALID_SUPPORT_VALUE"
     case "/null": status = 503; body = "null"
     case "/broken-json": status = 503; body = "{bad json"
     case "/wrong-code": status = 503; body = "{\"code\":42}"
     default: status = 503; body = "<html>PRIVATE_SERVER_BODY</html>"
     }
-    client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!, cacheStoragePolicy: .notAllowed)
+    client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: headers)!, cacheStoragePolicy: .notAllowed)
     client?.urlProtocol(self, didLoad: Data(body.utf8))
     client?.urlProtocolDidFinishLoading(self)
   }

@@ -76,6 +76,7 @@ struct PhotoSyncView: View {
   @State private var permissionTask: Task<Void, Never>?
   @State private var password: FotoroPassword?
   @State private var passkeyStatus = ""
+  @State private var diagnosticExport: NativeDiagnosticExport?
   @Environment(\.scenePhase) private var scenePhase
   @Environment(\.dismiss) private var dismiss
   init(services: AppServices, savedRefresh: SavedLibraryRefresh? = nil, requiresAuthentication: Bool = false,
@@ -242,12 +243,24 @@ struct PhotoSyncView: View {
           }
         }
       }.navigationTitle("Sync").navigationBarTitleDisplayMode(.inline)
-        .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+        .toolbar {
+          ToolbarItem(placement: .topBarLeading) {
+            Menu("Diagnostics", systemImage: "stethoscope") {
+              Button("Copy diagnostics", systemImage: "doc.on.doc") { UIPasteboard.general.string = services.diagnosticsJSON() }
+                .accessibilityIdentifier("support.copyDiagnostics")
+              Button("Share diagnostics", systemImage: "square.and.arrow.up") {
+                diagnosticExport = NativeDiagnosticExport(json: services.diagnosticsJSON())
+              }.accessibilityIdentifier("support.shareDiagnostics")
+            }
+          }
+          ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
+        }
         .sheet(item: $password) { FotoroPasswordView(password: $0) }
+        .sheet(item: $diagnosticExport) { NativeDiagnosticShareSheet(json: $0.json) }
         .task { resumeConsent() }
         .onChange(of: scenePhase) {
           if scenePhase == .active { resumeConsent() }
-          else if scenePhase == .background { cancelConsent(); password = nil }
+          else if scenePhase == .background { cancelConsent(); password = nil; diagnosticExport = nil }
         }
         .onChange(of: services.photoAccountAccess) {
           if authenticationTask == nil { resumeConsent() }
@@ -327,4 +340,13 @@ struct PhotoSyncView: View {
     passkeyOperation = nil
     services.auth.cancelStart()
   }
+}
+
+private struct NativeDiagnosticExport: Identifiable { let id = UUID(); let json: String }
+private struct NativeDiagnosticShareSheet: UIViewControllerRepresentable {
+  let json: String
+  func makeUIViewController(context: Context) -> UIActivityViewController {
+    UIActivityViewController(activityItems: [json], applicationActivities: nil)
+  }
+  func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }

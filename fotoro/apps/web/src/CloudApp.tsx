@@ -1,3 +1,5 @@
+import {diagnose, diagnosticReason, type DiagnosticContext} from "./diagnostics";
+import {CopyDiagnostics} from "./components/CopyDiagnostics";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { GrantV1, PhotoLocationV1 } from "@fotoro/contracts";
 import {annotationLocation} from "@fotoro/contracts/location";
@@ -320,11 +322,11 @@ export default function CloudApp({
     window.addEventListener("fotoro-lock", onLock);
     return () => window.removeEventListener("fotoro-lock", onLock);
   }, [photos, received]);
-  const refresh = async (send = false, current = () => true, signal?: AbortSignal) => {
+  const refresh = async (send = false, current = () => true, signal?: AbortSignal, diagnostic?: DiagnosticContext) => {
     const check = () => {signal?.throwIfAborted(); if (!current()) throw new DOMException("Save cancelled", "AbortError");};
     check();
     const session = requireVault();
-    const cached = await cachedSync(session);
+    const cached = await cachedSync(session, diagnostic);
     check();
     if (!sameVault(session)) return;
     setPhotos(cached.photos);
@@ -340,17 +342,19 @@ export default function CloudApp({
     setSkipped(cached.skipped);
     setSaveReady(session);
     if (send && pausedRef.current) {
+      diagnostic?.incomplete("cancelled");
       setStatus("Saving is paused. Continue when you’re ready.");
       return;
     }
     if (!navigator.onLine) {
+      diagnostic?.incomplete("network");
       setStatus(
         "Offline · your cached photos are available. Save when you’re online.",
       );
       return;
     }
     check();
-    const result = await (send ? saveSync(session, signal) : refreshSync(session));
+    const result = await (send ? saveSync(session, signal, diagnostic) : refreshSync(session));
     check();
     if (!sameVault(session)) return;
     setPhotos((previous) => (sameVault(session) ? result.photos : previous));
@@ -505,7 +509,7 @@ export default function CloudApp({
     return () => {window.removeEventListener("online", update); window.removeEventListener("offline", update);};
   }, []);
   const syncLocal = (snapshot?: ChosenSaveSnapshot, signal?: AbortSignal, current = () => true) =>
-    run(async () => {
+    run(() => diagnose("sync", async diagnostic => {
       const session = requireVault();
       const check = () => {signal?.throwIfAborted(); if (!current() || !sameVault(session)) throw new DOMException("Save cancelled", "AbortError");};
       check();
@@ -544,7 +548,7 @@ export default function CloudApp({
           },
           drain: async () => {
             check();
-            await refresh(true, current, controller.signal);
+            await refresh(true, current, controller.signal, diagnostic);
           },
           unresolved: async () => {
             const queue = await pendingImports();
@@ -552,7 +556,7 @@ export default function CloudApp({
             return queue.some((item) => item.state !== "committed");
           },
           skipped: async (file, error) => {
-            failures++;
+            failures++; diagnostic.incomplete(diagnosticReason(error));
             await recordSkipped(session, file, error);
             if (sameVault(session)) setStatus(readableSyncError(error));
           },
@@ -566,13 +570,14 @@ export default function CloudApp({
             `${failures} photos could not be prepared. Your local originals are unchanged.`,
           );
         check();
+        if (result.stopped || failures) diagnostic.incomplete("unavailable");
         return !result.stopped && failures === 0;
       } finally {
         signal?.removeEventListener("abort", abort);
         if (uploadAbort.current === controller) uploadAbort.current = null;
         if (sameVault(session)) setStaging(0);
       }
-    });
+    }, "save"));
   const startChosenSave = (request = saveIntentRef.current) => {
     if (!request?.pending) return Promise.resolve(false);
     // A failed cache activation can be retried explicitly without replacing the selection.
@@ -1148,6 +1153,7 @@ export default function CloudApp({
             </details>
             <details>
               <summary>Settings</summary>
+              <CopyDiagnostics />
               <button disabled={busy} onClick={() => {void run(refresh);}}>Refresh saved photos</button>
               <button
                 onClick={() => {

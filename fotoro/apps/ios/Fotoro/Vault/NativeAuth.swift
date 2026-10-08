@@ -288,7 +288,11 @@ final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate,
     self.rememberPassword = rememberPassword ?? { bytes, id in try Keychain.write(bytes, id: id) }
   }
   private func performCredential(_ request: ASAuthorizationRequest) async throws -> CredentialResult {
-    do { return try await credentialCeremony(request) }
+    do {
+      let result = try await credentialCeremony(request)
+      NativeDiagnosticTrace.current?.completed(.credential)
+      return result
+    }
     catch let error as ASAuthorizationError { throw NativePasskeyError(code: error.code) }
   }
   private func checkAuthentication(account: String?, generation: UUID) throws {

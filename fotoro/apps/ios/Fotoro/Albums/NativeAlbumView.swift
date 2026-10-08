@@ -286,7 +286,7 @@ struct NativeAlbumView: View {
     operation?.cancel(); let id = UUID(); operationID = id; feedback = nil
     operation = Task {
       defer { if operationID == id { operation = nil; operationID = nil } }
-      do { try await action() }
+      do { try await services.withDiagnosticAction(.albums, action) }
       catch is CancellationError {} catch { if operationID == id { feedback = error.localizedDescription } }
     }
   }

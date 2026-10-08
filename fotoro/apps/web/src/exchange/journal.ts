@@ -1,3 +1,4 @@
+import {type DiagnosticContext} from "../diagnostics";
 import type {
   PhotoManifestV1,
   RepresentationV1,
@@ -10,7 +11,7 @@ import { ready, signPayload, utf8 } from "@fotoro/crypto";
 import { requireVault, encryptPrivate, decryptPrivate } from "../vault/vault";
 import { all, get, atomic, put } from "./cache";
 import {
-  api,
+  api, scopedApi, uploadCipher,
   ApiError,
   fixtureMode,
   resolveUploadURL,
@@ -199,7 +200,8 @@ export async function pendingImports() {
     .filter(([key]) => key.startsWith(id + ":"))
     .map(([, value]) => decryptPrivate<PendingImport>(value));
 }
-export async function resumePendingImports(signal?: AbortSignal) {
+export async function resumePendingImports(signal?: AbortSignal, diagnostic?: DiagnosticContext) {
+  const request = diagnostic ? scopedApi(diagnostic) : api;
   const v = requireVault();
   if (fixtureMode || isPublicDemoAccount(v.accountId)) return;
   const check = () => {
@@ -225,7 +227,7 @@ export async function resumePendingImports(signal?: AbortSignal) {
         }
         if (part.reservation) {
           try {
-            const commit = await api<UploadCommitV1>(
+            const commit = await request<UploadCommitV1>(
               "/v1/uploads/" + part.reservation.uploadId + "/commit",
               {},
               "UploadCommitV1",
@@ -251,7 +253,7 @@ export async function resumePendingImports(signal?: AbortSignal) {
         pending.state = "uploading";
         await persist();
         check();
-        part.reservation ??= await api(
+        part.reservation ??= await request(
           "/v1/uploads/reserve",
           {
             version: 1,
@@ -274,7 +276,7 @@ export async function resumePendingImports(signal?: AbortSignal) {
             : undefined,
         );
         check();
-        const response = await fetch(url, {
+        const response = await uploadCipher(url, {
           method: "PUT",
           signal,
           body: new Uint8Array(bytes),
@@ -282,11 +284,11 @@ export async function resumePendingImports(signal?: AbortSignal) {
           headers: fixtureMode
             ? { "x-fotoro-fixture-account": v.accountId }
             : {},
-        });
+        }, diagnostic);
         if (!response.ok) throw new Error("UPLOAD_FAILED");
         pending.state = "committing";
         await persist();
-        const commit = await api<UploadCommitV1>(
+        const commit = await request<UploadCommitV1>(
           "/v1/uploads/" + part.reservation!.uploadId + "/commit",
           {},
           "UploadCommitV1",
@@ -316,7 +318,7 @@ export async function resumePendingImports(signal?: AbortSignal) {
       pending.manifest = manifest;
       await persist();
       check();
-      await api(
+      await request(
         "/v1/photos",
         signPayload(
           "photo-manifest",

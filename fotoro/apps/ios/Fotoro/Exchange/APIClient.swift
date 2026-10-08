@@ -2,20 +2,69 @@ import Foundation
 import OSLog
 import AuthenticationServices
 
-enum NativeDiagnosticPhase: String, Codable, Sendable { case app, api, auth, sync, share, consent, picks }
+enum NativeDiagnosticPhase: String, Codable, Sendable { case app, api, auth, sync, share, consent, picks, albums, search, metadata, people }
 enum NativeDiagnosticOutcome: String, Codable, Sendable { case started, completed, failed, cancelled, changed }
+enum NativeDiagnosticOperation: String, Codable, Sendable { case app, api, auth, sync, share, albums, search, metadata, people, consent, picks }
+enum NativeDiagnosticStep: String, Codable, Sendable { case action, request, response, decode, credential, unlock, catalog, verify, persist, transfer, annotation, scan, analysis, export }
+enum NativeDiagnosticReason: String, Codable, Sendable {
+  case cancelled, contextChanged, network, http, decode, validation, unknown
+  case signedOut, locked, permissionRequired, paused, offline, retryRequired, waiting, pendingTransfers, pendingAnnotations, sourceUnavailable, current
+  static func failure(_ error: Error) -> Self {
+    if error is CancellationError || (error as? URLError)?.code == .cancelled { return .cancelled }
+    if error is DecodingError { return .decode }
+    if error is URLError { return .network }
+    return .unknown
+  }
+}
+final class NativeDiagnosticTrace: @unchecked Sendable {
+  @TaskLocal static var current: NativeDiagnosticTrace?
+  let id = UUID()
+  let operation: NativeDiagnosticOperation
+  private let lock = NSLock()
+  private var completedStep: NativeDiagnosticStep?
+  init(_ operation: NativeDiagnosticOperation) { self.operation = operation }
+  var lastCompletedStep: NativeDiagnosticStep? { lock.lock(); defer { lock.unlock() }; return completedStep }
+  func completed(_ step: NativeDiagnosticStep) { lock.lock(); completedStep = step; lock.unlock() }
+  @MainActor static func action<T>(_ operation: NativeDiagnosticOperation, diagnostics: NativeDiagnostics,
+    _ body: @MainActor () async throws -> T) async throws -> T {
+    // Nested work belongs to its initiating action; only that action owns the terminal event.
+    if let current, current.operation != .app { return try await body() }
+    let trace = NativeDiagnosticTrace(operation)
+    return try await $current.withValue(trace) {
+      let start = ProcessInfo.processInfo.systemUptime
+      let phase = NativeDiagnosticPhase(rawValue: operation.rawValue) ?? .app
+      diagnostics.record(NativeDiagnosticEvent(phase: phase, outcome: .started, step: .action))
+      do {
+        try Task.checkCancellation()
+        let result = try await body()
+        try Task.checkCancellation()
+        diagnostics.record(NativeDiagnosticEvent(phase: phase, outcome: .completed,
+          elapsed: ProcessInfo.processInfo.systemUptime - start, step: .action))
+        return result
+      } catch {
+        diagnostics.record(NativeDiagnosticEvent(phase: phase,
+          outcome: .failure(for: error, taskCancelled: Task.isCancelled),
+          elapsed: ProcessInfo.processInfo.systemUptime - start,
+          authorizationCode: (error as? NativePasskeyError)?.code,
+          step: .action, reason: Task.isCancelled || (error as? NativePasskeyError)?.isCancelled == true ? .cancelled : .failure(error)))
+        throw error
+      }
+    }
+  }
+}
 enum NativeDiagnosticAccountState: String, Codable, Sendable {
   case signedOut, locked, recoveryRequired, unlocked, demo
 }
 enum NativeDiagnosticEndpoint: String, Codable, Sendable {
-  case auth, account, catalog, upload, annotations, exchange, device, other
+  case auth, account, catalog, upload, annotations, exchange, albums, device, other
   init(path: String) {
     let parts = path.split(separator: "/")
     guard parts.first == "v1", parts.count > 1 else { self = .other; return }
     switch parts[1] {
     case "auth", "recovery", "sessions": self = .auth
     case "accounts", "vault": self = .account
-    case "changes", "photos", "representations": self = .catalog
+    case "changes", "photos", "representations", "objects": self = .catalog
+    case "albums": self = .albums
     case "uploads", "staging": self = .upload
     case "background": self = parts.count > 2 && parts[2] == "uploads" ? .upload : .other
     case "annotations": self = .annotations
@@ -30,7 +79,7 @@ enum NativeDiagnosticMethod: String, Codable, Sendable {
   init(_ method: String) { self = Self(rawValue: method) ?? .OTHER }
 }
 struct NativeDiagnosticEvent: Codable, Sendable {
-  let timestamp: Double
+  private(set) var timestamp: Double
   let phase: NativeDiagnosticPhase
   let outcome: NativeDiagnosticOutcome
   let endpoint: NativeDiagnosticEndpoint?
@@ -44,13 +93,21 @@ struct NativeDiagnosticEvent: Codable, Sendable {
   let accountState: NativeDiagnosticAccountState?
   let completed: Int?
   let pending: Int?
-  let build: String
+  let attempted: Int?
+  let traceId: UUID?
+  let operation: NativeDiagnosticOperation?
+  let step: NativeDiagnosticStep?
+  let lastCompletedStep: NativeDiagnosticStep?
+  let reason: NativeDiagnosticReason?
+  private(set) var build: String
   init(phase: NativeDiagnosticPhase, outcome: NativeDiagnosticOutcome,
     endpoint: NativeDiagnosticEndpoint? = nil, method: String? = nil,
     elapsed: Double? = nil, status: Int? = nil, networkError: URLError? = nil,
     authorizationCode: ASAuthorizationError.Code? = nil, requestId: String? = nil,
     state: ConsumerSyncState? = nil, accountState: NativeDiagnosticAccountState? = nil,
-    completed: Int? = nil, pending: Int? = nil) {
+    completed: Int? = nil, pending: Int? = nil, attempted: Int? = nil,
+    trace: NativeDiagnosticTrace? = NativeDiagnosticTrace.current,
+    step: NativeDiagnosticStep? = nil, reason: NativeDiagnosticReason? = nil) {
     timestamp = Date().timeIntervalSince1970
     self.phase = phase; self.outcome = outcome; self.endpoint = endpoint
     self.method = method.map(NativeDiagnosticMethod.init)
@@ -63,8 +120,17 @@ struct NativeDiagnosticEvent: Codable, Sendable {
     self.accountState = accountState
     self.completed = completed.map { max(0, min($0, 1_000_000)) }
     self.pending = pending.map { max(0, min($0, 1_000_000)) }
+    self.attempted = attempted.map { max(0, min($0, 1_000_000)) }
+    traceId = trace?.id; operation = trace?.operation; self.step = step
+    lastCompletedStep = trace?.lastCompletedStep; self.reason = reason
     let value = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
     build = String(value.prefix(16).filter { $0.isNumber || $0 == "." })
+  }
+  func exportSafe() -> Self {
+    var result = self
+    result.build = String(build.prefix(16).filter { $0.isASCII && ($0.isNumber || $0 == ".") })
+    if !result.timestamp.isFinite || result.timestamp < 0 { result.timestamp = 0 }
+    return result
   }
 }
 final class NativeDiagnostics: @unchecked Sendable {
@@ -107,6 +173,17 @@ final class NativeDiagnostics: @unchecked Sendable {
     }
   }
   func flush() { queue.sync { persist() } }
+  func exportJSON() -> Data {
+    queue.sync {
+      var safe = events.suffix(160).map { $0.exportSafe() }
+      let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+      while let data = try? encoder.encode(safe) {
+        if data.count <= Self.maximumBytes { return data }
+        guard !safe.isEmpty else { break }; safe.removeFirst()
+      }
+      return Data("[]".utf8)
+    }
+  }
   private func persist() {
     guard let fileURL else { return }
     do {
@@ -204,16 +281,30 @@ enum APIURLPolicy {
       recordInvalidURL(method: method)
       throw FotoroError("Invalid API URL")
     }
-    return try await perform(url, method: method, body: body)
+    return try await perform(url, method: method, body: body, step: .response) { $0 }
   }
   private func recordInvalidURL(method: String) {
-    diagnostics.record(NativeDiagnosticEvent(phase: .api, outcome: .started, endpoint: .other, method: method))
-    diagnostics.record(NativeDiagnosticEvent(phase: .api, outcome: .failed, endpoint: .other, method: method))
+    let trace = NativeDiagnosticTrace.current ?? NativeDiagnosticTrace(.api)
+    diagnostics.record(NativeDiagnosticEvent(phase: .api, outcome: .started, endpoint: .other, method: method, trace: trace, step: .request))
+    diagnostics.record(NativeDiagnosticEvent(phase: .api, outcome: .failed, endpoint: .other, method: method, trace: trace, step: .request, reason: .validation))
   }
-  private func perform(_ url: URL, method: String, body: Data?) async throws -> Data {
+  private static func supportReference(_ value: String?) -> String? {
+    guard let value, let uuid = UUID(uuidString: value),
+      value.caseInsensitiveCompare(uuid.uuidString) == .orderedSame else { return nil }
+    return uuid.uuidString.lowercased()
+  }
+  private func perform<T>(_ url: URL, method: String, body: Data?, step: NativeDiagnosticStep,
+    transform: (Data) throws -> T) async throws -> T {
+    let trace = NativeDiagnosticTrace.current ?? NativeDiagnosticTrace(.api)
+    return try await NativeDiagnosticTrace.$current.withValue(trace) {
+      try await performTraced(url, method: method, body: body, step: step, transform: transform)
+    }
+  }
+  private func performTraced<T>(_ url: URL, method: String, body: Data?, step: NativeDiagnosticStep,
+    transform: (Data) throws -> T) async throws -> T {
     let started = ProcessInfo.processInfo.systemUptime
     let endpoint = NativeDiagnosticEndpoint(path: url.path)
-    diagnostics.record(NativeDiagnosticEvent(phase: .api, outcome: .started, endpoint: endpoint, method: method))
+    diagnostics.record(NativeDiagnosticEvent(phase: .api, outcome: .started, endpoint: endpoint, method: method, step: .request))
     let data: Data
     let response: URLResponse
     do {
@@ -227,6 +318,7 @@ enum APIURLPolicy {
       if endpoint == .auth { r.timeoutInterval = 20 }
       r.setValue("application/json", forHTTPHeaderField: "Content-Type")
       r.setValue(origin, forHTTPHeaderField: "Origin")
+      r.setValue(NativeDiagnosticTrace.current?.id.uuidString.lowercased(), forHTTPHeaderField: "X-Fotoro-Trace-Id")
       if endpoint != .auth, let account = session.accountId {
         r.setValue(account, forHTTPHeaderField: "X-Fotoro-Account-Id")
       }
@@ -244,41 +336,75 @@ enum APIURLPolicy {
     }
     catch {
       diagnostics.record(NativeDiagnosticEvent(phase: .api,
-        outcome: error is CancellationError || (error as? URLError)?.code == .cancelled ? .cancelled : .failed,
+        outcome: .failure(for: error, taskCancelled: Task.isCancelled),
         endpoint: endpoint, method: method, elapsed: ProcessInfo.processInfo.systemUptime - started,
-        networkError: error as? URLError))
+        networkError: error as? URLError, step: .request, reason: Task.isCancelled ? .cancelled : .failure(error)))
       throw error
+    }
+    let responseRequestId = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "x-request-id")
+    let requestId = Self.supportReference(responseRequestId)
+    if Task.isCancelled {
+      diagnostics.record(NativeDiagnosticEvent(phase: .api, outcome: .cancelled,
+        endpoint: endpoint, method: method, elapsed: ProcessInfo.processInfo.systemUptime - started,
+        status: (response as? HTTPURLResponse)?.statusCode, requestId: requestId,
+        step: .response, reason: .cancelled))
+      throw CancellationError()
     }
     guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
       let failure = try? JSONDecoder().decode(APIFailure.self, from: data)
+      let failureRequestId = requestId ?? Self.supportReference(failure?.requestId)
       diagnostics.record(NativeDiagnosticEvent(phase: .api, outcome: .failed,
         endpoint: endpoint, method: method, elapsed: ProcessInfo.processInfo.systemUptime - started,
-        status: (response as? HTTPURLResponse)?.statusCode, requestId: failure?.requestId))
+        status: (response as? HTTPURLResponse)?.statusCode,
+        requestId: failureRequestId,
+        step: .response, reason: .http))
       throw FotoroError(
         failure?.code ?? "Network request failed (\((response as? HTTPURLResponse)?.statusCode ?? 0))",
-        requestId: failure?.requestId, retryable: failure?.retryable ?? false)
+        requestId: failureRequestId,
+        retryable: failure?.retryable ?? false)
     }
+    NativeDiagnosticTrace.current?.completed(.response)
+    let value: T
+    do {
+      try Task.checkCancellation()
+      value = try transform(data)
+      try Task.checkCancellation()
+    } catch {
+      diagnostics.record(NativeDiagnosticEvent(phase: .api,
+        outcome: error is CancellationError || Task.isCancelled ? .cancelled : .failed,
+        endpoint: endpoint, method: method, elapsed: ProcessInfo.processInfo.systemUptime - started,
+        status: http.statusCode, requestId: http.value(forHTTPHeaderField: "x-request-id"),
+        step: step, reason: error is CancellationError || Task.isCancelled ? .cancelled : .decode))
+      throw error
+    }
+    NativeDiagnosticTrace.current?.completed(step)
     diagnostics.record(NativeDiagnosticEvent(phase: .api, outcome: .completed,
       endpoint: endpoint, method: method, elapsed: ProcessInfo.processInfo.systemUptime - started,
       status: (response as? HTTPURLResponse)?.statusCode,
-      requestId: (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "x-request-id")))
-    return data
+      requestId: (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "x-request-id"), step: step))
+    return value
+  }
+  private func decoded<T: Decodable>(_ path: String, method: String = "GET", body: Data? = nil) async throws -> T {
+    guard let url = URL(string: path, relativeTo: baseURL) else {
+      recordInvalidURL(method: method); throw FotoroError("Invalid API URL")
+    }
+    return try await perform(url, method: method, body: body, step: .decode) { try Wire.decode(T.self, $0) }
   }
   func get<T: Decodable>(_ path: String) async throws -> T {
-    try Wire.decode(T.self, await request(path))
+    try await decoded(path)
   }
   func post<T: Decodable, U: Encodable>(_ path: String, _ body: U) async throws -> T {
-    try Wire.decode(T.self, await request(path, method: "POST", body: Wire.encode(body)))
+    try await decoded(path, method: "POST", body: Wire.encode(body))
   }
   func commit(_ id: String) async throws -> UploadCommitV1 {
-    try Wire.decode(UploadCommitV1.self, await request("/v1/uploads/\(id)/commit", method: "POST"))
+    try await decoded("/v1/uploads/\(id)/commit", method: "POST")
   }
   func upload(_ bytes: Data, to location: String) async throws {
     guard let url = URL(string: location, relativeTo: baseURL) else {
       recordInvalidURL(method: "PUT")
       throw FotoroError("Invalid upload URL")
     }
-    _ = try await perform(url, method: "PUT", body: bytes)
+    _ = try await perform(url, method: "PUT", body: bytes, step: .response) { $0 }
   }
   func save(_ input: SavedPhotoV1, expectedGrantVersion: Int) async throws -> SavedPhotoV1 {
     try await post(

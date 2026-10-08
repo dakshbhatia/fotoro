@@ -54,12 +54,27 @@ import Photos
     let token = UUID(); operation = token
     task = Task { [weak self] in
       guard let self else { return }
+      await NativeDiagnosticTrace.$current.withValue(NativeDiagnosticTrace(.people)) {
+      let started = ProcessInfo.processInfo.systemUptime
+      var outcome: NativeDiagnosticOutcome = .failed
+      var reason: NativeDiagnosticReason?
+      var successes = 0
+      var attempts = 0
+      var pending = 0
+      NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .people, outcome: .started, step: .analysis))
+      defer {
+        NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .people, outcome: outcome,
+          elapsed: ProcessInfo.processInfo.systemUptime - started, completed: successes,
+          pending: pending, attempted: attempts,
+          step: .analysis, reason: reason))
+      }
       defer { if self.operation == token { self.task = nil; self.busy = false; self.refresh() } }
       do {
         let batch = try await Task.detached(priority: .utility) {
           (try index.pendingPeopleCount(scope: scope, after: after), try index.pendingPeopleRecords(scope: scope, after: after, limit: 500))
         }.value
         let records = batch.1
+        pending = batch.0
         try Task.checkCancellation()
         guard self.operation == token else { throw CancellationError() }
         self.total = records.count; self.remaining = max(0, batch.0 - records.count)
@@ -72,14 +87,20 @@ import Photos
           catch { completed = false; self.error = error.localizedDescription }
           try Task.checkCancellation()
           guard self.operation == token else { throw CancellationError() }
-          if completed { self.unavailableIDs.remove(record.id) }
+          if completed { self.unavailableIDs.remove(record.id); successes += 1; pending = max(0, pending - 1) }
           else { self.unavailableIDs.insert(record.id) }
           self.processed += 1
+          attempts += 1
           self.cursor = PhotoAnalysisCursor(record)
           self.groups = try index.peopleGroups()
           await Task.yield()
         }
-      } catch is CancellationError {} catch { self.error = error.localizedDescription }
+        outcome = .completed
+        reason = self.unavailableIDs.isEmpty ? nil : .sourceUnavailable
+        NativeDiagnosticTrace.current?.completed(.analysis)
+      } catch is CancellationError { outcome = .cancelled; reason = .contextChanged }
+      catch { reason = .failure(error); self.error = error.localizedDescription }
+      }
     }
   }
   private func save(groups groupIDs: Set<String> = [], faceID: String? = nil, _ action: (SearchIndex) throws -> [SearchRecord]) {

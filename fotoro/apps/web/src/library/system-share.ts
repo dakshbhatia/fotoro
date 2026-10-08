@@ -1,3 +1,4 @@
+import {diagnose, type DiagnosticContext} from "../diagnostics";
 import type {Photo} from "./catalog";
 
 export interface ShareEnvironment {
@@ -53,16 +54,21 @@ export function savedOriginalSelectionCurrent(sources: readonly Photo[], catalog
       JSON.stringify(ordered([photo.manifest, photo.metadata])) === JSON.stringify(ordered([source.manifest, source.metadata]));
   });
 }
-export async function prepareSavedOriginals(sources: readonly Photo[], signal: AbortSignal, current: () => boolean,
-  read: (photo: Photo, kind: "original", signal: AbortSignal) => Promise<Uint8Array>,
+export function prepareSavedOriginals(sources: readonly Photo[], signal: AbortSignal, current: () => boolean,
+  read: (photo: Photo, kind: "original", signal: AbortSignal, diagnostic?: DiagnosticContext) => Promise<Uint8Array>,
   filesForOriginal: (bytes: Uint8Array, photo: Photo) => File[] | Promise<File[]> = (bytes, photo) => [new File([new Uint8Array(bytes)], photo.metadata.filename, {type: photo.metadata.mediaType})]) {
+  return diagnose("share", diagnostic => prepareSavedOriginalsAction(sources, signal, current, read, filesForOriginal, diagnostic), "prepare");
+}
+async function prepareSavedOriginalsAction(sources: readonly Photo[], signal: AbortSignal, current: () => boolean,
+  read: (photo: Photo, kind: "original", signal: AbortSignal, diagnostic?: DiagnosticContext) => Promise<Uint8Array>,
+  filesForOriginal: (bytes: Uint8Array, photo: Photo) => File[] | Promise<File[]>, diagnostic: DiagnosticContext) {
   const files: File[] = [];
   const check = () => {signal.throwIfAborted(); if (!sources.length || !current()) throw new DOMException("Photo selection changed", "AbortError");};
   try {
     check();
     for (const photo of sources) {
       check();
-      const bytes = await read(photo, "original", signal);
+      const bytes = await read(photo, "original", signal, diagnostic);
       try {
         check(); const originals = await filesForOriginal(bytes, photo); check();
         if (!originals.length) throw new Error("SOURCE_UNAVAILABLE");
