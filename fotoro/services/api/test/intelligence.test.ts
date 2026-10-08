@@ -1,10 +1,10 @@
-import {it, expect, vi, afterEach} from "vitest";
+import {it, expect, vi, beforeEach, afterEach} from "vitest";
 import {env} from "cloudflare:test";
 import app from "../src/index";
 import {seed, http, actors} from "./helpers";
 import {capabilities, observe, validatePreview, validateObservation} from "../src/intelligence";
 
-const configured = (account = 10, global = 20) => ({...env, CLOUD_INTELLIGENCE_ENABLED: "true", GEMINI_API_KEY: "test-key-never-real", CLOUD_INTELLIGENCE_DAILY_ACCOUNT_REQUESTS: String(account), CLOUD_INTELLIGENCE_DAILY_GLOBAL_REQUESTS: String(global)});
+const configured = (account = 10, global = 20) => ({...env, CLOUD_INTELLIGENCE_ENABLED: "true", GEMINI_API_KEY: "test-key-never-real", CLOUD_INTELLIGENCE_DAILY_ACCOUNT_REQUESTS: String(account), CLOUD_INTELLIGENCE_DAILY_GLOBAL_REQUESTS: String(global), CLOUD_INTELLIGENCE_DAILY_ACCOUNT_MICROUSD: "100000000", CLOUD_INTELLIGENCE_DAILY_GLOBAL_MICROUSD: "1000000000"});
 const actor = () => ({accountId: crypto.randomUUID(), deviceId: crypto.randomUUID()});
 // A tiny structural JPEG fixture; provider is mocked and never receives pixels.
 function jpeg(width = 16, height = 8, metadata = false) {
@@ -15,7 +15,8 @@ const input = (expectedAccountId: string) => ({version: 1, expectedAccountId, ph
 const request = (body: unknown) => new Request("http://localhost:8787/v1/intelligence/observe", {method: "POST", headers: {"content-type": "application/json", origin: "http://localhost:4310"}, body: JSON.stringify(body)});
 const observations = {objects: ["dog"], scene: ["beach"], visibleText: "", uncertainty: ["Small distant object unclear"]};
 function provider(value: unknown = observations) {return new Response(JSON.stringify({candidates: [{finishReason: "STOP", content: {parts: [{text: JSON.stringify(value)}]}}]}));}
-afterEach(() => vi.unstubAllGlobals());
+beforeEach(() => vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-08T12:00:00.000Z")));
+afterEach(() => {vi.restoreAllMocks(); vi.unstubAllGlobals();});
 
 it("is off by default and fails closed without every bounded setting or migrated ledger", async () => {
   const a = actor();
@@ -46,6 +47,7 @@ it("sends bounded inline pixels and schema only, never account/photo identity or
   const wire = JSON.parse(init.body as string);
   expect(JSON.stringify(wire)).not.toContain(body.photoId); expect(JSON.stringify(wire)).not.toContain(a.accountId);
   expect(init.headers).toMatchObject({"x-goog-api-key": "test-key-never-real"});
+  expect(init.redirect).toBe("error");
   expect(wire.generationConfig).toMatchObject({maxOutputTokens: 1024, candidateCount: 1, responseFormat: {text: {mimeType: "application/json"}}});
   expect(wire.contents[0].parts[1].inlineData).toEqual({mimeType: "image/jpeg", data: body.preview.base64});
   const ledger = await env.DB.prepare("SELECT * FROM cloud_inference_work WHERE scope=?").bind(`account:${a.accountId}`).all();
@@ -70,14 +72,14 @@ it("rejects missing consent, unsupported model, metadata, pixel dimensions and o
 
 it("atomically caps concurrent account and global work, including provider failures", async () => {
   const fetch = vi.fn(async () => provider()); vi.stubGlobal("fetch", fetch);
-  const clock = vi.spyOn(Date, "now").mockReturnValue(2_000_000_000_000);
+  const clock = vi.spyOn(Date, "now").mockReturnValue(1_791_417_600_000);
   try {
     const a = actor(), e = configured(1, 20);
     const attempts = await Promise.allSettled([observe(e,a,request(input(a.accountId))),observe(e,a,request(input(a.accountId)))]);
     expect(attempts.filter(v => v.status === "fulfilled")).toHaveLength(1);
     expect((attempts.find(v => v.status === "rejected") as PromiseRejectedResult).reason).toMatchObject({code: "CLOUD_WORK_LIMIT", status: 429});
     expect(fetch).toHaveBeenCalledTimes(1);
-    clock.mockReturnValue(2_000_086_400_000);
+    clock.mockReturnValue(1_791_504_000_000);
     const global = configured(20, 1), b = actor(), c = actor();
     fetch.mockImplementation(async () => new Response("unavailable", {status: 503}));
     await expect(observe(global,b,request(input(b.accountId)))).rejects.toMatchObject({code: "CLOUD_PROVIDER_UNAVAILABLE"});
@@ -87,7 +89,7 @@ it("atomically caps concurrent account and global work, including provider failu
 });
 
 it("validates provider results independently from the requested schema and returns generic failure", async () => {
-  const clock = vi.spyOn(Date, "now").mockReturnValue(2_100_000_000_000);
+  const clock = vi.spyOn(Date, "now").mockReturnValue(1_791_590_400_000);
   try {
     for (const invalid of [{...observations, caption: "invented personal copy"}, {...observations, objects: new Array(13).fill("dog")}, {...observations, visibleText: "x".repeat(1201)}]) {
       vi.stubGlobal("fetch", vi.fn(async () => provider(invalid)));
@@ -102,7 +104,7 @@ it("validates provider results independently from the requested schema and retur
 });
 
 it("rejects truncated, blocked and oversized provider envelopes", async () => {
-  const clock = vi.spyOn(Date, "now").mockReturnValue(2_200_000_000_000);
+  const clock = vi.spyOn(Date, "now").mockReturnValue(1_791_676_800_000);
   try {
     for (const envelope of [{candidates: []}, {candidates: [{finishReason: "MAX_TOKENS", content: {parts: [{text: JSON.stringify(observations)}]}}]},
       {candidates: [{finishReason: "SAFETY"}]}]) {
@@ -161,4 +163,73 @@ it("rejects missing, malformed and switched-cookie accounts before work or provi
   expect((await ledger()).results).toEqual(before.results);
   const matching = await app.fetch(new Request(`http://localhost:8787/v1/intelligence/capabilities?expectedAccountId=${actors[1].accountId}`, {headers}), e);
   expect(matching.status).toBe(200);
+});
+
+it("requires bounded spend settings and expires the reviewed pricing before any provider dispatch", async () => {
+  const a = actor(), fetch = vi.fn(async () => provider()); vi.stubGlobal("fetch", fetch);
+  for (const broken of [
+    {CLOUD_INTELLIGENCE_DAILY_ACCOUNT_MICROUSD: undefined},
+    {CLOUD_INTELLIGENCE_DAILY_GLOBAL_MICROUSD: undefined},
+    {CLOUD_INTELLIGENCE_DAILY_ACCOUNT_MICROUSD: "0"},
+    {CLOUD_INTELLIGENCE_DAILY_GLOBAL_MICROUSD: "10000000001"},
+    {CLOUD_INTELLIGENCE_DAILY_ACCOUNT_MICROUSD: "1.5"},
+  ]) {
+    const e = {...configured(), ...broken};
+    expect(await capabilities(e, a, a.accountId)).toEqual({version: 1, enabled: false});
+    await expect(observe(e, a, request(input(a.accountId)))).rejects.toMatchObject({code: "CLOUD_UNAVAILABLE"});
+  }
+  const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2027-01-01T00:00:00.000Z"));
+  try {
+    expect(await capabilities(configured(), a, a.accountId)).toEqual({version: 1, enabled: false});
+    await expect(observe(configured(), a, request(input(a.accountId)))).rejects.toMatchObject({code: "CLOUD_UNAVAILABLE"});
+  } finally {clock.mockRestore();}
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it("reserves conservative model spend atomically before dispatch and never refunds ambiguous failures", async () => {
+  const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-20T12:00:00.000Z"));
+  // Full supported input/output ceilings at reviewed standard rates, including thinking.
+  // Flash: 1048576 * .75 + 65536 * 3.75 = 1032192 micro-USD.
+  // Lite: ceil(1048576 * .30 + 65536 * 2.50) = 478413 micro-USD.
+  const spend = async (scope: string) => (await env.DB.prepare("SELECT attempts FROM cloud_inference_work WHERE scope=? AND window LIKE 'spend:%'").bind(scope).first<{attempts: number}>())?.attempts;
+  const fetch = vi.fn(async () => {throw new Error("ambiguous public-fixture transport failure");}); vi.stubGlobal("fetch", fetch);
+  try {
+    const a = actor(), b = actor();
+    const e = {...configured(), CLOUD_INTELLIGENCE_DAILY_ACCOUNT_MICROUSD: "1032192", CLOUD_INTELLIGENCE_DAILY_GLOBAL_MICROUSD: "1510605"};
+    const concurrent = await Promise.allSettled([observe(e,a,request(input(a.accountId))), observe(e,a,request(input(a.accountId)))]);
+    expect(concurrent.map(value => value.status === "rejected" ? value.reason.code : "success").sort()).toEqual(["CLOUD_PROVIDER_UNAVAILABLE", "CLOUD_WORK_LIMIT"]);
+    expect(await spend(`account:${a.accountId}`)).toBe(1032192);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await expect(observe(e,b,request({...input(b.accountId), model: "gemini-3.5-flash-lite"}))).rejects.toMatchObject({code: "CLOUD_PROVIDER_UNAVAILABLE"});
+    expect(await spend("global")).toBe(1510605);
+    const c = actor();
+    await expect(observe(e,c,request({...input(c.accountId), model: "gemini-3.5-flash-lite"}))).rejects.toMatchObject({code: "CLOUD_WORK_LIMIT"});
+    expect(await spend(`account:${c.accountId}`)).toBeUndefined();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    clock.mockReturnValue(Date.parse("2026-10-21T00:00:00.000Z"));
+    fetch.mockImplementation(async () => provider());
+    await expect(observe(e,a,request(input(a.accountId)))).resolves.toMatchObject({observations});
+    expect(await spend("global")).toBe(1032192);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  } finally {clock.mockRestore();}
+});
+
+it("rejects unaffordable work without charging counters and caps cross-account concurrent spend", async () => {
+  const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-22T12:00:00.000Z"));
+  const fetch = vi.fn(async () => provider()); vi.stubGlobal("fetch", fetch);
+  const spend = () => env.DB.prepare("SELECT scope,window,attempts FROM cloud_inference_work ORDER BY scope,window").all();
+  try {
+    const a = actor(), e = {...configured(), CLOUD_INTELLIGENCE_DAILY_ACCOUNT_MICROUSD: "1032191"};
+    const before = await spend();
+    await expect(observe(e,a,request(input(a.accountId)))).rejects.toMatchObject({code: "CLOUD_WORK_LIMIT"});
+    expect((await spend()).results).toEqual(before.results);
+    expect(fetch).not.toHaveBeenCalled();
+    const limited = {...configured(), CLOUD_INTELLIGENCE_DAILY_GLOBAL_MICROUSD: "1032192"};
+    const people = [actor(), actor()];
+    const results = await Promise.allSettled(people.map(person => observe(limited,person,request(input(person.accountId)))));
+    expect(results.filter(value => value.status === "fulfilled")).toHaveLength(1);
+    expect((results.find(value => value.status === "rejected") as PromiseRejectedResult).reason).toMatchObject({code: "CLOUD_WORK_LIMIT"});
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect((await spend()).results.filter(value => value.scope === "global" && String(value.window).startsWith("spend:"))).toEqual([{scope: "global", window: `spend:day:${Math.floor(Date.now() / 86400000)}`, attempts: 1032192}]);
+  } finally {clock.mockRestore();}
 });

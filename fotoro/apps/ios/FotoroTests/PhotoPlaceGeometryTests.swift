@@ -124,4 +124,66 @@ final class PhotoPlaceGeometryTests: XCTestCase {
       point("new-b", 0, 0, date: Date(timeIntervalSince1970: 2)), point("new-a", 0, 0, date: Date(timeIntervalSince1970: 2))], viewport: world)
     XCTAssertEqual(result.visiblePhotoIDs, ["new-a", "new-b", "old", "undated"])
   }
+
+  @MainActor func testAreaLookupIsExplicitBoundedAndDoesNotReplaceSuppliedNames() async throws {
+    let points = (0..<20).map { point("p\($0)", -80 + Double($0) * 8, -170 + Double($0) * 16) }
+    var clusters = PhotoPlaceGeometry.snapshot(points, viewport: world).clusters
+    clusters[0].name = "My supplied place"
+    let names = PhotoPlaceNames()
+    var requests: [PhotoPlaceCoordinate] = []
+    XCTAssertTrue(names.names.isEmpty)
+    await names.load(clusters) { coordinate in requests.append(coordinate); return " City, Country " }
+    XCTAssertEqual(requests.count, 8)
+    XCTAssertFalse(requests.contains(clusters[0].coordinate))
+    XCTAssertNil(names.name(for: clusters[0]))
+    XCTAssertEqual(names.name(for: clusters[1]), "City, Country")
+    XCTAssertFalse(names.loading)
+    var changed = clusters[1]
+    changed.photoIDs.append("different-source")
+    XCTAssertNil(names.name(for: changed))
+    changed = clusters[1]; changed.coordinate.latitude += 0.01
+    XCTAssertNil(names.name(for: changed))
+  }
+
+  @MainActor func testWithdrawingPlaceSourceDiscardsLateNameWithoutClearingNewResult() async throws {
+    let cluster = try XCTUnwrap(PhotoPlaceGeometry.snapshot([point("a", 40, -74)], viewport: world).clusters.first)
+    let names = PhotoPlaceNames()
+    var suspended: CheckedContinuation<String?, Error>?
+    let old = Task { await names.load([cluster]) { _ in try await withCheckedThrowingContinuation { suspended = $0 } } }
+    while suspended == nil { await Task.yield() }
+    names.clear()
+    await names.load([cluster]) { _ in "Current city" }
+    suspended?.resume(returning: "Old city")
+    await old.value
+    XCTAssertEqual(names.name(for: cluster), "Current city")
+    XCTAssertFalse(names.loading)
+    names.clear()
+    XCTAssertNil(names.name(for: cluster))
+  }
+
+  @MainActor func testCancelledAreaLookupAndFailuresDoNotInventNames() async throws {
+    let clusters = PhotoPlaceGeometry.snapshot([point("a", 40, -74), point("b", -40, 74)], viewport: world).clusters
+    let names = PhotoPlaceNames()
+    var suspended: CheckedContinuation<String?, Error>?
+    let task = Task { await names.load(clusters) { _ in try await withCheckedThrowingContinuation { suspended = $0 } } }
+    while suspended == nil { await Task.yield() }
+    task.cancel(); suspended?.resume(returning: "Cancelled city"); await task.value
+    XCTAssertTrue(names.names.isEmpty)
+    await names.load(clusters) { _ in throw URLError(.notConnectedToInternet) }
+    XCTAssertTrue(names.names.isEmpty)
+    XCTAssertTrue(names.failed)
+    XCTAssertFalse(names.loading)
+  }
+
+  @MainActor func testCancelledBeforeStartingAreaLookupPreservesCurrentNames() async throws {
+    let clusters = PhotoPlaceGeometry.snapshot([point("a", 40, -74)], viewport: world).clusters
+    let names = PhotoPlaceNames()
+    await names.load(clusters) { _ in "Current city" }
+    var requests = 0
+    let cancelled = Task { await names.load(clusters) { _ in requests += 1; return "Old city" } }
+    cancelled.cancel()
+    await cancelled.value
+    XCTAssertEqual(requests, 0)
+    XCTAssertEqual(names.name(for: clusters[0]), "Current city")
+  }
 }

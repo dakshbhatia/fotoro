@@ -19,16 +19,16 @@ Cloudflare proposals become tasks here only when a consumer need admits them.
 
 | Order | Foundation and current implementation | Still needed to call it complete |
 | --- | --- | --- |
-| 1 | First photos and access: local photos before an account; password/passkey entry continues a chosen Save, Sync or invitation. A matching returning browser can sign in and unlock in one PRF request; fresh-browser discovery retains its second request. | Fresh iPhone → allow Photos → browse → opt in once → open the same Saved photos in Safari. Qualify real PRF passkeys on iPhone, Safari and Mac; Sign in with Apple is not implemented. |
+| 1 | First photos and access: local photos before an account; password/passkey entry continues a chosen Save, Sync or invitation. Native welcome directly offers new-account, passkey and password choices. A matching returning browser can sign in and unlock in one PRF request; fresh-browser discovery retains its second request. | Fresh iPhone → allow Photos → browse → opt in once → open the same Saved photos in Safari. Qualify real PRF passkeys on iPhone, Safari and Mac; Sign in with Apple and a consumer device-approval interface are not implemented. |
 | 2 | Sync intake: durable last-30-days initial scope, explicit expansion, Pause, retry and account/source fences. Existing 10-day anchors retain their exclusions until explicit expansion. | Physical background, relaunch, offline reconnect, changed permissions and edited/iCloud assets. Already scheduled ciphertext may finish in the background; new preparation needs the open, unlocked app. |
 | 3 | Original recovery: encrypted JPEG/PNG/HEIC, supported video and complete Live Photo resources, bounded staging and byte verification. | Cross-device physical restore after an interrupted transfer and relaunch. Keep the 50 MiB logical-original limit until larger-original recovery is qualified. |
 | 4 | Photo evidence: OCR, EXIF/Photos dates, observed locations, supplied labels and current revision bindings. iOS Info groups observed photo/camera fields, keeps capture details collapsed and shows provenance. Cheap metadata scopes heavy work before previews; native startup processes one bounded recent batch. | Personal-library OCR/metadata coverage, correction and location acceptance. No invented date or location for missing evidence; old Saved originals do not acquire trusted capture details retroactively. |
-| 5 | People: opt-in local pinned models, reviewed names, merge, separate and rejection on both clients. Native Any/Everyone choices include source-bound reviewed Saved names without Photos permission and invalidate after corrections. Date/source filters precede pixels and ranking limits; explicit batches contain at most 500 pending photos and reuse current results. | Held-out identity quality and cross-device reviewed-name acceptance. Isolated browser inference passes; physical Safari still needs qualification. Separate portraits or similar places must not imply shared attendance. |
-| 6 | Search and Picks: text/date/label search, local visual retrieval, diverse suggestions and explicit incomplete-coverage feedback. Browsing starts at 30 days; all photos and historical date queries stay reachable. | Held-out retrieval and shortlist quality against human choices; cold/warm time to the intended photo. Suggestions cannot silently select, save or delete originals. |
-| 7 | Photo delivery and return: thumbnails/previews, owned URL leases, retry, cancellation and bounded native zoom/pan. Browser refresh reuses verified unchanged metadata; an atomic 100 MiB cache ledger avoids ciphertext rescans. | Large-library frame pacing, memory, battery, motion playback and interruptions on supported phones. Full encrypted-catalog first-load hydration remains. Missing derivatives cannot silently download originals. |
-| 8 | Organization and accessibility: optional sortable photo tables, observed columns, keyboard navigation across virtualized rows and responsive selection/viewers. iOS Places adapts geographic clusters to zoom, counts available location metadata in the viewport and opens individual photos. | VoiceOver, Dynamic Type, physical gestures and broader hardware/browser acceptance. Geographic clusters are not resolved city identities; physical-device map performance remains unverified. |
-| 9 | Share and receive: system original sharing, private invitations, recipient-owned Save and live albums with explicit acceptance and later chosen owned-photo additions. Browser Choose photos retains its invited album; native invitations open independently of unrelated selections. Three-person browser acceptance/contribution/end and Safari original download pass. | Physical share-sheet completion and the family journey on installed devices; first-contact friction, contact convergence and paging beyond the newest 1,000 Saved photos in the native album picker. |
-| 10 | Optional understanding and operation: preview consent → Gemini review → Keep, encrypted facts, account fences, request caps and audited native artifacts. PR 50 production and internal TestFlight 46 availability are verified. [Bounded diagnostics](diagnostics.md) link client actions to server requests, timings and fixed failure/waiting reasons, with local Copy/Share controls. | Deliberate provider activation and live cost/behavior evidence; physical TestFlight installation. Measure upload/commit failures, quota pressure, orphan allocation and restore behavior without private content in logs. |
+| 5 | People: opt-in local pinned models, reviewed names, merge, separate and rejection on both clients. Native Any/Everyone choices include source-bound reviewed Saved names without Photos permission and invalidate after corrections. Saved-name discovery reads local catalog/annotations in explicit 200-record pages and reports partial coverage. Date/source filters precede pixels and ranking limits; explicit batches contain at most 500 pending photos and reuse current results. | Held-out identity quality and cross-device reviewed-name acceptance. Isolated browser inference passes; physical Safari still needs qualification. Separate portraits or similar places must not imply shared attendance. |
+| 6 | Search and Picks: text/date/label search, local visual retrieval, diverse suggestions and explicit incomplete-coverage feedback. Browsing starts at 30 days; all photos and historical date queries stay reachable. Browser Saved starts with a 100-record window and explicit further pages; date, Search and People coverage is limited to loaded photos until expanded. | Held-out retrieval and shortlist quality against human choices; cold/warm time to the intended photo. Suggestions cannot silently select, save or delete originals. |
+| 7 | Photo delivery and return: thumbnails/previews, owned URL leases, retry, cancellation and bounded native zoom/pan. Browser browsing hydrates bounded Saved windows and reuses verified unchanged metadata; an atomic 100 MiB cache ledger avoids ciphertext rescans. | Large-library frame pacing, memory, battery, motion playback and interruptions on supported phones. Explicit save/contribution synchronization can still traverse the full catalog; measure that path separately from bounded browsing. Missing derivatives cannot silently download originals. |
+| 8 | Organization and accessibility: optional sortable photo tables, observed columns, keyboard navigation across virtualized rows and responsive selection/viewers. iOS Places adapts geographic clusters to zoom, counts available location metadata in the viewport and opens individual photos. An explicit optional Apple Maps lookup labels up to eight map areas per action for the current view. | VoiceOver, Dynamic Type, physical gestures and broader hardware/browser acceptance. Area labels do not establish a photo's landmark or attendance; physical-device map performance remains unverified. |
+| 9 | Share and receive: system original sharing, private invitations, recipient-owned Save and live albums with explicit acceptance and later chosen owned-photo additions. Browser Choose photos retains its invited album; native invitations open independently of unrelated selections. Native album selection pages through Saved in explicit 200-record batches rather than truncating at 1,000; each contribution selects at most 100. Three-person browser acceptance/contribution/end and Safari original download pass. | Physical share-sheet completion and the family journey on installed devices; first-contact friction, contact convergence, album-scoped People facts and cross-trip landmark/family matching. |
+| 10 | Optional understanding and operation: preview consent → Gemini review → Keep, encrypted facts, account fences, request caps, conservative daily spend reservations and audited native artifacts. Provider remains disabled. PR 50 production and internal TestFlight 46 availability are verified; the current source batch is not yet released. [Bounded diagnostics](diagnostics.md) link client actions to server requests, timings and fixed failure/waiting reasons, with local Copy/Share controls. | Deliberate provider activation and live cost/behavior evidence; physical TestFlight installation. Measure upload/commit failures, quota pressure, orphan allocation and restore behavior without private content in logs. Safe undo, deletion and garbage collection remain open. |
 
 These gates qualify the current implementation. Test coverage and a public
 fixture exchange do not prove a personal-library journey or a better product.
@@ -53,8 +53,8 @@ originals remain visible and are reported as incomplete sync.
 
 Local OCR, pinned visual models, Picks/Best shots, private annotations, photo
 locations, confirmed browser Timeline import, optional photo tables and reviewed
-local People groups are implemented. Optional Gemini observations are behind
-server enablement, bounded work caps and per-photo consent. Locations need
+local People groups are implemented. Optional Gemini observations remain disabled,
+behind server enablement, bounded work/spend reservations and per-photo consent. Locations need
 real capture evidence; raw Timeline history and model vectors are not uploaded.
 Scene publication remains disabled for older-reader compatibility. Personal
 retrieval quality, physical media/background acceptance and large-library
@@ -68,8 +68,11 @@ inference. iOS Places starts with capture dates from the last 30 days, with expl
 older/all-date expansion. It uses the permitted device metadata index and loaded
 Saved pages, with at most 80 map markers and a nearby photo list. Counts cover
 available metadata, not an unloaded Saved catalog. Coordinate clustering works
-without reverse geocoding; supplied place names and Apple basemap labels do not
-turn a geographic cluster into a verified city or landmark. Physical-device frame
+without reverse geocoding by default. An explicit Apple Maps lookup can send up
+to eight unnamed marker coordinates per action; returned area labels stay in the
+current view and never become private photo facts or search evidence. Supplied
+place names, area labels and Apple basemap labels do not turn a geographic cluster
+into a verified photo landmark or family attendance. Physical-device frame
 pacing, memory and large-library acceptance remain open.
 
 Live albums have a fixed owner-plus-invitee roster of at most 12, at most 1,000
@@ -88,8 +91,10 @@ same encrypted account on another device. A returning browser can use one system
 request when its cached account, selected credential, public keys and wrapper
 salt match fresh server data. Fresh-browser discovery needs two system passkey
 requests to discover the account and then evaluate its wrapper salt.
-Providers without usable PRF retain the password path. Sign in with Apple is
-not delivered. System sharing is the main original-file
+Providers without usable PRF retain the password path. Native welcome exposes
+passkey access directly. Device approval has API/crypto support but no consumer
+interface; it requires same-account authentication before transferring a sealed
+bundle. Sign in with Apple is not delivered. System sharing is the main original-file
 route; private invitations require accepted contacts. Contact synchronization
 across devices remains open.
 
@@ -113,7 +118,12 @@ permission/deletion fences. Larger originals need bounded staging, durable
 resumption, cleanup and exact restore before the size limit changes. Safe cleanup
 needs recoverable deletion, undo and convergence before freeing device storage.
 Optional cloud AI needs explicit opt-in, a spending bound and a plaintext access
-model; current daily request/token caps are not dollar limits. Share extensions,
+model. Current source atomically reserves conservative estimated model costs
+against required account/global micro-USD caps before dispatch; it never refunds
+ambiguous failures and fails closed when reviewed pricing expires on January 1,
+2027. These reservations are not actual spend or a provider billing cap; unrelated
+key usage, upstream changes and live behavior still need separate qualification.
+Share extensions,
 stories, saved URLs, nearby transfer and public discovery
 wait for a specific admitted journey. None is required to qualify the core loop.
 

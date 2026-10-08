@@ -193,6 +193,109 @@ final class NativeAlbumTests: XCTestCase {
       XCTAssertFalse(model.hasPendingAddition)
     }
   }
+  @MainActor func testAlbumSavedPickerPagesBeyondOneThousandAndKeepsOlderSelection() async throws {
+    try await withAlbum(owner: true) { services, server, _ in
+      var photos: [LocalPhoto] = []
+      for number in 0..<1003 {
+        var photo = server.source; photo.photoId = Wire.id(); photo.manifest.photoId = photo.id
+        for index in photo.manifest.representations.indices { photo.manifest.representations[index].binding.photoId = photo.id }
+        photo.manifest.metadataRepresentation.binding.photoId = photo.id
+        photo.metadata.filename = "Saved-\(number).jpg"
+        photo.metadata.sourceDate = Wire.date(Date(timeIntervalSince1970: Double(1_700_000_000 + number)))
+        try services.store.put(photo); photos.append(photo)
+      }
+      var pending = server.source; pending.metadata.sourceDate = Wire.date(); pending.transferState = "pending"
+      try services.store.put(pending)
+      var foreign = server.source; foreign.photoId = Wire.id(); foreign.manifest.photoId = foreign.id
+      foreign.manifest.ownerAccountId = server.cards[1].accountId; try services.store.put(foreign)
+      let picker = NativeAlbumPhotoPickerStore()
+      picker.open(services, initial: [photos[0]])
+      await picker.waitUntilSettled()
+      XCTAssertTrue(picker.hasMore)
+      XCTAssertLessThanOrEqual(picker.photos.count, NativeAlbumPhotoPickerStore.pageSize)
+      XCTAssertFalse(picker.photos.contains { $0.id == photos[0].id })
+      XCTAssertEqual(try picker.chosen(services).map(\.id), [photos[0].id], "An initial older selection need not be in the first page")
+      picker.toggle(try XCTUnwrap(picker.photos.first), services: services)
+      var pageLoads = 1
+      while picker.hasMore, pageLoads < 10 { picker.loadMore(services); await picker.waitUntilSettled(); pageLoads += 1 }
+      XCTAssertFalse(picker.hasMore); XCTAssertNil(picker.feedback)
+      XCTAssertEqual(pageLoads, 6)
+      XCTAssertEqual(picker.photos.count, 1003)
+      XCTAssertEqual(Set(picker.photos.map(\.id)), Set(photos.map(\.id)))
+      XCTAssertEqual(picker.selection.count, 2)
+      XCTAssertTrue(try picker.chosen(services).contains { $0.id == photos[0].id })
+      picker.clear()
+    }
+  }
+  @MainActor func testAlbumSavedPickerDeduplicatesPagesAndInitialSelection() async throws {
+    try await withAlbum(owner: true) { services, server, _ in
+      let first = server.source
+      var second = first; second.photoId = Wire.id(); second.manifest.photoId = second.id
+      try services.store.put(first); try services.store.put(second)
+      let other = second
+      let picker = NativeAlbumPhotoPickerStore(readPage: { _, after, limit in
+        after == nil ? Array(repeating: first, count: limit) : [first, other]
+      })
+      picker.open(services, initial: [first, first])
+      await picker.waitUntilSettled()
+      XCTAssertEqual(picker.photos.map(\.id), [first.id]); XCTAssertEqual(picker.selection.count, 1)
+      picker.loadMore(services); await picker.waitUntilSettled()
+      XCTAssertEqual(picker.photos.map(\.id), [first.id, second.id])
+      XCTAssertFalse(picker.hasMore); XCTAssertEqual(try picker.chosen(services).map(\.id), [first.id])
+      picker.clear()
+    }
+  }
+  @MainActor func testAlbumSavedPickerDiscardsLatePageAfterCancellationAccountLockOrOriginChange() async throws {
+    for interruption in ["cancel", "account", "lock", "origin", "store"] {
+      try await withAlbum(owner: true) { services, server, _ in
+        try services.store.put(server.source)
+        let gate = AlbumPickerReadGate()
+        let picker = NativeAlbumPhotoPickerStore(readPage: { _, _, _ in await gate.read() })
+        picker.open(services, initial: [server.source])
+        let settled = Task { await picker.waitUntilSettled() }
+        while !(await gate.started) { await Task.yield() }
+        switch interruption {
+        case "cancel": picker.clear()
+        case "account": services.session.accountId = server.cards[1].accountId
+        case "lock": services.vault.lock()
+        case "origin": services.api.baseURL = URL(string: "http://localhost:8798")!
+        default: try services.activateAccount()
+        }
+        await gate.finish([server.source]); await settled.value
+        XCTAssertTrue(picker.photos.isEmpty, interruption)
+        XCTAssertEqual(picker.selection.count, 0, interruption)
+        XCTAssertFalse(picker.isCurrent(services), interruption)
+        XCTAssertFalse(picker.busy, interruption)
+        XCTAssertThrowsError(try picker.chosen(services), interruption)
+      }
+    }
+  }
+  @MainActor func testAlbumSavedPickerRejectsChangedSelectionAndRefreshesCurrentSource() async throws {
+    try await withAlbum(owner: true) { services, server, _ in
+      var photo = server.source; try services.store.put(photo)
+      let picker = NativeAlbumPhotoPickerStore(); picker.open(services)
+      await picker.waitUntilSettled(); picker.toggle(photo, services: services)
+      photo.metadata.originalSha256 = Data("changed original".utf8).digest
+      photo.metadata.filename = "changed.jpg"; try services.store.put(photo)
+      XCTAssertThrowsError(try picker.chosen(services))
+      picker.refresh(services); await picker.waitUntilSettled()
+      XCTAssertEqual(picker.selection.count, 0)
+      XCTAssertEqual(picker.photos.map { $0.metadata.filename }, ["changed.jpg"])
+      picker.toggle(photo, services: services)
+      XCTAssertEqual(try picker.chosen(services).map { $0.metadata.originalSha256 }, [photo.metadata.originalSha256])
+      picker.clear()
+    }
+  }
+  func testAlbumPhotoAccessibilityDistinguishesSameFilenameAndPreservesDateProvenance() throws {
+    let server = try AlbumTestServer(); var first = server.source, second = server.source
+    first.metadata.sourceDate = "2026-01-01T12:00:00.000Z"; first.metadata.dateSource = "photos"
+    second.metadata.sourceDate = "2026-02-01T12:00:00.000Z"; second.metadata.dateSource = "import"
+    let a = NativeAlbumPhotoAccessibility.label(first, member: "Member 1")
+    let b = NativeAlbumPhotoAccessibility.label(second, member: "Member 1")
+    XCTAssertNotEqual(a, b); XCTAssertTrue(a.contains(first.metadata.filename))
+    XCTAssertTrue(a.contains("Photo date")); XCTAssertTrue(b.contains("Import date"))
+    XCTAssertTrue(a.contains("Member 1")); XCTAssertFalse(a.contains(server.cards[0].accountId))
+  }
   @MainActor private func withAlbum(invited: Bool = false, owner: Bool = false, _ run: (AppServices, AlbumTestServer, NativeAlbumService) async throws -> Void) async throws {
     let previous = UserDefaults.standard.object(forKey: "fotoro.pinnedCards")
     let server = try AlbumTestServer(); server.accepted = !invited; AlbumTestProtocol.server = server
@@ -214,6 +317,15 @@ final class NativeAlbumTests: XCTestCase {
     try await run(services, server, model)
   }
   private func bundle(_ value: FixtureSecrets) -> AccountBundle { AccountBundle(vaultKey: value.vaultKey, boxSecretKey: value.boxSecretKey, signingSecretKey: value.signingSecretKey) }
+}
+
+private actor AlbumPickerReadGate {
+  private(set) var started = false
+  private var continuation: CheckedContinuation<[LocalPhoto], Never>?
+  func read() async -> [LocalPhoto] {
+    await withCheckedContinuation { continuation = $0; started = true }
+  }
+  func finish(_ photos: [LocalPhoto]) { continuation?.resume(returning: photos); continuation = nil }
 }
 
 private final class AlbumTestServer: @unchecked Sendable {

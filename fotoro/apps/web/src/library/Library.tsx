@@ -5,12 +5,17 @@ import {requireVault} from "../vault/vault";
 import {sameVault} from "../vault/scope";
 import {leaseSavedRaster, savedRasterSource} from "./saved-raster";
 import {usePhotoNavigation} from "./photo-navigation";
+export function PhotoSelectionButton({filename, selected, disabled = false, onSelect}: {filename: string; selected: boolean; disabled?: boolean; onSelect: () => void}) {
+  return <button className="select" aria-label={"Select " + filename} aria-pressed={selected} disabled={disabled}
+    onClick={() => {if (!disabled) onSelect();}}>{selected ? "✓" : ""}</button>;
+}
 export function Thumbnail({
   photo,
   onOpen,
   selected,
   onSelect,
   selecting = false,
+  selectionDisabled = false,
   reasons,
 }: {
   photo: Photo;
@@ -18,6 +23,7 @@ export function Thumbnail({
   selected: boolean;
   onSelect: () => void;
   selecting?: boolean;
+  selectionDisabled?: boolean;
   reasons?: string[];
 }) {
   const source = savedRasterSource(photo, "thumbnail");
@@ -49,6 +55,7 @@ export function Thumbnail({
         id={"photo-" + photo.manifest.photoId}
         data-photo-navigation-id={photo.manifest.photoId}
         onClick={onOpen}
+        disabled={selecting && selectionDisabled}
         aria-label={"Open " + photo.metadata.filename}
         aria-description={reasons?.join(". ")}
       >
@@ -59,14 +66,7 @@ export function Thumbnail({
         )}
         {reasons?.length ? <span className="find-photo-reason">{reasons.join(" · ")}</span> : null}
       </button>
-      {(selecting || selected) && <button
-        className="select"
-        aria-label={"Select " + photo.metadata.filename}
-        aria-pressed={selected}
-        onClick={onSelect}
-      >
-        {selected ? "✓" : ""}
-      </button>}
+      {(selecting || selected) && <PhotoSelectionButton filename={photo.metadata.filename} selected={selected} disabled={selectionDisabled} onSelect={onSelect} />}
     </div>
   );
 }
@@ -77,6 +77,7 @@ export function Library({
   onOpen,
   active = true,
   selecting = false,
+  selectionDisabled = false,
   reasons,
 }: {
   photos: Photo[];
@@ -85,6 +86,7 @@ export function Library({
   onOpen: (id: string) => void;
   active?: boolean;
   selecting?: boolean;
+  selectionDisabled?: boolean;
   reasons?: ReadonlyMap<string, string[]>;
 }) {
   const parent = useRef<HTMLDivElement>(null),
@@ -206,6 +208,7 @@ export function Library({
                   photo={photo}
                   selected={selected.has(photo.manifest.photoId)}
                   selecting={selecting}
+                  selectionDisabled={selectionDisabled}
                   reasons={reasons?.get(photo.manifest.photoId)}
                   onSelect={() => onSelect(photo.manifest.photoId)}
                   onOpen={() => onOpen(photo.manifest.photoId)}

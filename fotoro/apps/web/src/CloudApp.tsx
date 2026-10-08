@@ -6,7 +6,7 @@ import {annotationLocation} from "@fotoro/contracts/location";
 import { ready } from "@fotoro/crypto";
 import { Library } from "./library/Library";
 import { Viewer } from "./library/Viewer";
-import { photoBytes, type Photo } from "./library/catalog";
+import { photoBytes, type Photo, type CatalogCoverage } from "./library/catalog";
 import {projectLocalAnnotations} from "./library/annotation-projection";
 import {
   lockVault,
@@ -77,7 +77,7 @@ import {cameraOriginalFiles} from "./media/camera-original";
 import {Places} from "./local/PhotoPlaces";
 import {currentTimelineCandidates} from "./local/places";
 import type {TimelineCandidate} from "./local/google-timeline";
-import {ConsumerPreviewResources} from "./library/consumer-search";
+import {ConsumerPreviewResources, ConsumerSelectionRetention} from "./library/consumer-search";
 import {PeopleFilter, usePeopleFilter} from "./people/PeopleFilter";
 import {peopleMatchingPhotoIDs, peopleFilteredResult, peopleMetadataMatches} from "./people/filter";
 import {inRecentSelectedRange, recentBrowseActive} from "./local/consumer-range";
@@ -174,6 +174,13 @@ export default function CloudApp({
     [selecting, setSelecting] = useState(false),
     [online, setOnline] = useState(() => navigator.onLine !== false);
   const [saveReady, setSaveReady] = useState<UnlockedVault | null>(null);
+  const [catalogCoverage, setCatalogCoverage] = useState<CatalogCoverage | null>(null);
+  const catalogBrowse = useRef<{session: UnlockedVault; limit: number} | null>(null);
+  const [consumerSelection] = useState(() => new ConsumerSelectionRetention());
+  const browseFor = (session: UnlockedVault) => {
+    if (catalogBrowse.current?.session !== session) catalogBrowse.current = {session, limit: 100};
+    return {limit: catalogBrowse.current.limit, retainPhotoIds: [...new Set([...currentSelection.current, ...consumerSelection.idsFor(session, session.accountId, location.origin), ...(expiredSelection.current?.photoIdsFor(session.accountId) ?? [])])]};
+  };
   const [passwordFallback, setPasswordFallback] = useState(false);
   useEffect(() => {setPasswordFallback(false);}, [account]);
   const [placesOpen, setPlacesOpen] = useState(false), [placeResources] = useState(() => new ConsumerPreviewResources());
@@ -259,6 +266,7 @@ export default function CloudApp({
       photo.metadataKey.fill(0);
     setAccount("");
     setPhotos([]);
+    setCatalogCoverage(null); catalogBrowse.current = null; consumerSelection.clear();
     setReceived(null);
     setReceivedContext(null);
     setSelected(new Set());
@@ -326,10 +334,12 @@ export default function CloudApp({
     const check = () => {signal?.throwIfAborted(); if (!current()) throw new DOMException("Save cancelled", "AbortError");};
     check();
     const session = requireVault();
-    const cached = await cachedSync(session, diagnostic);
+    const browse = browseFor(session);
+    const cached = await cachedSync(session, diagnostic, browse);
     check();
     if (!sameVault(session)) return;
     setPhotos(cached.photos);
+    setCatalogCoverage(cached.coverage);
     const recoveredSelection = expiredSelection.current;
     expiredSelection.current = null;
     if (recoveredSelection) {
@@ -354,10 +364,12 @@ export default function CloudApp({
       return;
     }
     check();
-    const result = await (send ? saveSync(session, signal, diagnostic) : refreshSync(session));
+    const result = await (send ? saveSync(session, signal, diagnostic) : refreshSync(session, browse));
     check();
     if (!sameVault(session)) return;
+    if (send && catalogBrowse.current?.session === session) catalogBrowse.current.limit = Math.max(catalogBrowse.current.limit, result.photos.length);
     setPhotos((previous) => (sameVault(session) ? result.photos : previous));
+    setCatalogCoverage(result.coverage);
     if (recoveredSelection) setSelected(previous => recoveredSelection.restore(result.photos, session.accountId, previous));
     setPending((previous) => (sameVault(session) ? result.pending : previous));
     setSkipped((previous) => (sameVault(session) ? result.skipped : previous));
@@ -444,7 +456,7 @@ export default function CloudApp({
         if (!current()) return;
         if (!(error instanceof ApiTransportError)) throw error;
         let cached;
-        try {cached = await cachedSync(opened.session);}
+        try {cached = await cachedSync(opened.session, undefined, browseFor(opened.session));}
         catch (cacheError) {if (!current()) return; throw cacheError;}
         if (!current()) return;
         setStatus(cached.photos.length ? "Couldn’t connect. Showing saved photos." : "Couldn’t connect. Try again when you’re online.");
@@ -636,8 +648,10 @@ export default function CloudApp({
     let session;
     try {session = requireVault();} catch {return null;}
     if (session.accountId !== account) return null;
-    const current = () => sameVault(session) && currentCatalog.current === photos;
-    return {accountId: account, token: session, photos, current,
+    const origin = location.origin;
+    const current = () => sameVault(session) && location.origin === origin && currentCatalog.current === photos;
+    const snapshot: OwnedPhotoSnapshot = {accountId: account, token: session, photos, coverage: catalogCoverage ?? undefined, current,
+      get selectionReady() {return current() && !running.current;},
       sourceCurrent: source => sameVault(session) && currentCatalog.current.some(photo => !photo.grantId && photo.manifest.ownerAccountId === account
         && photo.manifest.photoId === source.manifest.photoId && photo.metadata.originalSha256 === source.metadata.originalSha256
         && photo.manifest === source.manifest && photo.metadata === source.metadata && photo.metadataKey === source.metadataKey),
@@ -657,7 +671,9 @@ export default function CloudApp({
       try {if (!current()) throw new Error("VAULT_LOCKED"); return new Blob([new Uint8Array(bytes)], {type: "image/jpeg"});}
       finally {bytes.fill(0);}
     }};
-  }, [account, photos, publicDemo]);
+    snapshot.retainSelection = consumerSelection.bind(snapshot, origin, () => location.origin);
+    return snapshot;
+  }, [account, photos, publicDemo, catalogCoverage, busy, consumerSelection]);
   useEffect(() => {placeResources.clear();}, [ownedSnapshot?.token, ownedSnapshot?.photos, placeResources]);
   useEffect(() => {onOwnedPhotos?.(ownedSnapshot);}, [ownedSnapshot, onOwnedPhotos]);
   const photoChanges = useMemo<ConsumerPhotoChanges | null>(() => {
@@ -674,6 +690,7 @@ export default function CloudApp({
   }, [account, publicDemo, annotationPending, busy, annotationError]);
   useEffect(() => {onPhotoChanges?.(photoChanges);}, [photoChanges, onPhotoChanges]);
   const searchable = received ?? photos;
+  const catalogIncomplete = !!catalogCoverage && (catalogCoverage.hasMore || catalogCoverage.hasMoreChanges !== false);
   const peopleRecords = useMemo(() => cloudSearchRecords(searchable), [searchable]);
   const peopleFind = usePeopleFilter(peopleRecords, receivedContext ?? ownedSnapshot?.token ?? account);
   const [recentOnly, setRecentOnly] = useState(true);
@@ -777,9 +794,9 @@ export default function CloudApp({
     let failure = "Changes could not be saved. Check your connection and try again.";
     const saved = await run(async () => {
       try {
-        const result = await saveQueuedAnnotations(session);
+        const result = await saveQueuedAnnotations(session, () => sameVault(session), browseFor(session));
         if (!sameVault(session)) return false;
-        setPhotos(result.photos); setAnnotationPending(result.annotations);
+        setPhotos(result.photos); setCatalogCoverage(result.coverage); setAnnotationPending(result.annotations);
       }
       catch (error) {failure = readableSyncError(error); throw error;}
     });
@@ -814,19 +831,19 @@ export default function CloudApp({
   }, [photos]);
   const chosen = photos.filter((p) => selected.has(p.manifest.photoId));
   const selectBestShots = () => {
-    if (!bestShots.active || bestShots.busy || !bestShots.recommendations || !ownedSnapshot?.current() || !activeRef.current || currentReceived.current || preparingOriginals || sharingOriginals) return;
+    if (running.current || !bestShots.active || bestShots.busy || !bestShots.recommendations || !ownedSnapshot?.current() || !activeRef.current || currentReceived.current || preparingOriginals || sharingOriginals) return;
     const ids = selectionCandidates(findMatches, bestShots.recommendations).map(photo => photo.id);
     setSelected(previous => ownedSnapshot.current() ? new Set([...previous, ...ids]) : previous);
     setSelecting(true);
   };
   const selectResults = () => {
-    if (!activeRef.current || latestSelectionInput.current !== selectionInput || received || !ownedSnapshot?.current() || preparingOriginals || sharingOriginals || searchResult.searching || bestShots.busy) return;
+    if (running.current || !activeRef.current || latestSelectionInput.current !== selectionInput || received || !ownedSnapshot?.current() || preparingOriginals || sharingOriginals || searchResult.searching || bestShots.busy) return;
     const ids = shown.filter(photo => currentCatalog.current.includes(photo) && !photo.grantId && photo.manifest.ownerAccountId === ownedSnapshot.accountId
       && (ownedSnapshot.sourceCurrent?.(photo) ?? true)).map(photo => photo.manifest.photoId);
     setSelected(new Set(ids)); setSelecting(true);
   };
   const prepareSelectedOriginals = async (items = chosen) => {
-    if (originalContext.current || originalShareAttempt.pending || !items.length || received || !activeRef.current || document.visibilityState === "hidden") return;
+    if (running.current || originalContext.current || originalShareAttempt.pending || !items.length || received || !activeRef.current || document.visibilityState === "hidden") return;
     const session = requireVault(), ids = new Set(items.map(photo => photo.manifest.photoId));
     if (!savedOriginalSelectionCurrent(items, currentCatalog.current, ids, session.accountId)) return;
     currentSelection.current = ids; setSelected(ids);
@@ -854,11 +871,15 @@ export default function CloudApp({
     }).catch(() => {if (current()) setOriginalShareError(download ? "The originals could not be downloaded. Try again." : "Sharing could not finish. You can download the originals instead.");})
       .finally(() => setSharingOriginals(false));
   };
-  const toggleSelection = (id: string) => setSelected(previous => {
+  const toggleSelection = (id: string) => {
+    if (running.current) return;
+    setSelected(previous => {
+    if (running.current) return previous;
     const next = new Set(previous);
     next.has(id) ? next.delete(id) : next.add(id);
     return next;
-  });
+    });
+  };
   const openSharing = (items: Photo[] = []) => {setExchangePhotos([...items]); setExchangeVersion(version => version + 1); setExchange(true);};
   const closeSharing = () => {setExchange(false); setExchangePhotos([]); onShareDone?.(); onIncomingDone?.();};
   const priorIncoming = useRef(incoming);
@@ -915,7 +936,7 @@ export default function CloudApp({
           </button>}
           {unlocked && (
             <>
-            {!received && photos.length > 0 && <button aria-pressed={selecting} onClick={() => setSelecting(value => !value)}>{selecting ? "Done" : "Select"}</button>}
+            {!received && photos.length > 0 && <button disabled={busy} aria-pressed={selecting} onClick={() => {if (!running.current) setSelecting(value => !value);}}>{selecting ? "Done" : "Select"}</button>}
             {!received && <button className="menu-button" onClick={() => {setReselect(undefined); input.current?.click();}} aria-label="Add photos" disabled={busy || publicDemo}><PlusIcon /></button>}
             <button className="menu-button" aria-label="Settings" onClick={() => setMenu(!menu)}>
               <svg
@@ -1008,9 +1029,14 @@ export default function CloudApp({
             </div>}
             {!received && photos.length > 0 && <div className="people-find-controls"><PeopleFilter people={peopleFind.people} value={peopleFind.filter} onChange={peopleFind.change}
               disabled={preparingOriginals || sharingOriginals} onReview={!publicDemo ? () => setPeopleOpen(true) : undefined} />
-              {(familyFilter || normalizeSearch(query)) && <button disabled={preparingOriginals || sharingOriginals || searchResult.searching || bestShots.busy || !shown.length} onClick={selectResults}>Select these {shown.length}</button>}
+              {(familyFilter || normalizeSearch(query)) && <button disabled={busy || preparingOriginals || sharingOriginals || searchResult.searching || bestShots.busy || !shown.length} onClick={selectResults}>Select these {shown.length}</button>}
             </div>}
-            {!received && photos.length > 0 && recentBrowseActive(true, query) && <button className="local-filter" aria-label={recentOnly ? "Show all photos" : "Browse the last 30 days"} onClick={() => setRecentOnly(current => !current)}>{recentOnly ? "Last 30 days ×" : "All photos"}</button>}
+            {!received && photos.length > 0 && recentBrowseActive(true, query) && <button className="local-filter" aria-label={recentOnly ? "Show all loaded photos" : "Browse the last 30 days"} onClick={() => setRecentOnly(current => !current)}>{recentOnly ? "Last 30 days ×" : catalogIncomplete ? "All loaded photos" : "All photos"}</button>}
+            {!received && catalogIncomplete && <div className="hint" aria-label="Saved coverage"><p role="status">{catalogCoverage!.loaded} Saved {catalogCoverage!.loaded === 1 ? "photo loaded" : "photos loaded"}. Date, search and People filters cover loaded photos only.</p><button disabled={busy || preparingOriginals || sharingOriginals} onClick={() => void run(async () => {
+              const session = requireVault(); browseFor(session);
+              catalogBrowse.current!.limit += 100;
+              await refresh(false, () => sameVault(session));
+            })}>Load more Saved photos</button></div>}
             {!received && (busy || localCount > 0 || summary.pending > 0 || summary.failed > 0 || needsAttention || annotationPending.length > 0) && <section className={"consumer-save-progress state-" + consumerSummary.state} aria-label="Save progress">
               <div><p role="status">{status || syncStateLabel[consumerSummary.state]}</p>{consumerSummary.detail && <p className="hint">{consumerSummary.detail}</p>}</div>
               <div className="actions">
@@ -1038,7 +1064,7 @@ export default function CloudApp({
                 <span>Also try</span>{searchResult.meanings.filter(meaning => meaning.id !== searchResult.meaning?.id && meaning.photoIds.some(id => !searchResult.photoIds.includes(id))).slice(0, 3).map(meaning => <button key={meaning.id} onClick={() => setCommittedMeaning(meaning.id)}>{meaning.term}</button>)}
               </div>
             )}
-            {normalizeSearch(query) && !received && (findMatches.length > 0 || bestShots.active) && <FindBestShots total={findMatches.length} review={bestShots} showCount onSelect={selectBestShots} disabled={preparingOriginals || sharingOriginals} />}
+            {normalizeSearch(query) && !received && (findMatches.length > 0 || bestShots.active) && <FindBestShots total={findMatches.length} review={bestShots} showCount onSelect={selectBestShots} disabled={busy || preparingOriginals || sharingOriginals} />}
             {shown.length ? (
               <>
               {normalizeSearch(query) && visualSearchFeedback(searchResult) && <p className="hint" role="status">{visualSearchFeedback(searchResult)}</p>}
@@ -1047,6 +1073,7 @@ export default function CloudApp({
                 photos={shown}
                 selected={selected}
                 selecting={selecting}
+                selectionDisabled={busy}
                 reasons={bestShots.active ? bestShots.recommendations?.reasons : undefined}
                 onSelect={toggleSelection}
                 onOpen={id => selecting && !received ? toggleSelection(id) : setViewer(id)}
@@ -1056,10 +1083,10 @@ export default function CloudApp({
               <div className="empty" aria-busy={searchResult.searching || undefined}>
                 <p role={searchResult.searching || searchResult.visualStatus ? "status" : undefined}>
                   {searchResult.searching ? "Searching photos…" : visualSearchFeedback(searchResult) ?? (bestShots.active ? bestShots.busy ? "Choosing best shots…" : "No best shots to suggest" : query || familyFilter
-                    ? "No matching photos"
+                    ? catalogIncomplete && !received ? "No matching loaded photos" : "No matching photos"
                     : received
                       ? "No received photos"
-                      : recentActive && photos.length ? "No photos in the last 30 days" : "Your Saved photos will appear here")}
+                      : recentActive && photos.length ? catalogIncomplete ? "No loaded photos in the last 30 days" : "No photos in the last 30 days" : "Your Saved photos will appear here")}
                 </p>
                 {bestShots.active && <p className="hint">All matches remain available. You choose what to Share.</p>}
                 {recentActive && photos.length > 0 && <button onClick={() => setRecentOnly(false)}>Show all photos</button>}
@@ -1071,10 +1098,10 @@ export default function CloudApp({
             )}
             {!received && selected.size > 0 && <div className="consumer-selection glass" aria-label="Selected photos">
               <span role="status">{selected.size} selected</span>
-              <button disabled={sharingOriginals} onClick={() => setSelected(new Set())}>Clear</button>
-              <button ref={originalButton} className="primary-action" disabled={preparingOriginals || sharingOriginals} onClick={() => void prepareSelectedOriginals()}>{preparingOriginals ? "Preparing…" : "Share"}</button>
+              <button disabled={busy || sharingOriginals} onClick={() => {if (!running.current) setSelected(new Set());}}>Clear</button>
+              <button ref={originalButton} className="primary-action" disabled={busy || preparingOriginals || sharingOriginals} onClick={() => void prepareSelectedOriginals()}>{preparingOriginals ? "Preparing…" : "Share"}</button>
               <details className="selection-more" onKeyDown={event => {if (event.key === "Escape") {event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();}}}>
-                <summary>More</summary><div><button disabled={preparingOriginals || sharingOriginals} onClick={() => openSharing(chosen)}>Share in Fotoro</button>{!publicDemo && <button disabled={preparingOriginals || sharingOriginals} onClick={() => openAlbums(chosen)}>Add to live album</button>}</div>
+                <summary>More</summary><div><button disabled={busy || preparingOriginals || sharingOriginals} onClick={() => {if (!running.current) openSharing(chosen);}}>Share in Fotoro</button>{!publicDemo && <button disabled={busy || preparingOriginals || sharingOriginals} onClick={() => {if (!running.current) openAlbums(chosen);}}>Add to live album</button>}</div>
               </details>
             </div>}
             <input
@@ -1237,7 +1264,7 @@ export default function CloudApp({
         onApplyLocations={!publicDemo ? applyTimelineLocations : undefined} onOpen={id => {
           setPlacesOpen(false); setReceived(null); setReceivedContext(null); setQuery(""); setCommittedMeaning(undefined); peopleFind.change({...peopleFind.filter, ids: new Set()}); setViewer(id);
         }} />}
-      {active && peopleOpen && unlocked && <Suspense fallback={<aside className="settings-panel" role="dialog" aria-modal="true" aria-label="People"><button autoFocus onClick={() => setPeopleOpen(false)}>Close</button><p role="status">Opening People…</p></aside>}><People photos={peoplePhotos} eligibleIDs={peopleEligibleIDs} onExpand={recentActive ? () => setRecentOnly(false) : undefined} scopeLabel={recentActive ? "Last 30 days and current filters" : "Current filters"} selectedIDs={new Set([...selected].map(id=>"saved:"+id))} resources={placeResources}
+      {active && peopleOpen && unlocked && <Suspense fallback={<aside className="settings-panel" role="dialog" aria-modal="true" aria-label="People"><button autoFocus onClick={() => setPeopleOpen(false)}>Close</button><p role="status">Opening People…</p></aside>}><People photos={peoplePhotos} eligibleIDs={peopleEligibleIDs} onExpand={recentActive ? () => setRecentOnly(false) : undefined} scopeLabel={(recentActive ? "Last 30 days and current filters" : "Current filters") + (catalogIncomplete ? " · loaded Saved photos only" : "")} selectedIDs={new Set([...selected].map(id=>"saved:"+id))} resources={placeResources}
         onClose={() => setPeopleOpen(false)} onAssignments={!publicDemo ? applyPeople : undefined} onFind={id => {peopleFind.change({ids: new Set([id]), mode: "any"}); setRecentOnly(false); setPeopleOpen(false);}}
         onOpen={id => {setPeopleOpen(false); setRecentOnly(false); setReceived(null); setReceivedContext(null); setQuery(""); setCommittedMeaning(undefined); peopleFind.change({...peopleFind.filter, ids: new Set()}); setViewer(id.slice(6));}} /></Suspense>}
       {active && exchange && unlocked && (

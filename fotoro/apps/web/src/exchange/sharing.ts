@@ -72,6 +72,7 @@ export class ExpiredSavedSelection {
     this.files = Object.freeze([...files]);
   }
   filesFor(accountId: string): File[] {return accountId === this.accountId ? [...this.files] : [];}
+  photoIdsFor(accountId: string): string[] {return accountId === this.accountId ? [...this.manifests.keys()] : [];}
   restore(photos: readonly Photo[], accountId: string, current?: ReadonlySet<string>): Set<string> {
     if (accountId !== this.accountId) return new Set();
     const eligible = photos.filter(photo => !photo.grantId && photo.manifest.ownerAccountId === accountId);

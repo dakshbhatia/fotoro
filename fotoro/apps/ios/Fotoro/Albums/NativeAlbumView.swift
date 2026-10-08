@@ -1,5 +1,6 @@
 import AVKit
 import NukeUI
+import Observation
 import SwiftUI
 
 struct NativeAlbumPresentation: Identifiable {
@@ -248,7 +249,7 @@ struct NativeAlbumView: View {
       LazyVGrid(columns: [GridItem(.adaptive(minimum: 96))], spacing: 4) {
         ForEach(filteredItems) { item in
           Button { viewer = item } label: { NativeAlbumThumbnail(model: model, item: item) }
-            .buttonStyle(.plain).accessibilityLabel("Photo from " + memberName(item.photo.manifest.ownerAccountId, in: album.definition))
+            .buttonStyle(.plain).accessibilityLabel(NativeAlbumPhotoAccessibility.label(item.photo, member: memberName(item.photo.manifest.ownerAccountId, in: album.definition)))
         }
       }
       if model.nextCursor != nil { Button("Load more photos") { run { try await model.loadMore() } }.disabled(busy) }
@@ -295,36 +296,165 @@ struct NativeAlbumView: View {
   }
 }
 
+struct NativeAlbumPickerContext: Equatable {
+  let access: PhotoAccountAccess
+  let origin: String
+  @MainActor static func current(_ services: AppServices) -> Self? {
+    guard let access = services.photoAccountAccess else { return nil }
+    return Self(access: access, origin: services.api.baseURL.absoluteString)
+  }
+}
+
+@MainActor @Observable final class NativeAlbumPhotoPickerStore {
+  static let pageSize = 200
+  private(set) var photos: [LocalPhoto] = []
+  private(set) var busy = false
+  private(set) var hasMore = false
+  private(set) var feedback: String?
+  private(set) var selection = SavedPhotoSelection()
+  private var context: NativeAlbumPickerContext?
+  private var after: String?
+  private var seen = Set<String>()
+  private var cursors = Set<String>()
+  private var task: Task<Void, Never>?
+  private var operation = UUID()
+  private let readPage: @Sendable (LibraryStore, String?, Int) async throws -> [LocalPhoto]
+  init(readPage: @escaping @Sendable (LibraryStore, String?, Int) async throws -> [LocalPhoto] = { catalog, after, limit in
+    try Task.checkCancellation()
+    let worker = Task.detached(priority: .userInitiated) {
+      try Task.checkCancellation()
+      return try catalog.photos(after: after, limit: limit)
+    }
+    return try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
+  }) { self.readPage = readPage }
+  func isCurrent(_ services: AppServices) -> Bool {
+    context != nil && context == NativeAlbumPickerContext.current(services)
+  }
+  func clear() {
+    operation = UUID(); task?.cancel(); task = nil
+    photos = []; selection.removeAll(); context = nil; after = nil; seen = []; cursors = []
+    busy = false; hasMore = false; feedback = nil
+  }
+  func open(_ services: AppServices, initial: [LocalPhoto] = []) {
+    clear()
+    guard let context = NativeAlbumPickerContext.current(services) else { return }
+    self.context = context
+    for photo in initial where selection.count < 100 && !selection.contains(photo.id)
+      && SavedPhotoSelection.isCurrent([photo], lookup: services.consumerSavedPhoto) {
+      selection.toggle(photo)
+    }
+    hasMore = true
+    loadMore(services)
+  }
+  func refresh(_ services: AppServices) {
+    guard isCurrent(services) else { clear(); return }
+    selection.removeWithdrawn(using: services.consumerSavedPhoto)
+    let selected = (try? selection.resolve(using: services.consumerSavedPhoto)) ?? []
+    open(services, initial: selected)
+  }
+  func toggle(_ photo: LocalPhoto, services: AppServices) {
+    guard isCurrent(services) else { clear(); return }
+    if selection.contains(photo.id) { selection.toggle(photo); return }
+    guard SavedPhotoSelection.isCurrent([photo], lookup: services.consumerSavedPhoto) else {
+      feedback = "This Saved photo changed. Refresh and choose it again."; return
+    }
+    guard selection.count < 100 else { feedback = "Choose up to 100 Saved photos."; return }
+    selection.toggle(photo); feedback = nil
+  }
+  func chosen(_ services: AppServices) throws -> [LocalPhoto] {
+    guard isCurrent(services) else { clear(); throw CancellationError() }
+    return try selection.resolve(using: services.consumerSavedPhoto)
+  }
+  func loadMore(_ services: AppServices) {
+    guard isCurrent(services) else { clear(); return }
+    guard !busy, hasMore, let context else { return }
+    let catalog = services.store, cursor = after, read = readPage, token = UUID()
+    operation = token; busy = true; feedback = nil
+    task = Task {
+      defer { if operation == token { task = nil; busy = false } }
+      do {
+        let page = try await read(catalog, cursor, Self.pageSize)
+        try Task.checkCancellation()
+        guard operation == token, isCurrent(services) else { throw CancellationError() }
+        guard page.count <= Self.pageSize else { throw FotoroError("Saved photo page is too large.") }
+        let next = page.count == Self.pageSize ? page.last?.id : nil
+        if let next, cursors.contains(next) { throw FotoroError("Saved photos changed. Refresh to continue.") }
+        for photo in page where photo.manifest.ownerAccountId == context.access.account
+          && photo.manifest.photoId == photo.id && ["saved", "committed"].contains(photo.transferState) {
+          if seen.insert(photo.id).inserted { photos.append(photo) }
+        }
+        if let next { cursors.insert(next) }
+        after = next; hasMore = next != nil
+      } catch is CancellationError {
+        if operation == token, !isCurrent(services) { clear() }
+      } catch {
+        if operation == token {
+          if !isCurrent(services) { clear() }
+          else if !Task.isCancelled { feedback = error.localizedDescription }
+        }
+      }
+    }
+  }
+  func waitUntilSettled() async { await task?.value }
+}
+
+enum NativeAlbumPhotoAccessibility {
+  static func label(_ photo: LocalPhoto, member: String? = nil) -> String {
+    var parts = [photo.metadata.filename]
+    if let date = Wire.parseDate(photo.metadata.sourceDate) {
+      let prefix = ["photos", "exif"].contains(photo.metadata.dateSource) ? "Photo date" : "Import date"
+      parts.append(prefix + " " + date.formatted(date: .abbreviated, time: .shortened))
+    }
+    if let member { parts.append("Photo from " + member) }
+    return parts.joined(separator: ", ")
+  }
+}
+
 private struct NativeAlbumPhotoPicker: View {
   @Bindable var services: AppServices
   let initial: [LocalPhoto]
   let add: ([LocalPhoto]) -> Void
-  @State private var photos: [LocalPhoto] = []
-  @State private var ids = Set<String>()
+  @State private var picker = NativeAlbumPhotoPickerStore()
   @State private var feedback: String?
   @Environment(\.dismiss) private var dismiss
+  @Environment(\.scenePhase) private var scenePhase
+  private var context: NativeAlbumPickerContext? {
+    scenePhase == .active ? NativeAlbumPickerContext.current(services) : nil
+  }
   var body: some View {
     NavigationStack {
       List {
         Text("Choose up to 100 of your Saved photos. Save device photos first.").font(.footnote).foregroundStyle(.secondary)
-        if let feedback { Text(feedback) }
-        ForEach(photos) { photo in
-          Toggle(photo.metadata.filename, isOn: Binding(get: { ids.contains(photo.id) }, set: { enabled in
-            if enabled { ids.insert(photo.id) } else { ids.remove(photo.id) }
-          }))
+        if let message = feedback ?? picker.feedback { Text(message).foregroundStyle(.secondary) }
+        ForEach(picker.isCurrent(services) ? picker.photos : []) { photo in
+          Toggle(photo.metadata.filename, isOn: Binding(get: { picker.selection.contains(photo.id) }, set: { enabled in
+            if enabled != picker.selection.contains(photo.id) { feedback = nil; picker.toggle(photo, services: services) }
+          })).accessibilityLabel(NativeAlbumPhotoAccessibility.label(photo))
+        }
+        if picker.busy { ProgressView("Loading Saved photos…") }
+        else if picker.isCurrent(services) {
+          if picker.hasMore {
+            Button("Load more Saved photos") { feedback = nil; picker.loadMore(services) }
+              .accessibilityIdentifier("albums.picker.loadMore")
+          }
+          Button("Refresh Saved photos") { feedback = nil; picker.refresh(services) }
+            .accessibilityIdentifier("albums.picker.refresh")
         }
       }.navigationTitle("Add Saved photos")
       .toolbar {
         ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-        ToolbarItem(placement: .confirmationAction) { Button("Add \(ids.count)") { add(photos.filter { ids.contains($0.id) }) }.disabled(ids.isEmpty || ids.count > 100) }
+        ToolbarItem(placement: .confirmationAction) {
+          Button("Add \(picker.selection.count)") {
+            do { add(try picker.chosen(services)) } catch is CancellationError {} catch { feedback = error.localizedDescription }
+          }.disabled(!picker.isCurrent(services) || picker.selection.count == 0)
+            .accessibilityIdentifier("albums.picker.add")
+        }
       }
-      .task {
-        do {
-          guard let account = services.photoAccountAccess?.account else { return }
-          photos = try services.store.photos(limit: 1000).filter { $0.manifest.ownerAccountId == account && ["saved", "committed"].contains($0.transferState) }
-          let eligible = Set(photos.map(\.id)); ids = Set(initial.map(\.id)).intersection(eligible)
-        } catch { feedback = error.localizedDescription }
+      .task(id: context) {
+        feedback = nil
+        if context == nil { picker.clear() } else { picker.open(services, initial: initial) }
       }
+      .onDisappear { picker.clear() }
     }
   }
 }

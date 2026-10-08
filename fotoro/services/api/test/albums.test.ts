@@ -83,9 +83,13 @@ it("rejects forged identities, cross-album entries and changed signed originals 
 });
 it("pages more than 100 photos and rejects overflow before any album or operation write", async () => {
   await seed(); const a = await album(), source = await photo(0);
-  for (let n = 0; n < 101; n++) {
-    const id = crypto.randomUUID(), manifest = {...source.m, photoId: id}, entry = (await append(0, a.id, {m: manifest, s: await signed(0, "photo-manifest", manifest)})).entries[0];
-    await env.DB.batch([env.DB.prepare("INSERT INTO photos VALUES(?,?,?,?)").bind(id, actors[0].accountId, json(manifest), json(await signed(0, "photo-manifest", manifest))), env.DB.prepare("INSERT INTO album_photos(album_id,photo_id,owner,entry) VALUES(?,?,?,?)").bind(a.id, id, actors[0].accountId, json(entry))]);
+  for (let start = 0; start < 101; start += 50) {
+    const statements: ReturnType<typeof env.DB.prepare>[] = [];
+    for (let n = start; n < Math.min(start + 50, 101); n++) {
+      const id = crypto.randomUUID(), manifest = {...source.m, photoId: id}, signedManifest = await signed(0, "photo-manifest", manifest), entry = (await append(0, a.id, {m: manifest, s: signedManifest})).entries[0];
+      statements.push(env.DB.prepare("INSERT INTO photos VALUES(?,?,?,?)").bind(id, actors[0].accountId, json(manifest), json(signedManifest)), env.DB.prepare("INSERT INTO album_photos(album_id,photo_id,owner,entry) VALUES(?,?,?,?)").bind(a.id, id, actors[0].accountId, json(entry)));
+    }
+    await env.DB.batch(statements);
   }
   const first = await (await http(0, `/v1/albums/${a.id}`)).json() as any;
   expect(first.entries).toHaveLength(100); expect(first.hasMore).toBe(true);
@@ -93,8 +97,12 @@ it("pages more than 100 photos and rejects overflow before any album or operatio
   expect(next.entries).toHaveLength(1); expect(next.hasMore).toBe(false);
   expect(new Set([...first.manifests, ...next.manifests].map((s: any) => s.body)).size).toBe(101);
   // Populate the remaining capacity as isolated database setup; the rejected real HTTP append must leave it unchanged.
-  for (let n = 101; n < 1000; n++) {
-    const id = crypto.randomUUID(); await env.DB.batch([env.DB.prepare("INSERT INTO photos VALUES(?,?,?,?)").bind(id, actors[0].accountId, json(source.m), json(source.s)), env.DB.prepare("INSERT INTO album_photos(album_id,photo_id,owner,entry) VALUES(?,?,?,?)").bind(a.id, id, actors[0].accountId, "{}")]);
+  for (let start = 101; start < 1000; start += 50) {
+    const statements: ReturnType<typeof env.DB.prepare>[] = [];
+    for (let n = start; n < Math.min(start + 50, 1000); n++) {
+      const id = crypto.randomUUID(); statements.push(env.DB.prepare("INSERT INTO photos VALUES(?,?,?,?)").bind(id, actors[0].accountId, json(source.m), json(source.s)), env.DB.prepare("INSERT INTO album_photos(album_id,photo_id,owner,entry) VALUES(?,?,?,?)").bind(a.id, id, actors[0].accountId, "{}"));
+    }
+    await env.DB.batch(statements);
   }
   const request = await append(0, a.id, source), rejected = await http(0, `/v1/albums/${a.id}/photos`, "POST", request);
   expect(rejected.status).toBe(413); expect(await rejected.json()).toMatchObject({code: "PHOTO_LIMIT"});

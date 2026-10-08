@@ -1,7 +1,7 @@
 import {diagnose, type DiagnosticContext} from "../diagnostics";
 import type { PendingImport } from "./journal";
 import { pendingImports, resumePendingImports } from "./journal";
-import { cachedCatalog, syncCatalog } from "../library/catalog";
+import { cachedCatalogSnapshot, syncCatalog, type CatalogBrowse } from "../library/catalog";
 import { requireVault, encryptPrivate, decryptPrivate } from "../vault/vault";
 import type { UnlockedVault } from "../vault/vault";
 import type { WrappedKeyV1 } from "@fotoro/contracts";
@@ -37,15 +37,18 @@ export function syncStatus(
   };
 }
 export class ScopedFlight<T> {
-  private flights = new WeakMap<object, Promise<T>>();
-  run(scope: object, task: () => Promise<T>): Promise<T> {
-    const existing = this.flights.get(scope);
+  private flights = new WeakMap<object, Map<string | undefined, Promise<T>>>();
+  run(scope: object, task: () => Promise<T>, window?: string): Promise<T> {
+    let scoped = this.flights.get(scope);
+    const existing = scoped?.get(window);
     if (existing) return existing;
+    if (!scoped) {scoped = new Map(); this.flights.set(scope, scoped);}
+    const flights = scoped;
     const operation = Promise.resolve().then(task);
-    this.flights.set(scope, operation);
+    flights.set(window, operation);
     void operation
       .finally(() => {
-        if (this.flights.get(scope) === operation) this.flights.delete(scope);
+        if (flights.get(window) === operation) flights.delete(window);
       })
       .catch(() => undefined);
     return operation;
@@ -114,29 +117,33 @@ export async function clearSkipped(session: UnlockedVault, file: File) {
   await put("settings", key, encryptPrivate(sources));
   assertVault(session);
 }
-export async function cachedSync(session = requireVault(), diagnostic?: DiagnosticContext) {
+export async function cachedSync(session = requireVault(), diagnostic?: DiagnosticContext, browse?: CatalogBrowse) {
   assertVault(session);
-  const photos = await cachedCatalog(diagnostic);
-  assertVault(session);
-  const pending = await pendingImports();
-  assertVault(session);
-  const annotations = await pendingAnnotations(session);
-  assertVault(session);
-  const lastSuccessfulSync = await lastSync(session);
-  assertVault(session);
-  const skipped = await skippedImports(session);
-  assertVault(session);
-  return { photos, pending, annotations, lastSuccessfulSync, skipped };
+  const {photos, coverage} = await cachedCatalogSnapshot(diagnostic, browse);
+  try {
+    assertVault(session);
+    const pending = await pendingImports();
+    assertVault(session);
+    const annotations = await pendingAnnotations(session);
+    assertVault(session);
+    const lastSuccessfulSync = await lastSync(session);
+    assertVault(session);
+    const skipped = await skippedImports(session);
+    assertVault(session);
+    return { photos, coverage, pending, annotations, lastSuccessfulSync, skipped };
+  } catch (error) {for (const photo of photos) photo.metadataKey.fill(0); throw error;}
 }
-async function performRefresh(session: UnlockedVault, signal?: AbortSignal, diagnostic?: DiagnosticContext) {
+async function performRefresh(session: UnlockedVault, signal?: AbortSignal, diagnostic?: DiagnosticContext, browse?: CatalogBrowse) {
   assertVault(session);
-  await syncCatalog(signal, diagnostic);
+  const feed = await syncCatalog(signal, diagnostic, browse ? 1 : Infinity);
   assertVault(session);
   signal?.throwIfAborted();
-  const lastSuccessfulSync = new Date().toISOString();
-  await put("settings", session.accountId + ":last-checked", encryptPrivate(lastSuccessfulSync));
+  if (!feed.hasMore) {
+    const lastSuccessfulSync = new Date().toISOString();
+    await put("settings", session.accountId + ":last-checked", encryptPrivate(lastSuccessfulSync));
+  }
   assertVault(session);
-  const result = await cachedSync(session, diagnostic);
+  const result = await cachedSync(session, diagnostic, browse);
   assertVault(session); signal?.throwIfAborted();
   return result;
 }
@@ -161,8 +168,9 @@ async function performSave(session: UnlockedVault, signal: AbortSignal, diagnost
   return result;
 }
 // Viewing the account can read saved photos, but never drains locally queued uploads or edits.
-export function refreshSync(session = requireVault()) {
-  return readFlight.run(session, () => serializeSync(session, () => diagnose("catalog", context => performRefresh(session, undefined, context), "refresh")));
+export function refreshSync(session = requireVault(), browse?: CatalogBrowse) {
+  const window = browse ? {limit: browse.limit, retainPhotoIds: [...(browse.retainPhotoIds ?? [])]} : undefined;
+  return readFlight.run(session, () => serializeSync(session, () => diagnose("catalog", context => performRefresh(session, undefined, context, window), "refresh")), window && JSON.stringify(window));
 }
 export function saveSync(session = requireVault(), signal?: AbortSignal, diagnostic?: DiagnosticContext) {
   signal?.throwIfAborted();

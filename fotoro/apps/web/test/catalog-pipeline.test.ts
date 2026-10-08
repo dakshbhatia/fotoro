@@ -5,9 +5,13 @@ import accounts from "../../../fixtures/accounts.json";
 import {ready, sodium, unb64, b64, encryptMedia, signPayload, utf8, wrapKey} from "@fotoro/crypto";
 import type {MediaBinding, PhotoManifestV1, PhotoMetadataV1, RepresentationV1, SignedPayloadV1} from "@fotoro/contracts";
 import {configureVault, unlockVault, lockVault, encryptPrivate, type UnlockedVault} from "../src/vault/vault";
-import {atomic, clearAccount, put} from "../src/exchange/cache";
-import {cachedCatalog, collect, digest, source} from "../src/library/catalog";
-import {cachedSync, readableSyncError} from "../src/exchange/sync";
+import {atomic, clearAccount, get, put} from "../src/exchange/cache";
+import {cachedCatalog, cachedCatalogSnapshot, collect, digest, source} from "../src/library/catalog";
+import {cachedSync, refreshSync, readableSyncError} from "../src/exchange/sync";
+import {ExpiredSavedSelection} from "../src/exchange/sharing";
+import {PhotoSelectionButton} from "../src/library/Library";
+import {ConsumerSelectionRetention, type OwnedPhotoSnapshot} from "../src/library/consumer-search";
+import {renderToStaticMarkup} from "react-dom/server";
 
 async function open(index: number) {
   const secret = accounts.testSecrets[index];
@@ -144,4 +148,207 @@ test("a catalog source replaced during metadata await cannot publish or seed a s
     globalThis.fetch = (async (input: string | URL | Request) => {const id = new URL(String(input), "https://public.test").pathname.split("/").at(-1)!; return new Response(new Uint8Array(objects.get(id)!));}) as typeof fetch;
     assert.equal((await cachedCatalog())[0].metadata.filename, changed.metadata.filename);
   } finally {globalThis.fetch = oldFetch; lockVault(); await clearAccount(session.accountId);}
+});
+
+const orderedID = (n: number) => "00000000-0000-4000-8000-" + String(n).padStart(12, "0");
+test("large cached browse opens a bounded first page, preserves selected sources and continues after deletions", {timeout: 20000}, async () => {
+  await ready; const session = await open(0), oldFetch = globalThis.fetch, objects = new Map<string, Uint8Array>();
+  await clearAccount(session.accountId);
+  let requests = 0;
+  try {
+    for (let n = 0; n < 1000; n++) await fixture(session, objects, `public-${n}.jpg`, orderedID(n));
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      requests++; const objectId = String(input).split("/").at(-1)!;
+      const bytes = objects.get(objectId); assert.ok(bytes); return new Response(new Uint8Array(bytes));
+    }) as typeof fetch;
+    const first = await cachedSync(session, undefined, {limit: 100});
+    assert.equal(requests, 100, "The first view must not fetch metadata for the other 900 photos");
+    assert.deepEqual(first.coverage, {loaded: 100, cachedTotal: 1000, hasMore: true, hasMoreChanges: null});
+    assert.deepEqual(first.photos.map(photo => photo.manifest.photoId), Array.from({length: 100}, (_, n) => orderedID(n)));
+    // A low-sorting insertion must not remove a manually selected previous edge of the window.
+    const selectedID = orderedID(99);
+    await fixture(session, objects, "new-public.jpg", "00000000-0000-4000-8000-000000000000".replace(/0$/, "a"));
+    const retained = await cachedSync(session, undefined, {limit: 100, retainPhotoIds: [selectedID]});
+    assert.ok(retained.photos.some(photo => photo.manifest.photoId === selectedID));
+    assert.equal(retained.coverage.loaded, 101);
+    // Re-read a bounded prefix, so a deleted earlier row cannot make a continuation skip an unseen row.
+    await atomic(Array.from({length: 10}, (_, n) => ({store: "catalog" as const, key: session.accountId + ":" + orderedID(n)})));
+    const second = await cachedSync(session, undefined, {limit: 200});
+    assert.equal(second.photos.length, 200);
+    assert.ok(second.photos.some(photo => photo.manifest.photoId === orderedID(208)));
+    assert.ok(second.photos.every(photo => !Array.from({length: 10}, (_, n) => orderedID(n)).includes(photo.manifest.photoId)));
+    const complete = await cachedSync(session, undefined, {limit: 1100});
+    assert.equal(complete.photos.length, 991);
+    assert.equal(complete.coverage.hasMore, false);
+    assert.equal(complete.coverage.hasMoreChanges, null, "Cached metadata cannot claim the server has been fully checked");
+    assert.equal(new Set(complete.photos.map(photo => photo.manifest.photoId)).size, 991);
+    assert.ok(first.photos.every(photo => photo.metadataKey.some(byte => byte !== 0)), "Page changes cannot zero gallery-held keys");
+    const expired = new ExpiredSavedSelection(session.accountId, complete.photos, new Set([orderedID(999)]));
+    assert.deepEqual(expired.photoIdsFor(accounts.accounts[1].accountId), []);
+    lockVault(); const renewed = await open(0);
+    const restored = await cachedSync(renewed, undefined, {limit: 100, retainPhotoIds: expired.photoIdsFor(renewed.accountId)});
+    assert.equal(restored.photos.length, 101, "Recover an exact historical choice without hydrating the other 890 rows");
+    assert.deepEqual([...expired.restore(restored.photos, renewed.accountId)], [orderedID(999)]);
+    await atomic([{store: "catalog", key: renewed.accountId + ":" + orderedID(999)}]);
+    const deleted = await cachedSync(renewed, undefined, {limit: 100, retainPhotoIds: expired.photoIdsFor(renewed.accountId)});
+    assert.deepEqual([...expired.restore(deleted.photos, renewed.accountId)], [], "Retained IDs cannot resurrect a deleted source");
+  } finally {globalThis.fetch = oldFetch; lockVault(); await clearAccount(session.accountId);}
+});
+
+test("bounded server refresh resumes the committed cursor one page at a time without claiming early completion", {timeout: 15000}, async () => {
+  await ready; const session = await open(0), oldFetch = globalThis.fetch, objects = new Map<string, Uint8Array>();
+  await clearAccount(session.accountId);
+  const items = [];
+  try {
+    for (let n = 0; n < 225; n++) items.push(await fixture(session, objects, `public-${n}.jpg`, orderedID(n)));
+    await atomic(items.map(item => ({store: "catalog" as const, key: session.accountId + ":" + item.manifest.photoId})));
+    const cursors: (string | null)[] = []; let metadataReads = 0, failNext = false;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(String(input), "https://public.test");
+      if (url.pathname === "/v1/changes") {
+        const cursor = url.searchParams.get("cursor"); cursors.push(cursor);
+        if (failNext) {failNext = false; return new Response(JSON.stringify({version: 1, code: "UNAVAILABLE", retryable: true, requestId: crypto.randomUUID()}), {status: 503});}
+        const start = cursor ? Number(cursor) : 0, end = Math.min(start + 100, items.length);
+        return new Response(JSON.stringify({version: 1, mediaVersion: 1,
+          changes: items.slice(start, end).map((item, offset) => ({cursor: String(start + offset + 1), entity: "photo", entityId: item.manifest.photoId, deleted: false, payload: item.signed})),
+          nextCursor: String(end), hasMore: end < items.length}));
+      }
+      metadataReads++; const bytes = objects.get(url.pathname.split("/").at(-1)!); assert.ok(bytes); return new Response(new Uint8Array(bytes));
+    }) as typeof fetch;
+    const first = await refreshSync(session, {limit: 100});
+    assert.deepEqual(cursors, [null]); assert.equal(metadataReads, 100);
+    assert.deepEqual(first.coverage, {loaded: 100, cachedTotal: 100, hasMore: false, hasMoreChanges: true});
+    assert.equal(first.lastSuccessfulSync, null);
+    failNext = true;
+    await assert.rejects(refreshSync(session, {limit: 200}), /UNAVAILABLE/);
+    assert.equal(metadataReads, 100);
+    assert.equal((await cachedSync(session, undefined, {limit: 100})).coverage.hasMoreChanges, true);
+    const second = await refreshSync(session, {limit: 200});
+    assert.deepEqual(cursors, [null, "100", "100"]); assert.equal(metadataReads, 200);
+    assert.equal(second.photos.length, 200); assert.equal(second.coverage.hasMoreChanges, true);
+    assert.equal(second.lastSuccessfulSync, null);
+    const third = await refreshSync(session, {limit: 300});
+    assert.deepEqual(cursors, [null, "100", "100", "200"]); assert.equal(metadataReads, 225);
+    assert.deepEqual(third.coverage, {loaded: 225, cachedTotal: 225, hasMore: false, hasMoreChanges: false});
+    assert.ok(third.lastSuccessfulSync);
+    assert.equal(new Set(third.photos.map(photo => photo.manifest.photoId)).size, 225);
+  } finally {globalThis.fetch = oldFetch; lockVault(); await clearAccount(session.accountId);}
+});
+
+test("lock/account change during bounded metadata hydration rejects the old window and cannot seed the new account", async () => {
+  await ready; const session = await open(0), oldFetch = globalThis.fetch, objects = new Map<string, Uint8Array>();
+  await clearAccount(session.accountId);
+  const item = await fixture(session, objects);
+  let release!: (response: Response) => void;
+  globalThis.fetch = (async () => new Promise<Response>(resolve => {release = resolve;})) as typeof fetch;
+  try {
+    const reading = cachedCatalogSnapshot(undefined, {limit: 100}), rejected = assert.rejects(reading, /VAULT_LOCKED/);
+    while (!release) await new Promise(resolve => setTimeout(resolve, 0));
+    lockVault(); const other = await open(1); await clearAccount(other.accountId);
+    release(new Response(new Uint8Array(objects.get(item.manifest.metadataRepresentation.objectId)!)));
+    await rejected;
+    const snapshot = await cachedSync(other, undefined, {limit: 100});
+    assert.equal(snapshot.photos.length, 0); assert.equal(snapshot.coverage.cachedTotal, 0);
+    assert.equal(await get("read", session.accountId + ":" + item.manifest.metadataRepresentation.objectId), undefined);
+  } finally {globalThis.fetch = oldFetch; lockVault(); for (const card of accounts.accounts) await clearAccount(card.accountId);}
+});
+
+test("a gated bounded refresh disables live tile mutations until the shifted catalog window is published", async () => {
+  await ready; const session = await open(0), oldFetch = globalThis.fetch, objects = new Map<string, Uint8Array>();
+  await clearAccount(session.accountId);
+  let release!: (response: Response) => void;
+  let reading: ReturnType<typeof refreshSync> | undefined, page: unknown;
+  try {
+    for (let n = 100; n < 200; n++) await fixture(session, objects, `public-${n}.jpg`, orderedID(n));
+    const incoming = await fixture(session, objects, "new-public.jpg", orderedID(0));
+    await atomic([{store: "catalog", key: session.accountId + ":" + incoming.manifest.photoId}]);
+    page = {version: 1, mediaVersion: 1, changes: [{cursor: "1", entity: "photo", entityId: incoming.manifest.photoId, deleted: false, payload: incoming.signed}], nextCursor: "1", hasMore: false};
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(String(input), "https://public.test");
+      if (url.pathname === "/v1/changes") return new Promise<Response>(resolve => {release = resolve;});
+      const bytes = objects.get(url.pathname.split("/").at(-1)!); assert.ok(bytes); return new Response(new Uint8Array(bytes));
+    }) as typeof fetch;
+    const initial = await cachedSync(session, undefined, {limit: 100});
+    const edge = initial.photos.find(photo => photo.manifest.photoId === orderedID(199))!;
+    assert.ok(edge);
+    const selected = new Set([orderedID(198)]);
+    reading = refreshSync(session, {limit: 100, retainPhotoIds: [...selected]});
+    while (!release) await new Promise(resolve => setTimeout(resolve, 0));
+    // Invoke the production tile control while the real network refresh is still gated.
+    const disabled = PhotoSelectionButton({filename: edge.metadata.filename, selected: false, disabled: true, onSelect: () => {selected.add(edge.manifest.photoId);}});
+    assert.match(renderToStaticMarkup(disabled), /disabled=""/);
+    disabled.props.onClick();
+    assert.deepEqual([...selected], [orderedID(198)], "A late page-edge choice cannot be accepted and silently lost on publication");
+    release(new Response(JSON.stringify(page)));
+    const refreshed = await reading;
+    assert.equal(refreshed.photos.length, 100);
+    assert.ok(refreshed.photos.some(photo => photo.manifest.photoId === orderedID(0)));
+    assert.ok(!refreshed.photos.some(photo => photo.manifest.photoId === edge.manifest.photoId));
+    assert.ok(refreshed.photos.some(photo => selected.has(photo.manifest.photoId)), "The earlier explicit choice remains available");
+    assert.equal(refreshed.coverage.hasMore, true, "Unselected historical rows remain explicitly unloaded");
+    const enabled = PhotoSelectionButton({filename: incoming.metadata.filename, selected: false, disabled: false, onSelect: () => {selected.add(incoming.manifest.photoId);}});
+    assert.doesNotMatch(renderToStaticMarkup(enabled), /disabled=""/);
+    enabled.props.onClick();
+    assert.deepEqual([...selected], [orderedID(198), orderedID(0)], "Selection resumes against the published current window");
+  } finally {
+    release?.(new Response(JSON.stringify(page))); await reading?.catch(() => undefined);
+    globalThis.fetch = oldFetch; lockVault(); await clearAccount(session.accountId);
+  }
+});
+
+
+test("consumer explicit Saved choices survive a shifted bounded page and late callbacks cannot cross lock/account/origin", async () => {
+  await ready; const session = await open(0), oldFetch = globalThis.fetch, objects = new Map<string, Uint8Array>();
+  await clearAccount(session.accountId);
+  let release!: (response: Response) => void, reading: ReturnType<typeof refreshSync> | undefined;
+  const retention = new ConsumerSelectionRetention();
+  try {
+    for (let n = 100; n < 200; n++) await fixture(session, objects, `public-${n}.jpg`, orderedID(n));
+    const incoming = await fixture(session, objects, "new-public.jpg", orderedID(0));
+    await atomic([{store: "catalog", key: session.accountId + ":" + incoming.manifest.photoId}]);
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(String(input), "https://public.test");
+      if (url.pathname === "/v1/changes") return new Promise<Response>(resolve => {release = resolve;});
+      const bytes = objects.get(url.pathname.split("/").at(-1)!); assert.ok(bytes); return new Response(new Uint8Array(bytes));
+    }) as typeof fetch;
+    const first = await cachedSync(session, undefined, {limit: 100});
+    let currentPhotos = first.photos, unlocked = true, busy = false, origin = "https://public.test";
+    const snapshot: OwnedPhotoSnapshot = {accountId: session.accountId, token: session, photos: first.photos,
+      current: () => unlocked && currentPhotos === first.photos, get selectionReady() {return !busy;},
+      sourceCurrent: photo => currentPhotos.includes(photo), preview: async () => new Blob()};
+    const choose = retention.bind(snapshot, origin, () => origin);
+    choose(new Set([orderedID(199), "not-a-source"]));
+    assert.deepEqual(retention.idsFor(session, session.accountId, origin), [orderedID(199)]);
+    busy = true;
+    reading = refreshSync(session, {limit: 100, retainPhotoIds: retention.idsFor(session, session.accountId, origin)});
+    while (!release) await new Promise(resolve => setTimeout(resolve, 0));
+    choose(new Set([orderedID(199), orderedID(198)]));
+    assert.deepEqual(retention.idsFor(session, session.accountId, origin), [orderedID(199)], "Consumer cannot add a late choice during refresh");
+    release(new Response(JSON.stringify({version: 1, mediaVersion: 1, changes: [{cursor: "1", entity: "photo", entityId: incoming.manifest.photoId, deleted: false, payload: incoming.signed}], nextCursor: "1", hasMore: false})));
+    const refreshed = await reading; currentPhotos = refreshed.photos; busy = false;
+    assert.equal(refreshed.photos.length, 101, "Only the explicit consumer choice extends the100-row browse budget");
+    assert.ok(refreshed.photos.some(photo => photo.manifest.photoId === orderedID(199)));
+    assert.equal(refreshed.coverage.hasMore, false);
+    retention.bind({...snapshot, photos: refreshed.photos, current: () => unlocked && currentPhotos === refreshed.photos}, origin, () => origin);
+    choose(new Set());
+    assert.deepEqual(retention.idsFor(session, session.accountId, origin), [orderedID(199)], "An obsolete projection cannot overwrite current choices");
+    unlocked = false; lockVault(); retention.clear();
+    choose(new Set([orderedID(198)]));
+    assert.deepEqual(retention.idsFor(session, session.accountId, origin), []);
+    const other = await open(1); await clearAccount(other.accountId);
+    const otherItem = await fixture(other, objects);
+    const otherPhotos = (await cachedSync(other, undefined, {limit: 100})).photos;
+    const otherSnapshot: OwnedPhotoSnapshot = {accountId: other.accountId, token: other, photos: otherPhotos, current: () => true, preview: async () => new Blob()};
+    const otherChoose = retention.bind(otherSnapshot, origin, () => origin);
+    otherChoose(new Set([otherItem.manifest.photoId]));
+    choose(new Set([orderedID(199)]));
+    assert.deepEqual(retention.idsFor(session, session.accountId, origin), []);
+    assert.deepEqual(retention.idsFor(other, other.accountId, origin), [otherItem.manifest.photoId], "A stale read/callback cannot clear the new account choice");
+    origin = "https://other.test"; otherChoose(new Set());
+    assert.deepEqual(retention.idsFor(other, other.accountId, "https://public.test"), [], "An origin-changed getter cannot expose the captured context");
+    assert.deepEqual(retention.idsFor(other, other.accountId, origin), []);
+  } finally {
+    release?.(new Response("{}")); await reading?.catch(() => undefined);
+    retention.clear(); globalThis.fetch = oldFetch; lockVault(); for (const card of accounts.accounts) await clearAccount(card.accountId);
+  }
 });

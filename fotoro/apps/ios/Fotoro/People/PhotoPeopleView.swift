@@ -36,26 +36,68 @@ struct SavedPeopleSearchContext: Equatable {
 }
 
 struct SavedPeopleSearchSnapshot {
+  static let pageSize = 200
   let context: SavedPeopleSearchContext
   let choices: [PhotoPeopleSearchChoice]
+  let checkedPhotos: Int
+  let hasMore: Bool
   private let sources: [LocalPhoto]
+  private let after: String?
+  private let seen: Set<String>
+  private let cursors: Set<String>
   @MainActor func isCurrent(_ services: AppServices, checkingSources: Bool = true) -> Bool {
     SavedPeopleSearchContext.current(services) == context
       && (!checkingSources || SavedPhotoSelection.isCurrent(sources, lookup: services.consumerSavedPhoto))
   }
-  @MainActor static func load(_ services: AppServices) async throws -> Self? {
+  @MainActor static func load(_ services: AppServices, continuing previous: Self? = nil,
+    readPage: @Sendable (LibraryStore, String?, Int) async throws -> [LocalPhoto] = { catalog, after, limit in
+      let worker = Task.detached(priority: .userInitiated) {
+        try Task.checkCancellation()
+        return try catalog.photos(after: after, limit: limit)
+      }
+      return try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
+    }) async throws -> Self? {
     guard let context = SavedPeopleSearchContext.current(services) else { return nil }
-    // Read existing encrypted annotations only; no PhotoKit access or new face analysis.
-    let photos = try await services.searchCatalog("")
-    var choices: [String: PhotoPeopleSearchChoice] = [:]
-    var sources: [LocalPhoto] = []
-    for (offset, photo) in photos.enumerated() {
+    if let previous {
+      guard previous.isCurrent(services) else { throw CancellationError() }
+      guard previous.hasMore else { return previous }
+    }
+    let catalog = services.store, ledger = services.annotations.ledger
+    let bundle = try services.vault.requireBundle(), card = try services.session.requireCard(context.access.account)
+    // Only existing, locally available catalog/annotation data; no PhotoKit or network reads.
+    let photos = try await readPage(catalog, previous?.after, pageSize)
+    try Task.checkCancellation()
+    guard SavedPeopleSearchContext.current(services) == context else { throw CancellationError() }
+    guard photos.count <= pageSize else { throw FotoroError("Saved photo page is too large.") }
+    let next = photos.count == pageSize ? photos.last?.id : nil
+    var cursors = previous?.cursors ?? []
+    if let next, !cursors.insert(next).inserted { throw FotoroError("Saved photos changed. Reopen People to continue.") }
+    let alreadySeen = previous?.seen ?? []
+    let account = context.access.account
+    let worker = Task.detached(priority: .userInitiated) {
+      var values: [(LocalPhoto, [PhotoPersonAssignment])] = []
+      var seen = alreadySeen
+      for photo in photos where photo.manifest.ownerAccountId == account
+        && photo.manifest.photoId == photo.id && ["saved", "committed"].contains(photo.transferState) {
+        try Task.checkCancellation()
+        guard seen.insert(photo.id).inserted else { continue }
+        let annotation = try ledger.current(photo: photo, bundle: bundle, card: card)
+        values.append((photo, PhotoPeopleFacts.read(annotation?.facts ?? [], originalSha256: photo.metadata.originalSha256)))
+      }
+      return values
+    }
+    let values = try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
+    var choices = Dictionary(uniqueKeysWithValues: (previous?.choices ?? []).map { ($0.id, $0) })
+    var sources = previous?.sources ?? [], seen = previous?.seen ?? []
+    var checkedPhotos = previous?.checkedPhotos ?? 0
+    for (offset, value) in values.enumerated() {
       try Task.checkCancellation()
       guard SavedPeopleSearchContext.current(services) == context else { throw CancellationError() }
+      let (photo, assignments) = value
       guard let current = try services.consumerSavedPhoto(photo.id),
         current.metadata == photo.metadata, current.manifest == photo.manifest else { continue }
-      let assignments = PhotoPeopleFacts.read(services.annotation(current).facts ?? [],
-        originalSha256: current.metadata.originalSha256)
+      guard seen.insert(photo.id).inserted else { continue }
+      checkedPhotos += 1
       if !assignments.isEmpty { sources.append(current) }
       for assignment in assignments {
         guard let id = UUID(uuidString: assignment.p)?.uuidString.lowercased() else { continue }
@@ -65,16 +107,24 @@ struct SavedPeopleSearchSnapshot {
       if offset % 100 == 99 { await Task.yield() }
     }
     try Task.checkCancellation()
-    let snapshot = Self(context: context, choices: PhotoPeopleSearchChoice.merged(local: [], saved: Array(choices.values)), sources: sources)
+    let snapshot = Self(context: context, choices: PhotoPeopleSearchChoice.merged(local: [], saved: Array(choices.values)),
+      checkedPhotos: checkedPhotos, hasMore: next != nil, sources: sources, after: next, seen: seen, cursors: cursors)
     guard snapshot.isCurrent(services) else { throw CancellationError() }
     return snapshot
   }
+}
+private struct SavedPeopleLoadRequest: Equatable {
+  let context: SavedPeopleSearchContext?
+  let page: Int
 }
 struct PhotoPeopleView: View {
   let search: LocalSearchStore
   let services: AppServices?
   @State private var savedPeople: SavedPeopleSearchSnapshot?
   @State private var savedPeopleError: String?
+  @State private var savedPeopleLoading = false
+  @State private var savedPeoplePage = 0
+  @State private var savedLoadID: UUID?
   @State private var people: PhotoPeopleStore
   @State private var names: [String: String] = [:]
   @State private var selection: PeopleSearchSelection
@@ -153,6 +203,18 @@ struct PhotoPeopleView: View {
             }
           }
           if let savedPeopleError { Text(savedPeopleError).font(.footnote).foregroundStyle(.red) }
+          if let savedPeople, savedPeople.context == savedContext {
+            Text("Checked available labels in \(savedPeople.checkedPhotos) Saved photos on this device.")
+              .font(.caption).foregroundStyle(.secondary)
+            if savedPeople.hasMore {
+              Text("More Saved names may be available.").font(.caption).foregroundStyle(.secondary)
+            }
+          }
+          if savedPeopleLoading, savedPeople != nil { ProgressView("Loading saved names…") }
+          else if savedContext != nil, savedPeople?.hasMore == true || savedPeopleError != nil {
+            Button(savedPeopleError == nil ? "Load more Saved names" : "Retry loading Saved names") { savedPeoplePage += 1 }
+              .accessibilityIdentifier("people.search.saved.loadMore")
+          }
           Button("Find photos", systemImage: "magnifyingglass") {
             let current = searchChoices(checkingSources: true)
             guard PhotoPeopleSearchChoice.canFind(selection, choices: current) else { return }
@@ -207,16 +269,20 @@ struct PhotoPeopleView: View {
       }.navigationTitle("People").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         .task { people.refresh() }
-        .task(id: savedContext) {
-          savedPeople = nil; savedPeopleError = nil
-          guard let services, let expected = savedContext else { return }
+        .task(id: SavedPeopleLoadRequest(context: savedContext, page: savedPeoplePage)) {
+          let token = UUID(); savedLoadID = token
+          savedPeopleError = nil
+          if savedPeople?.context != savedContext { savedPeople = nil }
+          guard let services, let expected = savedContext else { savedPeopleLoading = false; return }
+          savedPeopleLoading = true
+          defer { if savedLoadID == token { savedPeopleLoading = false } }
           do {
-            let snapshot = try await SavedPeopleSearchSnapshot.load(services)
+            let snapshot = try await SavedPeopleSearchSnapshot.load(services, continuing: savedPeople)
             try Task.checkCancellation()
-            guard savedContext == expected else { return }
+            guard savedLoadID == token, savedContext == expected else { return }
             savedPeople = snapshot
           } catch is CancellationError { return }
-          catch { if savedContext == expected { savedPeopleError = error.localizedDescription } }
+          catch { if savedLoadID == token, savedContext == expected { savedPeopleError = error.localizedDescription } }
         }
         .onChange(of: search.query) { people.invalidateScope() }
         .onChange(of: search.peopleSelection) { people.invalidateScope() }
