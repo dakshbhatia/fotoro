@@ -926,8 +926,8 @@ data are excluded from repository documentation.
   Browser uploads stay explicit.
 - Search, picks, photo GPS, reviewed People and confirmed Timeline imports operate
   locally. General identity/retrieval quality and cross-device contact convergence
-  remain open. Album search is filename/date only; private evidence stays in the
-  account finder. Scene publication remains disabled for reader compatibility.
+  remain open. Private evidence stays in the account finder. Scene publication
+  remains disabled for reader compatibility.
   Local vectors and raw Timeline imports do not upload.
 - Full first-use/returning-account acceptance, two-person sharing completion,
   interruption/relaunch restoration, accessibility and realistic library performance
