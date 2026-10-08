@@ -10,7 +10,7 @@ Neither ID grants access to anything.
 
 - iPhone: open **Sync → Diagnostics → Copy diagnostics** or **Share diagnostics**.
   The local history persists across app launches, capped at 160 events and 64 KiB.
-  This control requires the diagnostics update; TestFlight 44 predates it.
+  This control is available in TestFlight 0.1.0 (45); build 44 predates it.
 - Browser: open Settings in Photos or Saved, then **Copy diagnostics**. If clipboard
   access fails, select the displayed report. History is in memory, capped at 128
   events; copy it before reloading or closing the tab.
@@ -18,7 +18,9 @@ Neither ID grants access to anything.
   --format json`. Reproduce the action, then stop the tail. Raw Wrangler envelopes
   can contain request URLs and capabilities; retain them privately, never paste
   the raw envelope into an issue or chat. The Fotoro console event itself excludes
-  those values. Historical logs require separate observability access.
+  those values. A connected banner does not prove a reproduced request arrived;
+  match its trace/request references, and reproduce again if the first event is
+  absent. Historical logs require separate observability access.
 
 Save the copied client JSON and private server tail locally, then from `fotoro/`:
 
@@ -69,10 +71,29 @@ actions and requests only. Client reports stay local until the user copies/share
 them; there is no automatic diagnostic upload. Counts and timings are bounded.
 New labels must be closed enums and new fields must pass the privacy tests.
 
-## October 8 readback before this update
+## October 8 released diagnostics
+
+PR 49 qualified head `072cfa99d0f864c87cb8ed4132623efcd4274398` completed all
+23 checks (eight success, 15 intentional skips). Guarded merge
+`601bd3fab6cc964996c4ee3b0db427e04361044f` has the same tree. Production Worker
+`850dabd0-5603-49a0-9330-28c98fede807` serves 100%. A deliberate read-only 401
+probe's client trace and response/body request reference matched one final live
+`api.error` event, including method, status, phase, class and duration. Earlier
+capture attempts missed their probe; the successful capture matched the second
+of two fresh probes. This proves that observed correlation, without assigning a
+cause to the earlier misses or claiming historical log access.
+
+Apple independently reports build 45 `VALID` and `IN_BETA_TESTING`, with the same
+existing internal group and tester. Production Settings renders Copy diagnostics
+and its copied notice without console errors. Local desktop/mobile checks and
+native export regressions pass. The native toolbar is visible in the Simulator;
+its menu handoff and physical installation still require device acceptance.
+
+## Readback before this update
 
 - Apple independently reports build 44 `VALID` and `IN_BETA_TESTING`.
-- Production still serves PR 48 Worker `ba359106-30ac-4ac2-8f6a-0523c523a95a` at 100%.
+- At that checkpoint, production served PR 48 Worker
+  `ba359106-30ac-4ac2-8f6a-0523c523a95a` at 100%.
 - The available Simulator ring contains 160 events from build 40, including three
   upload 409s. Those are older local observations, not current physical-phone proof.
 - The physical-phone diagnostic read failed because the device connection reset.

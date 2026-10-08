@@ -17,9 +17,29 @@ Hono Worker with D1 and private R2. The upstream Ente application is a reference
   require separate preview consent and explicitly configured provider/work limits;
   that route remains disabled by default.
 
-### October 7 PR 48 checkpoint
+### October 8 PR 49 checkpoint
 
-The active Worker is `ba359106-30ac-4ac2-8f6a-0523c523a95a` at 100%,
+The active Worker is `850dabd0-5603-49a0-9330-28c98fede807` at 100%, deployment
+`02649e71-2bbf-4fdc-8c48-27746ea9ee3f`. Qualified PR 49 head
+`072cfa99d0f864c87cb8ed4132623efcd4274398` completed all 23 checks: eight success
+and 15 intentional skips. Guarded merge `601bd3fab6cc964996c4ee3b0db427e04361044f`
+has the same tree. All 46 non-HTML assets and root/Photos/Saved HTML match the
+fresh fixture-free build. Seven auth/route/association checks and the service
+check pass. Startup passes all three cases at 440,288 bytes across nine chunks.
+All eight bindings and runtime are unchanged; no migrations or optional provider
+changes were needed. Keep PR 48's `ba359106-30ac-4ac2-8f6a-0523c523a95a` for rollback.
+
+The release adds bounded action diagnostics across native, web and API, including
+independent server request references, client trace IDs, timings, decoding outcomes
+and fixed waiting/failure reasons. Production verifies header/body reference
+agreement, trace CORS and one exact final live log correlation. Photos Settings
+shows Copy diagnostics and its copied notice; Saved account entry renders without
+console errors. See [diagnostics](diagnostics.md) for collection and evidence limits.
+These checks do not establish personal-account or installed-device acceptance.
+
+### Earlier October 7 PR 48 checkpoint
+
+The previously verified Worker was `ba359106-30ac-4ac2-8f6a-0523c523a95a` at 100%,
 deployment `2f0d0d56-0cce-4d76-83e4-d2aa52f4b9b8`. Qualified PR 48 head
 `f302ca09f30a2df7d65fe0d7d92e38870277ac20` completed all 23 checks; guarded
 merge `2d14f8ba456fed053d2a0bd829e646c2172b1abc` has the same tree. All 46
@@ -106,7 +126,22 @@ personal-account sync or original restoration on a physical phone.
 
 ## Native distribution
 
-The last verified TestFlight build is 44 (0.1.0), independently read `VALID` and
+The last verified TestFlight build is 45 (0.1.0), independently read `VALID` and
+`IN_BETA_TESTING` on October 8. The same existing internal group auto-linked it,
+with the same one tester and no group, membership or access changes. What to Test
+notes and their exact build linkage match independent readback. All 154 native
+inputs and three release tools remain unchanged from qualified merged source
+`601bd3fab6cc964996c4ee3b0db427e04361044f` through archive, distribution export
+and upload. Full encrypted archive and Organizer IPA audits pass. The existing
+cloud-managed distribution identity exported and uploaded after CLI export could
+not see the account or a local distribution certificate. Apple accepted the known
+pinned resource-stub dSYM warning; the main binary/static runtime and matching
+dSYM pass the audit. The same approved encryption and France-exclusion facts
+qualify documentation-exemption metadata; binary encryption is unchanged and no
+declaration was created. Build 45 adds the Sync diagnostics Copy/Share controls.
+Physical installation and installed-device acceptance remain open.
+
+The preceding verified TestFlight build is 44 (0.1.0), independently read `VALID` and
 `IN_BETA_TESTING` on October 7. The existing internal group shows Testing for 44,
 with the same one tester as 43. Only this build's assignment was added; tester
 membership is unchanged. What to Test notes and their build linkage match

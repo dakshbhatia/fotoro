@@ -19,12 +19,42 @@ Five offline-reader tests cover correlated failures, redaction, truncated window
 CLI envelopes and malformed records that must never synthesize success. Core checks
 and release-artifact regressions pass.
 
-The available older Simulator ring reports three upload conflicts on build 40;
-it does not describe the installed physical app. The phone connection reset before
-diagnostics could be read. A live production tail observed the intentional 401
-read-only probe; historical log-query access returned 403. Build 44 remains independently
-`VALID` and `IN_BETA_TESTING`, and the PR 48 production Worker remains at 100%
-at this pre-release checkpoint. See [diagnostics](diagnostics.md) for collection,
+Qualified PR 49 head `072cfa99d0f864c87cb8ed4132623efcd4274398` completed all 23
+checks: eight success and 15 intentional skips. Guarded merge
+`601bd3fab6cc964996c4ee3b0db427e04361044f` has the same tree. Hosted full native
+executes 448 tests: 442 pass and six permission/explicit PhotoKit opt-in cases skip.
+Preview executes 134: 129 pass and five such cases skip. Hosted web executes 543:
+542 pass and the pre-build startup budget skips; the fresh production build then
+passes all three startup cases. API passes 108, reader five and isolated exchange
+five; public visual inference, TypeScript and builds pass.
+
+Production Worker `850dabd0-5603-49a0-9330-28c98fede807` serves 100%, deployment
+`02649e71-2bbf-4fdc-8c48-27746ea9ee3f`. All 46 assets and root/Photos/Saved HTML
+match the fixture-free build. Seven route/auth/AASA checks, service checks,
+header/body request-reference agreement and trace CORS pass. A live read-only 401
+probe matches exactly one final server event by both IDs. Earlier live-tail attempts
+missed their probe; the successful capture matched the second of two fresh probes.
+Those misses have no established cause. Bindings/runtime/auth are unchanged, no
+migration was applied and optional inference stays disabled. PR 48 remains available
+for rollback. Production Copy diagnostics reports success; Saved account entry and
+local desktop/mobile layouts render without console errors. Clipboard bridge content
+readback and the native menu handoff are not independently qualified.
+
+Apple independently reports build 45 (0.1.0) `VALID` and `IN_BETA_TESTING`. Its exact
+testing notes/build linkage and unchanged one-group/one-tester membership are verified.
+All 154 native inputs and three release tools match the frozen source before/after
+archive, Organizer export and upload. Full encrypted archive and IPA audits pass.
+Apple accepted the known pinned resource-stub dSYM warning; main/static runtime and
+matching dSYM pass. Documentation-exemption metadata uses the unchanged approved
+encryption/France-exclusion facts; the binary declaration is unchanged. This qualifies
+availability, not physical installation or the full family journey.
+
+The older Simulator ring captured before qualification reports three upload
+conflicts on build 40; it does not describe the installed physical app. The phone connection reset before
+diagnostics could be read. Before this release, a live production tail observed an
+intentional 401 read-only probe; historical log-query access returned 403. The
+pre-release checkpoint was TestFlight 44 and production PR 48. See
+[diagnostics](diagnostics.md) for collection,
 safe summaries and the limits of this evidence. Real-device family acceptance
 remains open.
 
