@@ -7,6 +7,7 @@ import {useDialogFocus} from "../library/dialog-focus";
 import {PhotoLocation} from "./PhotoLocation";
 import type {CloudPhotoUnderstandingProps} from "../intelligence/CloudPhotoUnderstanding";
 import {KeptObservations} from "../intelligence/KeptObservations";
+import {CaptureMetadataInfo} from "../library/CaptureMetadataInfo";
 const CloudPhotoUnderstanding = lazy(() => import("../intelligence/CloudPhotoUnderstanding").then(module => ({default: module.CloudPhotoUnderstanding})));
 export function LocalViewer({photos, initial, resources, onClose, onLabels, onFavorite, onUse, onConfirm, onPin, meaning, onReselect, onSave, isSaved, intelligence}: {
   photos: LocalPhoto[]; initial: string; resources: LocalResources; onClose: () => void;
@@ -89,6 +90,7 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
       <p>{photo.filename}</p><p>{photo.width} × {photo.height}{(photo.originalSize ?? photo.file?.size) ? ` · ${((photo.originalSize ?? photo.file!.size) / 1024 / 1024).toFixed(1)} MB` : ""}</p>
       <p>{new Date(photo.date).toLocaleString()}</p><p>{photo.dateSource === "photos" ? "Date from Photos" : photo.dateSource === "exif" ? "Date from the photo" : "Capture date unavailable · date selected"}</p>
       <PhotoLocation location={photo.location} />
+      <CaptureMetadataInfo facts={photo.facts} originalSha256={photo.digest ?? ""} />
       <KeptObservations facts={photo.facts} photoId={photo.id} sourceRevision={photo.digest ?? photo.id} />
       {intelligence && <Suspense fallback={null}><CloudPhotoUnderstanding apiBase="" expectedAccountId={intelligence.expectedAccountId} photoId={photo.id} sourceRevision={photo.digest ?? photo.id} scopeKey={intelligence.scopeKey}
         current={() => alive.current && currentPhoto.current?.id === photo.id && currentPhoto.current.digest === photo.digest && photo.current?.() !== false && intelligence.current()}

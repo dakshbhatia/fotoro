@@ -19,6 +19,7 @@ actor PhotoImport {
   let crypto = CryptoAdapter()
   let sourceReader: (@Sendable (SelectedResource) async throws -> (Data, String, Bool))?
   private let sourceRevision: @Sendable (String) -> String?
+  private let sourceCaptureMetadata: @Sendable (String) -> PhotoCaptureMetadata?
   private let sourceLocation: @Sendable (String) -> PhotoLocationV1?
   var failures: [ImportFailure] = []
   var notices: [String] = []
@@ -26,7 +27,8 @@ actor PhotoImport {
     store: LibraryStore,
     sourceReader: (@Sendable (SelectedResource) async throws -> (Data, String, Bool))? = nil,
     sourceRevision: (@Sendable (String) -> String?)? = nil,
-    sourceLocation: (@Sendable (String) -> PhotoLocationV1?)? = nil
+    sourceLocation: (@Sendable (String) -> PhotoLocationV1?)? = nil,
+    sourceCaptureMetadata: (@Sendable (String) -> PhotoCaptureMetadata?)? = nil
   ) {
     self.store = store
     self.sourceReader = sourceReader
@@ -34,6 +36,11 @@ actor PhotoImport {
       PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject.map {
         RecentPhoto.sourceRevision($0)
       }
+    }
+    self.sourceCaptureMetadata = sourceCaptureMetadata ?? { id in
+      guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+        let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject, !asset.isHidden else { return nil }
+      return .photos(asset, includeDetails: true)
     }
     self.sourceLocation = sourceLocation ?? { id in
       guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
@@ -58,8 +65,11 @@ actor PhotoImport {
         let revision = selection.origin == .photos ? sourceRevision(selection.resourceIdentifier) : nil
         let (bytes, filename, edited) = try await read(selection)
         guard await valid() else { throw CancellationError() }
+        let capture = (selection.origin == .photos ? sourceCaptureMetadata(selection.resourceIdentifier) : nil)
+          .map { $0.merging(Self.capture(bytes)) } ?? Self.capture(bytes)
+        let currentDate = capture.items.first { $0.p == .photos && $0.k == "createdAt" }.flatMap { Wire.parseDate($0.v) }
         let photo = try await buildMedia(
-          bytes: bytes, filename: filename, accountId: accountId, bundle: bundle)
+          bytes: bytes, filename: filename, accountId: accountId, bundle: bundle, capturedAt: currentDate, permitOriginalCaptureDate: selection.origin != .photos)
         guard !Task.isCancelled, await valid() else {
           for url in Array(photo.staged.values)
             + [photo.originalURL, photo.thumbnailURL, photo.previewURL].compactMap({ $0 })
@@ -76,7 +86,7 @@ actor PhotoImport {
           }
           throw FotoroError("Photo changed during import. Try again.")
         }
-        try persistLocation(location, photo: photo, accountId: accountId, bundle: bundle, insertPhoto: true)
+        try persistLocation(location, photo: photo, accountId: accountId, bundle: bundle, insertPhoto: true, capture: capture)
         imported.append(photo)
         if edited {
           notices.append("Imported the unmodified original; Photos edits are not included.")
@@ -165,6 +175,7 @@ actor PhotoImport {
     try checkRevision()
     try Task.checkCancellation()
     let location = sourceLocation(source.id)
+    let capture = (sourceCaptureMetadata(source.id) ?? PhotoCaptureMetadata()).merging(Self.capture(bytes))
     try checkRevision()
     if let reused = try store.ownedOriginal(digest: bytes.digest, accountId: accountId) {
       var checkpoint = source
@@ -174,20 +185,20 @@ actor PhotoImport {
       if ["committed", "saved"].contains(reused.transferState) {
         checkpoint.phase = .committed
         try store.putBackupSource(checkpoint)
-        try persistLocation(location, photo: reused, accountId: accountId, bundle: bundle)
+        try persistLocation(location, photo: reused, accountId: accountId, bundle: bundle, capture: capture)
       } else {
-        try store.stageBackup(reused, source: checkpoint, location: location, bundle: bundle)
+        try store.stageBackup(reused, source: checkpoint, location: location, bundle: bundle, capture: capture)
       }
       return reused
     }
     let photo = try await buildMedia(
       bytes: bytes, filename: filename, accountId: accountId, bundle: bundle,
-      photoId: source.photoId, backup: true, capturedAt: capturedAt)
+      photoId: source.photoId, backup: true, capturedAt: capturedAt, permitOriginalCaptureDate: false)
     do {
       try checkRevision()
       try Task.checkCancellation()
       guard await valid() else { throw CancellationError() }
-      try store.stageBackup(photo, source: source, location: location, bundle: bundle)
+      try store.stageBackup(photo, source: source, location: location, bundle: bundle, capture: capture)
     } catch {
       for url in Array(photo.staged.values)
         + [photo.originalURL, photo.thumbnailURL, photo.previewURL].compactMap({ $0 })
@@ -202,18 +213,21 @@ actor PhotoImport {
     if let pair = try? CameraMedia.decodeLivePhoto(bytes) { return PhotoLocationV1.exif(pair.still.bytes) }
     return PhotoLocationV1.exif(bytes)
   }
+  static func capture(_ bytes: Data) -> PhotoCaptureMetadata {
+    .original((try? CameraMedia.decodeLivePhoto(bytes))?.still.bytes ?? bytes)
+  }
   private func persistLocation(_ location: PhotoLocationV1?, photo: LocalPhoto, accountId: String,
-    bundle: AccountBundle, insertPhoto: Bool = false) throws {
+    bundle: AccountBundle, insertPhoto: Bool = false, capture: PhotoCaptureMetadata? = nil) throws {
     // Keep GRDB's synchronous transaction here: intake fences stay current
     // through the original and encrypted location write without a suspension.
     try store.database.write { db in
       if insertPhoto { try store.put(photo, db: db) }
-      try AnnotationLedger(store: store, accountId: accountId).seedLocation(location, photo: photo, bundle: bundle, db: db)
+      try AnnotationLedger(store: store, accountId: accountId).seedMetadata(location: location, capture: capture, photo: photo, bundle: bundle, db: db)
     }
   }
   func buildMedia(
     bytes: Data, filename: String, accountId: String, bundle: AccountBundle,
-    photoId: String = Wire.id(), backup: Bool = false, capturedAt: Date? = nil
+    photoId: String = Wire.id(), backup: Bool = false, capturedAt: Date? = nil, permitOriginalCaptureDate: Bool = true
   ) async throws -> LocalPhoto {
     try CameraMedia.validateSize(bytes.count)
     let ext = URL(fileURLWithPath: filename).pathExtension.lowercased()
@@ -225,29 +239,29 @@ actor PhotoImport {
       }
       _ = try await CameraMedia.videoPoster(bytes: pair.motion.bytes, filename: pair.motion.filename)
       return try buildOriginal(bytes: bytes, filename: filename, accountId: accountId, bundle: bundle,
-        photoId: photoId, backup: backup, capturedAt: capturedAt,
+        photoId: photoId, backup: backup, capturedAt: capturedAt, permitOriginalCaptureDate: permitOriginalCaptureDate,
         mediaType: CameraMedia.liveType, posterBytes: pair.still.bytes)
     }
     if ["mov", "mp4", "m4v"].contains(ext) {
       let media = try CameraMedia.videoType(filename: filename, bytes: bytes)
       let poster = try await CameraMedia.videoPoster(bytes: bytes, filename: filename)
       return try buildOriginal(bytes: bytes, filename: filename, accountId: accountId, bundle: bundle,
-        photoId: photoId, backup: backup, capturedAt: capturedAt, mediaType: media, posterBytes: poster)
+        photoId: photoId, backup: backup, capturedAt: capturedAt, permitOriginalCaptureDate: permitOriginalCaptureDate, mediaType: media, posterBytes: poster)
     }
     return try build(bytes: bytes, filename: filename, accountId: accountId, bundle: bundle,
-      photoId: photoId, backup: backup, capturedAt: capturedAt)
+      photoId: photoId, backup: backup, capturedAt: capturedAt, permitOriginalCaptureDate: permitOriginalCaptureDate)
   }
   func build(
     bytes: Data, filename: String, accountId: String, bundle: AccountBundle,
-    photoId: String = Wire.id(), backup: Bool = false, capturedAt: Date? = nil
+    photoId: String = Wire.id(), backup: Bool = false, capturedAt: Date? = nil, permitOriginalCaptureDate: Bool = true
   ) throws -> LocalPhoto {
     try buildOriginal(bytes: bytes, filename: filename, accountId: accountId, bundle: bundle,
-      photoId: photoId, backup: backup, capturedAt: capturedAt,
+      photoId: photoId, backup: backup, capturedAt: capturedAt, permitOriginalCaptureDate: permitOriginalCaptureDate,
       mediaType: Self.validate(bytes, filename: filename))
   }
   private func buildOriginal(
     bytes: Data, filename: String, accountId: String, bundle: AccountBundle,
-    photoId: String, backup: Bool, capturedAt: Date?,
+    photoId: String, backup: Bool, capturedAt: Date?, permitOriginalCaptureDate: Bool,
     mediaType: String, posterBytes: Data? = nil
   ) throws -> LocalPhoto {
     let media = mediaType
@@ -269,16 +283,14 @@ actor PhotoImport {
     guard let source = CGImageSourceCreateWithData((posterBytes ?? bytes) as CFData, nil) else { throw FotoroError("Cannot decode original preview") }
     var sourceDate = capturedAt.map(Wire.date) ?? Wire.date()
     var provenance = capturedAt == nil ? "import" : "photos"
-    if let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
-      let exif = properties[kCGImagePropertyExifDictionary as String] as? [String: Any],
-      let originalDate = exif[kCGImagePropertyExifDateTimeOriginal as String] as? String
-    {
-      let formatter = DateFormatter()
-      formatter.locale = Locale(identifier: "en_US_POSIX")
-      formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
-      if let date = formatter.date(from: originalDate) {
-        sourceDate = Wire.date(date)
-        provenance = "exif"
+    if capturedAt == nil && permitOriginalCaptureDate {
+      let capture = Self.capture(posterBytes ?? bytes)
+      if let raw = capture.items.first(where: { $0.k == "originalDateTime" })?.v,
+        let offset = capture.items.first(where: { $0.k == "offsetTimeOriginal" })?.v {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.isLenient = false
+        formatter.dateFormat = "yyyy:MM:dd HH:mm:ss XXX"
+        if let date = formatter.date(from: raw + " " + offset) { sourceDate = Wire.date(date); provenance = "exif" }
       }
     }
     for kind in ["original", "thumbnail", "preview"] {

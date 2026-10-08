@@ -1088,7 +1088,12 @@ final class AutomaticPhotoSyncTests: XCTestCase {
       XCTAssertEqual(try search.record("asset")?.ocrStatus, status)
       XCTAssertEqual(services.backup.status.completed, 1)
       XCTAssertTrue(try services.annotations.ledger.pendingIDs().isEmpty)
-      XCTAssertTrue(PausedUploadProtocol.server.requests.filter { $0.path.hasSuffix("/annotations") }.isEmpty)
+      let photo = try XCTUnwrap(services.store.photos().first)
+      let capture = try XCTUnwrap(services.annotations.ledger.current(photo: photo, bundle: services.vault.requireBundle(), card: services.session.requireCard(XCTUnwrap(services.session.accountId))))
+      XCTAssertNotNil(PhotoCaptureFacts.read(capture.facts, originalSha256: photo.metadata.originalSha256))
+      XCTAssertNil(capture.ocr); XCTAssertNil(capture.labels); XCTAssertNil(capture.caption)
+      XCTAssertFalse(PausedUploadProtocol.server.requests.filter { $0.path.hasSuffix("/annotations") }.isEmpty,
+        "Observed capture metadata is a nonempty derived sidecar even before OCR completes")
     }
   }
 
@@ -1118,7 +1123,9 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     let photo = try XCTUnwrap(services.store.photos().first)
     let value = try XCTUnwrap(services.annotations.ledger.current(photo: photo, bundle: services.vault.requireBundle(), card: services.session.requireCard(XCTUnwrap(services.session.accountId))))
     XCTAssertNil(value.labels); XCTAssertNil(value.caption); XCTAssertNil(value.keywords)
-    XCTAssertNil(value.facts); XCTAssertNil(value.favorite)
+    XCTAssertNotNil(PhotoCaptureFacts.read(value.facts, originalSha256: photo.metadata.originalSha256))
+    XCTAssertEqual((value.facts ?? []).filter { !PhotoCaptureFacts.isReserved($0) }, [])
+    XCTAssertNil(value.favorite)
     XCTAssertEqual(value.ocr?.text, "public fixture receipt")
     XCTAssertNil(value.visual, "Reader-first rollout keeps scenes local until installed readers are qualified")
     XCTAssertEqual(try services.annotations.ledger.pendingIDs(), [photo.id], "Offline analysis remains in the same durable outbox")

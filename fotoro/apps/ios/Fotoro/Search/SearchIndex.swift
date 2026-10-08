@@ -218,13 +218,16 @@ final class SearchIndex: @unchecked Sendable {
       guard var record = try Row.fetchOne(db, sql: "SELECT value FROM searchRecords WHERE id=?", arguments: [photoID]).map(decode), record.revision == revision else { return false }
       if record.beforeSync == nil {
         record.beforeSync = LocalSearchFields(labels: record.labels, captions: record.captions, keywords: record.keywords, facts: record.facts, favorite: record.favorite, ocrText: record.ocrText, ocrConfidence: record.ocrConfidence, ocrStatus: record.ocrStatus,
-          visualLabels: record.visualLabels, visualStatus: record.visualStatus, visualProcessor: record.visualProcessor)
+          visualLabels: record.visualLabels, visualStatus: record.visualStatus, visualProcessor: record.visualProcessor, captureMetadata: record.captureMetadata)
       }
       record.syncedAccountId = accountId
+      let capture = PhotoCaptureFacts.read(value.facts, originalSha256: value.originalSha256)
+      let localCapture = record.beforeSync?.captureMetadata ?? PhotoCaptureMetadata()
+      record.captureMetadata = record.scope == "photos" ? (capture ?? PhotoCaptureMetadata()).merging(localCapture) : capture
       record.labels = value.labels ?? []
       record.captions = value.caption.map { [$0] } ?? []
       record.keywords = value.keywords ?? []
-      record.facts = PhotoLocationFacts.userFacts(value.facts).filter { !PhotoPeopleFacts.isReserved($0) } + (value.location?.searchTerms ?? [])
+      record.facts = PhotoLocationFacts.userFacts(value.facts).filter { !PhotoPeopleFacts.isReserved($0) && !PhotoCaptureFacts.isReserved($0) } + (value.location?.searchTerms ?? [])
       record.facts = try PhotoPeopleFacts.replacing(record.facts, with: PhotoPeopleFacts.read(value.facts ?? [], originalSha256: value.originalSha256), enforceWireLimits: false)
       record.favorite = value.favorite ?? record.favorite
       if let ocr = value.ocr, ocr.processor == record.processor {
@@ -250,6 +253,20 @@ final class SearchIndex: @unchecked Sendable {
     }
   }
   #endif
+  @discardableResult func applyCaptureMetadata(_ value: PhotoCaptureMetadata, photoID: String, revision: String, generation: UInt64? = nil) throws -> Bool {
+    try database.write { db in
+      guard acceptsGeneration(generation), var record = try Row.fetchOne(db, sql: "SELECT value FROM searchRecords WHERE id=?", arguments: [photoID]).map(decode),
+        record.scope == "photos", record.revision == revision else { return false }
+      let original = PhotoCaptureMetadata(items: value.items.filter { $0.p == .original && PhotoCaptureMetadata.validated($0) })
+      record.captureMetadata = (record.captureMetadata ?? PhotoCaptureMetadata()).merging(original)
+      if var before = record.beforeSync {
+        before.captureMetadata = (before.captureMetadata ?? PhotoCaptureMetadata()).merging(original)
+        record.beforeSync = before
+      }
+      try put(record, db: db)
+      return true
+    }
+  }
   func clearSyncedAnnotations() throws {
     try database.write { db in
       let records = try Row.fetchAll(db, sql: "SELECT value FROM searchRecords").map(decode)
@@ -257,10 +274,12 @@ final class SearchIndex: @unchecked Sendable {
         if let prior = record.beforeSync {
           record.labels = prior.labels; record.captions = prior.captions; record.keywords = prior.keywords
           record.facts = prior.facts; record.favorite = prior.favorite
+          record.captureMetadata = prior.captureMetadata
           record.ocrText = prior.ocrText; record.ocrConfidence = prior.ocrConfidence; record.ocrStatus = prior.ocrStatus
           record.visualLabels = prior.visualLabels ?? []; record.visualStatus = prior.visualStatus ?? .pending
           record.visualProcessor = prior.visualProcessor ?? SearchVisualPolicy.processor
         } else {
+          record.captureMetadata = nil
           record.labels = []; record.ocrText = ""; record.ocrConfidence = 0; record.ocrStatus = .pending
           record.visualLabels = []; record.visualStatus = .pending; record.visualProcessor = SearchVisualPolicy.processor
         }
@@ -372,6 +391,10 @@ final class SearchIndex: @unchecked Sendable {
             }
             #endif
             if old.revision == r.revision {
+              if let prior = old.captureMetadata {
+                let original = PhotoCaptureMetadata(items: prior.items.filter { $0.p == .original })
+                r.captureMetadata = (r.captureMetadata ?? PhotoCaptureMetadata()).merging(original)
+              }
               r.syncedAccountId = old.syncedAccountId
               r.beforeSync = old.beforeSync
             }
@@ -454,7 +477,9 @@ final class SearchIndex: @unchecked Sendable {
         try add(label.label, relation: .visual, evidence: 5, confidence: label.confidence)
       }
     }
+    if let metadata = r.captureMetadata { try add(metadata.searchText, relation: .metadata, evidence: 1, supplied: true) }
     for fact in r.facts {
+      if PhotoCaptureFacts.isReserved(fact) { continue }
       #if !FOTORO_LOCAL_PREVIEW
       if PhotoPeopleFacts.isReserved(fact) || fact.hasPrefix("fotoro.ai.v1:") { continue }
       #endif

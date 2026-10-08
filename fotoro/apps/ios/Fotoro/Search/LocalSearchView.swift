@@ -2,6 +2,7 @@
 import NukeUI
 #endif
 import SwiftUI
+import Photos
 
 struct LocalSearchView: View {
   let search: LocalSearchStore
@@ -288,21 +289,57 @@ struct LocalPhotoDetails: View {
   let search: LocalSearchStore?
   @State private var labels: [String] = []
   @State private var label = ""
+  @State private var capture: PhotoCaptureMetadata?
+  @State private var readingCapture = false
+  @State private var originalUnavailable = false
+  @State private var sourceIsCurrent = false
   @FocusState private var labelFocused: Bool
   @Environment(\.dismiss) private var dismiss
+  @Environment(\.scenePhase) private var scenePhase
+  private var readIdentity: PhotoMetadataReadIdentity {
+    PhotoMetadataReadIdentity(id: photo.id, revision: photo.sourceRevision,
+      generation: search?.libraryGeneration ?? 0, active: scenePhase == .active)
+  }
   var body: some View {
     NavigationStack {
       List {
+        if sourceIsCurrent {
+        Section {
         if let date = photo.capturedAt {
           Text(date.formatted(date: .complete, time: .shortened))
         } else {
           Text("Capture date unavailable").foregroundStyle(.secondary)
         }
         if photo.isFavorite { Label("Favorite", systemImage: "heart.fill") }
-        if photo.isScreenshot { Label("Screenshot", systemImage: "rectangle.on.rectangle") }
-        if photo.isLivePhoto { Label("Live Photo · still preview", systemImage: "livephoto") }
-        if let location = photo.location { Label(location, systemImage: "location") }
+        }
+        if let location = photo.photoLocation {
+          Section("Location") {
+            Text(location.displayName).textSelection(.enabled)
+            if location.name != nil { Text(location.coordinates).foregroundStyle(.secondary) }
+            Text(location.provenance).font(.caption).foregroundStyle(.secondary)
+          }
+        }
+        if let capture { PhotoMetadataSections(metadata: capture) }
+        if readingCapture { ProgressView("Reading capture details…") }
+        if originalUnavailable {
+          Text("More camera details may be in the original. Info uses files already on this device.")
+            .font(.footnote).foregroundStyle(.secondary)
+        }
         if let search {
+          #if !FOTORO_LOCAL_PREVIEW
+          if let record = try? search.consumerRecord(photo.id), record.revision == photo.sourceRevision {
+            let named = PhotoPeopleFacts.read(record.facts, enforceWireLimits: false)
+            let detected = search.detectedFaceCount(for: photo)
+            if !named.isEmpty || detected != nil {
+              Section("People") {
+                if let detected { LabeledContent("Faces detected", value: String(detected)) }
+                ForEach(Array(Set(named.map(\.n))).sorted(), id: \.self) { Text($0) }
+                Text("Faces detected on this iPhone; names you reviewed. Detection can miss people.")
+                  .font(.caption).foregroundStyle(.secondary)
+              }
+            }
+          }
+          #endif
           if let record = try? search.consumerRecord(photo.id), !record.visualLabels.isEmpty {
             Section("Inferred scenes") {
               ForEach(record.visualLabels, id: \.identifier) { evidence in
@@ -360,6 +397,10 @@ struct LocalPhotoDetails: View {
             }
           }
         }
+        } else {
+          ContentUnavailableView("Photo unavailable", systemImage: "photo",
+            description: Text("This photo changed or is no longer permitted. Open it again from Photos."))
+        }
       }.navigationTitle("Photo details").navigationBarTitleDisplayMode(.inline).toolbar {
         ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
       }
@@ -367,6 +408,43 @@ struct LocalPhotoDetails: View {
       .onChange(of: search?.canEditLabels(photo.id) ?? false) {
         labels = search?.labels(photo.id) ?? []
       }
+      .task(id: readIdentity) { await readCapture() }
       .presentationDetents([.medium, .large])
   }
+
+  private func readCapture() async {
+    capture = nil; originalUnavailable = false; readingCapture = false; sourceIsCurrent = false
+    guard scenePhase == .active,
+      RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+      let asset = PHAsset.fetchAssets(withLocalIdentifiers: [photo.id], options: nil).firstObject,
+      !asset.isHidden, RecentPhoto.sourceRevision(asset) == photo.sourceRevision else { return }
+    sourceIsCurrent = true
+    capture = PhotoCaptureMetadata.photos(asset, includeDetails: true)
+    if let record = try? search?.consumerRecord(photo.id), record.revision == photo.sourceRevision,
+      let cached = record.captureMetadata, cached.items.contains(where: { $0.p == .original }) {
+      capture = capture?.merging(PhotoCaptureMetadata(items: cached.items.filter { $0.p == .original }))
+      return
+    }
+    readingCapture = true
+    let result = await PhotoCaptureMetadata.loadLocalOriginal(photo: photo)
+    guard !Task.isCancelled else { return }
+    readingCapture = false
+    switch result {
+    case .available(let metadata):
+      capture = metadata
+      do { try search?.recordCaptureMetadata(metadata, for: photo) }
+      catch is CancellationError {}
+      catch { search?.error = error.localizedDescription }
+    case .unavailable: originalUnavailable = true
+    case .changed: capture = nil; sourceIsCurrent = false
+    case .cancelled: capture = nil
+    }
+  }
+}
+
+private struct PhotoMetadataReadIdentity: Equatable {
+  var id: String
+  var revision: String
+  var generation: UInt64
+  var active: Bool
 }

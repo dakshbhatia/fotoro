@@ -414,6 +414,13 @@ struct SavedPhotoDetails: View {
   @FocusState private var labelFocused: Bool
   @Environment(\.dismiss) private var dismiss
   private var labels: [String] { services.annotation(photo).labels ?? [] }
+  private var capture: PhotoCaptureMetadata? {
+    PhotoCaptureFacts.read(services.annotation(photo).facts, originalSha256: photo.metadata.originalSha256)
+  }
+  private var namedPeople: [String] {
+    Array(Set(PhotoPeopleFacts.read(services.annotation(photo).facts ?? [],
+      originalSha256: photo.metadata.originalSha256).map(\.n))).sorted()
+  }
   private var canAddLabel: Bool {
     !SearchNormalization.text(label).isEmpty && label.unicodeScalars.count <= 120 && labels.count < 64
   }
@@ -424,8 +431,19 @@ struct SavedPhotoDetails: View {
           Text(photo.metadata.filename)
           if let date = Wire.parseDate(photo.metadata.sourceDate) {
             Text(date.formatted(date: .complete, time: .shortened)).foregroundStyle(.secondary)
+            Text(photo.metadata.dateSource == "photos" ? "Date from Photos" :
+              photo.metadata.dateSource == "exif" ? "Date from the original" : "Date imported · capture date unavailable")
+              .font(.caption).foregroundStyle(.secondary)
           }
           if services.annotation(photo).favorite == true { Label("Favorite", systemImage: "heart.fill") }
+        }
+        if let capture { PhotoMetadataSections(metadata: capture) }
+        if !namedPeople.isEmpty {
+          Section("People you’ve named") {
+            ForEach(namedPeople, id: \.self) { Text($0) }
+            Text("Names you reviewed in Fotoro. A photo may include other people.")
+              .font(.caption).foregroundStyle(.secondary)
+          }
         }
         Section("Labels") {
           ForEach(Array(labels.enumerated()), id: \.offset) { index, value in

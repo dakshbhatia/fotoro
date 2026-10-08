@@ -5,6 +5,96 @@ work; [product](product.md) owns the intended experience. Earlier measurements a
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
 
+## October 7 production PR 47 and TestFlight 43 checkpoint
+
+Qualified head `332891661eb37927a55ff2101ae0cb0668281dd8` passed all 23 checks
+or intentional skips. Guarded merge `a76bfa1cab4c7ab4392be8b6a0eddec28ae2e53a`
+has the same tree. Worker `5314d5c1-6d9b-4081-9a6b-f27649fd0123` serves 100%,
+deployment `910a7e1e-e2f7-4d19-8984-4bbd1bb72985`, with all 45 non-HTML asset
+digests and root/Photos/Saved HTML matching a fresh fixture-free build. Seven route,
+auth and Apple association checks plus the service check pass. All eight bindings
+are preserved, no migration is needed, and inference remains disabled. PR 46's
+Worker remains available for rollback. Actual production browser Settings shows
+Browse the last 30 days checked; entry has no console errors.
+
+Exact-head CI passes 98 API tests, five isolated encrypted exchanges and the actual
+public-image visual inference smoke. Web executes 532 tests: 531 pass and the
+built startup budget skips because the CI check runs before the emitted build.
+The subsequent fresh built startup check passes all three tests at 430,339 bytes.
+Full native executes 419 tests: 414 pass and five Photos-permission-dependent
+Simulator interactions skip. Preview executes 114: 110 pass and four such
+interactions skip. The local native run below covers those permission-dependent
+flows; neither run establishes physical-device acceptance.
+
+Build 43 (0.1.0) is independently read `VALID` and `IN_BETA_TESTING`, with
+approved notes and exact build linkage verified. The same existing internal group
+auto-linked it; the same one tester remains, with no membership or permission
+change. All 147 native inputs and release tools match qualified source and the
+immutable archive. The archive and Organizer-exported IPA pass full release audits
+before upload. Apple accepted the pinned resource-stub dSYM warning while the main
+binary/static runtime and dSYM pairing pass. Documentation-exemption metadata uses
+the same known encryption and France-exclusion facts as build 42; the binary is
+unchanged and no declaration was created. This establishes availability, not a
+physical installation of 43 or installed-device acceptance.
+
+## October 7 iOS capture metadata and Places checks
+
+The full local Simulator suite executes 444 tests: 443 pass and one existing
+Vision classifier case skips. New checks cover source-bound capture facts,
+original-header parsing, edited Photos dates, automatic derived retry separation,
+local metadata surviving remote annotation hydration, Info presentation, detected
+face-count evidence and adaptive Places geometry.
+
+The real PhotoKit integration imports three clearly labeled synthetic JPEGs,
+then edits Photos dates and changes or removes Photos GPS in a separate
+transaction. The selected Info loader reads their local original headers while
+keeping current Photos dates/GPS authoritative. Original GPS does not restore a
+location removed from Photos. The rendered full app shows the two retained GPS
+locations, the 30-day Places scope and the observed Info date/location/dimensions.
+The real PhotoKit test requires explicit local QA opt-in and reuses a dedicated
+three-photo synthetic album. It does not delete Photos or albums automatically,
+which avoids interactive OS prompts in unattended tests. These fixtures are
+Simulator-only and are not production sample intake.
+
+Nine geometry cases include 20,000 locations represented in at most 80 markers,
+late-indexed sources beyond the first browse page, dateline wrapping, stable
+clusters, coincident locations, calendar boundaries and invalid coordinates.
+The whole-library index keeps core dimensions, dates and media features. The
+extra Photos format/added-date/adjustment fields are read for selected Info and
+authorized intake. iOS 27 filename scanning consumes prefetched extended metadata
+before a resource fallback; iOS 26 retains the existing fallback.
+
+Map source snapshots and async projection are fenced by current permission,
+revision, index generation, account access and scene phase. Opening a map result
+constructs one photo page. These policy and Simulator checks do not qualify
+physical-device frame pacing, iCloud behavior, VoiceOver or resolved city names.
+
+## October 7 capture-metadata web reader checks
+
+Local checks on the metadata/Places source pass nine contract tests (five existing
+wire cases and four capture-reader cases), all 535 web tests, TypeScript and the
+web build. The fresh emitted startup check passes all three cases at 436,081
+static JavaScript bytes across nine chunks. These checks do not change the
+production PR 47 or TestFlight 43 checkpoint above or qualify a new native build.
+
+Capture details use account-private, original-digest-bound `fotoro.capture.v1:`
+facts inside the unchanged `PhotoAnnotationsV1` format. A group contains one
+source marker and at most 32 typed items, within the existing 64-fact and
+240-Unicode-character-per-fact limits. `PhotoMetadataV1`, the wire schema and
+generated validators are unchanged. The frozen older annotation validator accepts
+the native sorted-key vectors. Installed build 43 can retain these facts, but its
+older search can tokenize an unknown capture marker until that reader is updated.
+
+New web Info and search hide raw capture markers, including malformed and future
+versions. Only validated camera/lens and media terms enter search; duplicate,
+malformed or source-mismatched groups supply no capture evidence. Info keeps
+Photos and original-file provenance separate, formats units and known media
+types, and does not infer a timezone for an original EXIF time or derive GPS or
+People counts. Regression checks exercise encrypted label/favorite edits retaining
+native capture facts, unknown future facts and the exact existing caption, without
+putting their plaintext in the account cache. These are public-fixture functional
+checks, not personal-photo processing, recognition quality or device acceptance.
+
 ## October 7 metadata-first processing checks
 
 Local and Saved browsing now default to the last 30 days. A single chip switches
@@ -51,8 +141,8 @@ reviewed and named; 320- and 390-pixel views keep one dialog and usable controls
 This does not measure general identity accuracy or first-load performance for a
 20,000-photo encrypted catalog. The full catalog still hydrates before client
 metadata filtering, and physical iCloud, permissions, background work and memory
-acceptance remain open. These changes are not yet the production/build-42 checkpoint
-below; their release must pass exact-head CI and separate artifact audits.
+acceptance remain open. Production and build 43 qualification are recorded above;
+build 42 below is the preceding checkpoint.
 
 ## October 7 production and TestFlight 42 checkpoint
 

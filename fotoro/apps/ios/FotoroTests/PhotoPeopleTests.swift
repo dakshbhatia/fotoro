@@ -7,6 +7,22 @@ import XCTest
 @testable import Fotoro
 
 final class PhotoPeopleTests: XCTestCase {
+  func testFaceCountDistinguishesNotAnalyzedZeroAndChangedSources() throws {
+    let index = try SearchIndex()
+    let record = SearchRecord(id: "photo", revision: "current")
+    try index.replacePermitted([record]); try index.setWorkGeneration(1); try index.setPeopleEnabled(true)
+    XCTAssertNil(try index.detectedFaceCount(photoID: record.id, revision: record.revision))
+    XCTAssertTrue(try index.applyPeople([], photoID: record.id, revision: record.revision, generation: 1))
+    XCTAssertEqual(try index.detectedFaceCount(photoID: record.id, revision: record.revision), 0)
+    XCTAssertTrue(try index.applyPeople([PhotoFaceEmbedding(box: [0,0,100,100], vector: vector())],
+      photoID: record.id, revision: record.revision, generation: 1))
+    XCTAssertEqual(try index.detectedFaceCount(photoID: record.id, revision: record.revision), 1)
+    try index.put(SearchRecord(id: record.id, revision: "edited"))
+    XCTAssertNil(try index.detectedFaceCount(photoID: record.id, revision: record.revision))
+    XCTAssertNil(try index.detectedFaceCount(photoID: record.id, revision: "edited"))
+    try index.setPeopleEnabled(false)
+    XCTAssertNil(try index.detectedFaceCount(photoID: record.id, revision: "edited"))
+  }
   func testPeopleMetadataIntakeDefaultsToThirtyDaysFiltersBeforeInferenceAndCanTargetOlderDates() throws {
     let index = try SearchIndex(), now = Date(timeIntervalSince1970: 1_800_000_000)
     var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!

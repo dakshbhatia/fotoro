@@ -396,17 +396,19 @@ struct SearchAnalysisProgress: Equatable, Sendable {
       r.capturedAt = asset.creationDate
       r.favorite = asset.isFavorite
       r.burstID = asset.burstIdentifier
-      r.filename =
-        PHAssetResource.assetResources(for: asset).first(where: { $0.type == .photo || $0.type == .video })?
-        .originalFilename ?? ""
+      r.captureMetadata = photo.captureMetadata
       #if compiler(>=6.4)
         if #available(iOS 27, *) {
           let extended = asset.extendedMetadata
-          r.filename = extended.originalFilename ?? r.filename
+          r.filename = extended.originalFilename ?? ""
           r.captions = extended.caption.map { [$0] } ?? []
           r.keywords = extended.keywords
         }
       #endif
+      if r.filename.isEmpty {
+        r.filename = PHAssetResource.assetResources(for: asset)
+          .first(where: { $0.type == .photo || $0.type == .video })?.originalFilename ?? ""
+      }
       if photo.isScreenshot { r.facts.append("screenshot") }
       if photo.isLivePhoto { r.facts.append("live photo") }
       if asset.mediaType == .video { r.facts.append("video") }
@@ -414,6 +416,14 @@ struct SearchAnalysisProgress: Equatable, Sendable {
       records.append(r)
     }
     return Scan(photos: photos, records: records)
+  }
+  func recordCaptureMetadata(_ metadata: PhotoCaptureMetadata, for photo: RecentPhoto) throws {
+    guard ready, let index, assets[photo.id]?.sourceRevision == photo.sourceRevision,
+      RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+      let asset = PHAsset.fetchAssets(withLocalIdentifiers: [photo.id], options: nil).firstObject,
+      !asset.isHidden, RecentPhoto.sourceRevision(asset) == photo.sourceRevision else { throw CancellationError() }
+    try index.applyCaptureMetadata(metadata, photoID: photo.id, revision: photo.sourceRevision, generation: work.generation)
+    updateQuery(query)
   }
   private func loadPreview(_ asset: PHAsset) async -> SearchPreview? {
     let options = PHImageRequestOptions()

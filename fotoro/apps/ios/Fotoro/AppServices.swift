@@ -1434,7 +1434,8 @@ enum ReviewedPhotosBackupPolicy {
           let confirmed = PhotoPeopleFacts.read(value?.facts ?? [], originalSha256: photo.metadata.originalSha256)
           guard people.matches(Set(confirmed.map(\.p))) else { continue }
           let scenes = SearchVisualPolicy.validated(value?.visual).map(\.label)
-          let terms = [photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + PhotoLocationFacts.userFacts(value?.facts).filter { !PhotoPeopleFacts.isReserved($0) && !$0.hasPrefix("fotoro.ai.v1:") } + confirmed.map(\.n) + (value?.location?.searchTerms ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""]
+          let captureTerms = PhotoCaptureFacts.read(value?.facts, originalSha256: photo.metadata.originalSha256)?.searchText ?? ""
+          let terms = [captureTerms, photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + PhotoLocationFacts.userFacts(value?.facts).filter { !PhotoPeopleFacts.isReserved($0) && !$0.hasPrefix("fotoro.ai.v1:") && !PhotoCaptureFacts.isReserved($0) } + confirmed.map(\.n) + (value?.location?.searchTerms ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""]
           if parsed.text.isEmpty || terms.contains(where: { SearchNormalization.text($0).contains(parsed.text) })
             || scenes.contains(where: { SearchNormalization.text($0).hasPrefix(parsed.text) }) { matches.append(photo) }
         }
@@ -1456,7 +1457,7 @@ enum ReviewedPhotosBackupPolicy {
     guard !query.isEmpty else { return true }
     let value = photoAnnotations[photo.id]
     return SearchVisualPolicy.validated(value?.visual).contains { SearchNormalization.text($0.label).hasPrefix(SearchNormalization.text(query)) }
-      || ([photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + PhotoLocationFacts.userFacts(value?.facts).filter { !PhotoPeopleFacts.isReserved($0) && !$0.hasPrefix("fotoro.ai.v1:") } + PhotoPeopleFacts.read(value?.facts ?? [], originalSha256: photo.metadata.originalSha256).map(\.n) + (value?.location?.searchTerms ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""])
+      || ([PhotoCaptureFacts.read(value?.facts, originalSha256: photo.metadata.originalSha256)?.searchText ?? "", photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + PhotoLocationFacts.userFacts(value?.facts).filter { !PhotoPeopleFacts.isReserved($0) && !$0.hasPrefix("fotoro.ai.v1:") && !PhotoCaptureFacts.isReserved($0) } + PhotoPeopleFacts.read(value?.facts ?? [], originalSha256: photo.metadata.originalSha256).map(\.n) + (value?.location?.searchTerms ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""])
       .contains { $0.localizedCaseInsensitiveContains(query) }
   }
   private func automaticDerivedSourceCurrent(_ source: BackupSource) -> Bool {
@@ -1512,7 +1513,8 @@ enum ReviewedPhotosBackupPolicy {
       // Keep the encrypted facts exact instead of recapturing that search overlay.
       if record.syncedAccountId == nil, !record.facts.isEmpty {
         let location = value.location
-        value.facts = PhotoLocationFacts.userFacts(record.facts).filter { !PhotoPeopleFacts.isReserved($0) }
+        let captureFacts = (value.facts ?? []).filter(PhotoCaptureFacts.isReserved)
+        value.facts = PhotoLocationFacts.userFacts(record.facts).filter { !PhotoPeopleFacts.isReserved($0) && !PhotoCaptureFacts.isReserved($0) } + captureFacts
         if let location { try value.setLocation(location) }
       }
       if labelsChanged {

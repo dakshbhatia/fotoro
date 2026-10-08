@@ -5,6 +5,35 @@ import XCTest
 @testable import Fotoro
 
 final class AnnotationTests: XCTestCase {
+  func testRemoteCaptureOverlayKeepsCurrentLocalOriginalHeadersUntilSourceChanges() throws {
+    let index = try SearchIndex()
+    var record = SearchRecord(id: "asset", revision: "current")
+    record.captureMetadata = PhotoCaptureMetadata(items: [
+      .init(k: "createdAt", p: .photos, v: "2026-10-07T12:00:00.000Z"),
+      .init(k: "cameraModel", p: .original, v: "Current local camera")])
+    try index.replacePermitted([record])
+    let digest = Data("saved original".utf8).digest
+    var value = PhotoAnnotationsV1(photoId: Wire.id(), originalSha256: digest, labels: ["Remote label"])
+    XCTAssertTrue(try index.applyAnnotations(value, photoID: record.id, revision: record.revision, accountId: "owner"))
+    XCTAssertEqual(try index.search("Current local camera").leading?.id, record.id)
+    value.facts = PhotoCaptureMetadata(items: [
+      .init(k: "createdAt", p: .photos, v: "2000-01-01T00:00:00.000Z"),
+      .init(k: "cameraModel", p: .original, v: "Older remote camera"),
+      .init(k: "lensModel", p: .original, v: "Saved lens")]).facts(originalSha256: digest)
+    XCTAssertTrue(try index.applyAnnotations(value, photoID: record.id, revision: record.revision, accountId: "owner"))
+    let merged = try XCTUnwrap(index.record(record.id)?.captureMetadata)
+    XCTAssertEqual(merged.items.first { $0.k == "createdAt" }?.v, "2026-10-07T12:00:00.000Z")
+    XCTAssertEqual(merged.items.first { $0.k == "cameraModel" }?.v, "Current local camera")
+    XCTAssertEqual(merged.items.first { $0.k == "lensModel" }?.v, "Saved lens")
+    XCTAssertEqual(try index.record(record.id)?.labels, ["Remote label"])
+    try index.clearSyncedAnnotations()
+    XCTAssertEqual(try index.record(record.id)?.captureMetadata, record.captureMetadata)
+    XCTAssertTrue(try index.search("Saved lens").results.isEmpty)
+    record.revision = "changed"; record.captureMetadata = nil
+    try index.replacePermitted([record])
+    XCTAssertFalse(try index.applyAnnotations(value, photoID: record.id, revision: "current", accountId: "owner"))
+    XCTAssertTrue(try index.search("Current local camera").results.isEmpty)
+  }
   @MainActor func testHydratedMaximumFactAnnotationSurvivesDeviceLabelEditWithoutRecapturingLocationSearchTerms() async throws {
     let (_, photo, bundle, card) = try context()
     let secret = try fixture(FixtureAccounts.self, "accounts").testSecrets[0]
@@ -213,6 +242,30 @@ final class AnnotationTests: XCTestCase {
     let manual = try XCTUnwrap(ledger.prepare(photo: photo, bundle: bundle))
     XCTAssertNil(try ledger.prepare(photo: photo, bundle: bundle, card: card, derivedOnly: true), "Frozen manual payload cannot be retried by automatic sync")
     XCTAssertEqual(try ledger.prepare(photo: photo, bundle: bundle), manual)
+  }
+  func testCaptureDerivedMetadataRetryNeverPublishesOwnerFactsOrCameraCorrections() throws {
+    let (store, photo, bundle, card) = try context()
+    let ledger = AnnotationLedger(store: store, accountId: card.accountId)
+    let capture = PhotoCaptureMetadata(items: [.init(k: "cameraModel", p: .original, v: "Fixture camera")])
+    var value = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256,
+      facts: capture.facts(originalSha256: photo.metadata.originalSha256))
+    try ledger.edit(value, photo: photo, bundle: bundle, card: card)
+    let first = try XCTUnwrap(ledger.prepare(photo: photo, bundle: bundle, card: card, derivedOnly: true))
+    value.facts?.append("Owner’s exact unpublished fact")
+    try ledger.edit(value, photo: photo, bundle: bundle, card: card)
+    XCTAssertEqual(try ledger.prepare(photo: photo, bundle: bundle, card: card, derivedOnly: true), first,
+      "Frozen derived retry stays exact while a newer owner edit waits")
+    try ledger.receive(first, photo: photo, bundle: bundle, card: card)
+    XCTAssertNil(try ledger.prepare(photo: photo, bundle: bundle, card: card, derivedOnly: true),
+      "Capture enrichment cannot turn an owner fact into an automatic update")
+    let manual = try XCTUnwrap(ledger.prepare(photo: photo, bundle: bundle))
+    XCTAssertNil(try ledger.prepare(photo: photo, bundle: bundle, card: card, derivedOnly: true))
+    try ledger.receive(manual, photo: photo, bundle: bundle, card: card)
+    let changed = PhotoCaptureMetadata(items: [.init(k: "cameraModel", p: .original, v: "Owner camera correction")])
+    value.facts = ["Owner’s exact unpublished fact"] + changed.facts(originalSha256: photo.metadata.originalSha256)
+    try ledger.edit(value, photo: photo, bundle: bundle, card: card)
+    XCTAssertNil(try ledger.prepare(photo: photo, bundle: bundle, card: card, derivedOnly: true),
+      "Changing existing capture fields requires an explicit owner save")
   }
   @MainActor func testDerivedOnlySenderIgnoresMixedDraftAndDoesNotRepeatAcknowledgedEmptyAnalysis() async throws {
     let (store, photo, bundle, card) = try context()

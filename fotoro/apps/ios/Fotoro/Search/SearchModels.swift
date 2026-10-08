@@ -25,6 +25,7 @@ struct LocalSearchFields: Codable, Sendable {
   var visualLabels: [SearchVisualLabel]?
   var visualStatus: SearchVisualStatus?
   var visualProcessor: String?
+  var captureMetadata: PhotoCaptureMetadata? = nil
 }
 struct SearchRecord: Codable, Sendable {
   var version = 1
@@ -50,6 +51,7 @@ struct SearchRecord: Codable, Sendable {
   var previewAvailable = false
   var originalAvailable = true
   var burstID: String?
+  var captureMetadata: PhotoCaptureMetadata?
   var syncedAccountId: String?
   var beforeSync: LocalSearchFields?
 }
@@ -60,7 +62,7 @@ extension SearchRecord {
     case version, id, scope, revision, filename, capturedAt, favorite, currentMoment
     case labels, captions, keywords, facts, ocrText, ocrConfidence, ocrStatus, processor
     case visualLabels, visualStatus, visualProcessor, previewAvailable, originalAvailable
-    case burstID, syncedAccountId, beforeSync
+    case burstID, captureMetadata, syncedAccountId, beforeSync
   }
   init(from decoder: Decoder) throws {
     let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -86,6 +88,7 @@ extension SearchRecord {
     previewAvailable = try values.decodeIfPresent(Bool.self, forKey: .previewAvailable) ?? previewAvailable
     originalAvailable = try values.decodeIfPresent(Bool.self, forKey: .originalAvailable) ?? originalAvailable
     burstID = try values.decodeIfPresent(String.self, forKey: .burstID)
+    captureMetadata = try values.decodeIfPresent(PhotoCaptureMetadata.self, forKey: .captureMetadata)
     syncedAccountId = try values.decodeIfPresent(String.self, forKey: .syncedAccountId)
     beforeSync = try values.decodeIfPresent(LocalSearchFields.self, forKey: .beforeSync)
   }
@@ -192,9 +195,9 @@ struct PhotoAnalysisScope: Equatable, Sendable {
     }
     let requested = words(text)
     guard let last = requested.last else { return true }
-    let facts = record.facts.filter { !$0.hasPrefix("fotoro:people-source:v1:") && !$0.hasPrefix("fotoro:person:v1:") && !$0.hasPrefix("fotoro.ai.v1:") }
+    let facts = record.facts.filter { !$0.hasPrefix("fotoro:people-source:v1:") && !$0.hasPrefix("fotoro:person:v1:") && !$0.hasPrefix("fotoro.ai.v1:") && !PhotoCaptureFacts.isReserved($0) }
     let source = record.labels + record.captions + record.keywords + facts + [record.filename,
-      record.favorite ? "favorite" : "", record.capturedAt?.formatted(date: .complete, time: .omitted) ?? ""]
+      record.captureMetadata?.searchText ?? "", record.favorite ? "favorite" : "", record.capturedAt?.formatted(date: .complete, time: .omitted) ?? ""]
     let tokens = Set(words(source.joined(separator: " ")))
     return requested.dropLast().allSatisfy { tokens.contains($0) }
       && tokens.contains { last.contains(where: \.isLetter) ? $0.hasPrefix(last) : $0 == last }

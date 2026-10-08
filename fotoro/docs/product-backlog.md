@@ -22,13 +22,13 @@ Cloudflare proposals become tasks here only when a consumer need admits them.
 | 1 | First photos and access: local photos before an account; password/passkey entry continues a chosen Save, Sync or invitation. A matching returning browser can sign in and unlock in one PRF request; fresh-browser discovery retains its second request. | Fresh iPhone → allow Photos → browse → opt in once → open the same Saved photos in Safari. Qualify real PRF passkeys on iPhone, Safari and Mac; Sign in with Apple is not implemented. |
 | 2 | Sync intake: durable last-30-days initial scope, explicit expansion, Pause, retry and account/source fences. Existing 10-day anchors retain their exclusions until explicit expansion. | Physical background, relaunch, offline reconnect, changed permissions and edited/iCloud assets. Already scheduled ciphertext may finish in the background; new preparation needs the open, unlocked app. |
 | 3 | Original recovery: encrypted JPEG/PNG/HEIC, supported video and complete Live Photo resources, bounded staging and byte verification. | Cross-device physical restore after an interrupted transfer and relaunch. Keep the 50 MiB logical-original limit until larger-original recovery is qualified. |
-| 4 | Photo evidence: OCR, EXIF dates, observed locations, supplied labels and current revision bindings. Cheap metadata scopes heavy work before previews; native startup processes one bounded recent batch. | Personal-library OCR/metadata coverage, correction and location acceptance. No invented date or location for missing evidence. |
+| 4 | Photo evidence: OCR, EXIF/Photos dates, observed locations, supplied labels and current revision bindings. iOS Info groups observed photo/camera fields, keeps capture details collapsed and shows provenance. Cheap metadata scopes heavy work before previews; native startup processes one bounded recent batch. | Personal-library OCR/metadata coverage, correction and location acceptance. No invented date or location for missing evidence; old Saved originals do not acquire trusted capture details retroactively. |
 | 5 | People: opt-in local pinned models, reviewed names, merge, separate and rejection on both clients. Date/source/Any/Everyone filters precede pixels and ranking limits; explicit batches contain at most 500 pending photos and reuse current results. | Held-out identity quality and cross-device reviewed-name acceptance. Isolated browser inference passes; physical Safari still needs qualification. Separate portraits or similar places must not imply shared attendance. |
 | 6 | Search and Picks: text/date/label search, local visual retrieval, diverse suggestions and explicit incomplete-coverage feedback. Browsing starts at 30 days; all photos and historical date queries stay reachable. | Held-out retrieval and shortlist quality against human choices; cold/warm time to the intended photo. Suggestions cannot silently select, save or delete originals. |
 | 7 | Photo delivery and return: thumbnails/previews, owned URL leases, retry, cancellation and bounded native zoom/pan. Browser refresh reuses verified unchanged metadata; an atomic 100 MiB cache ledger avoids ciphertext rescans. | Large-library frame pacing, memory, battery, motion playback and interruptions on supported phones. Full encrypted-catalog first-load hydration remains. Missing derivatives cannot silently download originals. |
-| 8 | Organization and accessibility: optional sortable photo tables, observed columns, keyboard navigation across virtualized rows and responsive selection/viewers. | VoiceOver, Dynamic Type, physical gestures and broader hardware/browser acceptance. |
+| 8 | Organization and accessibility: optional sortable photo tables, observed columns, keyboard navigation across virtualized rows and responsive selection/viewers. iOS Places adapts geographic clusters to zoom, counts available location metadata in the viewport and opens individual photos. | VoiceOver, Dynamic Type, physical gestures and broader hardware/browser acceptance. Geographic clusters are not resolved city identities; physical-device map performance remains unverified. |
 | 9 | Share and receive: system original sharing, private invitations, recipient-owned Save and live albums with explicit acceptance and later chosen owned-photo additions. Three-person browser acceptance/contribution/end and Safari original download pass. | Physical share-sheet completion and the family journey on installed devices; first-contact friction and contact convergence. |
-| 10 | Optional understanding and operation: preview consent → Gemini review → Keep, encrypted facts, account fences, request caps and audited native artifacts. PR 46 production and internal TestFlight 42 availability are verified; API errors expose bounded operation categories. | Deliberate provider activation and live cost/behavior evidence; physical TestFlight installation. Qualify the separate 30-day processing release. Measure upload/commit failures, quota pressure, orphan allocation and restore behavior without private content in logs. |
+| 10 | Optional understanding and operation: preview consent → Gemini review → Keep, encrypted facts, account fences, request caps and audited native artifacts. PR 47 production and internal TestFlight 43 availability are verified; API errors expose bounded operation categories. | Deliberate provider activation and live cost/behavior evidence; physical TestFlight installation. Measure upload/commit failures, quota pressure, orphan allocation and restore behavior without private content in logs. |
 
 These gates qualify the current implementation. Test coverage and a public
 fixture exchange do not prove a personal-library journey or a better product.
@@ -60,6 +60,18 @@ Scene publication remains disabled for older-reader compatibility. Personal
 retrieval quality, physical media/background acceptance and large-library
 performance remain open.
 
+iOS Info separates observed media/camera details from user labels and reviewed
+Fotoro People names. Apple People names are not available through this feature.
+Original-file capture details remain bound to the source digest; missing details
+on older Saved photos do not trigger an original download or become trusted by
+inference. iOS Places starts with capture dates from the last 30 days, with explicit
+older/all-date expansion. It uses the permitted device metadata index and loaded
+Saved pages, with at most 80 map markers and a nearby photo list. Counts cover
+available metadata, not an unloaded Saved catalog. Coordinate clustering works
+without reverse geocoding; supplied place names and Apple basemap labels do not
+turn a geographic cluster into a verified city or landmark. Physical-device frame
+pacing, memory and large-library acceptance remain open.
+
 Live albums have a fixed owner-plus-invitee roster of at most 12, at most 1,000
 photos and a 50-accepted-active-albums allowance per account. Pending invitations
 do not consume that allowance. Each invited member explicitly accepts before
@@ -89,10 +101,9 @@ server sign-in; failed visual checks no longer claim a successful empty result.
 Production browser-reader interruption/reopen tests now cover five media kinds,
 while physical qualification remains open. Full-app release audits now
 gate archive/export/upload. These changes and their local regression evidence
-are recorded in [verification](verification.md). PR 46 production and build 42
-availability through the existing internal TestFlight group are verified. The
-30-day metadata-first follow-up needs its own release qualification; physical
-installation and acceptance remain open.
+are recorded in [verification](verification.md). PR 47 production and build 43
+availability through the existing internal TestFlight group are verified, including
+the 30-day metadata-first follow-up. Physical installation and acceptance remain open.
 
 ## Admit later work only with a complete job
 

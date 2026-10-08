@@ -17,17 +17,20 @@ Hono Worker with D1 and private R2. The upstream Ente application is a reference
   require separate preview consent and explicitly configured provider/work limits;
   that route remains disabled by default.
 
-The last verified active Worker is `8777a26f-ac52-4f7a-95ae-f2bdd94a188e`
-at 100%, deployment `8bbe9d36-e5ea-43ff-9e8e-f46ac0468526` (2026-10-07,
-merged [PR 46](https://github.com/dakshbhatia/fotoro/pull/46)). All 45 non-HTML
+The last verified active Worker is `5314d5c1-6d9b-4081-9a6b-f27649fd0123`
+at 100%, deployment `910a7e1e-e2f7-4d19-8984-4bbd1bb72985` (2026-10-07,
+merged [PR 47](https://github.com/dakshbhatia/fotoro/pull/47)). All 45 non-HTML
 asset digests match the qualified build; Photos and Saved HTML routes match the
-built HTML. All 23 checks passed or skipped for qualified head `8311a8639801ad99fe80c42449bab41b1b7f1eab`;
-the guarded merge `a092848097c07ec304835c3c09ada27c17cdf705` has the same tree.
+built HTML. All 23 checks passed or skipped for qualified head `332891661eb37927a55ff2101ae0cb0668281dd8`;
+the guarded merge `a76bfa1cab4c7ab4392be8b6a0eddec28ae2e53a` has the same tree.
+The 30-day default and metadata-first processing are deployed. A fresh build passes
+all three startup checks at 430,339 bytes. An immediate asset propagation mismatch
+cleared on bounded readback before release qualification. No new migration was needed.
 Migrations 0007 and 0008 are applied, with schema and ledger read back and no
 pending migrations. A private staging copy removed 0007's leading comment after
 Wrangler rejected its semicolon; the qualified SQL statements were unchanged.
 Production bindings were preserved, and optional inference remains disabled.
-The preceding qualified version is `2ca15bc9-614b-4b21-a115-f3748c60bbc4`.
+The preceding qualified version is PR 46's `8777a26f-ac52-4f7a-95ae-f2bdd94a188e`.
 Read the current deployment back before
 changing traffic; preserve the preceding qualified version for rollback.
 
@@ -83,7 +86,22 @@ personal-account sync or original restoration on a physical phone.
 
 ## Native distribution
 
-The last verified TestFlight build is 42 (0.1.0), processed `VALID` and
+The last verified TestFlight build is 43 (0.1.0), independently read `VALID` and
+`IN_BETA_TESTING` on October 7. Its existing internal group auto-linked it, with
+the same one tester and no assignment or permission mutation. What to Test notes
+and their exact build linkage match independent readback. Source
+`332891661eb37927a55ff2101ae0cb0668281dd8` passed exact-head CI; all 147 native
+inputs and release tools match the immutable archive and audited Organizer IPA.
+The existing cloud-managed distribution identity exported and uploaded it after
+CLI export again could not see the Xcode account or a local distribution certificate.
+Apple accepted the pinned resource-stub dSYM warning; main binary/static runtime
+and dSYM pairing pass. The same documented standard outside-OS encryption and
+approved France exclusion qualify documentation-exemption metadata; binary
+encryption settings are unchanged. No new declaration was created. Physical
+installation, passkeys, original restoration and background acceptance remain open.
+Build 43 contains the 30-day and metadata-first processing changes from PR 47.
+
+The preceding verified TestFlight build is 42 (0.1.0), processed `VALID` and
 `IN_BETA_TESTING` in the same existing internal group as build 41 on October 7.
 The existing tester has access; no testers or permissions were added. Its archive
 and distribution IPA were audited before upload. Physical installation and

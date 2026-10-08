@@ -4,6 +4,7 @@ import {validatedVisualLabels} from "@fotoro/contracts/visual";
 import {isLocationFact, validatedPhotoLocation} from "@fotoro/contracts/location";
 import {isCloudObservationFact, observationSearchText} from "@fotoro/contracts/intelligence";
 import {isPeopleFact, peopleNames} from "@fotoro/contracts/people";
+import {isCaptureMetadataFact, captureMetadataSearchText} from "@fotoro/contracts/capture-metadata";
 
 export interface SearchOcr {
   photoID: string;
@@ -136,7 +137,11 @@ export class PhotoSearchIndex {
         add(keyword, "keyword", photo.id);
         for (const word of words(keyword)) add(word, "keyword", photo.id);
       }
-      for (const fact of photo.facts ?? []) if (!isLocationFact(fact) && !isCloudObservationFact(fact) && !isPeopleFact(fact)) { add(fact, "fact", photo.id); phraseSource(fact, "fact", photo.id); }
+      for (const fact of photo.facts ?? []) if (!isLocationFact(fact) && !isCloudObservationFact(fact) && !isPeopleFact(fact) && !isCaptureMetadataFact(fact)) { add(fact, "fact", photo.id); phraseSource(fact, "fact", photo.id); }
+      for (const term of captureMetadataSearchText(photo, photo.digest ?? "")) {
+        add(term, "fact", photo.id); phraseSource(term, "fact", photo.id);
+        for (const word of words(term)) add(word, "fact", photo.id);
+      }
       for (const fact of observationSearchText(photo, {photoId: photo.observationPhotoId ?? photo.id, sourceRevision: photo.digest ?? photo.id})) {
         add(fact, "observation", photo.id); phraseSource(fact, "observation", photo.id);
         for (const word of words(fact)) add(word, "observation", photo.id);
