@@ -17,7 +17,26 @@ Hono Worker with D1 and private R2. The upstream Ente application is a reference
   require separate preview consent and explicitly configured provider/work limits;
   that route remains disabled by default.
 
-### October 8 PR 49 checkpoint
+### October 8 PR 50 checkpoint
+
+The active Worker is `a4f88a21-b35f-4def-a07e-5c57543b8464` at 100%, deployment
+`26db1d26-de0a-4e28-b882-905684a1295f`. Qualified PR 50 head
+`7dfe96d90830f3adee5533b6aea19e2d1be5ff96` completed all 23 checks: seven success
+and 16 intentional skips. Guarded merge `ef4d85d91f974904d50759057859b57474328da9`
+has the same tree. All 46 non-HTML assets and root/Photos/Saved HTML match the
+fresh fixture-free build. Seven auth/route/association checks, the service check
+and all three startup checks pass; startup is 440,288 bytes across nine chunks.
+All eight bindings and runtime are unchanged; no migrations or optional provider
+changes were needed. Keep PR 49's `850dabd0-5603-49a0-9330-28c98fede807` for rollback.
+
+Browser Choose photos preserves its incoming album, while choosing from a different
+active album clears the old invitation. Public desktop QA verifies explicit
+contributions and fresh-session readback without console warnings/errors. Native
+source adds reviewed Saved People choices, correction invalidation and independent
+invitation opening, plus transient-commit retry and cancelled-catalog status fixes.
+These checks do not establish physical family acceptance.
+
+### Earlier October 8 PR 49 checkpoint
 
 The active Worker is `850dabd0-5603-49a0-9330-28c98fede807` at 100%, deployment
 `02649e71-2bbf-4fdc-8c48-27746ea9ee3f`. Qualified PR 49 head
@@ -126,7 +145,23 @@ personal-account sync or original restoration on a physical phone.
 
 ## Native distribution
 
-The last verified TestFlight build is 45 (0.1.0), independently read `VALID` and
+The last verified TestFlight build is 46 (0.1.0), independently read `VALID` and
+`IN_BETA_TESTING` on October 8. The same existing internal group auto-linked it,
+with the same one tester and no group, membership or access changes. What to Test
+notes and their exact build linkage match independent readback. All 154 native
+inputs and three release tools match qualified merged source
+`ef4d85d91f974904d50759057859b57474328da9` through archive, Organizer distribution
+export and upload. Full encrypted archive and IPA audits pass. The existing
+cloud-managed identity exported and uploaded after CLI export could not see the
+account or a local distribution certificate. Apple accepted the same pinned ONNX
+resource-stub dSYM warning as 45; the main binary/static runtime and matching dSYM
+pass the audit. The same approved encryption and France-exclusion facts qualify
+the documentation-exemption metadata; binary encryption is unchanged and no
+declaration was created. Build 46 adds reviewed Saved People choices, correction
+invalidation, album-selection continuity and native retry/cancellation fixes.
+Physical installation and installed-device acceptance remain open.
+
+The preceding verified TestFlight build is 45 (0.1.0), independently read `VALID` and
 `IN_BETA_TESTING` on October 8. The same existing internal group auto-linked it,
 with the same one tester and no group, membership or access changes. What to Test
 notes and their exact build linkage match independent readback. All 154 native

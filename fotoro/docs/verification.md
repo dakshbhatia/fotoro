@@ -42,9 +42,36 @@ readback after reopening. Explicit Close removes the incoming URL intent. Consol
 warnings/errors are empty. The attempted viewport override did not change the
 reported desktop dimensions, so this run adds no mobile-layout qualification.
 Physical family acceptance, large-catalog hydration/performance and the native
-album picker's first-1,000 Saved-photo limit remain open. Production and TestFlight
-availability below still describe the preceding diagnostic release until a new
-release checkpoint is recorded.
+album picker's first-1,000 Saved-photo limit remain open. A second public desktop
+flow verifies incoming A → All albums → B → Choose photos clears A, preserves
+the chosen set, and contributes to B only after explicit Add. A fresh sign-in
+reads the contribution back; console warnings/errors are empty.
+
+Qualified PR 50 head `7dfe96d90830f3adee5533b6aea19e2d1be5ff96` completed all 23
+checks: seven success and 16 intentional skips. Guarded merge
+`ef4d85d91f974904d50759057859b57474328da9` has the same tree. Hosted full native
+executes 457: 451 pass and six permission/explicit metadata-QA cases skip.
+Preview executes 134: 129 pass and five such cases skip. Hosted web executes 548:
+547 pass and the pre-build startup budget skips; the fresh production build then
+passes all three startup cases. API passes 108 and isolated exchange five. All
+seven new native family/cancellation regressions pass in the hosted log.
+
+Production Worker `a4f88a21-b35f-4def-a07e-5c57543b8464` serves 100%, deployment
+`26db1d26-de0a-4e28-b882-905684a1295f`. All 46 assets and root/Photos/Saved HTML
+match the fixture-free build. Seven route/auth/AASA checks, the service check,
+startup and production Photos/Saved entry pass without console warnings/errors.
+Bindings/runtime/auth are unchanged; no migration or optional inference activation
+was needed. PR 49 remains available for rollback.
+
+Build 46 has full encrypted archive and Organizer distribution IPA audits, with
+all 154 native inputs and three release tools matching the frozen merged source
+through upload. Apple accepted the same pinned ONNX resource-stub dSYM warning as
+45; the main binary/static runtime and matching dSYM pass the audit. Apple
+independently reports `VALID` and `IN_BETA_TESTING`. Exact testing notes/build linkage
+and the unchanged one-group/one-tester membership are verified. The same approved
+encryption/France-exclusion basis qualifies the documentation-exemption metadata;
+binary encryption is unchanged and no declaration was created. Physical installation
+and installed-device acceptance remain open.
 
 ## October 8 action diagnostics qualification
 

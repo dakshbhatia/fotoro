@@ -28,7 +28,7 @@ Cloudflare proposals become tasks here only when a consumer need admits them.
 | 7 | Photo delivery and return: thumbnails/previews, owned URL leases, retry, cancellation and bounded native zoom/pan. Browser refresh reuses verified unchanged metadata; an atomic 100 MiB cache ledger avoids ciphertext rescans. | Large-library frame pacing, memory, battery, motion playback and interruptions on supported phones. Full encrypted-catalog first-load hydration remains. Missing derivatives cannot silently download originals. |
 | 8 | Organization and accessibility: optional sortable photo tables, observed columns, keyboard navigation across virtualized rows and responsive selection/viewers. iOS Places adapts geographic clusters to zoom, counts available location metadata in the viewport and opens individual photos. | VoiceOver, Dynamic Type, physical gestures and broader hardware/browser acceptance. Geographic clusters are not resolved city identities; physical-device map performance remains unverified. |
 | 9 | Share and receive: system original sharing, private invitations, recipient-owned Save and live albums with explicit acceptance and later chosen owned-photo additions. Browser Choose photos retains its invited album; native invitations open independently of unrelated selections. Three-person browser acceptance/contribution/end and Safari original download pass. | Physical share-sheet completion and the family journey on installed devices; first-contact friction, contact convergence and paging beyond the newest 1,000 Saved photos in the native album picker. |
-| 10 | Optional understanding and operation: preview consent → Gemini review → Keep, encrypted facts, account fences, request caps and audited native artifacts. PR 49 production and internal TestFlight 45 availability are verified. [Bounded diagnostics](diagnostics.md) link client actions to server requests, timings and fixed failure/waiting reasons, with local Copy/Share controls. | Deliberate provider activation and live cost/behavior evidence; physical TestFlight installation. Measure upload/commit failures, quota pressure, orphan allocation and restore behavior without private content in logs. |
+| 10 | Optional understanding and operation: preview consent → Gemini review → Keep, encrypted facts, account fences, request caps and audited native artifacts. PR 50 production and internal TestFlight 46 availability are verified. [Bounded diagnostics](diagnostics.md) link client actions to server requests, timings and fixed failure/waiting reasons, with local Copy/Share controls. | Deliberate provider activation and live cost/behavior evidence; physical TestFlight installation. Measure upload/commit failures, quota pressure, orphan allocation and restore behavior without private content in logs. |
 
 These gates qualify the current implementation. Test coverage and a public
 fixture exchange do not prove a personal-library journey or a better product.
@@ -101,10 +101,10 @@ server sign-in; failed visual checks no longer claim a successful empty result.
 Production browser-reader interruption/reopen tests now cover five media kinds,
 while physical qualification remains open. Full-app release audits now
 gate archive/export/upload. These changes and their local regression evidence
-are recorded in [verification](verification.md). PR 49 production and build 45
-availability through the existing internal TestFlight group are verified, including
-metadata-first processing and action diagnostics. Physical installation and acceptance
-remain open.
+are recorded in [verification](verification.md). PR 50 production and build 46
+availability through the existing internal TestFlight group are verified. Build 46
+adds reviewed Saved People choices, album-selection continuity and retry/cancellation
+fixes. Physical installation and acceptance remain open.
 
 ## Admit later work only with a complete job
 
