@@ -176,6 +176,9 @@ struct SearchAnalysisProgress: Equatable, Sendable {
     if token == work.generation { indexing = false }
   }
   private func runRefresh(token: UInt64, retryFailedOCR: Bool) async {
+    #if !FOTORO_LOCAL_PREVIEW
+    let diagnosticStarted = ProcessInfo.processInfo.systemUptime
+    #endif
     do {
       let localIndex: SearchIndex
       if let index {
@@ -197,6 +200,11 @@ struct SearchAnalysisProgress: Equatable, Sendable {
         try localIndex.replacePermitted(scanned.records, generation: token)
       }.value
       guard applied, token == work.generation, !Task.isCancelled else { return }
+      #if !FOTORO_LOCAL_PREVIEW
+      NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .metadata, outcome: .completed,
+        elapsed: ProcessInfo.processInfo.systemUptime - diagnosticStarted,
+        completed: scanned.records.count, trace: NativeDiagnosticTrace(.metadata), step: .scan))
+      #endif
       completePermittedSnapshotRefresh(photos: scanned.photos)
       try onSnapshotReady?()
       await runScopedAnalysis(scope: PhotoAnalysisScope(query: query, people: peopleSelection), after: nil, retryFailed: retryFailedOCR, token: token, explicit: false)
@@ -249,6 +257,12 @@ struct SearchAnalysisProgress: Equatable, Sendable {
       analysisRemaining = max(0, batch.0 - pending.count)
       guard !pending.isEmpty else { return }
       var attempted: [SearchRecord] = []
+      #if !FOTORO_LOCAL_PREVIEW
+      let diagnosticTrace = NativeDiagnosticTrace(.search)
+      let diagnosticStarted = ProcessInfo.processInfo.systemUptime
+      NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .search, outcome: .started,
+        pending: batch.0, trace: diagnosticTrace, step: .analysis))
+      #endif
       defer {
         if analysisIsCurrent(scope, token: token, explicit: explicit) {
           analysisRemaining += pending.count - attempted.count
@@ -263,6 +277,15 @@ struct SearchAnalysisProgress: Equatable, Sendable {
             else { analysisUnavailableIDs.remove(record.id) }
           }
         }
+        #if !FOTORO_LOCAL_PREVIEW
+        let cancelled = Task.isCancelled || !analysisIsCurrent(scope, token: token, explicit: explicit) || attempted.count < pending.count
+        let incomplete = attempted.filter { analysisUnavailableIDs.contains($0.id) }.count
+        NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .search, outcome: cancelled ? .cancelled : .completed,
+          elapsed: ProcessInfo.processInfo.systemUptime - diagnosticStarted,
+          completed: cancelled ? nil : max(0, attempted.count - incomplete), pending: max(0, batch.0 - attempted.count) + incomplete,
+          attempted: attempted.count, trace: diagnosticTrace, step: .analysis,
+          reason: cancelled ? .contextChanged : (incomplete > 0 ? .sourceUnavailable : nil)))
+        #endif
       }
       #if !FOTORO_LOCAL_PREVIEW
         let semanticPreparation = Task { try? await PhotoSemanticProcessor.shared.prepare() }
@@ -564,6 +587,10 @@ struct SearchAnalysisProgress: Equatable, Sendable {
         displayedID = next.leading?.id
         priorPermittedResponse = nil
         searching = false
+        #if !FOTORO_LOCAL_PREVIEW
+        NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .search, outcome: .completed,
+          completed: next.results.count, trace: NativeDiagnosticTrace(.search), step: .catalog))
+        #endif
       } catch {
         guard generation == queryGeneration, !Task.isCancelled else { return }
         searching = false

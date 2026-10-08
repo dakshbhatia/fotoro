@@ -1,3 +1,4 @@
+import {diagnose, type DiagnosticContext} from "../diagnostics";
 import { startAuthentication, startRegistration } from "@simplewebauthn/browser";
 import type {
   VaultV1,
@@ -17,7 +18,7 @@ import {
   signPayload,
   utf8,
 } from "@fotoro/crypto";
-import { api, ApiError, ApiTransportError, setFixtureAccount, fixtureMode } from "../exchange/api";
+import { api, scopedApi, ApiError, ApiTransportError, setFixtureAccount, fixtureMode } from "../exchange/api";
 import { get, put, clearAccount } from "../exchange/cache";
 import {
   configureVault,
@@ -91,7 +92,9 @@ function publicResponse(response: any) {
     },
   };
 }
-export async function passkeyLogin(current = () => true, {discoverAccount = false}: {discoverAccount?: boolean} = {}) {
+export function passkeyLogin(current = () => true, options: {discoverAccount?: boolean} = {}) {return diagnose("auth", context => passkeyLoginAction(context, current, options), "passkey");}
+async function passkeyLoginAction(diagnostic: DiagnosticContext, current: () => boolean, {discoverAccount = false}: {discoverAccount?: boolean}) {
+  const api = scopedApi(diagnostic);
   cancelBrowserSignOut();
   setFixtureAccount();
   let generation = vaultGeneration();
@@ -197,7 +200,9 @@ export async function passkeyLogin(current = () => true, {discoverAccount = fals
     throw error;
   } finally {output?.fill(0);}
 }
-export async function addPasskey(current = () => true): Promise<boolean> {
+export function addPasskey(current = () => true): Promise<boolean> {return diagnose("auth", context => addPasskeyAction(context, current), "passkey");}
+async function addPasskeyAction(diagnostic: DiagnosticContext, current: () => boolean): Promise<boolean> {
+  const api = scopedApi(diagnostic);
   const session = requireVault(), generation = vaultGeneration(), origin = location.origin;
   const checkCurrent = () => {
     if (!current() || vaultGeneration() !== generation || location.origin !== origin || requireVault() !== session)
@@ -259,7 +264,9 @@ export async function addPasskey(current = () => true): Promise<boolean> {
     return true;
   } finally {output?.fill(0);}
 }
-export async function recover(code: string, current = () => true) {
+export function recover(code: string, current = () => true) {return diagnose("auth", context => recoverAction(context, code, current), "password");}
+async function recoverAction(diagnostic: DiagnosticContext, code: string, current: () => boolean) {
+  const api = scopedApi(diagnostic);
   cancelBrowserSignOut();
   let opened: ReturnType<typeof requireVault> | undefined;
   let generation = vaultGeneration();
@@ -361,7 +368,9 @@ let enrollment:
     }
   | undefined;
 let enrollmentEpoch = 0;
-export async function prepareEnrollment() {
+export function prepareEnrollment() {return diagnose("auth", context => prepareEnrollmentAction(context), "enrollment");}
+async function prepareEnrollmentAction(diagnostic: DiagnosticContext) {
+  const api = scopedApi(diagnostic);
   cancelBrowserSignOut();
   cancelEnrollment();
   const epoch = enrollmentEpoch;
@@ -425,14 +434,16 @@ export function cancelEnrollment() {
     enrollment = undefined;
   }
 }
-export async function completeEnrollment() {
+export function completeEnrollment() {return diagnose("auth", context => completeEnrollmentAction(context), "enrollment");}
+async function completeEnrollmentAction(diagnostic: DiagnosticContext) {
+  const api = scopedApi(diagnostic);
   if (!enrollment) throw new Error("ACCOUNT_SETUP_NOT_STARTED");
   const e = enrollment;
   const current = () => enrollment === e;
   // A lost response may have committed this identity and consumed its signup challenge.
   if (e.verificationAttempted) {
     try {
-      await recover(formatFotoroPassword(e.card.accountId, e.recovery), current);
+      await recoverAction(diagnostic, formatFotoroPassword(e.card.accountId, e.recovery), current);
       if (current()) cancelEnrollment();
       return;
     } catch (error) {

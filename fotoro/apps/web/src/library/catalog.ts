@@ -1,3 +1,4 @@
+import {type DiagnosticContext} from "../diagnostics";
 import {acceptedPhotoManifestKind, LIVE_PHOTO_TYPE} from "@fotoro/contracts/camera-media";
 import type {
   PhotoManifestV1,
@@ -19,7 +20,7 @@ import {
   verifyPayload,
   decodeLivePhoto,
 } from "@fotoro/crypto";
-import { api, fetchCipher } from "../exchange/api";
+import { api, scopedApi, fetchCipher } from "../exchange/api";
 import { get, all, atomic, cacheCipher } from "../exchange/cache";
 import { requireVault, encryptPrivate, decryptPrivate, type UnlockedVault } from "../vault/vault";
 import {assertVault} from "../vault/scope";
@@ -53,7 +54,7 @@ export async function collect(parts: AsyncIterable<Uint8Array>) {
   }
   return bytes;
 }
-export async function representation(rep: RepresentationV1, key: Uint8Array, signal?: AbortSignal) {
+export async function representation(rep: RepresentationV1, key: Uint8Array, signal?: AbortSignal, diagnostic?: DiagnosticContext) {
   await ready;
   signal?.throwIfAborted();
   const session = requireVault();
@@ -63,7 +64,7 @@ export async function representation(rep: RepresentationV1, key: Uint8Array, sig
   let bytes = await get<Uint8Array>("read", cacheKey);
   check();
   if (!bytes) {
-    bytes = await fetchCipher(rep.objectId, signal);
+    bytes = await fetchCipher(rep.objectId, signal, diagnostic);
     check();
     if (
       bytes.byteLength !== rep.ciphertextBytes ||
@@ -92,6 +93,7 @@ export async function readPhoto(
   metadataKey?: Uint8Array,
   grantId?: string,
   signal?: AbortSignal,
+  diagnostic?: DiagnosticContext,
 ): Promise<Photo> {
   signal?.throwIfAborted();
   const key =
@@ -99,7 +101,7 @@ export async function readPhoto(
     unwrapKey(manifest.ownerWrappedMetadataKey, requireVault().vaultKey);
   let plain: Uint8Array | undefined;
   try {
-    plain = await representation(manifest.metadataRepresentation, key, signal);
+    plain = await representation(manifest.metadataRepresentation, key, signal, diagnostic);
     const metadata = validateWire<PhotoMetadataV1>(
       "PhotoMetadataV1",
       JSON.parse(new TextDecoder().decode(plain)),
@@ -112,6 +114,7 @@ export async function photoBytes(
   photo: Photo,
   kind: "thumbnail" | "preview" | "original",
   signal?: AbortSignal,
+  diagnostic?: DiagnosticContext,
 ) {
   signal?.throwIfAborted();
   const session = requireVault();
@@ -122,6 +125,7 @@ export async function photoBytes(
     rep,
     unb64(photo.metadata.representationKeys[rep.binding.representationId]),
     signal,
+    diagnostic,
   );
   if (
     rep.binding.kind === "original" &&
@@ -188,14 +192,15 @@ export async function applyChanges(
     if (requireVault() !== session) throw new Error("VAULT_LOCKED");
   });
 }
-export async function syncCatalog(signal?: AbortSignal) {
+export async function syncCatalog(signal?: AbortSignal, diagnostic?: DiagnosticContext) {
+  const request = diagnostic ? scopedApi(diagnostic) : api;
   const session = requireVault();
   const id = session.accountId;
   const capability = await get<WrappedKeyV1>("settings", id + ":media-reader-v1");
   let cursor = capability ? await get<WrappedKeyV1>("settings", id + ":cursor") : undefined;
   do {
     if (requireVault() !== session) throw new Error("VAULT_LOCKED");
-    const page = await api<ChangePageV1>(
+    const page = await request<ChangePageV1>(
       "/v1/changes?limit=100&media=1" +
         (cursor && decryptPrivate<string | null>(cursor)
           ? "&cursor=" + encodeURIComponent(decryptPrivate<string>(cursor))
@@ -252,7 +257,7 @@ function rememberHydrated(cache: HydratedCatalog, id: string, entry: HydratedEnt
   }
   cache.entries.set(id, entry); cache.bytes += entry.bytes;
 }
-export async function cachedCatalog() {
+export async function cachedCatalog(diagnostic?: DiagnosticContext) {
   const v = requireVault(), cache = currentHydratedCatalog(v);
   const rows = await all<WrappedKeyV1>("catalog", v.accountId + ":");
   assertVault(v);
@@ -273,7 +278,7 @@ export async function cachedCatalog() {
         );
         if (signed.accountId !== v.accountId || !["photo-manifest", "photo-media-manifest-v1"].includes(signed.kind) || manifest.ownerAccountId !== v.accountId || id !== v.accountId + ":" + manifest.photoId)
           throw new Error("CATALOG_BINDING_MISMATCH");
-        photo = previous?.signed === identity ? previous.photo : await readPhoto(manifest);
+        photo = previous?.signed === identity ? previous.photo : await readPhoto(manifest, undefined, undefined, undefined, diagnostic);
         try {assertVault(v); if (hydrated !== cache) throw new Error("VAULT_LOCKED");}
         catch (error) {if (photo !== previous?.photo) photo.metadataKey.fill(0); throw error;}
       }

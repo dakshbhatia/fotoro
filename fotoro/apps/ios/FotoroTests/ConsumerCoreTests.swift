@@ -702,6 +702,95 @@ extension ConsumerCoreTests {
     diagnostics.flush()
     return try Data(contentsOf: file).split(separator: 10).map { try JSONDecoder().decode(NativeDiagnosticEvent.self, from: Data($0)) }
   }
+  @MainActor func testDiagnosticActionCorrelatesAPIHeadersAndDoesNotCompleteMalformedDecode() async throws {
+    let diagnostics = NativeDiagnostics(fileURL: nil, emitSystemLog: false)
+    let session = AccountSession(); session.fixture = false
+    let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [DiagnosticTraceProtocol.self]
+    let api = APIClient(session: session, baseURL: URL(string: "https://diagnostics.invalid")!, networkConfiguration: config, diagnostics: diagnostics)
+    let reply: DiagnosticTraceReply = try await NativeDiagnosticTrace.action(.auth, diagnostics: diagnostics) {
+      let first: DiagnosticTraceReply = try await api.get("/v1/auth/options/private-name?query=private-query")
+      let second: DiagnosticTraceReply = try await api.get("/v1/auth/verify/private-name")
+      XCTAssertEqual(first.trace, second.trace)
+      return second
+    }
+    let trace = try XCTUnwrap(UUID(uuidString: reply.trace))
+    var events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: diagnostics.exportJSON())
+    XCTAssertEqual(Set(events.compactMap(\.traceId)), [trace])
+    XCTAssertTrue(events.allSatisfy { $0.operation == .auth })
+    XCTAssertEqual(events.filter { $0.phase == .auth }.map(\.outcome), [.started, .completed])
+    XCTAssertEqual(events.filter { $0.phase == .api && $0.outcome == .completed }.map(\.step), [.decode, .decode])
+    XCTAssertEqual(events.last?.lastCompletedStep, .decode)
+    XCTAssertTrue(events.filter { $0.phase == .api && $0.outcome == .completed }.allSatisfy { $0.requestId != nil })
+    do {
+      let _: DiagnosticTraceReply = try await NativeDiagnosticTrace.action(.sync, diagnostics: diagnostics) {
+        try await api.get("/v1/albums/malformed/private-album")
+      }
+      XCTFail("Malformed successful responses must fail decoding.")
+    } catch { XCTAssertTrue(error is DecodingError) }
+    events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: diagnostics.exportJSON())
+    let failed = events.filter { $0.operation == .sync }
+    XCTAssertEqual(failed.filter { $0.phase == .api }.map(\.outcome), [.started, .failed])
+    XCTAssertEqual(failed.last?.outcome, .failed)
+    XCTAssertEqual(failed.last?.reason, .decode)
+    XCTAssertEqual(failed.last?.lastCompletedStep, .response)
+    XCTAssertEqual(failed.first { $0.phase == .api }?.endpoint, .albums)
+    let safe = String(decoding: diagnostics.exportJSON(), as: UTF8.self)
+    for secret in ["private-name", "private-query", "private-album", "private-response", "https://", "diagnostics.invalid"] { XCTAssertFalse(safe.contains(secret), secret) }
+    XCTAssertNil(NativeDiagnosticTrace.current, "A completed action must not leak its context to later work.")
+  }
+  @MainActor func testConcurrentDiagnosticActionsKeepSeparateEphemeralTracesAndCancellationTerminal() async throws {
+    let diagnostics = NativeDiagnostics(fileURL: nil, emitSystemLog: false)
+    let session = AccountSession(); session.fixture = false
+    let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [DiagnosticTraceProtocol.self]
+    let api = APIClient(session: session, baseURL: URL(string: "https://diagnostics.invalid")!, networkConfiguration: config, diagnostics: diagnostics)
+    let first = Task { @MainActor in
+      try await NativeDiagnosticTrace.action(.sync, diagnostics: diagnostics) { () -> DiagnosticTraceReply in
+        await Task.yield(); return try await api.get("/v1/photos/first-private")
+      }
+    }
+    let second = Task { @MainActor in
+      try await NativeDiagnosticTrace.action(.share, diagnostics: diagnostics) { () -> DiagnosticTraceReply in
+        await Task.yield(); return try await api.get("/v1/grants/second-private")
+      }
+    }
+    let a = try await first.value, b = try await second.value
+    XCTAssertNotEqual(a.trace, b.trace)
+    let cancelled = Task { @MainActor in
+      try await NativeDiagnosticTrace.action(.auth, diagnostics: diagnostics) {
+        NativeDiagnosticTrace.current?.completed(.credential)
+        throw CancellationError()
+      }
+    }
+    do { try await cancelled.value; XCTFail("Cancellation must propagate.") } catch { XCTAssertTrue(error is CancellationError) }
+    let events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: diagnostics.exportJSON())
+    XCTAssertEqual(Set(events.filter { $0.operation == .sync }.compactMap(\.traceId)), [UUID(uuidString: a.trace)!])
+    XCTAssertEqual(Set(events.filter { $0.operation == .share }.compactMap(\.traceId)), [UUID(uuidString: b.trace)!])
+    XCTAssertEqual(events.last?.outcome, .cancelled)
+    XCTAssertEqual(events.last?.lastCompletedStep, .credential)
+    XCTAssertNil(NativeDiagnosticTrace.current)
+  }
+  func testDiagnosticExportBoundsAndSanitizesLegacyRecordsWithoutTraceFields() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let file = root.appendingPathComponent("runtime.jsonl")
+    let legacy = #"{"timestamp":1,"phase":"api","outcome":"failed","build":"private-person-name","unknown":"private-query"}"#
+    try Data((legacy + "\n").utf8).write(to: file)
+    let diagnostics = NativeDiagnostics(fileURL: file, emitSystemLog: false)
+    var exported = diagnostics.exportJSON()
+    var events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: exported)
+    XCTAssertEqual(events.count, 1); XCTAssertNil(events[0].traceId); XCTAssertEqual(events[0].build, "")
+    XCTAssertFalse(String(decoding: exported, as: UTF8.self).contains("private"))
+    for _ in 0..<200 {
+      let trace = NativeDiagnosticTrace(.people)
+      diagnostics.record(NativeDiagnosticEvent(phase: .people, outcome: .completed, elapsed: 1,
+        completed: 20, pending: 30, attempted: 25, trace: trace, step: .analysis, reason: .sourceUnavailable))
+    }
+    exported = diagnostics.exportJSON(); events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: exported)
+    XCTAssertLessThanOrEqual(exported.count, NativeDiagnostics.maximumBytes)
+    XCTAssertLessThanOrEqual(events.count, 160); XCTAssertFalse(events.isEmpty)
+    XCTAssertTrue(events.allSatisfy { $0.attempted == 25 && $0.completed == 20 && $0.pending == 30 })
+  }
   @MainActor func testAccountDiagnosticsEmitOnlyStateChangesWithoutIdentityOrCredentials() throws {
     let savedSession = try? Keychain.read("session")
     Keychain.remove("session")
@@ -800,6 +889,21 @@ extension ConsumerCoreTests {
   }
 }
 
+private struct DiagnosticTraceReply: Decodable { let trace: String }
+private final class DiagnosticTraceProtocol: URLProtocol, @unchecked Sendable {
+  override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "diagnostics.invalid" }
+  override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+  override func startLoading() {
+    guard let url = request.url, let trace = request.value(forHTTPHeaderField: "X-Fotoro-Trace-Id"),
+      let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil,
+        headerFields: ["X-Request-Id": UUID().uuidString]) else { return }
+    let data = url.path.contains("malformed") ? Data("private-response".utf8)
+      : (try! JSONSerialization.data(withJSONObject: ["trace": trace]))
+    client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+    client?.urlProtocol(self, didLoad: data); client?.urlProtocolDidFinishLoading(self)
+  }
+  override func stopLoading() {}
+}
 private final class AuthTimeoutProtocol: URLProtocol, @unchecked Sendable {
   override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "auth-timeout.invalid" }
   override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }

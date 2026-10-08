@@ -1,15 +1,16 @@
+import {diagnose, type DiagnosticContext} from "../diagnostics";
 import {acceptedPhotoManifestKind, photoManifestKind} from "@fotoro/contracts/camera-media";
 import type {AccountCardV1, GrantV1, GrantDetailV1, PhotoManifestV1, SavedPhotoV1, SaveRequestV1, ContributionV1, WrappedKeyV1} from "@fotoro/contracts";
 import {validatePublicAccountCard} from "@fotoro/contracts/share-links";
 import {validateWire} from "@fotoro/contracts/validate";
 import {ready, sealShareKey, openShareKey, signPayload, verifyPayload, utf8, unb64, wrapKey, unwrapKey} from "@fotoro/crypto";
-import {api} from "./api";
+import {api as rawApi, scopedApi} from "./api";
 import {get, db, all} from "./cache";
 import {requireVault, type UnlockedVault} from "../vault/vault";
 import {assertVault} from "../vault/scope";
 import {readPhoto, photoBytes, type Photo} from "../library/catalog";
 import {sameIdentity} from "./sharing";
-export interface ShareScope {signal?: AbortSignal; current?: () => boolean;}
+export interface ShareScope {diagnostic?: DiagnosticContext; signal?: AbortSignal; current?: () => boolean;}
 const check = (session: UnlockedVault, scope: ShareScope = {}) => {assertVault(session); scope.signal?.throwIfAborted(); if (scope.current && !scope.current()) throw new DOMException("Share cancelled", "AbortError");};
 const trustVersions = new Map<string, number>();
 interface SharingAuthority {session: UnlockedVault; scope: ShareScope; trustVersion: number; cards: Map<string, AccountCardV1>;}
@@ -124,7 +125,9 @@ const owned = (photos: readonly Photo[], session: UnlockedVault) => {
   if (!photos.length || photos.length > 100) throw new Error("SELECT_1_TO_100_PHOTOS");
   if (photos.some(photo => photo.grantId || photo.manifest.ownerAccountId !== session.accountId)) throw new Error("PHOTO_NOT_OWNED");
 };
-export async function sharePhotos(photos: Photo[], recipient: AccountCardV1, access: "ongoing" | "temporary", scope: ShareScope = {}) {
+export function sharePhotos(photos: Photo[], recipient: AccountCardV1, access: "ongoing" | "temporary", scope: ShareScope = {}) {return diagnose("share", diagnostic => sharePhotosAction(photos, recipient, access, {...scope, diagnostic}), "create");}
+async function sharePhotosAction(photos: Photo[], recipient: AccountCardV1, access: "ongoing" | "temporary", scope: ShareScope) {
+  const api = scope.diagnostic ? scopedApi(scope.diagnostic) : rawApi;
   const session = requireVault(), authorization = authority(session, scope); owned(photos, session);
   recipient = validatePublicAccountCard(recipient);
   if (recipient.accountId === session.accountId) throw new Error("SHARE_OWN_ACCOUNT");
@@ -140,11 +143,14 @@ export async function sharePhotos(photos: Photo[], recipient: AccountCardV1, acc
   if (!sameJSON(result, grant)) throw new Error("GRANT_BINDING_MISMATCH");
   return result;
 }
-export async function receive(grantId: string, scope: ShareScope = {}, expectedSender?: AccountCardV1) {
+export function receive(grantId: string, scope: ShareScope = {}, expectedSender?: AccountCardV1) {return diagnose("share", diagnostic => receiveAction(grantId, {...scope, diagnostic}, expectedSender), "receive");}
+async function receiveAction(grantId: string, scope: ShareScope, expectedSender?: AccountCardV1) {
+  const api = scope.diagnostic ? scopedApi(scope.diagnostic) : rawApi;
   return receiveWithAuthority(grantId, authority(requireVault(), scope), expectedSender);
 }
 async function receiveWithAuthority(grantId: string, authorization: SharingAuthority, expectedSender?: AccountCardV1) {
   const {session, scope} = authorization;
+  const api = scope.diagnostic ? scopedApi(scope.diagnostic) : rawApi;
   if (expectedSender && !sameIdentity(await captureCard(expectedSender.accountId, authorization), expectedSender)) throw new Error("ACCOUNT_KEYS_CHANGED_RENEW_TRUST");
   const detail = await api<GrantDetailV1>("/v1/grants/" + grantId + "?media=1", undefined, "GrantDetailV1", "GET", scope.signal); checkAuthority(authorization);
   if (detail.grant.grantId !== grantId) throw new Error("GRANT_BINDING_MISMATCH");
@@ -173,14 +179,16 @@ async function receiveWithAuthority(grantId: string, authorization: SharingAutho
       if (!envelope) continue;
       checkAuthority(authorization);
       const key = openShareKey(envelope, session.boxSecretKey, card, {version: 1, grantId, photoId: manifest.photoId, senderAccountId: card.accountId, recipientAccountId: session.accountId});
-      try {const photo = await readPhoto(manifest, key, grantId, scope.signal); await checkTrust(authorization); photos.push(photo);} catch (error) {key.fill(0); throw error;}
+      try {const photo = await readPhoto(manifest, key, grantId, scope.signal, scope.diagnostic); await checkTrust(authorization); photos.push(photo);} catch (error) {key.fill(0); throw error;}
     }
     await checkTrust(authorization);
     await api("/v1/grants/" + grantId + "/viewed", {}, undefined, "POST", scope.signal); await checkTrust(authorization);
     return {grant: detail.grant, photos};
   } catch (error) {for (const photo of photos) photo.metadataKey.fill(0); throw error;}
 }
-export async function saveReceivedPhoto(grantId: string, photoId: string, scope: ShareScope = {}): Promise<SavedPhotoV1> {
+export function saveReceivedPhoto(grantId: string, photoId: string, scope: ShareScope = {}): Promise<SavedPhotoV1> {return diagnose("share", diagnostic => saveReceivedPhotoAction(grantId, photoId, {...scope, diagnostic}), "save");}
+async function saveReceivedPhotoAction(grantId: string, photoId: string, scope: ShareScope): Promise<SavedPhotoV1> {
+  const api = scope.diagnostic ? scopedApi(scope.diagnostic) : rawApi;
   const session = requireVault(), authorization = authority(session, scope), key = session.accountId + ":" + grantId + ":" + photoId;
   let request: SaveRequestV1;
   const saved = await get<WrappedKeyV1>("saves", key); checkAuthority(authorization);
@@ -190,7 +198,7 @@ export async function saveReceivedPhoto(grantId: string, photoId: string, scope:
     try {
       const photo = received.photos.find(item => item.manifest.photoId === photoId);
       if (!photo) throw new Error("PHOTO_NOT_GRANTED");
-      const original = await photoBytes(photo, "original", scope.signal); original.fill(0); await checkTrust(authorization);
+      const original = await photoBytes(photo, "original", scope.signal, scope.diagnostic); original.fill(0); await checkTrust(authorization);
       const manifest: PhotoManifestV1 = {...photo.manifest, photoId: crypto.randomUUID(), ownerAccountId: session.accountId, ownerWrappedMetadataKey: wrapKey(photo.metadataKey, session.vaultKey)};
       const save: SavedPhotoV1 = {version: 1, operationId: crypto.randomUUID(), photoId: manifest.photoId, sourceGrantId: grantId, sourcePhotoId: photoId, manifest, signedPayload: signPayload(photoManifestKind(photo.metadata), session.accountId, utf8(manifest), session.signingSecretKey)};
       request = {version: 1, expectedGrantVersion: received.grant.version, save};
@@ -207,7 +215,9 @@ export async function saveReceivedPhoto(grantId: string, photoId: string, scope:
       !sameJSON(result.manifest, request.save.manifest)) throw new Error("SAVE_RECEIPT_MISMATCH");
   return result;
 }
-export async function contribute(grant: GrantV1, photos: Photo[], scope: ShareScope = {}) {
+export function contribute(grant: GrantV1, photos: Photo[], scope: ShareScope = {}) {return diagnose("share", diagnostic => contributeAction(grant, photos, {...scope, diagnostic}), "contribute");}
+async function contributeAction(grant: GrantV1, photos: Photo[], scope: ShareScope) {
+  const api = scope.diagnostic ? scopedApi(scope.diagnostic) : rawApi;
   const session = requireVault(), authorization = authority(session, scope); owned(photos, session);
   if (grant.ownerAccountId !== session.accountId && grant.recipientAccountId !== session.accountId) throw new Error("INVITATION_RECIPIENT_MISMATCH");
   const recipientId = grant.ownerAccountId === session.accountId ? grant.recipientAccountId : grant.ownerAccountId;

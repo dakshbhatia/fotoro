@@ -1,10 +1,11 @@
+import {type DiagnosticContext} from "../diagnostics";
 import type { PhotoAnnotationsV1, PhotoAnnotationsUpdateV1, PhotoAnnotationsReplyV1, PhotoLocationV1, SignedPayloadV1, WrappedKeyV1 } from "@fotoro/contracts";
 import { validateWire } from "@fotoro/contracts/validate";
 import { signPayload, verifyPayload, unb64, utf8 } from "@fotoro/crypto";
 import { requireVault, encryptPrivate, decryptPrivate, type UnlockedVault } from "../vault/vault";
 import { assertVault } from "../vault/scope";
 import { all, atomic, get, put, type Store } from "./cache";
-import { api, ApiError, fixtureMode, isPublicDemoAccount } from "./api";
+import { scopedApi, api, ApiError, fixtureMode, isPublicDemoAccount } from "./api";
 import type { LocalPhoto } from "../local/resources";
 import { OCR_PROCESSOR } from "../local/ocr";
 import {VISUAL_PUBLICATION_ENABLED} from "@fotoro/contracts/visual";
@@ -220,7 +221,8 @@ async function reconcile(id: string, remote: VerifiedAnnotations | undefined, se
   });
 }
 const flights = new WeakMap<UnlockedVault, Promise<void>>();
-export function flushAnnotations(session = requireVault(), signal?: AbortSignal): Promise<void> {
+export function flushAnnotations(session = requireVault(), signal?: AbortSignal, diagnostic?: DiagnosticContext): Promise<void> {
+  const request = diagnostic ? scopedApi(diagnostic) : api;
   const existing = flights.get(session);
   if (existing) return existing;
   const flight = (async () => {
@@ -237,7 +239,7 @@ export function flushAnnotations(session = requireVault(), signal?: AbortSignal)
           if (Object.hasOwn(plaintext, "visual")) break;
         }
         try {
-          const response = await api<SignedPayloadV1>("/v1/photos/" + item.photoId + "/annotations", pending.signed, "SignedPayloadV1", "PUT", signal);
+          const response = await request<SignedPayloadV1>("/v1/photos/" + item.photoId + "/annotations", pending.signed, "SignedPayloadV1", "PUT", signal);
           assertVault(session);
           const remote = verifyAnnotations(response, identity, session);
           if (!same(response, pending.signed)) throw new Error("ANNOTATION_RECEIPT_MISMATCH");
@@ -246,7 +248,7 @@ export function flushAnnotations(session = requireVault(), signal?: AbortSignal)
         } catch (error) {
           assertVault(session);
           if (!(error instanceof ApiError) || error.code !== "VERSION_CONFLICT") throw error;
-          const response = await api<PhotoAnnotationsReplyV1>("/v1/photos/" + item.photoId + "/annotations", undefined, "PhotoAnnotationsReplyV1", "GET", signal);
+          const response = await request<PhotoAnnotationsReplyV1>("/v1/photos/" + item.photoId + "/annotations", undefined, "PhotoAnnotationsReplyV1", "GET", signal);
           assertVault(session);
           const remote = response.annotations ? verifyAnnotations(response.annotations, identity, session) : undefined;
           if (remote) await cacheAnnotations(remote.signed, item.photoId, session);

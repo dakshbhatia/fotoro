@@ -100,6 +100,7 @@ enum ReviewedPhotosBackupPolicy {
   private(set) var consumerCatalogGeneration: UInt64 = 0
   private var activatedPhotoAccount: PhotoAccountAccess?
   @ObservationIgnored private var diagnosticAccountState: NativeDiagnosticAccountState?
+  @ObservationIgnored private var diagnosticSyncReason: NativeDiagnosticReason?
   @ObservationIgnored private var consumerObservation = UUID()
   @ObservationIgnored private var syncIntent = UUID()
   private var automaticSyncPreference = AutomaticPhotoSyncPreference()
@@ -375,16 +376,19 @@ enum ReviewedPhotosBackupPolicy {
       diagnostics.record(NativeDiagnosticEvent(phase: .app, outcome: .changed, accountState: accountState))
     }
     let previous = consumerSyncSummary.state
+    var reason: NativeDiagnosticReason = .current
     defer {
-      if consumerSyncSummary.state != previous {
+      if consumerSyncSummary.state != previous || diagnosticSyncReason != reason {
+        diagnosticSyncReason = reason
         diagnostics.record(NativeDiagnosticEvent(phase: .sync, outcome: .changed,
           state: consumerSyncSummary.state, completed: consumerSyncSummary.completedPhotos,
           pending: consumerSyncSummary.totalPhotos.flatMap { total in
             consumerSyncSummary.completedPhotos.map { max(0, total - $0 - consumerSyncSummary.skippedPhotos) }
-          }))
+          }, step: .transfer, reason: reason))
       }
     }
     guard session.isSignedIn, vault.isUnlocked, let account = session.accountId, store.root.lastPathComponent == account else {
+      reason = session.isSignedIn ? .locked : .signedOut
       consumerSyncSummary = ConsumerSyncSummary()
       return
     }
@@ -429,7 +433,16 @@ enum ReviewedPhotosBackupPolicy {
         facts.detail = "Public demo accounts cannot back up your private photos."
       }
       consumerSyncSummary = ConsumerSyncSummary.derive(facts)
+      switch consumerSyncSummary.state {
+      case .paused: reason = .paused
+      case .offline: reason = .offline
+      case .preparing, .uploading, .checking: reason = .waiting
+      case .needsAttention: reason = facts.failed > 0 ? .retryRequired : .pendingTransfers
+      case .notStarted, .upToDate: reason = facts.annotationsPending > 0 ? .pendingAnnotations : .current
+      }
+      if automaticPhotoSync.phase == .permissionRequired { reason = .permissionRequired }
     } catch {
+      reason = .unknown
       consumerSyncSummary = ConsumerSyncSummary(state: .needsAttention, detail: "Sync status could not be read. Your originals are unchanged.", action: .retry)
     }
   }
@@ -724,6 +737,19 @@ enum ReviewedPhotosBackupPolicy {
     automaticSyncSettling = nil
     automaticSyncTask = Task { [weak self] in
       guard let self else { return }
+      let trace = NativeDiagnosticTrace.current ?? NativeDiagnosticTrace(.sync)
+      await NativeDiagnosticTrace.$current.withValue(trace) {
+      let started = ProcessInfo.processInfo.systemUptime
+      self.diagnostics.record(NativeDiagnosticEvent(phase: .sync, outcome: .started, step: .action))
+      defer {
+        let cancelled = Task.isCancelled || self.automaticSyncGeneration != token
+        let failed = self.automaticSyncFailure != nil || self.backup.status.phase == .failed || !self.annotations.errors.isEmpty
+        self.diagnostics.record(NativeDiagnosticEvent(phase: .sync,
+          outcome: cancelled ? .cancelled : (failed ? .failed : .completed),
+          elapsed: ProcessInfo.processInfo.systemUptime - started,
+          completed: self.consumerSyncSummary.completedPhotos,
+          step: .action, reason: cancelled ? .contextChanged : (failed ? .retryRequired : nil)))
+      }
       defer {
         if self.automaticSyncGeneration == token {
           self.automaticSyncTask = nil
@@ -764,6 +790,7 @@ enum ReviewedPhotosBackupPolicy {
       } catch is CancellationError {
       } catch {
         if self.automaticSyncGeneration == token { self.automaticSyncFailure = error.localizedDescription }
+      }
       }
     }
   }
@@ -1273,15 +1300,11 @@ enum ReviewedPhotosBackupPolicy {
     try reloadAnnotations()
   }
   func sync() async throws {
+    try await withDiagnosticAction(.sync) { try await self.syncTraced() }
+  }
+  private func syncTraced() async throws {
     guard photoAccountAccess != nil else { throw FotoroError("Open Fotoro before loading saved photos.") }
     let bundle = try vault.requireBundle()
-    let started = ProcessInfo.processInfo.systemUptime
-    var outcome = NativeDiagnosticOutcome.failed
-    defer {
-      diagnostics.record(NativeDiagnosticEvent(phase: .sync,
-        outcome: outcome,
-        elapsed: ProcessInfo.processInfo.systemUptime - started))
-    }
     let authorizedAccount = session.accountId
     let generation = vault.generation
     let catalog = store
@@ -1340,6 +1363,7 @@ enum ReviewedPhotosBackupPolicy {
         try annotations.ledger.receive(signed, photo: photo, bundle: bundle, card: session.requireCard(signed.accountId))
       }
       try catalog.apply(ownedPage, verified: verified)
+      NativeDiagnosticTrace.current?.completed(.persist)
       more = page.hasMore
     }
     try fence()
@@ -1351,9 +1375,8 @@ enum ReviewedPhotosBackupPolicy {
     try catalog.setConsumerLastChecked(Date())
     consumerOffline = false
     consumerFailure = nil
-    outcome = .completed
+    NativeDiagnosticTrace.current?.completed(.catalog)
     } catch {
-      outcome = .failure(for: error, taskCancelled: Task.isCancelled)
       if vault.generation == generation, store === catalog, session.accountId == authorizedAccount { recordConsumerSyncFailure(error) }
       throw error
     }
@@ -1833,6 +1856,9 @@ enum ReviewedPhotosBackupPolicy {
   func share(_ selected: [LocalPhoto], recipient: AccountCardV1, temporary: Bool) async throws
     -> GrantV1
   {
+    try await withDiagnosticAction(.share) { try await self.shareTraced(selected, recipient: recipient, temporary: temporary) }
+  }
+  private func shareTraced(_ selected: [LocalPhoto], recipient: AccountCardV1, temporary: Bool) async throws -> GrantV1 {
     guard !selected.isEmpty, selected.count <= 100 else {
       throw FotoroError("Choose between 1 and 100 photos")
     }
@@ -1850,6 +1876,7 @@ enum ReviewedPhotosBackupPolicy {
       else { throw FotoroError("Save these photos before sharing them in Fotoro.") }
       return photo
     }
+    NativeDiagnosticTrace.current?.completed(.verify)
     let moment = Wire.id()
     let grant: GrantV1 = try await api.post(
       "/v1/moments/\(moment)/grants/options",
@@ -1874,6 +1901,8 @@ enum ReviewedPhotosBackupPolicy {
       CreateGrantV1(grant: grant, envelopes: envelopes, signedPayload: signed))
     try requireSharingAccess(access)
     try requireGrant(created, matches: grant, account: access.account)
+    NativeDiagnosticTrace.current?.completed(.persist)
+    diagnostics.record(NativeDiagnosticEvent(phase: .share, outcome: .changed, completed: current.count, step: .persist))
     return created
   }
   func receive(_ grant: GrantV1) async throws {
@@ -2033,22 +2062,32 @@ enum ReviewedPhotosBackupPolicy {
     try requireSharingAccess(access)
   }
   @discardableResult
+  func withDiagnosticAction<T>(_ operation: NativeDiagnosticOperation,
+    _ action: @MainActor () async throws -> T) async throws -> T {
+    try await NativeDiagnosticTrace.action(operation, diagnostics: diagnostics, action)
+  }
+  func diagnosticsJSON() -> String { String(decoding: diagnostics.exportJSON(), as: UTF8.self) }
+  @discardableResult
   func run(phase: NativeDiagnosticPhase? = nil, _ action: @escaping @MainActor () async throws -> Void) -> Task<Void, Never>? {
     guard !busy else { return nil }
     busy = true
     error = nil
     let started = ProcessInfo.processInfo.systemUptime
-    if let phase { diagnostics.record(NativeDiagnosticEvent(phase: phase, outcome: .started)) }
+    let trace = NativeDiagnosticTrace.current ?? NativeDiagnosticTrace(NativeDiagnosticOperation(rawValue: phase?.rawValue ?? "app") ?? .app)
+    if let phase { diagnostics.record(NativeDiagnosticEvent(phase: phase, outcome: .started, trace: trace, step: .action)) }
     return Task {
+      await NativeDiagnosticTrace.$current.withValue(trace) {
       var outcome = NativeDiagnosticOutcome.completed
       var passkeyError: NativePasskeyError?
+      var diagnosticReason: NativeDiagnosticReason?
       defer {
         busy = false
         refreshConsumerSyncSummary()
         if let phase {
           diagnostics.record(NativeDiagnosticEvent(phase: phase, outcome: outcome,
             elapsed: ProcessInfo.processInfo.systemUptime - started,
-            authorizationCode: phase == .auth ? passkeyError?.code : nil))
+            authorizationCode: phase == .auth ? passkeyError?.code : nil,
+            step: .action, reason: outcome == .cancelled ? .cancelled : diagnosticReason))
         }
       }
       do {
@@ -2057,10 +2096,12 @@ enum ReviewedPhotosBackupPolicy {
         if Task.isCancelled { outcome = .cancelled }
       } catch {
         outcome = .failure(for: error, taskCancelled: Task.isCancelled)
+        diagnosticReason = .failure(error)
         passkeyError = error as? NativePasskeyError
         if outcome == .cancelled { return }
         recordConsumerSyncFailure(error)
         self.error = error.localizedDescription
+      }
       }
     }
   }

@@ -1,3 +1,4 @@
+import {CopyDiagnostics} from "../components/CopyDiagnostics";
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../library/icons";
 import { LocalLibrary } from "./LocalLibrary";
@@ -508,6 +509,7 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
       <p className="hint">Keep search data and up to 100 MB of previews in this browser. Original files are not retained.</p>
       {saving && <p role="status">{saving}</p>}
       <button disabled={!ready} onClick={() => {void clear(); closeSettings();}}>Clear local search</button>
+              <CopyDiagnostics />
     </aside>}
     {active && preparedShare && originalsCurrent(preparedShare) && <aside className="original-share saved-original-share" ref={originalPanel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Share selected photos">
       <button className="close" aria-label="Close share options" disabled={sharing} onClick={cancelOriginals}><Icon kind="close" /></button>

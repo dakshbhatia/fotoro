@@ -195,6 +195,30 @@ struct PhotoCaptureMetadata: Codable, Equatable, Sendable {
 extension PhotoCaptureMetadata {
   enum LocalOriginalResult: Sendable { case available(PhotoCaptureMetadata), unavailable, changed, cancelled }
   @MainActor static func loadLocalOriginal(photo: RecentPhoto) async -> LocalOriginalResult {
+    #if !FOTORO_LOCAL_PREVIEW
+    let trace = NativeDiagnosticTrace.current ?? NativeDiagnosticTrace(.metadata)
+    return await NativeDiagnosticTrace.$current.withValue(trace) {
+      let started = ProcessInfo.processInfo.systemUptime
+      NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .metadata, outcome: .started, step: .scan))
+      let result = await loadLocalOriginalTraced(photo: photo)
+      let outcome: NativeDiagnosticOutcome
+      let reason: NativeDiagnosticReason?
+      switch result {
+      case .available: outcome = .completed; reason = nil; trace.completed(.scan)
+      case .unavailable: outcome = .failed; reason = .sourceUnavailable
+      case .changed: outcome = .cancelled; reason = .contextChanged
+      case .cancelled: outcome = .cancelled; reason = .cancelled
+      }
+      NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .metadata, outcome: outcome,
+        elapsed: ProcessInfo.processInfo.systemUptime - started, completed: outcome == .completed ? 1 : 0,
+        step: .scan, reason: reason))
+      return result
+    }
+    #else
+    return await loadLocalOriginalTraced(photo: photo)
+    #endif
+  }
+  @MainActor private static func loadLocalOriginalTraced(photo: RecentPhoto) async -> LocalOriginalResult {
     let id=photo.id,revision=photo.sourceRevision
     func current() -> PHAsset? {
       guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for:.readWrite)),
