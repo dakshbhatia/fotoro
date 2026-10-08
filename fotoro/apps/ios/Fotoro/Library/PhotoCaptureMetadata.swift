@@ -78,11 +78,14 @@ struct PhotoCaptureMetadata: Codable, Equatable, Sendable {
     guard let value else { return };let item=Item(k:key,p:provenance,v:value)
     if Self.validated(item) { items.removeAll { $0.k==key && $0.p==provenance };items.append(item) }
   }
-  static func photos(_ asset: PHAsset) -> Self {
+  static func photos(_ asset: PHAsset, includeDetails: Bool = false) -> Self {
     var result=Self()
     result.add("width",String(asset.pixelWidth),.photos);result.add("height",String(asset.pixelHeight),.photos)
     result.add("createdAt",asset.creationDate.map(iso),.photos);result.add("modifiedAt",asset.modificationDate.map(iso),.photos)
-    result.add("addedAt",asset.addedDate.map(iso),.photos);result.add("contentType",asset.contentType.identifier,.photos)
+    if includeDetails {
+      result.add("addedAt",asset.addedDate.map(iso),.photos);result.add("contentType",asset.contentType.identifier,.photos)
+      result.add("hasAdjustments",String(asset.hasAdjustments),.photos)
+    }
     result.add("mediaType",asset.mediaType == .image ? "image" : asset.mediaType == .video ? "video" : asset.mediaType == .audio ? "audio" : nil,.photos)
     if asset.mediaType == .video || asset.mediaType == .audio { result.add("duration",decimal(asset.duration),.photos) }
     let features:[(PHAssetMediaSubtype,String)]=[(.photoPanorama,"panorama"),(.photoHDR,"hdr"),(.photoScreenshot,"screenshot"),(.photoLive,"livePhoto"),(.photoDepthEffect,"depthEffect"),(.photoAnimation,"animation"),(.spatialMedia,"spatial"),(.videoStreamed,"streamed"),(.videoHighFrameRate,"highFrameRate"),(.videoTimelapse,"timelapse"),(.videoScreenRecording,"screenRecording"),(.videoCinematic,"cinematic")]
@@ -91,7 +94,7 @@ struct PhotoCaptureMetadata: Codable, Equatable, Sendable {
     result.add("sourceTypes",sources.filter { asset.sourceType.contains($0.0) }.map(\.1).sorted().joined(separator:","),.photos)
     result.add("burst",String(asset.burstIdentifier != nil || asset.representsBurst),.photos)
     var picks:[String]=[];if asset.burstSelectionTypes.contains(.autoPick) { picks.append("autoPick") };if asset.burstSelectionTypes.contains(.userPick) { picks.append("userPick") }
-    result.add("burstSelection",picks.joined(separator:","),.photos);result.add("hasAdjustments",String(asset.hasAdjustments),.photos)
+    result.add("burstSelection",picks.joined(separator:","),.photos)
     return result
   }
   private static func decimal(_ value: Double) -> String? {
@@ -217,7 +220,7 @@ extension PhotoCaptureMetadata {
     guard !Task.isCancelled else { return .cancelled }
     guard let latest=current() else { return .changed }
     guard !original.items.isEmpty else { return .unavailable }
-    return .available(photos(latest).merging(original))
+    return .available(photos(latest, includeDetails: true).merging(original))
   }
 }
 

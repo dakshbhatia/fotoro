@@ -397,17 +397,18 @@ struct SearchAnalysisProgress: Equatable, Sendable {
       r.favorite = asset.isFavorite
       r.burstID = asset.burstIdentifier
       r.captureMetadata = photo.captureMetadata
-      r.filename =
-        PHAssetResource.assetResources(for: asset).first(where: { $0.type == .photo || $0.type == .video })?
-        .originalFilename ?? ""
       #if compiler(>=6.4)
         if #available(iOS 27, *) {
           let extended = asset.extendedMetadata
-          r.filename = extended.originalFilename ?? r.filename
+          r.filename = extended.originalFilename ?? ""
           r.captions = extended.caption.map { [$0] } ?? []
           r.keywords = extended.keywords
         }
       #endif
+      if r.filename.isEmpty {
+        r.filename = PHAssetResource.assetResources(for: asset)
+          .first(where: { $0.type == .photo || $0.type == .video })?.originalFilename ?? ""
+      }
       if photo.isScreenshot { r.facts.append("screenshot") }
       if photo.isLivePhoto { r.facts.append("live photo") }
       if asset.mediaType == .video { r.facts.append("video") }

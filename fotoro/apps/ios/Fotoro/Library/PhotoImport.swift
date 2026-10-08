@@ -40,7 +40,7 @@ actor PhotoImport {
     self.sourceCaptureMetadata = sourceCaptureMetadata ?? { id in
       guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
         let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject, !asset.isHidden else { return nil }
-      return .photos(asset)
+      return .photos(asset, includeDetails: true)
     }
     self.sourceLocation = sourceLocation ?? { id in
       guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),

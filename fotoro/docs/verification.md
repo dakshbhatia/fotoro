@@ -59,6 +59,11 @@ Simulator-only and are not production sample intake.
 Nine geometry cases include 20,000 locations represented in at most 80 markers,
 late-indexed sources beyond the first browse page, dateline wrapping, stable
 clusters, coincident locations, calendar boundaries and invalid coordinates.
+The whole-library index keeps core dimensions, dates and media features. The
+extra Photos format/added-date/adjustment fields are read for selected Info and
+authorized intake. iOS 27 filename scanning consumes prefetched extended metadata
+before a resource fallback; iOS 26 retains the existing fallback.
+
 Map source snapshots and async projection are fenced by current permission,
 revision, index generation, account access and scene phase. Opening a map result
 constructs one photo page. These policy and Simulator checks do not qualify

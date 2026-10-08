@@ -419,7 +419,7 @@ struct LocalPhotoDetails: View {
       let asset = PHAsset.fetchAssets(withLocalIdentifiers: [photo.id], options: nil).firstObject,
       !asset.isHidden, RecentPhoto.sourceRevision(asset) == photo.sourceRevision else { return }
     sourceIsCurrent = true
-    capture = RecentPhoto(asset: asset).captureMetadata
+    capture = PhotoCaptureMetadata.photos(asset, includeDetails: true)
     if let record = try? search?.consumerRecord(photo.id), record.revision == photo.sourceRevision,
       let cached = record.captureMetadata, cached.items.contains(where: { $0.p == .original }) {
       capture = capture?.merging(PhotoCaptureMetadata(items: cached.items.filter { $0.p == .original }))
