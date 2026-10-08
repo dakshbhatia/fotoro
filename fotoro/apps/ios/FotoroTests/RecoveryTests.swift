@@ -4,6 +4,107 @@ import XCTest
 @testable import Fotoro
 
 final class RecoveryTests: XCTestCase {
+  @MainActor func testTrustedCardsAreOwnerScopedAcrossRenewalSwitchSignOutAndRelaunch() throws {
+    try withTrustDefaults { defaults in
+      let cards = try trustCards(count: 4)
+      let session = AccountSession(loadSession: { throw FotoroError("No saved session") }, persistSession: { _ in }, defaults: defaults)
+      XCTAssertTrue(session.pinnedCards.isEmpty)
+      XCTAssertThrowsError(try session.pin(cards[2]))
+      try session.accept(trustSession(cards[0]))
+      try session.pin(cards[0]); try session.pin(cards[2])
+      try session.accept(trustSession(cards[0]))
+      XCTAssertEqual(session.pinnedCards, [cards[0].accountId: cards[0], cards[2].accountId: cards[2]])
+      try session.accept(trustSession(cards[1]))
+      XCTAssertTrue(session.pinnedCards.isEmpty)
+      XCTAssertThrowsError(try session.requireCard(cards[2].accountId))
+      try session.pin(cards[1]); try session.pin(cards[3])
+      session.accountId = nil
+      XCTAssertTrue(session.pinnedCards.isEmpty)
+      XCTAssertThrowsError(try session.pin(cards[2]))
+      try session.accept(trustSession(cards[0]))
+      XCTAssertEqual(try session.requireCard(cards[2].accountId), cards[2])
+      XCTAssertThrowsError(try session.requireCard(cards[3].accountId))
+      let restored = AccountSession(loadSession: { try Wire.encode(self.trustSession(cards[1])) }, defaults: defaults)
+      XCTAssertEqual(restored.pinnedCards, [cards[1].accountId: cards[1], cards[3].accountId: cards[3]])
+    }
+  }
+  @MainActor func testFailedSessionReplacementKeepsCurrentOwnersTrustedCards() throws {
+    try withTrustDefaults { defaults in
+      let cards = try trustCards(count: 3)
+      var fail = false
+      let session = AccountSession(loadSession: { throw FotoroError("No saved session") }, persistSession: { _ in
+        if fail { throw FotoroError("Controlled persistence failure") }
+      }, defaults: defaults)
+      try session.accept(trustSession(cards[0])); try session.pin(cards[2])
+      fail = true
+      for replacement in [cards[0], cards[1]] {
+        XCTAssertThrowsError(try session.accept(trustSession(replacement)))
+        XCTAssertEqual(session.accountId, cards[0].accountId)
+        XCTAssertEqual(session.pinnedCards, [cards[2].accountId: cards[2]])
+      }
+    }
+  }
+  @MainActor func testLegacyTrustNeverMigratesAnAmbiguousContactGraph() throws {
+    try withTrustDefaults { defaults in
+      let cards = try trustCards(count: 3)
+      let legacy = Dictionary(uniqueKeysWithValues: cards.map { ($0.accountId, $0) })
+      let bytes = try Wire.encode(legacy)
+      defaults.set(bytes, forKey: "fotoro.pinnedCards")
+      defaults.set(cards[0].accountId, forKey: "fotoro.account")
+      let anonymous = AccountSession(loadSession: { throw FotoroError("No saved session") }, defaults: defaults)
+      XCTAssertTrue(anonymous.pinnedCards.isEmpty, "A last-account hint cannot establish trust ownership")
+      for owner in cards.prefix(2) {
+        let session = AccountSession(loadSession: { try Wire.encode(self.trustSession(owner)) }, defaults: defaults)
+        XCTAssertEqual(session.pinnedCards, [owner.accountId: owner])
+        XCTAssertThrowsError(try session.requireCard(cards[2].accountId))
+      }
+      let owner = cards[0]
+      let key = "fotoro.pinnedCards.v2." + owner.accountId.lowercased()
+      defaults.set(try Wire.encode([cards[2].accountId: owner]), forKey: key)
+      let malformed = AccountSession(loadSession: { try Wire.encode(self.trustSession(owner)) }, defaults: defaults)
+      XCTAssertTrue(malformed.pinnedCards.isEmpty, "Malformed scoped storage must not fall back to legacy trust")
+      defaults.removeObject(forKey: key)
+      defaults.set(try Wire.encode([owner.accountId: cards[2]]), forKey: "fotoro.pinnedCards")
+      let mismatched = AccountSession(loadSession: { try Wire.encode(self.trustSession(owner)) }, defaults: defaults)
+      XCTAssertTrue(mismatched.pinnedCards.isEmpty)
+    }
+  }
+  @MainActor func testLegacyOwnCardStillVerifiesLocalVaultUnlockAndSignOutClearsTrust() async throws {
+    let suite = "fotoro-trust-tests-" + Wire.id()
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let cards = try trustCards(count: 2), owner = cards[0]
+    defaults.set(try Wire.encode(Dictionary(uniqueKeysWithValues: cards.map { ($0.accountId, $0) })), forKey: "fotoro.pinnedCards")
+    let session = AccountSession(loadSession: { try Wire.encode(self.trustSession(owner)) }, defaults: defaults)
+    let secret = try fixture(FixtureAccounts.self, "accounts").testSecrets[0]
+    let bundle = AccountBundle(vaultKey: secret.vaultKey, boxSecretKey: secret.boxSecretKey, signingSecretKey: secret.signingSecretKey)
+    try Keychain.write(Wire.encode(bundle), id: owner.accountId)
+    defer { Keychain.remove(owner.accountId) }
+    let api = APIClient(session: session, baseURL: URL(string: "https://local-unlock.invalid")!,
+      diagnostics: NativeDiagnostics(fileURL: nil, emitSystemLog: false))
+    let vault = VaultStore(session: session, api: api)
+    try await vault.unlock(.localKeychain)
+    XCTAssertTrue(vault.isUnlocked)
+    XCTAssertEqual(session.pinnedCards, [owner.accountId: owner])
+    XCTAssertThrowsError(try session.requireCard(cards[1].accountId))
+    try vault.signOut()
+    XCTAssertNil(session.accountId)
+    XCTAssertTrue(session.pinnedCards.isEmpty)
+    XCTAssertThrowsError(try session.requireCard(owner.accountId))
+  }
+  @MainActor private func withTrustDefaults(_ check: (UserDefaults) throws -> Void) throws {
+    let suite = "fotoro-trust-tests-" + Wire.id()
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    try check(defaults)
+  }
+  private func trustCards(count: Int) throws -> [AccountCardV1] {
+    let template = try fixture(FixtureAccounts.self, "accounts").accounts[0]
+    return (0..<count).map { _ in var card = template; card.accountId = Wire.id(); return card }
+  }
+  private func trustSession(_ card: AccountCardV1) -> SessionV1 {
+    SessionV1(version: 1, accountId: card.accountId, deviceId: Wire.id(), expiresAt: "2099-01-01T00:00:00Z", token: "public-controlled-session")
+  }
   func testCompactPasswordMatchesWebVectorAndAcceptsLegacyCodes() throws {
     let account = "00112233-4455-6677-8899-aabbccddeeff"
     let secret = Data((0..<32).map(UInt8.init))
@@ -831,9 +932,12 @@ final class RecoveryTests: XCTestCase {
       let secret = try fixture(FixtureAccounts.self, "accounts").testSecrets[0]
       let bundle = AccountBundle(vaultKey: secret.vaultKey, boxSecretKey: secret.boxSecretKey, signingSecretKey: secret.signingSecretKey)
       let previousBytes = try Wire.encode(bundle)
-      defer { Keychain.remove(previousCard.accountId) }
-      try session.pin(previousCard)
+      defer {
+        Keychain.remove(previousCard.accountId)
+        UserDefaults.standard.removeObject(forKey: "fotoro.pinnedCards.v2." + previousCard.accountId.lowercased())
+      }
       session.accountId = previousCard.accountId
+      try session.pin(previousCard)
       session.bearerToken = "previous-public-session"
       try Keychain.write(previousBytes, id: previousCard.accountId)
       try await vault.unlock(.localKeychain)
@@ -1031,6 +1135,7 @@ final class RecoveryTests: XCTestCase {
     let host = "login-" + card.accountId.lowercased() + ".invalid"
     defer {
       NativeLoginProtocol.responses.remove(host)
+      defaults.removeObject(forKey: "fotoro.pinnedCards.v2." + card.accountId.lowercased())
       Keychain.remove(card.accountId)
       Keychain.remove("password-" + card.accountId)
       Keychain.remove("session")
@@ -1057,9 +1162,9 @@ final class RecoveryTests: XCTestCase {
       let secret = try fixture(FixtureAccounts.self, "accounts").testSecrets[0]
       let bundle = AccountBundle(vaultKey: secret.vaultKey, boxSecretKey: secret.boxSecretKey,
         signingSecretKey: secret.signingSecretKey)
+      session.accountId = card.accountId
       try session.pin(card)
       try Keychain.write(Wire.encode(bundle), id: card.accountId)
-      session.accountId = card.accountId
     }
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [NativeLoginProtocol.self]

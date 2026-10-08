@@ -1244,6 +1244,22 @@ extension ConsumerCoreTests {
     XCTFail("Saved search did not reach its controlled read: \(request)")
     throw CancellationError()
   }
+  @MainActor func testFreshOwnerSavedSyncSkipsPeerContributionWithoutTrustOrObjectReads() async throws {
+    try await withSavedLibrary(peerContribution: true) { services, server in
+      let owner = try XCTUnwrap(services.session.accountId)
+      XCTAssertEqual(Set(services.session.pinnedCards.keys), [owner])
+      XCTAssertTrue(try services.store.photos().isEmpty)
+      try await services.sync()
+      XCTAssertEqual(try services.store.cursor(), "2", "Ignored peer changes still advance the consumed feed")
+      XCTAssertEqual(try services.store.photos().map(\.id), [server.photoID])
+      XCTAssertEqual(try services.consumerSavedPhoto(server.photoID)?.metadata.filename, "remote-receipt.jpg")
+      XCTAssertNil(try services.store.backupPhoto(server.peerPhotoID))
+      XCTAssertNil(services.session.pinnedCards[server.peerAccountID])
+      XCTAssertEqual(Set(services.session.pinnedCards.keys), [owner], "Reading Saved cannot trust a peer implicitly")
+      XCTAssertEqual(server.requests.map(\.path), ["/v1/changes", "/v1/objects/" + server.objectID, "/v1/grants"])
+      XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" })
+    }
+  }
   @MainActor func testExplicitSavedLibraryOpenFetchesCatalogWithoutSendingQueuedOriginalsOrLocalDrafts() async throws {
     let gate = SavedLibraryRequestGate(started: expectation(description: "Explicit catalog read started"))
     defer { gate.release.signal() }
@@ -1653,7 +1669,7 @@ extension ConsumerCoreTests {
   @MainActor private func withSavedLibrary(gate: SavedLibraryRequestGate? = nil, failFirst: Bool = false,
     failureCode: String = "CONTROLLED_CATALOG_UNAVAILABLE",
     networkFailure: URLError.Code? = nil,
-    original: Data? = nil, mediaVersion: Int? = 1,
+    original: Data? = nil, mediaVersion: Int? = 1, peerContribution: Bool = false,
     check: @MainActor (AppServices, SavedLibraryServer) async throws -> Void) async throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
     let previousCards = UserDefaults.standard.object(forKey: "fotoro.pinnedCards")
@@ -1662,7 +1678,7 @@ extension ConsumerCoreTests {
     let secret = accounts.testSecrets[0]
     let server = try SavedLibraryServer(card: card, secret: secret, gate: gate, failFirst: failFirst,
       failureCode: failureCode, networkFailure: networkFailure,
-      original: original ?? Data("jpg".utf8), mediaVersion: mediaVersion)
+      original: original ?? Data("jpg".utf8), mediaVersion: mediaVersion, peerContribution: peerContribution)
     SavedLibraryProtocol.server = server
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [SavedLibraryProtocol.self]
@@ -1671,6 +1687,7 @@ extension ConsumerCoreTests {
     defer {
       SavedLibraryProtocol.server = nil
       services.vault.lock(); Keychain.remove(card.accountId)
+      UserDefaults.standard.removeObject(forKey: "fotoro.pinnedCards.v2." + card.accountId.lowercased())
       if let previousCards { UserDefaults.standard.set(previousCards, forKey: "fotoro.pinnedCards") }
       else { UserDefaults.standard.removeObject(forKey: "fotoro.pinnedCards") }
       try? FileManager.default.removeItem(at: directory)
@@ -1724,6 +1741,7 @@ private final class SavedLibraryRequestGate: @unchecked Sendable {
 private final class SavedLibraryServer: @unchecked Sendable {
   struct Request { var method: String; var path: String; var mediaAware: Bool }
   let photoID = Wire.id(), objectID = Wire.id()
+  let peerPhotoID = Wire.id(), peerAccountID = Wire.id()
   private let lock = NSLock()
   private var recorded: [Request] = []
   private let gate: SavedLibraryRequestGate?
@@ -1733,7 +1751,7 @@ private final class SavedLibraryServer: @unchecked Sendable {
   private let page: Data
   private let metadata: Data
   init(card: AccountCardV1, secret: FixtureSecrets, gate: SavedLibraryRequestGate?, failFirst: Bool,
-    failureCode: String, networkFailure: URLError.Code?, original: Data, mediaVersion: Int?) throws {
+    failureCode: String, networkFailure: URLError.Code?, original: Data, mediaVersion: Int?, peerContribution: Bool) throws {
     self.gate = gate; self.failFirst = failFirst
     self.failureCode = failureCode
     self.networkFailure = networkFailure
@@ -1748,9 +1766,26 @@ private final class SavedLibraryServer: @unchecked Sendable {
       metadataRepresentation: rep, ownerWrappedMetadataKey: try crypto.wrap(key, key: Data(b64: secret.vaultKey)))
     let signed = try crypto.sign(manifest, kind: "photo-manifest", accountId: card.accountId,
       secret: Data(b64: secret.signingSecretKey))
+    var changes: [ChangeV1] = []
+    if peerContribution {
+      // Accepted grant contributions also appear in the owner's feed signed by the peer.
+      // A fresh device has only its own card and must use explicit invitations for peer access.
+      let peerSecret = try fixture(FixtureAccounts.self, "accounts").testSecrets[1]
+      let peerKey = crypto.randomKey()
+      let peerBinding = MediaBinding(photoId: peerPhotoID, representationId: Wire.id(), kind: "metadata")
+      let peerBytes = try crypto.encrypt(Wire.encode(value), key: peerKey, binding: peerBinding)
+      let peerRepresentation = RepresentationV1(binding: peerBinding, objectId: Wire.id(), header: peerBytes.prefix(24).b64,
+        ciphertextBytes: peerBytes.count, ciphertextSha256: peerBytes.digest)
+      let peerManifest = PhotoManifestV1(photoId: peerPhotoID, ownerAccountId: peerAccountID, representations: [],
+        metadataRepresentation: peerRepresentation, ownerWrappedMetadataKey: try crypto.wrap(peerKey, key: Data(b64: peerSecret.vaultKey)))
+      let peerSigned = try crypto.sign(peerManifest, kind: "photo-manifest", accountId: peerAccountID,
+        secret: Data(b64: peerSecret.signingSecretKey))
+      changes.append(ChangeV1(cursor: "1", entity: "photo", entityId: peerPhotoID, deleted: false, payload: peerSigned))
+    }
+    let cursor = peerContribution ? "2" : "1"
+    changes.append(ChangeV1(cursor: cursor, entity: "photo", entityId: photoID, deleted: false, payload: signed))
     page = try Wire.encode(ChangePageV1(version: 1, mediaVersion: mediaVersion,
-      changes: [ChangeV1(cursor: "1", entity: "photo", entityId: photoID, deleted: false, payload: signed)],
-      nextCursor: "1", hasMore: false))
+      changes: changes, nextCursor: cursor, hasMore: false))
   }
   var requests: [Request] { lock.lock(); defer { lock.unlock() }; return recorded }
   func response(_ request: URLRequest) throws -> (Int, Data) {

@@ -3,17 +3,18 @@ import type {AccountCardV1} from "@fotoro/contracts";
 import {ALBUM_DEFINITION_KIND, readAlbumSignedBody, validateAlbumDefinition, type AlbumOverviewV1} from "@fotoro/contracts/albums";
 import {createAlbumLink} from "@fotoro/contracts/albums-links";
 import {verifyAlbumDefinition} from "@fotoro/crypto/albums";
-import {contacts, contactNames, pinCard, trustedCard, type ShareScope} from "../exchange/share-service";
-import {identityLabel, sameIdentity, ShareSelection} from "../exchange/sharing";
+import {contacts, contactNames, pinCard, type ShareScope} from "../exchange/share-service";
+import {identityLabel, ShareSelection} from "../exchange/sharing";
 import {requireVault} from "../vault/vault";
 import {sameVault} from "../vault/scope";
 import {useDialogFocus} from "../library/dialog-focus";
 import type {Photo} from "../library/catalog";
-import {AlbumAccess, albumCapabilities, albumInbox, albumOwnedSelection, albumOriginalFiles, createAlbum, type AlbumCreationDraft} from "./service";
+import {AlbumAccess, albumInbox, albumOwnedSelection, albumOriginalFiles, createAlbum, type AlbumCreationDraft} from "./service";
 import type {IncomingAlbumIntent} from "./intent";
 import {searchAlbumPhotos} from "./search";
 import {albumDateTag, albumMemberLabel} from "./presentation";
 import {Icon} from "../library/icons";
+import {loadAlbumEntry, unsupportedAlbumCapabilities} from "./bootstrap";
 import {shareOriginals} from "../library/system-share";
 
 function readableError(error: unknown) {
@@ -59,7 +60,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   const [access, setAccess] = useState<AlbumAccess | null>(null), [photos, setPhotos] = useState<Photo[]>([]), [preview, setPreview] = useState<Photo | null>(null);
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState(""), [title, setTitle] = useState(""), [invitees, setInvitees] = useState(new Set<string>()), [confirmEnd, setConfirmEnd] = useState(false);
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState(false), [unsupported, setUnsupported] = useState(false), [entryFailed, setEntryFailed] = useState(false);
   const preparedDownload = useRef<{access: AlbumAccess; photo: Photo; files: File[]; controller: AbortController} | null>(null);
   const [downloadReady, setDownloadReady] = useState(false);
   const clearDownload = () => {preparedDownload.current?.controller.abort(); if (preparedDownload.current) preparedDownload.current.files.length = 0; preparedDownload.current = null; setDownloadReady(false);};
@@ -104,23 +105,21 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     accessRef.current = opened; setAccess(opened);
     if (overview.membership === "accepted") {const loaded = await opened.loadPhotos(); if (scope.current?.() && accessRef.current === opened) setPhotos(loaded);}
   }
-  useEffect(() => {
-    void action(async () => {
-      try {await albumCapabilities(scope); if (scope.current?.()) setAvailable(true);} catch (failure) {if (scope.current?.()) setAvailable(false); throw failure;}
-      const list = await loadInbox();
-      if (incoming) {
-        const found = list?.find(item => readAlbumSignedBody(item.definition, ALBUM_DEFINITION_KIND, validateAlbumDefinition).albumId === incoming.link.albumId);
-        if (!found) {setError("This account has no invitation to that album."); return;}
-        // A server response cannot substitute a different owner for the public link.
-        verifyAlbumDefinition(found.definition, incoming.link.ownerCard);
-        let trusted: AccountCardV1 | undefined;
-        try {trusted = await trustedCard(incoming.link.ownerCard.accountId, session, scope);} catch (failure) {if (!(failure instanceof Error && failure.message === "PIN_ACCOUNT_CARD_FROM_TRUSTED_CHANNEL")) throw failure;}
-        if (!scope.current?.()) return;
-        if (!trusted || !sameIdentity(trusted, incoming.link.ownerCard)) {setOwnerChanged(!!trusted); setOwnerReview(found);}
-        else await open(found);
-      }
-    });
-  }, []);
+  const initialize = () => action(async () => {
+    let checked = false;
+    setAvailable(null); setUnsupported(false); setEntryFailed(false);
+    try {
+      const entry = await loadAlbumEntry({session, scope, incoming, loadInbox, onAvailable: () => {checked = true; setAvailable(true);}});
+      if (entry.kind === "missing") setError("This account has no invitation to that album.");
+      else if (entry.kind === "review") {setOwnerChanged(entry.changed); setOwnerReview(entry.overview);}
+      else if (entry.kind === "open") await open(entry.overview);
+    } catch (failure) {
+      if (scope.current?.()) setEntryFailed(true);
+      if (!checked && scope.current?.()) {setAvailable(false); setUnsupported(unsupportedAlbumCapabilities(failure));}
+      throw failure;
+    }
+  });
+  useEffect(() => {void initialize();}, []);
   useEffect(() => {
     if (!access || access.overview.membership !== "accepted") return;
     const ended = () => {if (accessRef.current === access) {closeAlbum(); setError("Album access has ended or is unavailable.");}};
@@ -133,7 +132,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   const shown = useMemo(() => searchAlbumPhotos(photos, query, () => !!access?.current()), [photos, query, access]);
   let chosen = 0;
   try {chosen = chosenSnapshot.current ? albumOwnedSelection(chosenSnapshot.photos, session, currentPhotos()).length : 0;} catch {}
-  const refresh = () => action(async () => {
+  const refresh = () => entryFailed ? initialize() : action(async () => {
     const list = await loadInbox();
     if (access) {const item = list?.find(item => item.definition.body === access.overview.definition.body && item.definition.signature === access.overview.definition.signature); if (!item || item.endedAt) {closeAlbum(); setNotice("Album access has ended.");} else await open(item);}
   });
@@ -182,7 +181,8 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
       <button className="album-icon-button" onClick={close} aria-label="Close albums"><Icon kind="close" /></button>
     </header>
     <div className="albums-content" inert={preview ? true : undefined} aria-busy={busy || available === null}>
-      {error && <p className="hint" role="alert">{available === false ? "Live albums are unavailable on this server. Existing photos and Share still work." : error}</p>}
+      {error && <p className="hint" role="alert">{available === false ? unsupported ? "Live albums are unavailable on this server. Existing photos and Share still work." : "Live albums could not be opened. Try again." : error}</p>}
+      {entryFailed && <button className="primary-action" disabled={busy} onClick={() => void initialize()}>Try again</button>}
       {notice && <p className="hint" role="status">{notice}</p>}
       {available === null && <p role="status">Checking album availability…</p>}
       {available && <>

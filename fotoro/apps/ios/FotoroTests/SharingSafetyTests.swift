@@ -4,6 +4,21 @@ import XCTest
 @testable import Fotoro
 
 final class SharingSafetyTests: XCTestCase {
+  @MainActor func testReviewedContactDoesNotBecomeTrustedForAnotherOwner() async throws {
+    let context = try SharingSafetyContext()
+    let services = try await context.open(index: 0)
+    defer { context.restore() }
+    var contact = context.cards[1]; contact.accountId = Wire.id()
+    try services.acceptContact(contact, name: "Public test contact")
+    XCTAssertEqual(try services.session.requireCard(contact.accountId), contact)
+    XCTAssertEqual(services.contactName(contact.accountId), "Public test contact")
+    try await context.changeAccount(to: 1)
+    XCTAssertNil(services.session.pinnedCards[contact.accountId])
+    XCTAssertThrowsError(try services.session.requireCard(contact.accountId))
+    try await context.changeAccount(to: 0)
+    XCTAssertEqual(try services.session.requireCard(contact.accountId), contact)
+    XCTAssertEqual(services.contactName(contact.accountId), "Public test contact")
+  }
   @MainActor func testInvitationPasswordRetryKeepsTheOriginalAccountWorkAndReopensOnlyAfterExplicitAuthorization() async throws {
     let context = try SharingSafetyContext()
     let services = try await context.open(index: 0)
@@ -385,8 +400,6 @@ final class SharingSafetyTests: XCTestCase {
       diagnostics: NativeDiagnostics(fileURL: nil, emitSystemLog: false))
     self.services = services
     services.api.baseURL = URL(string: "http://127.0.0.1:8797")!
-    services.session.pinnedCards = [:]
-    for card in cards { try services.session.pin(card) }
     try await changeAccount(to: index)
     return services
   }
@@ -395,6 +408,8 @@ final class SharingSafetyTests: XCTestCase {
     services.vault.lock()
     services.session.accountId = cards[index].accountId
     services.session.fixture = true
+    // Each public-fixture owner explicitly trusts these test peers independently.
+    for card in cards { try services.session.pin(card) }
     let secret = secrets[index]
     try await services.vault.unlock(.recoveryEnvelope(secret: Data(b64: secret.recoverySecret), wrapper: secret.encryptedBundle))
     try services.activateAccount()
@@ -414,7 +429,10 @@ final class SharingSafetyTests: XCTestCase {
   func restore() {
     services?.vault.lock()
     SharingSafetyProtocol.server = nil
-    for card in cards { Keychain.remove(card.accountId) }
+    for card in cards {
+      Keychain.remove(card.accountId)
+      UserDefaults.standard.removeObject(forKey: "fotoro.pinnedCards.v2." + card.accountId.lowercased())
+    }
     if let previousCards { UserDefaults.standard.set(previousCards, forKey: "fotoro.pinnedCards") }
     else { UserDefaults.standard.removeObject(forKey: "fotoro.pinnedCards") }
     try? FileManager.default.removeItem(at: root)
