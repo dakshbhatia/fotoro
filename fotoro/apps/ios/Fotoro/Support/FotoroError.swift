@@ -4,6 +4,7 @@ struct FotoroError: LocalizedError, Equatable {
   var message: String
   let requestId: String?
   let retryable: Bool
+  let statusCode: Int?
   var errorDescription: String? {
     let detail = switch message {
     case "STORAGE_QUOTA_EXCEEDED": "Fotoro storage is full. Pause sync or contact support."
@@ -12,9 +13,10 @@ struct FotoroError: LocalizedError, Equatable {
     }
     return requestId.map { "\(detail) (reference: \($0))" } ?? detail
   }
-  init(_ message: String, requestId: String? = nil, retryable: Bool = false) {
+  init(_ message: String, requestId: String? = nil, retryable: Bool = false, statusCode: Int? = nil) {
     self.message = message
     self.retryable = retryable
+    self.statusCode = statusCode
     if let requestId, let uuid = UUID(uuidString: requestId),
       requestId.caseInsensitiveCompare(uuid.uuidString) == .orderedSame
     {

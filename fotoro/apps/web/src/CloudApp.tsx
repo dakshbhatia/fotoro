@@ -85,6 +85,8 @@ import {peopleSourceCurrent} from "./people/groups";
 import type {PeopleUpdate} from "./people/People";
 import type {IncomingAlbumIntent} from "./albums/intent";
 import {AlbumPanel} from "./albums/AlbumPanel";
+import {AlbumEntryRevision, type AlbumEntrySelection} from "./albums/entry";
+import {AlbumContinuation, type AlbumDestination} from "./albums/AlbumContinuation";
 const People = lazy(() => import("./people/People").then(module => ({default: module.People})));
 interface SelectedOriginalContext {snapshot: ShareSelection; session: UnlockedVault; controller: AbortController;}
 const noLocalPhotos: LocalPhoto[] = [];
@@ -185,11 +187,14 @@ export default function CloudApp({
   useEffect(() => {setPasswordFallback(false);}, [account]);
   const [placesOpen, setPlacesOpen] = useState(false), [placeResources] = useState(() => new ConsumerPreviewResources());
   const [peopleOpen, setPeopleOpen] = useState(false);
-  const [albumsOpen, setAlbumsOpen] = useState(false), [albumSelection, setAlbumSelection] = useState<Photo[]>([]);
+  const [albumsOpen, setAlbumsOpen] = useState(false), [albumSelection, setAlbumSelection] = useState<AlbumEntrySelection | null>(null);
+  const [albumEntryRevision] = useState(() => new AlbumEntryRevision());
+  const [albumDestination, setAlbumDestination] = useState<AlbumDestination | null>(null);
+  const albumPanelKey = account + ":" + albumEntryRevision.key(incomingAlbum);
   const albumIncomingRef = useRef(incomingAlbum); albumIncomingRef.current = incomingAlbum;
   useEffect(() => {if (!active || !account) setPlacesOpen(false);}, [active, account]);
   useEffect(() => {if (!active || !account) setPeopleOpen(false);}, [active, account]);
-  useEffect(() => {if (!active || !account) {setAlbumsOpen(false); setAlbumSelection([]);}}, [active, account]);
+  useEffect(() => {if (!active || !account) {setAlbumsOpen(false); setAlbumSelection(null); setAlbumDestination(null);}}, [active, account]);
   useEffect(() => () => placeResources.clear(), [placeResources]);
   const running = useRef(false),
     authIntent = useRef(0),
@@ -277,7 +282,7 @@ export default function CloudApp({
     setExchange(false);
     setMenu(false);
     setPeopleOpen(false);
-    setAlbumsOpen(false); setAlbumSelection([]);
+    setAlbumsOpen(false); setAlbumSelection(null); setAlbumDestination(null);
     setReselect(undefined);
     setPending([]);
     setAnnotationPending([]);
@@ -676,6 +681,7 @@ export default function CloudApp({
   }, [account, photos, publicDemo, catalogCoverage, busy, consumerSelection]);
   useEffect(() => {placeResources.clear();}, [ownedSnapshot?.token, ownedSnapshot?.photos, placeResources]);
   useEffect(() => {onOwnedPhotos?.(ownedSnapshot);}, [ownedSnapshot, onOwnedPhotos]);
+  const currentOwnedSnapshot = useRef(ownedSnapshot); currentOwnedSnapshot.current = ownedSnapshot;
   const photoChanges = useMemo<ConsumerPhotoChanges | null>(() => {
     if (!account || publicDemo) return null;
     let session;
@@ -893,16 +899,17 @@ export default function CloudApp({
   const priorAlbumIncoming = useRef(incomingAlbum);
   useEffect(() => {
     const previous = priorAlbumIncoming.current; priorAlbumIncoming.current = incomingAlbum;
-    if (previous && !incomingAlbum) {setAlbumsOpen(false); setAlbumSelection([]);}
+    if (previous && !incomingAlbum) {setAlbumsOpen(false); setAlbumSelection(null);}
     if (!active || !account || !incomingAlbum?.pending) return;
     const session = effectVault(); if (!session) return; incomingAlbum.bindInitialVault(session);
     if (incomingAlbum.current(session)) openAlbums();
   }, [active, account, incomingAlbum]);
-  const openAlbums = (selection: Photo[] = []) => {
+  const openAlbums = (selection: Photo[] = [], destination = albumDestination?.current() ? albumDestination.albumId : undefined) => {
     cancelOriginals(); setViewer(null); setExchange(false); setExchangePhotos([]); setPeopleOpen(false); setPlacesOpen(false); setMenu(false); menuRef.current = false;
-    setAlbumSelection([...selection]); setAlbumsOpen(true);
+    if (destination && albumDestination?.albumId !== destination) return;
+    setAlbumSelection(albumEntryRevision.capture(selection)); setAlbumsOpen(true);
   };
-  const closeAlbums = () => {setAlbumsOpen(false); setAlbumSelection([]); onAlbumDone?.();};
+  const closeAlbums = () => {setAlbumsOpen(false); setAlbumSelection(null); setAlbumDestination(null); onAlbumDone?.();};
   useEffect(() => {if (active && account && albumPhotos?.length) openAlbums(albumPhotos);}, [active, account, albumPhotos]);
   useEffect(() => {
     if (!active || !account || !sharePhotos?.length) return;
@@ -916,7 +923,7 @@ export default function CloudApp({
             if (event.target.value === "photos") onBack();
             else if (event.target.value === "places") setPlacesOpen(true);
             else if (event.target.value === "shared") openSharing();
-            else if (event.target.value === "albums") openAlbums();
+            else if (event.target.value === "albums") openAlbums(albumDestination?.current() ? chosen : []);
             else {setReceived(null); setReceivedContext(null); setQuery(""); setCommittedMeaning(undefined);}
           }}><option value="photos">Photos</option><option value="saved">Saved</option><option value="shared">Shared</option><option value="places">Places</option>{!publicDemo && <option value="albums">Live albums</option>}</select></nav> : <h1>Fotoro</h1>}
           <div className="header-actions">
@@ -1099,6 +1106,7 @@ export default function CloudApp({
             {!received && selected.size > 0 && <div className="consumer-selection glass" aria-label="Selected photos">
               <span role="status">{selected.size} selected</span>
               <button disabled={busy || sharingOriginals} onClick={() => {if (!running.current) setSelected(new Set());}}>Clear</button>
+              <AlbumContinuation destination={albumDestination} photos={chosen} disabled={busy || preparingOriginals || sharingOriginals} onContinue={(items, albumId) => {if (!running.current) openAlbums(items, albumId);}} />
               <button ref={originalButton} className="primary-action" disabled={busy || preparingOriginals || sharingOriginals} onClick={() => void prepareSelectedOriginals()}>{preparingOriginals ? "Preparing…" : "Share"}</button>
               <details className="selection-more" onKeyDown={event => {if (event.key === "Escape") {event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();}}}>
                 <summary>More</summary><div><button disabled={busy || preparingOriginals || sharingOriginals} onClick={() => {if (!running.current) openSharing(chosen);}}>Share in Fotoro</button>{!publicDemo && <button disabled={busy || preparingOriginals || sharingOriginals} onClick={() => {if (!running.current) openAlbums(chosen);}}>Add to live album</button>}</div>
@@ -1284,9 +1292,9 @@ export default function CloudApp({
           }}
         />
       )}
-      {active && albumsOpen && unlocked && <AlbumPanel key={account} selection={albumSelection} currentPhotos={() => currentCatalog.current}
-        onClose={closeAlbums} onIncomingDone={onAlbumIncomingDone} onChoosePhotos={() => {setReceived(null); setReceivedContext(null); setSelecting(true);}} incoming={incomingAlbum ?? undefined}
-        onRetryAccount={incomingAlbum?.pending ? () => {incomingAlbum.retryPassword(); setAlbumsOpen(false); setAlbumSelection([]); lockVault();} : undefined} />}
+      {active && albumsOpen && unlocked && <AlbumPanel key={albumPanelKey} selection={albumEntryRevision.photos(albumSelection)} initialAlbumId={albumDestination?.current() ? albumDestination.albumId : undefined} currentPhotos={() => currentCatalog.current} currentOwnedPhotos={() => currentOwnedSnapshot.current}
+        onClose={closeAlbums} onIncomingDone={() => {setAlbumDestination(null); onAlbumIncomingDone?.();}} onChoosePhotos={albumId => {const session = effectVault(); if (!session) return; const origin = location.origin; const invitation = albumIncomingRef.current?.pending && albumIncomingRef.current.link.albumId === albumId ? albumIncomingRef.current : undefined; setAlbumDestination({albumId, current: () => sameVault(session) && location.origin === origin && activeRef.current && (!invitation || invitation.current(session))}); setReceived(null); setReceivedContext(null); setSelecting(true);}} incoming={incomingAlbum ?? undefined}
+        onRetryAccount={incomingAlbum?.pending ? () => {incomingAlbum.retryPassword(); setAlbumsOpen(false); setAlbumSelection(null); lockVault();} : undefined} />}
       {active && viewing && viewer && unlocked && (
         <Viewer
           photos={shown}

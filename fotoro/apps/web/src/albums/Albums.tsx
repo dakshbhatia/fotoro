@@ -1,9 +1,9 @@
+import {AlbumNameChoices} from "./AlbumNameChoices";
 import {useEffect, useMemo, useRef, useState} from "react";
 import type {AccountCardV1} from "@fotoro/contracts";
 import {ALBUM_DEFINITION_KIND, readAlbumSignedBody, validateAlbumDefinition, type AlbumOverviewV1} from "@fotoro/contracts/albums";
 import {createAlbumLink} from "@fotoro/contracts/albums-links";
-import {verifyAlbumDefinition} from "@fotoro/crypto/albums";
-import {contacts, contactNames, pinCard, type ShareScope} from "../exchange/share-service";
+import {contacts, contactNames, type ShareScope} from "../exchange/share-service";
 import {identityLabel, ShareSelection} from "../exchange/sharing";
 import {requireVault} from "../vault/vault";
 import {sameVault} from "../vault/scope";
@@ -11,10 +11,16 @@ import {useDialogFocus} from "../library/dialog-focus";
 import type {Photo} from "../library/catalog";
 import {AlbumAccess, albumInbox, albumOwnedSelection, albumOriginalFiles, createAlbum, type AlbumCreationDraft} from "./service";
 import type {IncomingAlbumIntent} from "./intent";
-import {searchAlbumPhotos} from "./search";
+import type {AlbumPhotoFactsContentV1} from "@fotoro/contracts/album-photo-facts";
+import type {OwnedPhotoSnapshot} from "../library/consumer-search";
+import {emptyPeopleFilter} from "../people/filter";
+import {PeopleFilter} from "../people/PeopleFilter";
+import {albumPhotoGroups} from "./browse";
+import {ownedAlbumDetails, type OwnedAlbumDetails} from "./details";
+import {albumReviewedPeople, sharedAlbumDetails, searchAlbumPhotos} from "./search";
 import {albumDateTag, albumMemberLabel} from "./presentation";
 import {Icon} from "../library/icons";
-import {loadAlbumEntry, unsupportedAlbumCapabilities} from "./bootstrap";
+import {joinAlbumInvitation, loadAlbumEntry, unsupportedAlbumCapabilities} from "./bootstrap";
 import {shareOriginals} from "../library/system-share";
 
 function readableError(error: unknown) {
@@ -23,6 +29,7 @@ function readableError(error: unknown) {
   if (/ALBUM_(ACCESS_ENDED|NOT_FOUND|NOT_ACCEPTED)|FORBIDDEN/.test(code)) return "Album access has ended or is unavailable.";
   if (/CAPACITY|PHOTO_LIMIT/.test(code)) return "This album has reached its photo limit.";
   if (/ALBUM_LIMIT/.test(code)) return "This account has reached its active album limit.";
+  if (/CONFLICT/.test(code)) return "Shared details changed. Refresh and review before saving again.";
   if (/SELECTION_CHANGED/.test(code)) return "The chosen Saved photos changed. Close this panel and choose them again.";
   if (/KEYS_CHANGED/.test(code)) return "An account's keys changed. Review the contact before continuing.";
   return "Albums could not finish this action. Refresh and try again.";
@@ -49,7 +56,7 @@ function AlbumImage({access, photo, preview = false, onOpen}: {access: AlbumAcce
   const image = url ? <img src={url} alt={preview ? photo.metadata.filename : ""} onError={() => setError("Preview unavailable.")} /> : <span>{error || "Loading photo…"}</span>;
   return <div ref={element} className={preview ? "album-preview-image" : "album-thumbnail"}>{preview ? error || image : <button className="photo" onClick={onOpen} aria-label={"Open " + photo.metadata.filename}>{error || image}</button>}</div>;
 }
-export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incoming, onRetryAccount}: {selection: readonly Photo[]; currentPhotos: () => readonly Photo[]; onClose: () => void; onChoosePhotos: (albumId: string) => void; incoming?: IncomingAlbumIntent; onRetryAccount?: () => void}) {
+export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incoming, onRetryAccount, currentOwnedPhotos, initialAlbumId}: {selection: readonly Photo[]; initialAlbumId?: string; currentPhotos: () => readonly Photo[]; onClose: () => void; onChoosePhotos: (albumId: string) => void; incoming?: IncomingAlbumIntent; onRetryAccount?: () => void; currentOwnedPhotos?: () => OwnedPhotoSnapshot | null}) {
   const [session] = useState(requireVault), [controller] = useState(() => new AbortController());
   const [chosenSnapshot] = useState(() => new ShareSelection([...selection]));
   const creationDraft = useRef<AlbumCreationDraft>({});
@@ -59,16 +66,19 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   const [ownerReview, setOwnerReview] = useState<AlbumOverviewV1 | null>(null), [ownerChanged, setOwnerChanged] = useState(false);
   const [access, setAccess] = useState<AlbumAccess | null>(null), [photos, setPhotos] = useState<Photo[]>([]), [preview, setPreview] = useState<Photo | null>(null);
   const [query, setQuery] = useState("");
+  const [facts, setFacts] = useState(new Map<string, AlbumPhotoFactsContentV1>()), [factsState, setFactsState] = useState<"loading" | "ready" | "legacy" | "error" | "partial">("loading");
+  const [peopleFilter, setPeopleFilter] = useState(emptyPeopleFilter), [from, setFrom] = useState(""), [through, setThrough] = useState(""), [groupCopies, setGroupCopies] = useState(true);
+  const [detailDraft, setDetailDraft] = useState<{photo: Photo; source: OwnedAlbumDetails; revision: number; people: string[]; location: boolean; existing: boolean} | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState(""), [title, setTitle] = useState(""), [invitees, setInvitees] = useState(new Set<string>()), [confirmEnd, setConfirmEnd] = useState(false);
   const [creating, setCreating] = useState(false), [unsupported, setUnsupported] = useState(false), [entryFailed, setEntryFailed] = useState(false);
   const preparedDownload = useRef<{access: AlbumAccess; photo: Photo; files: File[]; controller: AbortController} | null>(null);
   const [downloadReady, setDownloadReady] = useState(false);
   const clearDownload = () => {preparedDownload.current?.controller.abort(); if (preparedDownload.current) preparedDownload.current.files.length = 0; preparedDownload.current = null; setDownloadReady(false);};
   const scope: ShareScope = {signal: controller.signal, current: () => alive.current && sameVault(session) && (!incoming || incoming.current(session))};
-  const closeAlbum = () => {clearDownload(); const previous = accessRef.current; accessRef.current = null; previous?.dispose(); setAccess(null); setPhotos([]); setPreview(null); setQuery(""); setConfirmEnd(false);};
+  const closeAlbum = () => {clearDownload(); const previous = accessRef.current; accessRef.current = null; previous?.dispose(); setAccess(null); setPhotos([]); setPreview(null); setQuery(""); setConfirmEnd(false); setFacts(new Map()); setFactsState("loading"); setPeopleFilter(emptyPeopleFilter()); setFrom(""); setThrough(""); setDetailDraft(null);};
   const close = () => {alive.current = false; controller.abort(); closeAlbum(); onClose();};
   useDialogFocus(panel, () => preview ? setPreview(null) : close());
-  useEffect(() => {if (preview) previewPanel.current?.focus({preventScroll: true});}, [preview]);
+  useEffect(() => {setDetailDraft(null); if (preview) previewPanel.current?.focus({preventScroll: true});}, [preview]);
   useEffect(() => {
     clearDownload();
     const clear = () => clearDownload();
@@ -99,17 +109,27 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     if (scope.current?.()) setTitles(decrypted);
     return list;
   }
+  async function readFacts(opened: AlbumAccess) {
+    if (!scope.current?.() || accessRef.current !== opened) return;
+    setFacts(new Map()); setFactsState("loading");
+    try {
+      const result = await opened.loadFacts();
+      if (scope.current?.() && accessRef.current === opened && opened.current()) {setFacts(result.facts); setFactsState(!result.supported ? "legacy" : result.unmatched ? "partial" : "ready");}
+    } catch {
+      if (scope.current?.() && accessRef.current === opened) {setFacts(new Map()); setFactsState("error"); if (!opened.current()) closeAlbum();}
+    }
+  }
   async function open(overview: AlbumOverviewV1) {
     closeAlbum(); const opened = await AlbumAccess.open(overview, scope);
     if (!scope.current?.()) {opened.dispose(); return;}
     accessRef.current = opened; setAccess(opened);
-    if (overview.membership === "accepted") {const loaded = await opened.loadPhotos(); if (scope.current?.() && accessRef.current === opened) setPhotos(loaded);}
+    if (overview.membership === "accepted") {const loaded = await opened.loadPhotos(); if (scope.current?.() && accessRef.current === opened) {setPhotos(loaded); await readFacts(opened);}}
   }
   const initialize = () => action(async () => {
     let checked = false;
     setAvailable(null); setUnsupported(false); setEntryFailed(false);
     try {
-      const entry = await loadAlbumEntry({session, scope, incoming, loadInbox, onAvailable: () => {checked = true; setAvailable(true);}});
+      const entry = await loadAlbumEntry({session, scope, incoming, albumId: initialAlbumId, loadInbox, onAvailable: () => {checked = true; setAvailable(true);}});
       if (entry.kind === "missing") setError("This account has no invitation to that album.");
       else if (entry.kind === "review") {setOwnerChanged(entry.changed); setOwnerReview(entry.overview);}
       else if (entry.kind === "open") await open(entry.overview);
@@ -129,7 +149,17 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     return () => {clearInterval(timer); window.removeEventListener("focus", refresh); access.signal.removeEventListener("abort", ended);};
   }, [access, photos.length, query]);
   const contributor = (id: string, roster = access?.definition.members.map(member => member.card.accountId) ?? cards.map(card => card.accountId)) => albumMemberLabel(id, session.accountId, names, roster);
-  const shown = useMemo(() => searchAlbumPhotos(photos, query, () => !!access?.current()), [photos, query, access]);
+  const shown = useMemo(() => searchAlbumPhotos(photos, query, () => !!access?.current(), Date.now(), {facts, people: peopleFilter, from, through}), [photos, query, access, facts, peopleFilter, from, through]);
+  const groups = useMemo(() => albumPhotoGroups(shown, groupCopies, () => !!access?.current()), [shown, groupCopies, access]);
+  const reviewed = useMemo(() => albumReviewedPeople(photos, facts, () => !!access?.current()).map(person => ({...person, names: [person.names[0] + " · " + contributor(JSON.parse(person.id)[0])]})), [photos, facts, access, names]);
+  const openDetails = (photo: Photo) => action(async () => {
+    if (!access || accessRef.current !== access || factsState === "legacy") return;
+    const source = ownedAlbumDetails(photo, currentOwnedPhotos?.() ?? null);
+    if (!source?.current()) throw new Error("ALBUM_SELECTION_CHANGED");
+    const latest = await access.readFactsFor(photo);
+    if (!source.current() || !scope.current?.() || accessRef.current !== access) throw new Error("ALBUM_SELECTION_CHANGED");
+    setDetailDraft({photo, source, revision: (latest?.revision ?? 0) + 1, people: [], location: false, existing: !!latest && (!!latest.people.length || !!latest.location)});
+  });
   let chosen = 0;
   try {chosen = chosenSnapshot.current ? albumOwnedSelection(chosenSnapshot.photos, session, currentPhotos()).length : 0;} catch {}
   const refresh = () => entryFailed ? initialize() : action(async () => {
@@ -139,6 +169,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   const memberIDs = access?.definition.members.map(member => member.card.accountId) ?? [];
   const photoCount = access?.overview.membership === "accepted" ? photos.length : access?.overview.photoCount ?? 0;
   const previewDate = preview && albumDateTag(preview.metadata), previewIndex = preview ? shown.indexOf(preview) : -1;
+  const previewOwned = preview && ownedAlbumDetails(preview, currentOwnedPhotos?.() ?? null);
   const prepareDownload = () => action(async () => {
     if (!access || !preview) return;
     clearDownload();
@@ -171,7 +202,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
         <summary>More</summary><div>
           <button disabled={busy} onClick={() => void refresh()}>Refresh</button>
           {incoming && onRetryAccount && <button disabled={busy} onClick={onRetryAccount}>Use another account</button>}
-          {access && <details className="album-roster"><summary>Details</summary><p className="hint">Fixed invited roster</p><ul>{access.definition.members.map(member => <li key={member.card.accountId}><span>{contributor(member.card.accountId)}</span><small>{identityLabel(member.card)}</small></li>)}</ul><p className="hint">Search uses filenames and capture dates. Private labels stay in your account.</p></details>}
+          {access && <details className="album-roster"><summary>Details</summary><p className="hint">Fixed invited roster</p><ul>{access.definition.members.map(member => <li key={member.card.accountId}><span>{contributor(member.card.accountId)}</span><small>{identityLabel(member.card)}</small></li>)}</ul><p className="hint">Search includes filenames, capture dates and explicitly shared details. Private labels stay in your account.</p></details>}
           {access?.definition.ownerAccountId === session.accountId && <>
             <button disabled={busy} onClick={() => void action(async () => {const link = createAlbumLink(access.albumId, session.card, location.origin); await navigator.clipboard.writeText(link); if (scope.current?.()) setNotice("Album link copied. Only invited accounts can accept it.");})}>Copy invitation link</button>
             <details><summary>End access</summary><label><input type="checkbox" checked={confirmEnd} onChange={event => setConfirmEnd(event.target.checked)} />End album access for everyone</label><button disabled={busy || !confirmEnd} onClick={() => void action(async () => {await access.end(); closeAlbum(); await loadInbox(); setError(""); setNotice("Album access ended.");})}>End access</button></details>
@@ -190,18 +221,26 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
           <h3>{ownerChanged ? "The album owner's identity changed" : "Accept the album owner"}</h3>
           <p className="hint">Only accept an album link sent to you by its owner. {ownerChanged && "Confirm the new link with them before continuing."}</p>
           <details className="album-roster"><summary>Verify sender</summary><p className="contact-identity">Fotoro {identityLabel(incoming.link.ownerCard)}</p></details>
-          <button className="primary-action" disabled={busy} onClick={() => void action(async () => {verifyAlbumDefinition(ownerReview.definition, incoming.link.ownerCard); await pinCard(incoming.link.ownerCard, scope); if (!scope.current?.()) return; setOwnerReview(null); await open(ownerReview);})}>{ownerChanged ? "Accept new identity" : "Accept owner and review invitation"}</button>
+          <button className="primary-action" disabled={busy} onClick={() => void action(async () => {const accepted = await joinAlbumInvitation(ownerReview, scope, incoming.link.ownerCard); if (!scope.current?.()) return; setOwnerReview(null); await open(accepted); await loadInbox();})}>{ownerChanged ? "Join album with new identity" : "Join album"}</button>
         </section> : access ? <>
           {access.overview.membership === "invited" ? <>
             <p>Accept to view this album and add chosen Saved photos. Its invited members stay fixed.</p>
-            <button className="primary-action" disabled={busy} onClick={() => void action(async () => {const accepted = await access.accept(); await open(accepted); await loadInbox();})}>Accept invitation</button>
+            <button className="primary-action" disabled={busy} onClick={() => void action(async () => {const accepted = await joinAlbumInvitation(access.overview, scope); await open(accepted); await loadInbox();})}>Join album</button>
           </> : <>
-            <div className="album-toolbar"><input type="search" aria-label="Search album filenames or dates" placeholder="Search album" value={query} onChange={event => setQuery(event.target.value)} />
+            <div className="album-toolbar"><input type="search" aria-label="Search album people, places, filenames or capture dates" placeholder="Search album" value={query} onChange={event => setQuery(event.target.value)} />
               {chosen ? <button className="primary-action" disabled={busy} onClick={() => void action(async () => {const added = await access.add(chosenSnapshot.photos, currentPhotos); const list = await loadInbox(); const updated = list?.find(item => item.definition.body === access.overview.definition.body); if (updated) await open(updated); setNotice(added ? `${added} ${added === 1 ? "photo added" : "photos added"}.` : "Already in this album.");})}>Add {chosen} {chosen === 1 ? "photo" : "photos"}</button> : <button disabled={busy} onClick={() => onChoosePhotos(access.albumId)}>Choose photos</button>}
             </div>
+            <div className="album-filters"><PeopleFilter people={reviewed} value={peopleFilter} onChange={setPeopleFilter} disabled={busy} />
+              <details><summary>Time and copies</summary><div className="album-range"><label>Captured from<input type="date" value={from} onChange={event => setFrom(event.target.value)} /></label><label>Captured through<input type="date" value={through} onChange={event => setThrough(event.target.value)} /></label>
+                {(from || through) && <button onClick={() => {setFrom(""); setThrough("");}}>Clear dates</button>}<label><input type="checkbox" checked={groupCopies} onChange={event => setGroupCopies(event.target.checked)} />Group exact copies</label></div></details></div>
+            {factsState === "loading" && <p className="hint" role="status">Loading shared details…</p>}
+            {factsState === "legacy" && <p className="hint" role="status">This server supports filenames and capture dates. Shared details are unavailable.</p>}
+            {(factsState === "error" || factsState === "partial") && <p className="hint" role="status">{factsState === "partial" ? "Some shared details need newly added photos. Refresh to include them." : "Shared details could not load. Filename and date search still work."} <button disabled={busy} onClick={() => void (factsState === "partial" ? refresh() : action(() => readFacts(access)))}>Retry details</button></p>}
             {busy && !photos.length && <p className="hint" role="status">Loading photos…</p>}
-            {query && <p role="status">{shown.length} matching {shown.length === 1 ? "photo" : "photos"}</p>}
-            <div className="album-grid">{shown.map(photo => <div className="tile" key={photo.manifest.photoId}><AlbumImage access={access} photo={photo} onOpen={() => setPreview(photo)} /><div className="album-photo-tags" aria-label="Photo information"><span aria-label="Contributor">{contributor(photo.manifest.ownerAccountId)}</span>{(() => {const date = albumDateTag(photo.metadata); return date ? <span aria-label={date.label}>{date.text}</span> : null;})()}</div></div>)}</div>
+            {(query || peopleFilter.ids.size > 0 || from || through) && <p role="status">{shown.length} matching {shown.length === 1 ? "photo" : "photos"}</p>}
+            {groups.length < shown.length && <p className="hint">{groups.length} exact originals · {shown.length} contributed copies. All copies are kept.</p>}
+            <div className="album-grid">{groups.map(group => {const photo = group.photo, shared = sharedAlbumDetails(photo, facts), date = albumDateTag(photo.metadata); return <div className="tile" key={photo.manifest.photoId}><AlbumImage access={access} photo={photo} onOpen={() => setPreview(photo)} /><div className="album-photo-tags" aria-label="Photo information"><span aria-label="Contributor">{contributor(photo.manifest.ownerAccountId)}</span>{date && <span aria-label={date.label}>{date.text}</span>}{shared?.people.map(name => <span key={name} aria-label="Shared reviewed person">{name}</span>)}{shared?.location?.name && <span aria-label="Shared place">{shared.location.name}</span>}</div>
+              {group.copies.length > 1 && <details className="album-copies"><summary>{group.copies.length} copies</summary>{group.copies.map(copy => <button key={copy.manifest.photoId} onClick={() => setPreview(copy)}>{contributor(copy.manifest.ownerAccountId)} · {copy.metadata.filename}</button>)}</details>}</div>;})}</div>
             {!photos.length && !busy && <p>No contributions yet.</p>}
           </>}
         </> : <>
@@ -222,7 +261,21 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
       <header><button className="album-icon-button" onClick={() => setPreview(null)} aria-label="Back to album"><Icon kind="previous" /></button><p>{previewIndex + 1} of {shown.length}</p><div className="actions"><button className="album-icon-button" aria-label="Previous photo" disabled={previewIndex <= 0} onClick={() => setPreview(shown[previewIndex - 1])}><Icon kind="previous" /></button><button className="album-icon-button" aria-label="Next photo" disabled={previewIndex < 0 || previewIndex >= shown.length - 1} onClick={() => setPreview(shown[previewIndex + 1])}><Icon kind="next" /></button></div></header>
       <AlbumImage access={access} photo={preview} preview />
       <div className="album-photo-tags" aria-label="Photo information"><span aria-label="Contributor">{contributor(preview.manifest.ownerAccountId)}</span>{previewDate && <span aria-label={previewDate.label}>{previewDate.text}</span>}</div>
-      <details className="album-preview-details"><summary>Details</summary><p>{preview.metadata.filename}</p><button disabled={busy} onClick={downloadReady ? download : () => void prepareDownload()}>{downloadReady ? "Download original" : busy ? "Preparing…" : "Prepare download"}</button></details>
+      <div className="album-photo-tags" aria-label="Shared photo details">{sharedAlbumDetails(preview, facts)?.people.map(name => <span key={name} aria-label="Shared reviewed person">{name}</span>)}{sharedAlbumDetails(preview, facts)?.location && <span aria-label="Shared photo location">{sharedAlbumDetails(preview, facts)?.location?.name || "Photo location shared"}</span>}</div>
+      <details className="album-preview-details"><summary>Details</summary><p>{preview.metadata.filename}</p>
+        {error && <p className="hint" role="alert">{error}</p>}{notice && <p className="hint" role="status">{notice}</p>}
+        {preview.manifest.ownerAccountId === session.accountId && factsState !== "legacy" && <button disabled={busy || !previewOwned} onClick={() => void openDetails(preview)}>Share details</button>}
+        {preview.manifest.ownerAccountId === session.accountId && !previewOwned && factsState !== "legacy" && <p className="hint">Load this photo in Saved to share its reviewed details.</p>}
+        {detailDraft && detailDraft.photo === preview && <section className="album-share-details" aria-label="Share photo details"><h3>Share photo details</h3><p className="hint">Choose details to share with album members. Unchecked details are removed on save.</p>
+          <AlbumNameChoices names={detailDraft.source.people} selected={detailDraft.people} disabled={busy || !detailDraft.source.current()} onChange={people => setDetailDraft({...detailDraft, people})} />
+          <label><input type="checkbox" checked={detailDraft.location} disabled={busy || !detailDraft.source.location || !detailDraft.source.current()} onChange={event => setDetailDraft({...detailDraft, location: event.target.checked})} />Photo location{detailDraft.source.location?.name ? ": " + detailDraft.source.location.name : ""}</label>
+          {detailDraft.source.location && <p className="hint">Sharing location includes exact coordinates.</p>}
+          {!detailDraft.source.current() && <p className="hint" role="alert">The Saved source changed. Refresh details and review again.</p>}
+          <div className="actions"><button disabled={busy || !detailDraft.source.current() || (!detailDraft.people.length && !detailDraft.location && !detailDraft.existing)} onClick={() => void action(async () => {
+            const draft = detailDraft; const content = await access.shareDetails(draft.photo, draft.source, draft, draft.revision);
+            if (scope.current?.() && accessRef.current === access && draft.source.current()) {setFacts(current => new Map(current).set(draft.photo.manifest.photoId, content)); setDetailDraft(null); setNotice(content.people.length || content.location ? "Selected details shared." : "Shared details cleared.");}
+          })}>{detailDraft.people.length || detailDraft.location ? "Share selected details" : "Clear shared details"}</button><button disabled={busy} onClick={() => void openDetails(preview)}>Refresh details</button><button disabled={busy} onClick={() => setDetailDraft(null)}>Cancel</button></div></section>}
+        <button disabled={busy} onClick={downloadReady ? download : () => void prepareDownload()}>{downloadReady ? "Download original" : busy ? "Preparing…" : "Prepare download"}</button></details>
     </section>}
   </aside>;
 }

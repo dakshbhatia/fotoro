@@ -98,3 +98,16 @@ test("unsupported capability responses stay distinct from temporary HTTP or tran
   for (const error of [new Error("ALBUM_UPDATE_REQUIRED"), new ApiError("NOT_FOUND"), new ApiError("HTTP_404"), new ApiError("HTTP_501")]) assert.equal(unsupportedAlbumCapabilities(error), true);
   for (const error of [new ApiError("UNAVAILABLE", true), new ApiError("HTTP_503"), new TypeError("offline"), new ApiError("ACCOUNT_MISMATCH")]) assert.equal(unsupportedAlbumCapabilities(error), false);
 });
+
+
+test("chosen-photo return resolves the exact active album from the verified inbox, without accepting or adding", () => scoped(async () => {
+  const data = await fixture();
+  const id = JSON.parse(new TextDecoder().decode(unb64(data.overview.definition.body))).albumId;
+  let reads = 0;
+  globalThis.fetch = async (path, init) => {assert.equal(init?.method, "GET"); reads++; assert.equal(path, "/v1/albums/capabilities"); return response(capabilities);};
+  const result = await loadAlbumEntry({session: data.session, scope: {current: () => true}, albumId: id,
+    loadInbox: async () => [data.overview], onAvailable: () => {}});
+  assert.equal(result.kind, "open"); if (result.kind === "open") assert.deepEqual(result.overview, data.overview);
+  assert.equal(reads, 1);
+  assert.equal((await loadAlbumEntry({session: data.session, scope: {current: () => true}, albumId: crypto.randomUUID(), loadInbox: async () => [data.overview], onAvailable: () => {}})).kind, "missing");
+}));

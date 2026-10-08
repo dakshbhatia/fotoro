@@ -51,6 +51,14 @@ struct NativeAlbumAccess {
   private var access: NativeAlbumAccess?
   private(set) var nextCursor: String?
   private var cursors = Set<String>()
+  private(set) var sharedFacts: [String: AlbumPhotoFactsContentV1] = [:]
+  private(set) var factsSupported: Bool?
+  private(set) var factsError: String?
+  private(set) var factsNextCursor: String?
+  private(set) var factsPageLoaded = false
+  private var pendingFacts: [String: AlbumPhotoFactsContentV1] = [:]
+  private var factsCursors = Set<String>()
+  private var factsListedIDs = Set<String>()
   private var epoch = UUID()
   private let crypto = NativeAlbumCrypto()
   private static var cleanedStaleCaches = false
@@ -66,6 +74,7 @@ struct NativeAlbumAccess {
   }
   func clear() {
     epoch = UUID(); access = nil; opened = nil; items = []; albums = []; nextCursor = nil; cursors = []
+    clearFacts()
     if let directory { try? FileManager.default.removeItem(at: directory) }
     directory = nil; ImageCache.shared.removeAll()
   }
@@ -83,9 +92,14 @@ struct NativeAlbumAccess {
     try Task.checkCancellation()
     guard isCurrent(expected) else { clear(); throw CancellationError() }
   }
-  private func request<T: Codable>(_ type: T.Type, path: String, context: NativeAlbumContext, body: Data? = nil) async throws -> T {
+  private func request<T: Codable>(_ type: T.Type, path: String, context: NativeAlbumContext, body: Data? = nil, method: String? = nil) async throws -> T {
     try check(context)
-    let bytes = try await services.api.request(path, method: body == nil ? "GET" : "POST", body: body)
+    let bytes: Data
+    do { bytes = try await services.api.request(path, method: method ?? (body == nil ? "GET" : "POST"), body: body) }
+    catch let error as FotoroError where error.statusCode == 403 {
+      if isCurrent(context) { clearOpen() }
+      throw error
+    }
     try check(context)
     return try NativeAlbumWire.decode(type, bytes)
   }
@@ -124,7 +138,12 @@ struct NativeAlbumAccess {
   }
   private func clearOpen() {
     epoch = UUID(); access = nil; opened = nil; items = []; nextCursor = nil; cursors = []
+    clearFacts()
     if let directory { try? FileManager.default.removeItem(at: directory) }; directory = nil; ImageCache.shared.removeAll()
+  }
+  private func clearFacts() {
+    sharedFacts = [:]; pendingFacts = [:]; factsCursors = []; factsListedIDs = []; factsNextCursor = nil
+    factsSupported = nil; factsError = nil; factsPageLoaded = false
   }
   private func creationID(_ captured: NativeAlbumContext) -> String { "albumcreate-" + Data(captured.origin.utf8).digest }
   var hasPendingCreation: Bool {
@@ -240,6 +259,13 @@ struct NativeAlbumAccess {
     access = reading; opened = value
     do { try await loadPage(reading, cursor: nil) }
     catch { if isCurrent(captured) { clearOpen() }; throw error }
+    do { try await loadMoreSharedDetails() }
+    catch is CancellationError { throw CancellationError() }
+    catch {
+      if NativeDiagnosticOutcome.failure(for: error, taskCancelled: Task.isCancelled) == .cancelled { throw CancellationError() }
+      try check(captured)
+      factsError = error.localizedDescription
+    }
   }
   func loadMore() async throws {
     guard let reading = access, let cursor = nextCursor else { return }
@@ -272,6 +298,100 @@ struct NativeAlbumAccess {
     try await membership(reading); try check(captured)
     if let cursor = detail.nextCursor { guard cursors.insert(cursor).inserted else { throw FotoroError("Invalid album pagination.") } }
     nextCursor = detail.nextCursor
+    do { try bindSharedDetails() }
+    catch { sharedFacts = [:]; pendingFacts = [:]; factsError = error.localizedDescription }
+  }
+  private func bindSharedDetails() throws {
+    var values: [String: AlbumPhotoFactsContentV1] = [:]
+    for item in items {
+      if let value = pendingFacts[item.id] { try NativeAlbumFacts.bind(value, to: item); values[item.id] = value }
+    }
+    sharedFacts = values
+  }
+  func loadMoreSharedDetails() async throws {
+    guard let reading = access else { throw FotoroError("Open an accepted album first.") }
+    do {
+      if factsSupported == nil {
+        do {
+          let capability = try await request(AlbumFactsCapabilitiesV1.self, path: "/v1/album-photo-facts/capabilities", context: reading.context)
+          guard capability.version == 1, capability.albumFactsVersion == 1 else { throw FotoroError("Shared details need a newer Fotoro version.") }
+          factsSupported = true
+        } catch let error as FotoroError where [404, 501].contains(error.statusCode ?? 0) {
+          try check(reading.context); factsSupported = false; factsError = nil; return
+        }
+      }
+      guard factsSupported == true, !factsPageLoaded || factsNextCursor != nil else { return }
+      try await membership(reading)
+      let path = "/v1/albums/\(reading.albumID)/photo-facts" + (factsNextCursor.map { "?cursor=" + $0 } ?? "")
+      let page = try await request(AlbumPhotoFactsPageV1.self, path: path, context: reading.context)
+      guard page.version == 1, page.facts.count <= 100, page.hasMore == (page.nextCursor != nil),
+        page.nextCursor.map({ $0.range(of: "^[1-9][0-9]{0,14}$", options: .regularExpression) != nil && !page.facts.isEmpty
+          && (Int($0) ?? 0) > (Int(factsNextCursor ?? "0") ?? 0) && !factsCursors.contains($0) }) ?? true
+      else { throw FotoroError("Invalid shared details pagination.") }
+      var next = pendingFacts
+      var pageIDs = Set<String>()
+      for signed in page.facts {
+        let value = try NativeAlbumFacts.readEnvelope(signed, access: reading)
+        guard pageIDs.insert(value.photoId).inserted, !factsListedIDs.contains(value.photoId),
+          next[value.photoId] != nil || next.count < 1000 else { throw FotoroError("Duplicate or oversized shared details.") }
+        if let item = items.first(where: { $0.id == value.photoId }) { try NativeAlbumFacts.bind(value, to: item) }
+        if (next[value.photoId]?.revision ?? 0) <= value.revision { next[value.photoId] = value }
+      }
+      try await membership(reading); try check(reading.context)
+      pendingFacts = next; factsPageLoaded = true; factsNextCursor = page.nextCursor
+      factsListedIDs.formUnion(pageIDs)
+      if let cursor = page.nextCursor { factsCursors.insert(cursor) }
+      try bindSharedDetails(); factsError = nil
+    } catch {
+      if isCurrent(reading.context) { factsError = error.localizedDescription }
+      throw error
+    }
+  }
+  func prepareSharedDetails(_ item: NativeAlbumItem) async throws -> NativeAlbumFactsReview {
+    guard let reading = access, factsSupported == true,
+      items.contains(where: { $0.id == item.id && $0.signedManifest == item.signedManifest && $0.entry == item.entry }),
+      let source = try services.consumerSavedPhoto(item.id), source.manifest == item.photo.manifest,
+      source.metadata == item.photo.metadata, source.manifest.ownerAccountId == reading.context.photo.account
+    else { throw FotoroError("Only your current contributed Saved photo can share details.") }
+    let annotation = services.annotation(source)
+    guard annotation.photoId == source.id, annotation.originalSha256 == source.metadata.originalSha256 else { throw FotoroError("Photo details changed. Review the photo again.") }
+    let reply = try await request(AlbumPhotoFactsReplyV1.self, path: "/v1/albums/\(reading.albumID)/photo-facts/\(item.id)", context: reading.context)
+    guard reply.version == 1 else { throw FotoroError("Invalid shared photo details.") }
+    let current = try reply.facts.map { try NativeAlbumFacts.read($0, item: item, access: reading) }
+    try await membership(reading); try check(reading.context)
+    let review = NativeAlbumFactsReview(item: item, context: reading.context, source: source, annotation: annotation,
+      revision: current?.revision ?? 0,
+      people: Dictionary(PhotoPeopleFacts.read(annotation.facts ?? [], originalSha256: source.metadata.originalSha256).map { (Data($0.n.utf8).b64, $0.n) },
+        uniquingKeysWith: { first, _ in first }).values.sorted(),
+      location: annotation.location, shared: current)
+    try checkReview(review, reading: reading)
+    if let current { pendingFacts[item.id] = current } else { pendingFacts.removeValue(forKey: item.id) }
+    try bindSharedDetails()
+    return review
+  }
+  private func checkReview(_ review: NativeAlbumFactsReview, reading: NativeAlbumAccess) throws {
+    try check(review.context)
+    guard reading.context == review.context, let current = try services.consumerSavedPhoto(review.item.id),
+      current.manifest == review.source.manifest, current.metadata == review.source.metadata,
+      services.annotation(current) == review.annotation else { throw FotoroError("Photo details changed. Review the photo again.") }
+  }
+  func shareDetails(_ review: NativeAlbumFactsReview, names: [String], includeLocation: Bool) async throws {
+    guard let reading = access, Set(names.map { Data($0.utf8) }).isSubset(of: Set(review.people.map { Data($0.utf8) })) else { throw FotoroError("Choose only reviewed names from this photo.") }
+    try checkReview(review, reading: reading); try await membership(reading); try checkReview(review, reading: reading)
+    let signed = try NativeAlbumFacts.make(item: review.item, access: reading, people: names.sorted(),
+      location: includeLocation ? review.location : nil, revision: review.revision + 1,
+      card: services.session.requireCard(reading.context.photo.account), bundle: services.vault.requireBundle())
+    do {
+      let reply = try await request(AlbumPhotoFactsReplyV1.self, path: "/v1/albums/\(reading.albumID)/photo-facts/\(review.item.id)",
+        context: reading.context, body: Wire.encode(AlbumPhotoFactsRequestV1(facts: signed)), method: "PUT")
+      guard reply.version == 1, reply.facts == signed else { throw FotoroError("Shared details update binding failed.") }
+      let current = try NativeAlbumFacts.read(signed, item: review.item, access: reading)
+      try await membership(reading); try checkReview(review, reading: reading)
+      pendingFacts[review.item.id] = current; try bindSharedDetails()
+    } catch let error as FotoroError where error.statusCode == 409 {
+      _ = try await prepareSharedDetails(review.item)
+      throw FotoroError("Shared details changed. Refresh and review before updating.")
+    }
   }
   func thumbnail(_ item: NativeAlbumItem) async throws -> URL? {
     guard let reading = access, items.contains(where: { $0.id == item.id && $0.entry == item.entry && $0.signedManifest == item.signedManifest }),

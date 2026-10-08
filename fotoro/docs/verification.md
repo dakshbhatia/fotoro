@@ -5,6 +5,41 @@ work; [product](product.md) owns the intended experience. Earlier measurements a
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
 
+## October 8 live family search follow-up — locally qualified
+
+Live albums add optional contributor-authenticated encrypted photo details, with
+explicit reviewed-name and location sharing, clearing, revision conflicts and
+current-account/access fences. Private OCR and other annotations stay excluded.
+People Any/Everyone, shared place, natural capture-date queries and date controls
+filter each actual copy before exact-original grouping. All contributed copies
+remain accessible. Names are contributor-scoped text snapshots; this does not
+establish automatic family attendance or shared face identity across contributors.
+The additive `0009_album_photo_facts.sql` migration is required before deployment.
+
+Actual local browser QA uses three isolated accounts and public images with
+synthetic reviewed facts. A first-contact Join album succeeds; Choose → Continue
+→ Add changes the invited album from zero to one photo, independently read back
+by its owner. Three contributions appear as two exact originals. Re-adding the
+same owned photo reports Already in this album and preserves the count. Every
+duplicate copy is reachable. Combined person/place/month queries, Everyone,
+import-date exclusion and same-tab invitation switching pass. Clearing and
+republishing shared details reach revisions two and three in another member's
+authenticated readback, without private OCR. Browser original download is
+byte-identical (613,520 bytes). The 390×844 layout has no horizontal overflow and
+no console warnings/errors.
+
+Local full native tests pass 484 with two simulator skips; the isolated preview
+passes 136 with two skips. All 32 native album regressions pass. The app builds
+and launches; simulator input automation cannot establish its touch connection,
+so the native family UI journey is not claimed as rendered acceptance. Physical
+installation, real passkey ceremonies, personal-library face quality and family
+acceptance remain open. Final workspace checks pass, including 567 browser tests,
+116 API tests, 57 core tests, five isolated encrypted exchanges and the pinned
+public-image inference smoke case. All three startup checks pass at 442,102 bytes
+across nine chunks. Independent protocol/client review finds no blockers. Hosted
+checks, production and TestFlight qualification are recorded separately after
+they complete; production and TestFlight 47 remain the prior release here.
+
 ## October 8 account and album recovery follow-up — locally qualified
 
 Native trusted account cards are now scoped to the active owner. Renewal keeps

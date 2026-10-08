@@ -51,6 +51,15 @@ Photo GPS and confirmed Google Timeline imports support Places/Timeline locally.
 Raw imported location data and local vectors are not uploaded. Reviewed People groups now use the existing local index and encrypted facts.
 Automatically inferred trips and automatic cleanup remain open product work.
 
+Live albums reuse encrypted originals and the existing accepted-member roster.
+Optional photo details use an additive signed/encrypted sidecar, authenticated
+against the contributor, immutable album definition, manifest and original digest.
+Only the contributor can revise it. Explicit reviewed names and location support
+album People/place/capture-date search; private OCR and unrelated annotations are
+excluded. Names are contributor-scoped snapshots, not a shared face-identity graph.
+Filtering precedes exact-original grouping, which preserves all contributed copies.
+Older servers can still serve albums without this optional details capability.
+
 ## Intelligence wiring — October 2026
 
 Find resolves eligible photos through the existing index. Best shots applies the
