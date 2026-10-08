@@ -138,6 +138,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     if (access) {const item = list?.find(item => item.definition.body === access.overview.definition.body && item.definition.signature === access.overview.definition.signature); if (!item || item.endedAt) {closeAlbum(); setNotice("Album access has ended.");} else await open(item);}
   });
   const memberIDs = access?.definition.members.map(member => member.card.accountId) ?? [];
+  const photoCount = access?.overview.membership === "accepted" ? photos.length : access?.overview.photoCount ?? 0;
   const previewDate = preview && albumDateTag(preview.metadata), previewIndex = preview ? shown.indexOf(preview) : -1;
   const prepareDownload = () => action(async () => {
     if (!access || !preview) return;
@@ -164,7 +165,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     <header inert={preview ? true : undefined}>
       {access && <button className="album-icon-button" disabled={busy} onClick={closeAlbum} aria-label="All albums"><Icon kind="previous" /></button>}
       <div className="album-heading"><h2>{access ? access.title : creating ? "New album" : "Live albums"}</h2>
-        {access && <div className="album-chips" aria-label="Album summary"><span>{access.overview.membership === "accepted" ? photos.length : access.overview.photoCount} photos</span><span aria-label={`${memberIDs.length} invited roster members`}>{memberIDs.length} people</span></div>}
+        {access && <div className="album-chips" aria-label="Album summary"><span>{photoCount} {photoCount === 1 ? "photo" : "photos"}</span><span aria-label={`${memberIDs.length} invited roster members`}>{memberIDs.length} people</span></div>}
       </div>
       {!access && !ownerReview && !creating && available && <button onClick={() => setCreating(true)}>New album</button>}
       {available && <details className="album-menu" onKeyDown={event => {if (event.key === "Escape") {event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();}}}>
@@ -212,7 +213,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
             <button type="submit" className="primary-action" disabled={busy || !title.trim() || [...title].length > 80 || !invitees.size}>Create and invite</button>
             <button type="button" disabled={busy} onClick={() => setCreating(false)}>Cancel</button>
           </form>}
-          {!creating && <div className="album-inbox">{items.map(item => {const definition = readAlbumSignedBody(item.definition, ALBUM_DEFINITION_KIND, validateAlbumDefinition), label = titles.get(definition.albumId) || (item.membership === "invited" ? "Album invitation" : "Album"); return <button className="album-inbox-card" key={definition.albumId} disabled={busy || !!item.endedAt} onClick={() => void action(() => open(item))} aria-label={`${item.membership === "invited" ? "Review invitation to" : "Open"} ${label}`}><div><strong>{label}</strong><div className="album-chips"><span>{item.photoCount} photos</span><span>{definition.members.length} people</span><span>{item.endedAt ? "Access ended" : item.membership === "invited" ? "Invitation" : contributor(definition.ownerAccountId, definition.members.map(member => member.card.accountId))}</span></div></div><Icon kind="next" /></button>;})}</div>}
+          {!creating && <div className="album-inbox">{items.map(item => {const definition = readAlbumSignedBody(item.definition, ALBUM_DEFINITION_KIND, validateAlbumDefinition), label = titles.get(definition.albumId) || (item.membership === "invited" ? "Album invitation" : "Album"); return <button className="album-inbox-card" key={definition.albumId} disabled={busy || !!item.endedAt} onClick={() => void action(() => open(item))} aria-label={`${item.membership === "invited" ? "Review invitation to" : "Open"} ${label}`}><div><strong>{label}</strong><div className="album-chips"><span>{item.photoCount} {item.photoCount === 1 ? "photo" : "photos"}</span><span>{definition.members.length} people</span><span>{item.endedAt ? "Access ended" : item.membership === "invited" ? "Invitation" : contributor(definition.ownerAccountId, definition.members.map(member => member.card.accountId))}</span></div></div><Icon kind="next" /></button>;})}</div>}
           {!creating && !items.length && !busy && <p>No albums or invitations yet.</p>}
         </>}
       </>}
