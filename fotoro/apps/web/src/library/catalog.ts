@@ -21,7 +21,7 @@ import {
   decodeLivePhoto,
 } from "@fotoro/crypto";
 import { api, scopedApi, fetchCipher } from "../exchange/api";
-import { get, all, atomic, cacheCipher } from "../exchange/cache";
+import { get, all, atomic, cacheCipher, boundedRows } from "../exchange/cache";
 import { requireVault, encryptPrivate, decryptPrivate, type UnlockedVault } from "../vault/vault";
 import {assertVault} from "../vault/scope";
 import { annotationCacheWrite, readAnnotations, serializeAnnotationWrites } from "../exchange/annotations";
@@ -188,17 +188,20 @@ export async function applyChanges(
       key: v.accountId + ":cursor",
       value: encryptPrivate(page.nextCursor),
     });
+    writes.push({store: "settings", key: v.accountId + ":catalog-has-more", value: encryptPrivate(page.hasMore)});
     await atomic(writes);
     if (requireVault() !== session) throw new Error("VAULT_LOCKED");
   });
 }
-export async function syncCatalog(signal?: AbortSignal, diagnostic?: DiagnosticContext) {
+export async function syncCatalog(signal?: AbortSignal, diagnostic?: DiagnosticContext, maxPages = Infinity) {
+  if (!(maxPages === Infinity || Number.isSafeInteger(maxPages) && maxPages > 0)) throw new Error("INVALID_CATALOG_WINDOW");
   const request = diagnostic ? scopedApi(diagnostic) : api;
   const session = requireVault();
   const id = session.accountId;
   const capability = await get<WrappedKeyV1>("settings", id + ":media-reader-v1");
   let cursor = capability ? await get<WrappedKeyV1>("settings", id + ":cursor") : undefined;
-  do {
+  let pages = 0;
+  while (true) {
     if (requireVault() !== session) throw new Error("VAULT_LOCKED");
     const page = await request<ChangePageV1>(
       "/v1/changes?limit=100&media=1" +
@@ -216,9 +219,10 @@ export async function syncCatalog(signal?: AbortSignal, diagnostic?: DiagnosticC
     if (requireVault() !== session) throw new Error("VAULT_LOCKED");
     await atomic([{store: "settings", key: id + ":media-reader-v1", value: encryptPrivate(true)}]);
     if (requireVault() !== session) throw new Error("VAULT_LOCKED");
-    if (!page.hasMore) break;
+    signal?.throwIfAborted();
+    if (!page.hasMore || ++pages >= maxPages) return {hasMore: page.hasMore};
     cursor = await get("settings", id + ":cursor");
-  } while (true);
+  }
 }
 const HYDRATED_PHOTOS = 2048, HYDRATED_BYTES = 16 * 1024 * 1024;
 interface HydratedEntry {wrapped: WrappedKeyV1; signed: string; photo: Photo; bytes: number}
@@ -258,8 +262,24 @@ function rememberHydrated(cache: HydratedCatalog, id: string, entry: HydratedEnt
   cache.entries.set(id, entry); cache.bytes += entry.bytes;
 }
 export async function cachedCatalog(diagnostic?: DiagnosticContext) {
+  return (await cachedCatalogSnapshot(diagnostic)).photos;
+}
+export interface CatalogBrowse {limit: number; retainPhotoIds?: readonly string[]}
+export interface CatalogCoverage {loaded: number; cachedTotal: number; hasMore: boolean; hasMoreChanges: boolean | null}
+export async function cachedCatalogSnapshot(diagnostic?: DiagnosticContext, browse?: CatalogBrowse) {
   const v = requireVault(), cache = currentHydratedCatalog(v);
-  const rows = await all<WrappedKeyV1>("catalog", v.accountId + ":");
+  const window = browse ? await boundedRows<WrappedKeyV1>("catalog", v.accountId + ":", browse.limit) : undefined;
+  const rows = window?.rows ?? await all<WrappedKeyV1>("catalog", v.accountId + ":");
+  if (browse?.retainPhotoIds?.length) {
+    const present = new Set(rows.map(([id]) => id));
+    for (const photoId of new Set(browse.retainPhotoIds)) {
+      const id = v.accountId + ":" + photoId;
+      if (present.has(id)) continue;
+      const value = await get<WrappedKeyV1>("catalog", id);
+      assertVault(v);
+      if (value) {rows.push([id, value]); present.add(id);}
+    }
+  }
   assertVault(v);
   const photos: Photo[] = [], present = new Set<string>();
   try {
@@ -304,9 +324,15 @@ export async function cachedCatalog(diagnostic?: DiagnosticContext) {
         if (photo !== previous?.photo) photo.metadataKey.fill(0);
       }
     }
-    for (const id of cache.entries.keys()) if (!present.has(id)) forgetHydrated(cache, id);
+    if (!window || window.total === rows.length) for (const id of cache.entries.keys()) if (!present.has(id)) forgetHydrated(cache, id);
+    const remaining = await get<WrappedKeyV1>("settings", v.accountId + ":catalog-has-more");
     assertVault(v);
-    return photos.sort((a, b) => b.metadata.sourceDate.localeCompare(a.metadata.sourceDate));
+    if (hydrated !== cache) throw new Error("VAULT_LOCKED");
+    const hasMoreChanges = remaining ? decryptPrivate<boolean>(remaining) : null;
+    if (hasMoreChanges !== null && typeof hasMoreChanges !== "boolean") throw new Error("CATALOG_COVERAGE_INVALID");
+    const coverage: CatalogCoverage = {loaded: photos.length, cachedTotal: window?.total ?? rows.length,
+      hasMore: !!window && window.total > rows.length, hasMoreChanges};
+    return {photos: photos.sort((a, b) => b.metadata.sourceDate.localeCompare(a.metadata.sourceDate)), coverage};
   } catch (error) {
     for (const photo of photos) photo.metadataKey.fill(0);
     throw error;

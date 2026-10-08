@@ -69,6 +69,26 @@ export async function all<T>(store: Store, prefix?: string): Promise<[string, T]
     r.onerror = () => reject(r.error);
   });
 }
+// Count keys without reading their values; only materialize the requested account window.
+export async function boundedRows<T>(store: Store, prefix: string, limit: number) {
+  if (!prefix || !Number.isSafeInteger(limit) || limit < 1) throw new Error("INVALID_CACHE_WINDOW");
+  const d = await db();
+  return new Promise<{rows: [string, T][]; total: number}>((resolve, reject) => {
+    const tx = d.transaction(store), source = tx.objectStore(store);
+    const upper = prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
+    const range = IDBKeyRange.bound(prefix, upper, false, true);
+    const rows: [string, T][] = [], count = source.count(range), cursor = source.openCursor(range);
+    cursor.onsuccess = () => {
+      const row = cursor.result;
+      if (!row) return;
+      rows.push([String(row.key), row.value]);
+      if (rows.length < limit) row.continue();
+    };
+    tx.oncomplete = () => resolve({rows, total: count.result});
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error ?? new Error("STORAGE_ABORTED"));
+  });
+}
 type Write = {store: Store; key: string; value?: unknown};
 // The read + metadata transaction serializes accounting across tabs and crashes.
 function cipherWrites(tx: IDBTransaction, writes: Write[]) {

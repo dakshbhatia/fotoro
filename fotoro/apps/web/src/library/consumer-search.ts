@@ -1,4 +1,4 @@
-import type {Photo} from "./catalog";
+import type {Photo, CatalogCoverage} from "./catalog";
 import {cloudSearchRecords} from "./search";
 import type {LocalPhoto} from "../local/resources";
 import {LocalResources, imageDimensions} from "../local/resources";
@@ -27,12 +27,39 @@ export interface OwnedPhotoSnapshot {
   accountId: string;
   token: object;
   photos: Photo[];
+  coverage?: CatalogCoverage;
+  selectionReady?: boolean;
+  retainSelection?: (ids: ReadonlySet<string>) => void;
   current: () => boolean;
   sourceCurrent?: (photo: Photo) => boolean;
   preview: (photo: Photo) => Promise<Blob>;
   edit?: (photo: Photo, changes: {labels?: string[]; favorite?: boolean; location?: PhotoLocationV1; observation?: PhotoObservationV1; people?: PeopleAssignment[]}) => Promise<void>;
   locate?: (updates: readonly {photo: Photo; location: PhotoLocationV1}[]) => Promise<{applied: number; failed: number; updatedPhotoIDs: string[]}>;
   people?: (updates: readonly {photo: Photo; assignments: PeopleAssignment[]}[]) => Promise<void>;
+}
+export class ConsumerSelectionRetention {
+  private binding?: {accountId: string; token: object; origin: string; current: () => boolean};
+  private selected = new Set<string>();
+  clear() {this.binding = undefined; this.selected.clear();}
+  idsFor(token: object, accountId: string, origin: string) {
+    if (this.binding?.token !== token || this.binding.accountId !== accountId || this.binding.origin !== origin || !this.binding.current()) return [];
+    return [...this.selected];
+  }
+  bind(snapshot: OwnedPhotoSnapshot, origin: string, currentOrigin: () => string) {
+    if (this.binding?.token !== snapshot.token || this.binding.accountId !== snapshot.accountId || this.binding.origin !== origin) {
+      this.clear(); this.binding = {accountId: snapshot.accountId, token: snapshot.token, origin, current: () => currentOrigin() === origin && snapshot.current()};
+    }
+    this.binding.current = () => currentOrigin() === origin && snapshot.current();
+    const binding = this.binding;
+    return (ids: ReadonlySet<string>) => {
+      if (this.binding !== binding || currentOrigin() !== origin || !snapshot.current()) return;
+      const eligible = new Set(snapshot.photos.filter(photo => !photo.grantId && photo.manifest.ownerAccountId === snapshot.accountId
+        && (snapshot.sourceCurrent?.(photo) ?? true)).map(photo => photo.manifest.photoId));
+      const next = new Set([...ids].filter(id => eligible.has(id)));
+      if (snapshot.selectionReady === false && [...next].some(id => !this.selected.has(id))) return;
+      this.selected = next;
+    };
+  }
 }
 export class ConsumerPreviewResources extends LocalResources {
   private sourceGeneration = 0;

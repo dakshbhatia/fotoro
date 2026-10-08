@@ -5,6 +5,65 @@ work; [product](product.md) owns the intended experience. Earlier measurements a
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
 
+## October 8 bounded foundation follow-up — source qualification pending
+
+This batch follows the released PR 50/build 46 checkpoint below. Its combined
+final checks, hosted CI and shipping remain pending; these changes are not claimed
+as deployed or available in a new TestFlight build.
+
+Browser Saved now opens a 100-record hydrated window and retrieves bounded change
+pages, with explicit Load more Saved photos. Coverage identifies unloaded cached
+records and unfinished remote change pages. Date, Search and People filters cover
+only the loaded records; a partial catalog cannot claim complete no-match coverage.
+Annotations and selection continue to use current account/vault/source bindings.
+
+The native album picker reads explicit 200-record local Saved pages, retains
+selection across them and no longer silently stops at the first 1,000 records.
+The album itself still caps contributions at 1,000 photos and a chosen append at
+100. Native Saved People choices likewise load local catalog and annotation data
+in explicit 200-record pages, display partial coverage and invalidate after
+account, vault, catalog, source or reviewed-name changes. This does not upload
+People facts to albums or establish family attendance across separate photos.
+
+Native welcome directly exposes New Fotoro, Continue with a passkey and Use Fotoro
+password. Both passkey entry points reuse the existing sign-in/unlock completion
+path and chosen-action callback. Remembered access and password recovery remain.
+Fresh-device discovery may still require a second PRF assertion; Sign in with
+Apple and a consumer device-approval interface are not implemented. Actual native
+UI QA verifies all three distinct welcome choices. This establishes reachability,
+not a physical passkey/PRF ceremony or a completed cross-device unlock.
+
+iOS Places offers an explicit optional Apple Maps area-name lookup for at most
+eight unnamed marker coordinates per action. Names are current-view labels,
+cleared when their map/source scope changes; they do not write photo annotations,
+restore missing GPS, identify landmarks or prove travel attendance. Controlled
+lookups test limits and cancellation. Actual native UI QA resolves public synthetic
+Singapore/London coordinates through Apple Maps and verifies that choosing the
+London area zooms the street map. This does not establish personal-photo landmark
+accuracy or physical-device map performance.
+
+Optional inference remains disabled. Current API source adds required daily
+account/global micro-USD reservations atomically with request counts in the existing
+ledger, before its single provider request. Full published model token ceilings,
+including thinking, reserve 1,032,192 micro-USD for Flash or 478,413 for Lite per
+admitted attempt. Failures retain the estimate; rejected work changes no counters.
+Reviewed pricing expires at January 1, 2027 UTC and stale pricing fails closed.
+These are conservative estimated upper bounds, not measured spend or a provider
+billing cap. No paid calls, activation, schema migration or storage deletion occurred.
+Unused upload leases already refund on expiry; started/ambiguous writes remain
+charged because a late-write race prevents a safe automatic refund.
+
+Local full native qualification reported 468 tests: 466 pass and two skip.
+The isolated preview reports 138 tests: 136 pass and two skip. Actual browser QA
+opens the first 100 Saved records, loads the remaining page and preserves the
+chosen item without console errors.
+API qualification passes 111 tests across 20 files and TypeScript; the final focused
+inference suite passes 13. Full API output includes the existing deliberately
+injected upload-disconnect/network-loss warnings and exits successfully. Combined
+final web/build/startup and release evidence will be recorded
+after they actually complete. All ten foundations retain their physical quality,
+performance and cross-device restore gates in the backlog.
+
 ## October 8 family-loop reliability qualification
 
 Browser Choose photos preserves the exact incoming live-album destination through

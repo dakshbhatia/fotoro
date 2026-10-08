@@ -111,23 +111,18 @@ struct AccountView: View {
             .disabled(authenticationInProgress).accessibilityIdentifier("account.password")
           primaryAction("Open Fotoro", identifier: "account.signIn", action: signIn)
             .disabled(password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-          secondaryAction("Use a passkey", identifier: "account.passkey") {
-            authenticate {
-              try AccountEntryPolicy.preparePrivateAuthentication(services)
-              let outcome = try await services.auth.login(discoverAccount: true)
-              if outcome == .unlocked { try await finishSignIn() }
-            }
-          }
+          secondaryAction("Continue with a passkey", identifier: "account.passkey", action: signInWithPasskey)
         } else {
           Text("Your Fotoro").font(.largeTitle.weight(.semibold))
-          primaryAction("Get started", identifier: "account.create") {
+          primaryAction("New Fotoro", identifier: "account.create") {
             authenticate {
               try AccountEntryPolicy.preparePrivateAuthentication(services)
               try await services.auth.prepareStart()
               passwordExpanded = false
             }
           }
-          secondaryAction("Sign in to your Fotoro", identifier: "account.choosePassword", action: choosePassword)
+          secondaryAction("Continue with a passkey", identifier: "account.passkey", action: signInWithPasskey)
+          secondaryAction("Use Fotoro password", identifier: "account.choosePassword", action: choosePassword)
         }
         if let error = services.error {
           Text(error).font(.body).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
@@ -190,6 +185,13 @@ struct AccountView: View {
     ShareLink(item: code) {
       Label("Save", systemImage: "square.and.arrow.up").frame(maxWidth: .infinity, minHeight: 48)
     }.buttonStyle(.glass).accessibilityLabel("Save password")
+  }
+  private func signInWithPasskey() {
+    authenticate {
+      try AccountEntryPolicy.preparePrivateAuthentication(services)
+      let outcome = try await services.auth.login(discoverAccount: true)
+      if outcome == .unlocked { try await finishSignIn() }
+    }
   }
   private func choosePassword() {
     guard !authenticationInProgress else { return }

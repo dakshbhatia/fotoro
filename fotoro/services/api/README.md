@@ -118,36 +118,61 @@ Google’s [API data terms](https://ai.google.dev/gemini-api/terms) apply to thi
 optional processing. Fotoro does not log or persist previews or provider results.
 
 To enable in a reviewed environment, apply migration `0007_cloud_inference_work.sql`,
-set the server-only `GEMINI_API_KEY` secret, and set all three Worker variables:
+set the server-only `GEMINI_API_KEY` secret, and set all five Worker variables:
 `CLOUD_INTELLIGENCE_ENABLED=true`, `CLOUD_INTELLIGENCE_DAILY_ACCOUNT_REQUESTS`
 (a positive integer at most 1000), and `CLOUD_INTELLIGENCE_DAILY_GLOBAL_REQUESTS`
-(a positive integer at most 10000). No value is provisioned by the repository.
+(a positive integer at most 10000), plus
+`CLOUD_INTELLIGENCE_DAILY_ACCOUNT_MICROUSD` (a positive integer at most 1,000,000,000)
+and `CLOUD_INTELLIGENCE_DAILY_GLOBAL_MICROUSD` (a positive integer at most
+10,000,000,000). One micro-USD is one millionth of a US dollar. No value is
+provisioned by the repository; production optional inference remains disabled.
 Missing, invalid, or absent ledger configuration fails closed. Atomic D1 claims
-count every admitted attempt, including provider failures and canceled browser
-requests; claims are never refunded. UTC calendar-day limits apply per account
+count every admitted attempt and reserve its conservative cost estimate, including
+provider failures and canceled browser requests; claims are never refunded.
+UTC calendar-day limits apply per account
 and globally, with fixed per-minute caps of 2 per account and 20 globally. The
-ledger stores only scope, window, expiry and counts. Expired rows are removed on
+existing ledger stores only scope, window, expiry and integer request counts or
+reserved micro-USD totals in separate windows. Expired rows are removed on
 later admitted work. Switching account IDs cannot bypass the global limit.
 
 The allowlist is `gemini-3.8-flash` (default observation) and
 `gemini-3.5-flash-lite` (cheaper extraction). Each request carries one inline
 preview, a fixed instruction, no tools, one candidate and `maxOutputTokens=1024`;
 the Worker aborts after 30 seconds and bounds the provider envelope at 64 KiB.
+It performs one fetch without automatic retries and rejects redirects.
 The strict observation schema separates objects, scene terms, visible text and
 uncertainty. Runtime checks reject malformed, excessive, truncated or blocked
 output. Results carry their photo ID, source revision, model and observation time;
 clients must reject stale bindings and review evidence separately from personal
 captions, labels and OCR. Retention is a client decision, never a server side effect.
-These are hard work limits, **not a dollar spending guarantee**: provider billing,
-thinking and image-token accounting can vary, and a timeout need not cancel
-provider billing. Configure and monitor provider billing separately.
+Before dispatch, one atomic transaction admits all request and spend windows or
+changes none. At standard rates reviewed on October 8, 2026, each admitted
+`gemini-3.8-flash` request reserves 1,032,192 micro-USD and each
+`gemini-3.5-flash-lite` request reserves 478,413. These deliberately use the full
+published 1,048,576 input-token and 65,536 output-token ceilings, including thinking,
+despite the smaller preview and requested output. The estimates are rounded up,
+never settled down or refunded after an ambiguous failure, and require no new
+migration beyond the existing work ledger. A cap smaller than a request's estimate
+rejects that request before contacting Google. Reviewed pricing expires at
+`2027-01-01T00:00:00.000Z`; capabilities and dispatch fail closed until source
+pricing/model limits are reviewed again.
+
+These are enforced conservative **reservation limits, not measured spend or a
+provider billing cap**. They apply to requests through this route and database;
+other API-key consumers, separate databases and upstream changes are outside
+that boundary. UTC days track reservation time, rather than the provider's invoice
+period. A timeout need not cancel provider billing. Configure and monitor provider
+billing separately before deliberate activation.
 
 Model and REST behavior were verified against Google’s official
 [3.8 Flash model](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash),
 [3.5 Flash-Lite model](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite),
 [structured output REST](https://ai.google.dev/gemini-api/docs/generate-content/structured-output)
 and [image understanding REST](https://ai.google.dev/gemini-api/docs/generate-content/image-understanding)
-documentation on October 6, 2026. The API uses REST without a provider SDK.
+documentation on October 6, 2026. The
+[standard pricing](https://ai.google.dev/gemini-api/docs/pricing) and both model
+token ceilings were reviewed again on October 8 for conservative reservations.
+The API uses REST without a provider SDK.
 [Gemini Embedding 2](https://ai.google.dev/gemini-api/docs/embeddings) supports
 multimodal embeddings, but this release does not send embedding requests or mix
 those vectors with the independent on-device index. A future integration needs

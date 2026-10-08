@@ -665,20 +665,96 @@ final class ConsumerCoreTests: XCTestCase {
     }
   }
   @MainActor func testSavedPeopleChoiceScanRejectsLateResultsAfterLockAndCancellation() async throws {
-    for interruption in ["lock", "cancel"] {
+    for interruption in ["lock", "cancel", "account", "origin", "catalog"] {
       try await withSavedLibrary { services, _ in
         var photo = try self.samplePhoto(); photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
         try services.store.put(photo)
         let gate = CatalogScanGate()
-        services.catalogSearchWillRead = { gate.visit() }
-        defer { services.catalogSearchWillRead = nil }
-        let scan = Task { try await SavedPeopleSearchSnapshot.load(services) }
+        let scan = Task {
+          try await SavedPeopleSearchSnapshot.load(services, readPage: { catalog, after, limit in
+            try await Task.detached { gate.visit(); return try catalog.photos(after: after, limit: limit) }.value
+          })
+        }
         while gate.count == 0 { await Task.yield() }
-        if interruption == "lock" { services.vault.lock() } else { scan.cancel() }
+        switch interruption {
+        case "lock": services.vault.lock()
+        case "account": services.session.accountId = Wire.id()
+        case "origin": services.api.baseURL = URL(string: "http://localhost:8796")!
+        case "catalog": try services.reload()
+        default: scan.cancel()
+        }
         gate.release.signal()
         do { _ = try await scan.value; XCTFail("Withdrawn Saved choices must not publish") }
         catch { XCTAssertTrue(error is CancellationError) }
       }
+    }
+  }
+
+  @MainActor func testSavedPeopleNamesLoadOnlyOneExplicitPageAndRetainEarlierChoices() async throws {
+    try await withSavedLibrary { services, _ in
+      let account = try XCTUnwrap(services.session.accountId)
+      let bundle = try services.vault.requireBundle(), card = try services.session.requireCard(account)
+      let first = Wire.id(), older = Wire.id()
+      let start = try XCTUnwrap(Wire.parseDate("2026-10-01T00:00:00.000Z"))
+      for index in 0...202 {
+        var photo = try self.samplePhoto(); photo.manifest.ownerAccountId = account
+        photo.metadata.sourceDate = Wire.date(start.addingTimeInterval(Double(index)))
+        if index == 201 { photo.transferState = "pending" }
+        if index == 202 { photo.manifest.ownerAccountId = Wire.id() }
+        try services.store.put(photo)
+        if index == 200 || index == 0 {
+          var annotation = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+          let assignments = index == 200 ? [PhotoPersonAssignment(p: first, n: "Newest name", b: [0,0,100,100])]
+            : [PhotoPersonAssignment(p: first, n: "Earlier name", b: [0,0,100,100]),
+               PhotoPersonAssignment(p: older, n: "Older reviewed person", b: [100,0,100,100])]
+          annotation.facts = try PhotoPeopleFacts.replacing([], with: assignments, originalSha256: photo.metadata.originalSha256)
+          try services.annotations.ledger.edit(annotation, photo: photo, bundle: bundle, card: card)
+        }
+      }
+      let probe = SavedPeoplePageProbe()
+      let read: @Sendable (LibraryStore, String?, Int) async throws -> [LocalPhoto] = { catalog, after, limit in
+        await probe.record(after: after, limit: limit)
+        return try await Task.detached { try catalog.photos(after: after, limit: limit) }.value
+      }
+      let initial = try await SavedPeopleSearchSnapshot.load(services, readPage: read)
+      let firstPage = try XCTUnwrap(initial)
+      XCTAssertEqual(firstPage.checkedPhotos, 198)
+      XCTAssertTrue(firstPage.hasMore)
+      XCTAssertEqual(firstPage.choices.map(\.id), [first])
+      let selection = PeopleSearchSelection(personIDs: [first])
+      let loaded = try await SavedPeopleSearchSnapshot.load(services, continuing: firstPage, readPage: read)
+      let nextPage = try XCTUnwrap(loaded)
+      XCTAssertEqual(nextPage.checkedPhotos, 201)
+      XCTAssertFalse(nextPage.hasMore)
+      XCTAssertEqual(Set(nextPage.choices.map(\.id)), [first, older])
+      XCTAssertEqual(nextPage.choices.first(where: { $0.id == first })?.name, "Newest name")
+      XCTAssertTrue(PhotoPeopleSearchChoice.canFind(selection, choices: nextPage.choices))
+      _ = try await SavedPeopleSearchSnapshot.load(services, continuing: nextPage, readPage: read)
+      let requests = await probe.requests
+      XCTAssertEqual(requests.count, 2, "Opening and each explicit continuation read one page; completion does not read again")
+      XCTAssertEqual(requests.map(\.limit), [200, 200])
+      XCTAssertNil(requests[0].after); XCTAssertNotNil(requests[1].after)
+    }
+  }
+
+  @MainActor func testSavedPeoplePagesDeduplicateAndRejectRepeatingCursorOrStaleContinuation() async throws {
+    try await withSavedLibrary { services, _ in
+      var photo = try self.samplePhoto(); photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+      try services.store.put(photo)
+      let repeated = Array(repeating: photo, count: SavedPeopleSearchSnapshot.pageSize)
+      let loaded = try await SavedPeopleSearchSnapshot.load(services, readPage: { _, _, _ in repeated })
+      let snapshot = try XCTUnwrap(loaded)
+      XCTAssertEqual(snapshot.checkedPhotos, 1)
+      XCTAssertTrue(snapshot.hasMore)
+      do {
+        _ = try await SavedPeopleSearchSnapshot.load(services, continuing: snapshot, readPage: { _, _, _ in repeated })
+        XCTFail("A repeating cursor must stop rather than silently loop or claim complete coverage")
+      } catch { XCTAssertFalse(error is CancellationError) }
+      try services.reload()
+      do {
+        _ = try await SavedPeopleSearchSnapshot.load(services, continuing: snapshot)
+        XCTFail("A stale generation must not continue an earlier page")
+      } catch { XCTAssertTrue(error is CancellationError) }
     }
   }
 
@@ -689,6 +765,12 @@ final class ConsumerCoreTests: XCTestCase {
     let rep = RepresentationV1(binding: MediaBinding(photoId: id, representationId: Wire.id(), kind: "metadata"), objectId: Wire.id(), header: "", ciphertextBytes: 1, ciphertextSha256: Data("cipher".utf8).digest)
     return LocalPhoto(photoId: id, manifest: PhotoManifestV1(photoId: id, ownerAccountId: owner.accountId, representations: [], metadataRepresentation: rep, ownerWrappedMetadataKey: WrappedKeyV1(nonce: "", ciphertext: "")), metadata: PhotoMetadataV1(filename: "receipt.jpg", mediaType: "image/jpeg", sourceDate: Wire.date(), dateSource: "photos", originalBytes: 3, originalSha256: Data("jpg".utf8).digest, representationKeys: [:]), transferState: "committed")
   }
+}
+
+private actor SavedPeoplePageProbe {
+  struct Request: Sendable { let after: String?; let limit: Int }
+  private(set) var requests: [Request] = []
+  func record(after: String?, limit: Int) { requests.append(Request(after: after, limit: limit)) }
 }
 
 private final class CatalogScanGate: @unchecked Sendable {

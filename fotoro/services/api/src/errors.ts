@@ -14,6 +14,8 @@ export interface Env {
   GEMINI_API_KEY?: string;
   CLOUD_INTELLIGENCE_DAILY_ACCOUNT_REQUESTS?: string;
   CLOUD_INTELLIGENCE_DAILY_GLOBAL_REQUESTS?: string;
+  CLOUD_INTELLIGENCE_DAILY_ACCOUNT_MICROUSD?: string;
+  CLOUD_INTELLIGENCE_DAILY_GLOBAL_MICROUSD?: string;
 }
 export interface Actor {
   accountId: string;

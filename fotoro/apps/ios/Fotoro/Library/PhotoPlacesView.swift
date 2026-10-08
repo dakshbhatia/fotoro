@@ -1,6 +1,7 @@
 import MapKit
 import Photos
 import SwiftUI
+import Observation
 #if !FOTORO_LOCAL_PREVIEW
 import NukeUI
 #endif
@@ -20,6 +21,56 @@ struct PhotoPlaceItem: Identifiable, Equatable {
   var id: String { reference.id }
 }
 struct PhotoPlacesPresentation: Identifiable { let id = UUID() }
+
+@MainActor @Observable
+final class PhotoPlaceNames {
+  typealias Lookup = @MainActor (PhotoPlaceCoordinate) async throws -> String?
+  static let maximumRequests = 8
+  private(set) var names: [String: String] = [:]
+  private(set) var loading = false
+  private(set) var failed = false
+  private var targets: [PhotoPlaceCluster] = []
+  private var generation = UUID()
+
+  func clear() {
+    generation = UUID(); names = [:]; targets = []; loading = false; failed = false
+  }
+  func name(for cluster: PhotoPlaceCluster) -> String? {
+    guard targets.contains(cluster) else { return nil }
+    return names[cluster.id]
+  }
+  func load(_ clusters: [PhotoPlaceCluster], lookup: Lookup = PhotoPlaceNames.lookup) async {
+    guard !Task.isCancelled, !loading else { return }
+    clear()
+    let token = generation
+    targets = Array(clusters.filter { $0.name == nil && $0.coordinate.isValid }.prefix(Self.maximumRequests))
+    let requested = targets
+    loading = true
+    defer { if generation == token { loading = false } }
+    for cluster in requested {
+      guard generation == token, !Task.isCancelled else { return }
+      do {
+        let result = try await lookup(cluster.coordinate)
+        guard generation == token, !Task.isCancelled else { return }
+        if let result = result?.trimmingCharacters(in: .whitespacesAndNewlines), !result.isEmpty, result.count <= 200 {
+          names[cluster.id] = result
+        }
+      } catch {
+        guard generation == token, !Task.isCancelled else { return }
+        failed = true
+      }
+    }
+  }
+  private static func lookup(_ coordinate: PhotoPlaceCoordinate) async throws -> String? {
+    guard coordinate.isValid,
+      let request = MKReverseGeocodingRequest(location: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)) else { return nil }
+    let result = try await withTaskCancellationHandler {
+      try await request.mapItems
+    } onCancel: { request.cancel() }
+    try Task.checkCancellation()
+    return result.first?.addressRepresentations?.cityWithContext ?? result.first?.name
+  }
+}
 
 enum PhotoPlacesPolicy {
   static func ordered(_ items: [PhotoPlaceItem]) -> [PhotoPlaceItem] {
@@ -83,6 +134,9 @@ struct PhotoPlacesView: View {
   @State private var rowLimit = 80
   @State private var sourceToken = UUID()
   @State private var projection: Task<Void, Never>?
+  @State private var placeNames = PhotoPlaceNames()
+  @State private var nameLookup: Task<Void, Never>?
+  @ScaledMetric(relativeTo: .body) private var mapHeight = 300.0
   @State private var devicePage: UUID?
   @State private var deviceStatus: PHAuthorizationStatus?
   @State private var searchGeneration: UInt64?
@@ -120,7 +174,7 @@ struct PhotoPlacesView: View {
             ForEach(snapshot.clusters) { cluster in
               Marker(clusterLabel(cluster), coordinate: coordinate(cluster.coordinate)).tag(cluster.id)
             }
-          }.mapStyle(.standard(pointsOfInterest: .excludingAll)).frame(height: 300)
+          }.mapStyle(.standard(pointsOfInterest: .excludingAll)).frame(height: min(450, mapHeight))
             .onMapCameraChange(frequency: .onEnd) { context in
               let next = PhotoPlaceViewport(center: PhotoPlaceCoordinate(latitude: context.region.center.latitude, longitude: PhotoPlaceGeometry.longitude(context.region.center.longitude)),
                 latitudeSpan: min(180, context.region.span.latitudeDelta), longitudeSpan: min(360, context.region.span.longitudeDelta))
@@ -130,6 +184,24 @@ struct PhotoPlacesView: View {
             .accessibilityIdentifier("places.map")
         }
         List {
+          if sourceCurrent, !snapshot.clusters.isEmpty {
+            Section {
+              if placeNames.loading { ProgressView("Finding area names…") }
+              else {
+                Button("Look up area names", systemImage: "map") { lookupAreaNames() }
+              }
+              ForEach(snapshot.clusters.filter { placeNames.name(for: $0) != nil }) { cluster in
+                if let name = placeNames.name(for: cluster) {
+                  Button { zoom(to: cluster) } label: {
+                    Label(name, systemImage: "mappin.and.ellipse")
+                  }.accessibilityHint("Zoom to this photo area")
+                }
+              }
+              if placeNames.failed { Text("Some area names are unavailable. Try again.").font(.footnote).foregroundStyle(.secondary) }
+            } footer: {
+              Text("Look up up to 8 map areas with Apple Maps. Only marker coordinates are sent. Names describe the area around each marker.")
+            }
+          }
           if loading { ProgressView("Loading location metadata…") }
           if search?.indexing == true && search?.assets.isEmpty == true { ProgressView("Updating location metadata…") }
           if let error { Text(error).font(.footnote).foregroundStyle(.secondary) }
@@ -207,10 +279,11 @@ struct PhotoPlacesView: View {
     MKCoordinateRegion(center: coordinate(value.center), span: MKCoordinateSpan(latitudeDelta: value.latitudeSpan, longitudeDelta: value.longitudeSpan))
   }
   private func clusterLabel(_ cluster: PhotoPlaceCluster) -> String {
-    let label = cluster.name ?? (cluster.count == 1 ? "Photo" : snapshot.scale.areaLabel)
+    let label = cluster.name ?? placeNames.name(for: cluster).map { "Near " + $0 } ?? (cluster.count == 1 ? "Photo" : snapshot.scale.areaLabel)
     return cluster.count == 1 ? label : "\(label) · \(cluster.count) photos"
   }
   private func clearPlaces() {
+    nameLookup?.cancel(); nameLookup = nil; placeNames.clear()
     projection?.cancel(); projection = nil; sourceToken = UUID(); selectedID = nil
     items = []; byID = [:]; devicePhotos = [:]; points = []; snapshot = .empty; visibleRows = []; focusedPhotoIDs = nil
     #if !FOTORO_LOCAL_PREVIEW
@@ -219,6 +292,7 @@ struct PhotoPlacesView: View {
     viewport = nil; camera = .automatic
   }
   private func refreshSources(recenter: Bool = false) {
+    nameLookup?.cancel(); nameLookup = nil; placeNames.clear()
     guard scenePhase == .active else { clearPlaces(); return }
     projection?.cancel(); sourceToken = UUID(); selectedID = nil; focusedPhotoIDs = nil; snapshot = .empty; visibleRows = []; rowLimit = 80
     let page = store.browsePage, status = store.status
@@ -271,6 +345,7 @@ struct PhotoPlacesView: View {
     viewport = bounds; focusedPhotoIDs = nil; selectedID = nil; rowLimit = 80; camera = .region(region(bounds)); updateMap()
   }
   private func updateMap() {
+    nameLookup?.cancel(); nameLookup = nil; placeNames.clear()
     projection?.cancel()
     guard sourceCurrent, let viewport else { snapshot = .empty; visibleRows = []; return }
     let input = points, token = sourceToken
@@ -295,6 +370,19 @@ struct PhotoPlacesView: View {
     if viewport.map({ $0.latitudeSpan > target.latitudeSpan * 1.2 || $0.longitudeSpan > target.longitudeSpan * 1.2 }) ?? true {
       withAnimation { camera = .region(region(target)) }
     }
+  }
+  private func lookupAreaNames() {
+    guard sourceCurrent, !placeNames.loading else { return }
+    nameLookup?.cancel()
+    let clusters = snapshot.clusters, token = sourceToken
+    nameLookup = Task { @MainActor in
+      guard sourceCurrent, sourceToken == token else { return }
+      await placeNames.load(clusters)
+    }
+  }
+  private func zoom(to cluster: PhotoPlaceCluster) {
+    guard sourceCurrent, snapshot.clusters.contains(cluster) else { return }
+    withAnimation { camera = .region(region(cluster.bounds.padded(1.4, minimum: 0.002))) }
   }
   private func openPhoto(_ item: PhotoPlaceItem) {
     guard sourceCurrent, byID[item.id] == item else { return }
