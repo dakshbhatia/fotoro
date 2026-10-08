@@ -36,6 +36,9 @@ preview_sources=preview_files([
  'Fotoro/Library/RecentPhotosStore.swift',
  'Fotoro/Library/PhotoBrowsing.swift',
  'Fotoro/Library/PhotoLocations.swift',
+ 'Fotoro/Library/PhotoCaptureMetadata.swift',
+ 'Fotoro/Library/PhotoMetadataSections.swift',
+ 'Fotoro/Library/PhotoPlaceGeometry.swift',
  'Fotoro/Library/PhotoPlacesView.swift',
  'Fotoro/Library/AutomaticPhotoPicks.swift',
  'Fotoro/Library/PhotoPickAnalyzer.swift',
@@ -59,6 +62,9 @@ preview_tests=preview_files([
  'FotoroTests/AutomaticPhotoPicksTests.swift', 'FotoroTests/PhotoPickLifecycleTests.swift',
  'FotoroTests/PhotoBrowsingTests.swift',
  'FotoroTests/PhotoLocationsTests.swift',
+ 'FotoroTests/PhotoCaptureMetadataTests.swift',
+ 'FotoroTests/PhotoMetadataPresentationTests.swift',
+ 'FotoroTests/PhotoPlaceGeometryTests.swift',
 ], 'FotoroLocalPreviewTests')
 preview_test_resources=preview_files([
  'FotoroTests/search-cases.json', 'FotoroTests/neutral-a.png', 'FotoroTests/neutral-c.png',

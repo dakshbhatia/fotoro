@@ -149,7 +149,7 @@ extension LibraryStore {
         "INSERT INTO backupSources(id,value) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value",
       arguments: [source.id, try Wire.encode(source)])
   }
-  func stageBackup(_ photo: LocalPhoto, source: BackupSource, location: PhotoLocationV1? = nil, bundle: AccountBundle? = nil) throws {
+  func stageBackup(_ photo: LocalPhoto, source: BackupSource, location: PhotoLocationV1? = nil, bundle: AccountBundle? = nil, capture: PhotoCaptureMetadata? = nil) throws {
     guard photo.photoId == source.photoId else { throw FotoroError("Source identity changed") }
     try database.write { db in
       var queued = source
@@ -158,7 +158,7 @@ extension LibraryStore {
       queued.originalSha256 = photo.metadata.originalSha256
       try put(photo, db: db)
       if let bundle {
-        try AnnotationLedger(store: self, accountId: photo.manifest.ownerAccountId).seedLocation(location, photo: photo, bundle: bundle, db: db)
+        try AnnotationLedger(store: self, accountId: photo.manifest.ownerAccountId).seedMetadata(location: location, capture: capture, photo: photo, bundle: bundle, db: db)
       }
       try putBackupSource(queued, db: db)
       try db.execute(

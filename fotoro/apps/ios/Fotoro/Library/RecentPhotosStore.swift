@@ -26,6 +26,7 @@ struct RecentPhoto: Identifiable {
     "\(asset.modificationDate?.timeIntervalSince1970 ?? 0)|\(asset.pixelWidth)x\(asset.pixelHeight)"
   }
   var capturedAt: Date? { asset.creationDate }
+  var captureMetadata: PhotoCaptureMetadata { .photos(asset) }
   var isFavorite: Bool { asset.isFavorite }
   var isScreenshot: Bool { asset.mediaSubtypes.contains(.photoScreenshot) }
   var isLivePhoto: Bool { asset.mediaSubtypes.contains(.photoLive) }

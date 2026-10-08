@@ -1,5 +1,9 @@
 import MapKit
+import Photos
 import SwiftUI
+#if !FOTORO_LOCAL_PREVIEW
+import NukeUI
+#endif
 
 enum PhotoPlaceReference: Hashable {
   case device(String), saved(String)
@@ -44,7 +48,7 @@ enum PhotoPlacesPolicy {
         ["committed", "saved"].contains(photo.transferState), !ConsumerSearchBinding.duplicate(saved: photo, copies: copies)
       else { return nil }
       return PhotoPlaceItem(reference: .saved(photo.id), revision: savedRevision(photo),
-        capturedAt: Wire.parseDate(photo.metadata.sourceDate), location: item.location, owner: account)
+        capturedAt: ["exif", "photos"].contains(photo.metadata.dateSource) ? Wire.parseDate(photo.metadata.sourceDate) : nil, location: item.location, owner: account)
     }
     return ordered(device + retained)
   }
@@ -58,98 +62,299 @@ struct PhotoPlacesView: View {
   @Environment(\.dismiss) private var dismiss
   @Environment(\.scenePhase) private var scenePhase
   let store: RecentPhotosStore
+  var search: LocalSearchStore? = nil
   #if !FOTORO_LOCAL_PREVIEW
   let services: AppServices?
   #endif
   let open: (PhotoPlaceItem) -> Void
   @State private var camera = MapCameraPosition.automatic
+  @State private var viewport: PhotoPlaceViewport?
   @State private var selectedID: String?
+  @State private var recentOnly = true
   @State private var loading = false
   @State private var error: String?
+  @State private var items: [PhotoPlaceItem] = []
+  @State private var byID: [String: PhotoPlaceItem] = [:]
+  @State private var devicePhotos: [String: RecentPhoto] = [:]
+  @State private var points: [PhotoPlacePoint] = []
+  @State private var snapshot = PhotoPlaceMapSnapshot.empty
+  @State private var visibleRows: [PhotoPlaceItem] = []
+  @State private var focusedPhotoIDs: Set<String>?
+  @State private var rowLimit = 80
+  @State private var sourceToken = UUID()
+  @State private var projection: Task<Void, Never>?
+  @State private var devicePage: UUID?
+  @State private var deviceStatus: PHAuthorizationStatus?
+  @State private var searchGeneration: UInt64?
+  @State private var searchAssetCount: Int?
+  #if !FOTORO_LOCAL_PREVIEW
+  @State private var savedAccess: PhotoAccountAccess?
+  @State private var savedGeneration: UInt64?
+  @State private var savedPageExhausted = false
+  @State private var savedPhotos: [String: LocalPhoto] = [:]
+  #endif
 
-  private var items: [PhotoPlaceItem] {
-    let device = RecentPhotosPolicy.canRead(store.status) ? store.photos.compactMap { photo -> PhotoPlaceItem? in
-      guard let location = photo.photoLocation else { return nil }
-      return PhotoPlaceItem(reference: .device(photo.id), revision: photo.sourceRevision,
-        capturedAt: photo.capturedAt, location: location)
-    } : []
-    #if FOTORO_LOCAL_PREVIEW
-      return PhotoPlacesPolicy.ordered(device)
-    #else
-      guard let services, let access = services.photoAccountAccess else { return PhotoPlacesPolicy.ordered(device) }
-      let saved = services.photos.compactMap { photo -> PhotoPlacesPolicy.SavedItem? in
-        guard let location = services.annotation(photo).location else { return nil }
-        return PhotoPlacesPolicy.SavedItem(photo: photo, location: location)
-      }
-      return PhotoPlacesPolicy.items(device: device, saved: saved,
-        sources: (try? services.store.backupSources()) ?? [], account: access.account)
+  private var sourceCurrent: Bool {
+    guard scenePhase == .active, store.browsePage == devicePage, store.status == deviceStatus,
+      PHPhotoLibrary.authorizationStatus(for: .readWrite) == store.status,
+      search?.libraryGeneration == searchGeneration, search?.assets.count == searchAssetCount else { return false }
+    #if !FOTORO_LOCAL_PREVIEW
+    guard services?.photoAccountAccess == savedAccess, services?.consumerCatalogGeneration == savedGeneration else { return false }
     #endif
+    return true
   }
-  private var mapItems: [PhotoPlaceItem] { Array(items.prefix(200)) }
-
   var body: some View {
     NavigationStack {
       VStack(spacing: 0) {
-        if !items.isEmpty {
+        HStack {
+          Button(recentOnly ? "Last 30 days" : "All dates") { recentOnly.toggle(); refreshSources(recenter: true) }
+            .accessibilityLabel(recentOnly ? "Include older photo locations" : "Show photo locations from the last 30 days")
+          Spacer()
+          if sourceCurrent, !items.isEmpty {
+            Button("Fit locations", systemImage: "viewfinder") { fitLocations() }.labelStyle(.iconOnly)
+              .accessibilityLabel("Fit all loaded photo locations")
+          }
+        }.padding(.horizontal).padding(.vertical, 8)
+        if sourceCurrent, !items.isEmpty {
           Map(position: $camera, interactionModes: [.pan, .zoom, .rotate], selection: $selectedID) {
-            ForEach(mapItems) { item in
-              Marker(item.location.displayName,
-                coordinate: CLLocationCoordinate2D(latitude: item.location.latitude, longitude: item.location.longitude))
-                .tag(item.id)
+            ForEach(snapshot.clusters) { cluster in
+              Marker(clusterLabel(cluster), coordinate: coordinate(cluster.coordinate)).tag(cluster.id)
             }
-          }.mapStyle(.standard(pointsOfInterest: .excludingAll)).frame(height: 260)
+          }.mapStyle(.standard(pointsOfInterest: .excludingAll)).frame(height: 300)
+            .onMapCameraChange(frequency: .onEnd) { context in
+              let next = PhotoPlaceViewport(center: PhotoPlaceCoordinate(latitude: context.region.center.latitude, longitude: PhotoPlaceGeometry.longitude(context.region.center.longitude)),
+                latitudeSpan: min(180, context.region.span.latitudeDelta), longitudeSpan: min(360, context.region.span.longitudeDelta))
+              guard next.isValid else { return }
+              viewport = next; focusedPhotoIDs = nil; rowLimit = 80; selectedID = nil; updateMap()
+            }
             .accessibilityIdentifier("places.map")
         }
         List {
-          if loading { ProgressView("Loading photos…") }
+          if loading { ProgressView("Loading location metadata…") }
+          if search?.indexing == true && search?.assets.isEmpty == true { ProgressView("Updating location metadata…") }
           if let error { Text(error).font(.footnote).foregroundStyle(.secondary) }
-          ForEach(items) { item in
-            Button { openPhoto(item) } label: { PhotoPlaceRow(item: item) }
-              .buttonStyle(.plain).accessibilityHint("Open photo")
+          if sourceCurrent, !items.isEmpty {
+            Section {
+              ForEach(visibleRows) { item in
+                Button { openPhoto(item) } label: {
+                  HStack(spacing: 12) {
+                    thumbnail(item).frame(width: 60, height: 60).clipped().clipShape(.rect(cornerRadius: 8)).accessibilityHidden(true)
+                    PhotoPlaceRow(item: item)
+                  }
+                }.buttonStyle(.plain).accessibilityHint("Open photo")
+              }
+              if visibleRows.count < displayedCount {
+                Button("Show more nearby photos") { rowLimit += 80; updateRows() }
+              }
+            } header: {
+              Text(focusedPhotoIDs == nil ? "\(snapshot.scale.title) · \(photoCount(snapshot.visibleCount)) in map" : "\(photoCount(displayedCount)) at this spot")
+            } footer: {
+              Text("\(items.count) photo location\(items.count == 1 ? "" : "s") available. \(coverageDescription)")
+            }
+            if snapshot.visibleCount == 0 { Button("Fit loaded locations") { fitLocations() } }
+          } else if !loading {
+            ContentUnavailableView(recentOnly ? "No recent photo locations" : "No photo locations", systemImage: "map",
+              description: Text("Photos with supplied GPS appear here. Load more location metadata or include older photos."))
+            if recentOnly { Button("Include older photos") { recentOnly = false; refreshSources(recenter: true) } }
           }
-          if items.isEmpty, !loading {
-            ContentUnavailableView("No photo locations", systemImage: "map",
-              description: Text("Photos with location appear here. Their dates and GPS come from the photos you allow or save."))
+          if hasMoreMetadata {
+            Button(recentOnly ? "Load more location metadata" : "Load more older locations") { loadMoreMetadata() }.disabled(loading)
           }
         }.listStyle(.plain)
       }
       .navigationTitle("Places").navigationBarTitleDisplayMode(.inline)
       .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
-      .task(id: scenePhase) { await loadPhotos() }
-      .onChange(of: selectedID) {
-        guard let selectedID, let item = mapItems.first(where: { $0.id == selectedID }) else { return }
-        openPhoto(item)
-      }
-      .onChange(of: store.browsePage) { selectedID = nil }
+      .task(id: scenePhase) { if scenePhase == .active { refreshSources() } else { clearPlaces() } }
+      .onChange(of: selectedID) { selectMarker() }
+      .onChange(of: store.browsePage) { refreshSources() }
+      .onChange(of: store.status) { refreshSources(recenter: true) }
+      .onChange(of: search?.libraryGeneration) { refreshSources() }
+      .onChange(of: search?.assets.count) { refreshSources() }
+      .onDisappear { clearPlaces() }
       #if !FOTORO_LOCAL_PREVIEW
-      .onChange(of: services?.vault.generation) { selectedID = nil; camera = .automatic }
-      .onChange(of: services?.session.accountId) { selectedID = nil; camera = .automatic }
+      .onChange(of: services?.vault.generation) { savedPageExhausted = false; refreshSources(recenter: true) }
+      .onChange(of: services?.session.accountId) { savedPageExhausted = false; refreshSources(recenter: true) }
+      .onChange(of: services?.consumerCatalogGeneration) { refreshSources() }
+      .onChange(of: services?.photos.count) { refreshSources() }
       #endif
     }
   }
-  private func openPhoto(_ item: PhotoPlaceItem) {
-    guard items.contains(item) else { return }
-    open(item)
-    dismiss()
+  private var displayedCount: Int { focusedPhotoIDs?.count ?? snapshot.visibleCount }
+  private func photoCount(_ count: Int) -> String { "\(count) photo\(count == 1 ? "" : "s")" }
+  private var coverageDescription: String {
+    #if FOTORO_LOCAL_PREVIEW
+    return "Counts cover available device metadata."
+    #else
+    return "Counts cover available device metadata and loaded Saved metadata."
+    #endif
   }
-  private func loadPhotos() async {
-    guard scenePhase == .active else { return }
-    loading = true
-    defer { loading = false }
-    while store.hasMorePhotos, !Task.isCancelled, scenePhase == .active {
-      await store.loadMorePhotos(matching: .withLocation, whileActive: { scenePhase == .active })
-    }
+  private var hasMoreMetadata: Bool {
+    guard sourceCurrent else { return false }
+    #if FOTORO_LOCAL_PREVIEW
+    return deviceNeedsMetadataPage
+    #else
+    return deviceNeedsMetadataPage || (services?.photoAccountAccess != nil && !savedPageExhausted && services?.photos.isEmpty == false)
+    #endif
+  }
+  private var deviceNeedsMetadataPage: Bool {
+    // A ready index has already published every permitted device metadata row.
+    store.hasMorePhotos && !(search?.canAnalyzeMetadataMatches ?? false)
+  }
+  private func coordinate(_ value: PhotoPlaceCoordinate) -> CLLocationCoordinate2D {
+    CLLocationCoordinate2D(latitude: value.latitude, longitude: value.longitude)
+  }
+  private func region(_ value: PhotoPlaceViewport) -> MKCoordinateRegion {
+    MKCoordinateRegion(center: coordinate(value.center), span: MKCoordinateSpan(latitudeDelta: value.latitudeSpan, longitudeDelta: value.longitudeSpan))
+  }
+  private func clusterLabel(_ cluster: PhotoPlaceCluster) -> String {
+    let label = cluster.name ?? (cluster.count == 1 ? "Photo" : snapshot.scale.areaLabel)
+    return cluster.count == 1 ? label : "\(label) · \(cluster.count) photos"
+  }
+  private func clearPlaces() {
+    projection?.cancel(); projection = nil; sourceToken = UUID(); selectedID = nil
+    items = []; byID = [:]; devicePhotos = [:]; points = []; snapshot = .empty; visibleRows = []; focusedPhotoIDs = nil
     #if !FOTORO_LOCAL_PREVIEW
-    guard let services, let access = services.photoAccountAccess else { return }
-    let vault = services.vault.generation
-    while !Task.isCancelled, scenePhase == .active,
-      services.photoAccountAccess == access, services.vault.generation == vault {
+    savedPhotos = [:]
+    #endif
+    viewport = nil; camera = .automatic
+  }
+  private func refreshSources(recenter: Bool = false) {
+    guard scenePhase == .active else { clearPlaces(); return }
+    projection?.cancel(); sourceToken = UUID(); selectedID = nil; focusedPhotoIDs = nil; snapshot = .empty; visibleRows = []; rowLimit = 80
+    let page = store.browsePage, status = store.status
+    let library = search?.libraryGeneration, assetCount = search?.assets.count
+    // The index already holds permitted metadata; using it does not request originals or inference.
+    // Its empty refresh snapshot must not fall back to potentially withdrawn old browse locations.
+    var available = Dictionary(store.photos.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+    if let search {
+      if search.assets.isEmpty && search.indexing { available = [:] }
+      else { available.merge(search.assets, uniquingKeysWith: { _, indexed in indexed }) }
+    }
+    let device = RecentPhotosPolicy.canRead(status) ? available.values.compactMap { photo -> PhotoPlaceItem? in
+      guard let location = photo.photoLocation else { return nil }
+      return PhotoPlaceItem(reference: .device(photo.id), revision: photo.sourceRevision, capturedAt: photo.capturedAt, location: location)
+    } : []
+    let projected: [PhotoPlaceItem]
+    #if FOTORO_LOCAL_PREVIEW
+    projected = PhotoPlacesPolicy.ordered(device)
+    #else
+    let access = services?.photoAccountAccess
+    let generation = services?.consumerCatalogGeneration
+    if let services, let access {
+      let saved = services.photos.compactMap { photo -> PhotoPlacesPolicy.SavedItem? in
+        guard let location = services.annotation(photo).location else { return nil }
+        return PhotoPlacesPolicy.SavedItem(photo: photo, location: location)
+      }
+      projected = PhotoPlacesPolicy.items(device: device, saved: saved, sources: (try? services.store.backupSources()) ?? [], account: access.account)
+    } else { projected = PhotoPlacesPolicy.ordered(device) }
+    guard services?.photoAccountAccess == access, services?.consumerCatalogGeneration == generation else { clearPlaces(); return }
+    savedAccess = access; savedGeneration = generation
+    #endif
+    guard store.browsePage == page, store.status == status, search?.libraryGeneration == library,
+      search?.assets.count == assetCount else { clearPlaces(); return }
+    let now = Date()
+    let scoped = projected.filter { PhotoPlaceGeometry.includes(point($0), recentOnly: recentOnly, now: now) }
+    devicePage = page; deviceStatus = status; searchGeneration = library; searchAssetCount = assetCount; items = scoped
+    byID = Dictionary(scoped.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last }); points = scoped.map(point)
+    devicePhotos = available.filter { byID["device:" + $0.key] != nil }
+    #if !FOTORO_LOCAL_PREVIEW
+    savedPhotos = Dictionary((services?.photos ?? []).filter { byID["saved:" + $0.id] != nil }.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+    #endif
+    if recenter { viewport = nil; camera = .automatic }
+    if viewport == nil { fitLocations() } else { updateMap() }
+  }
+  private func point(_ item: PhotoPlaceItem) -> PhotoPlacePoint {
+    PhotoPlacePoint(id: item.id, revision: item.revision, coordinate: PhotoPlaceCoordinate(latitude: item.location.latitude, longitude: item.location.longitude), capturedAt: item.capturedAt, name: item.location.name)
+  }
+  private func fitLocations() {
+    guard sourceCurrent, let bounds = PhotoPlaceGeometry.bounds(points.map(\.coordinate))?.padded() else { return }
+    viewport = bounds; focusedPhotoIDs = nil; selectedID = nil; rowLimit = 80; camera = .region(region(bounds)); updateMap()
+  }
+  private func updateMap() {
+    projection?.cancel()
+    guard sourceCurrent, let viewport else { snapshot = .empty; visibleRows = []; return }
+    let input = points, token = sourceToken
+    projection = Task { @MainActor in
+      let worker = Task.detached(priority: .userInitiated) { PhotoPlaceGeometry.snapshot(input, viewport: viewport) }
+      let value = await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
+      guard !Task.isCancelled, sourceToken == token, sourceCurrent, self.viewport == viewport else { return }
+      snapshot = value; updateRows()
+    }
+  }
+  private func updateRows() {
+    guard sourceCurrent else { visibleRows = []; return }
+    let ids = snapshot.visiblePhotoIDs.filter { focusedPhotoIDs == nil || focusedPhotoIDs!.contains($0) }
+    visibleRows = ids.prefix(rowLimit).compactMap { byID[$0] }
+  }
+  private func selectMarker() {
+    guard sourceCurrent, let selectedID, let cluster = snapshot.clusters.first(where: { $0.id == selectedID }) else { return }
+    self.selectedID = nil
+    if cluster.count == 1, let item = byID[cluster.photoIDs[0]] { openPhoto(item); return }
+    focusedPhotoIDs = Set(cluster.photoIDs); rowLimit = 80; updateRows()
+    let target = cluster.bounds.padded(1.4, minimum: 0.002)
+    if viewport.map({ $0.latitudeSpan > target.latitudeSpan * 1.2 || $0.longitudeSpan > target.longitudeSpan * 1.2 }) ?? true {
+      withAnimation { camera = .region(region(target)) }
+    }
+  }
+  private func openPhoto(_ item: PhotoPlaceItem) {
+    guard sourceCurrent, byID[item.id] == item else { return }
+    switch item.reference {
+    case .device(let id):
+      guard RecentPhotosPolicy.canRead(store.status), let projected = devicePhotos[id],
+        projected.sourceRevision == item.revision,
+        store.validatePresentation(viewer: [RecentPhotoSource(projected)], selection: [], share: []).viewerIsCurrent,
+        let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject,
+        !asset.isHidden, RecentPhoto.sourceRevision(asset) == item.revision,
+        PhotoLocationV1.photos(asset.location) == item.location,
+        RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)), sourceCurrent
+      else { refreshSources(); return }
+    case .saved(let id):
+      #if !FOTORO_LOCAL_PREVIEW
+      guard let services, services.photoAccountAccess == savedAccess, let current = try? services.consumerSavedPhoto(id),
+        current.manifest.ownerAccountId == item.owner, PhotoPlacesPolicy.savedRevision(current) == item.revision,
+        services.annotation(current).location == item.location else { refreshSources(); return }
+      #else
+      return
+      #endif
+    }
+    open(item); dismiss()
+  }
+  private func loadMoreMetadata() {
+    guard sourceCurrent, !loading else { return }
+    loading = true; error = nil
+    // One explicit action loads one metadata page; map browsing never drains a library.
+    if deviceNeedsMetadataPage { store.loadMorePhotos() }
+    #if !FOTORO_LOCAL_PREVIEW
+    if let services, let access = services.photoAccountAccess, !savedPageExhausted {
       let count = services.photos.count
-      do { try services.loadMore() } catch { self.error = error.localizedDescription; return }
-      guard services.photos.count > count else { return }
-      await Task.yield()
+      do { try services.loadMore(); savedPageExhausted = services.photos.count == count }
+      catch { self.error = error.localizedDescription }
+      guard services.photoAccountAccess == access else { loading = false; clearPlaces(); return }
     }
     #endif
+    loading = false; refreshSources()
+  }
+  @ViewBuilder private func thumbnail(_ item: PhotoPlaceItem) -> some View {
+    if sourceCurrent {
+      switch item.reference {
+      case .device(let id):
+        if let photo = devicePhotos[id], photo.sourceRevision == item.revision {
+          PhotosImage(photo: photo, store: store, networkAllowed: false).scaledToFill()
+        } else { Image(systemName: "photo").foregroundStyle(.secondary) }
+      case .saved(let id):
+        #if !FOTORO_LOCAL_PREVIEW
+        if let services, services.photoAccountAccess == savedAccess,
+          let photo = savedPhotos[id], PhotoPlacesPolicy.savedRevision(photo) == item.revision {
+          LazyImage(url: photo.thumbnailURL) { state in
+            if let image = state.image { image.resizable().scaledToFill() }
+            else { Image(systemName: "photo").foregroundStyle(.secondary) }
+          }
+        } else { Image(systemName: "photo").foregroundStyle(.secondary) }
+        #else
+        Image(systemName: "photo").foregroundStyle(.secondary)
+        #endif
+      }
+    } else { Image(systemName: "photo").foregroundStyle(.secondary) }
   }
 }
 
@@ -157,11 +362,9 @@ private struct PhotoPlaceRow: View {
   let item: PhotoPlaceItem
   var body: some View {
     HStack(spacing: 12) {
-      Image(systemName: "photo").font(.title2).foregroundStyle(.secondary)
       VStack(alignment: .leading, spacing: 4) {
-        Text(item.capturedAt.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Date unavailable")
-          .font(.subheadline)
         Text(item.location.displayName).font(.body)
+        Text(item.capturedAt.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Capture date unavailable").font(.subheadline)
         Text(item.location.provenance).font(.caption).foregroundStyle(.secondary)
       }
       Spacer()

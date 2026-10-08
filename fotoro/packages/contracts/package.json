@@ -15,7 +15,8 @@
     "./intelligence": "./src/intelligence.ts",
     "./people": "./src/people.ts",
     "./albums": "./src/albums.ts",
-    "./albums-links": "./src/albums-links.ts"
+    "./albums-links": "./src/albums-links.ts",
+    "./capture-metadata": "./src/capture-metadata.ts"
   },
   "dependencies": {
     "ajv": "8.18.0",

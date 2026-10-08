@@ -617,9 +617,9 @@ struct RecentPhotosView: View {
         }) { settingsView }
         .sheet(item: $places, onDismiss: openPendingPlace) { _ in
           #if FOTORO_LOCAL_PREVIEW
-          PhotoPlacesView(store: store, open: { pendingPlace = $0 })
+          PhotoPlacesView(store: store, search: search, open: { pendingPlace = $0 })
           #else
-          PhotoPlacesView(store: store, services: services, open: { pendingPlace = $0 })
+          PhotoPlacesView(store: store, search: search, services: services, open: { pendingPlace = $0 })
           #endif
         }
         #if !FOTORO_LOCAL_PREVIEW
@@ -1544,14 +1544,16 @@ struct RecentPhotosView: View {
     pendingPlace = nil
     switch item.reference {
     case .device(let id):
-      guard let photo = store.photos.first(where: { $0.id == id }), photo.sourceRevision == item.revision,
+      guard let photo = search.assets[id] ?? store.photos.first(where: { $0.id == id }),
+        photo.sourceRevision == item.revision, photo.photoLocation == item.location,
         store.validatePresentation(viewer: [RecentPhotoSource(photo)], selection: [], share: []).viewerIsCurrent else { return }
-      viewer = RecentPhotoViewerPresentation(initial: photo, photos: store.photos.filter { $0.photoLocation != nil })
+      // A map can index thousands of coordinates; opening one pin must not construct thousands of pages.
+      viewer = RecentPhotoViewerPresentation(initial: photo, photos: [photo])
     case .saved(let id):
       #if !FOTORO_LOCAL_PREVIEW
       guard let services, services.photoAccountAccess?.account == item.owner,
         let photo = try? services.consumerSavedPhoto(id), PhotoPlacesPolicy.savedRevision(photo) == item.revision else { return }
-      savedViewer = SavedPhotoViewerPresentation(initial: photo, photos: allOwnedPhotos.filter { services.annotation($0).location != nil })
+      savedViewer = SavedPhotoViewerPresentation(initial: photo, photos: [photo])
       #endif
     }
   }

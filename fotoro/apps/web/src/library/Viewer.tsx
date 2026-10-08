@@ -13,6 +13,7 @@ import {photoChangeState, type ConsumerPhotoChanges} from "./consumer-changes";
 import {failedViewerPreview, readViewerPreview, viewerPreviewSource, type ViewerPreview} from "./viewer-preview";
 import {annotationLocation} from "@fotoro/contracts/location";
 import {PhotoLocation} from "../local/PhotoLocation";
+import {CaptureMetadataInfo} from "./CaptureMetadataInfo";
 import type {PhotoObservationV1} from "@fotoro/contracts/intelligence";
 import {KeptObservations} from "../intelligence/KeptObservations";
 import {intelligenceScope} from "../intelligence/scope";
@@ -333,6 +334,7 @@ export function Viewer({
             · {new Date(photo.metadata.sourceDate).toLocaleString()}
           </p>
           {!photo.grantId && <PhotoLocation location={annotationLocation(photo.annotations ?? {})} />}
+          {!photo.grantId && <CaptureMetadataInfo facts={photo.annotations?.facts} originalSha256={photo.metadata.originalSha256} />}
           {!photo.grantId && <>
             <KeptObservations facts={photo.annotations?.facts} photoId={photo.manifest.photoId} sourceRevision={photo.metadata.originalSha256} />
             {onObservation && intelligenceSession && photo.manifest.ownerAccountId === intelligenceSession.accountId && <Suspense fallback={null}>

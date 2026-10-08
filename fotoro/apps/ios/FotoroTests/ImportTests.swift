@@ -18,6 +18,61 @@ final class ImportTests: XCTestCase {
     XCTAssertTrue(CGImageDestinationFinalize(destination))
     return data as Data
   }
+  private func originalWithCapture(offset: String? = "+08:00") throws -> Data {
+    let bytes = try originalWithGPS()
+    let source = try XCTUnwrap(CGImageSourceCreateWithData(bytes as CFData, nil))
+    let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+    let data = NSMutableData()
+    let destination = try XCTUnwrap(CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil))
+    var exif: [CFString: Any] = [kCGImagePropertyExifDateTimeOriginal: "2000:01:02 12:34:56", kCGImagePropertyExifFNumber: 1.8,
+      kCGImagePropertyExifExposureTime: 0.004, kCGImagePropertyExifISOSpeedRatings: [100]]
+    if let offset { exif[kCGImagePropertyExifOffsetTimeOriginal] = offset }
+    CGImageDestinationAddImage(destination, image, [kCGImagePropertyExifDictionary: exif,
+      kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFMake: "Apple", kCGImagePropertyTIFFModel: "Fixture camera"]] as CFDictionary)
+    XCTAssertTrue(CGImageDestinationFinalize(destination)); return data as Data
+  }
+  func testPhotosDateRemainsAuthoritativeAndCaptureFactsSeedWithoutChangingOriginalOrStrictWire() async throws {
+    let bytes = try originalWithCapture()
+    let store = try LibraryStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
+    let accounts = try fixture(FixtureAccounts.self, "accounts"), secret = accounts.testSecrets[0]
+    let bundle = AccountBundle(vaultKey: secret.vaultKey, boxSecretKey: secret.boxSecretKey, signingSecretKey: secret.signingSecretKey)
+    let current = "2026-10-07T12:00:00.000Z"
+    let photos = PhotoCaptureMetadata(items: [.init(k: "createdAt", p: .photos, v: current), .init(k: "width", p: .photos, v: "1000")])
+    let importer = PhotoImport(store: store, sourceReader: { _ in (bytes, "original.jpg", false) }, sourceRevision: { _ in "current" },
+      sourceLocation: { _ in nil }, sourceCaptureMetadata: { _ in photos })
+    let imported = try await importer.importResources([SelectedResource(id: "selected", origin: .photos, resourceIdentifier: "selected")], accountId: secret.accountId, bundle: bundle)
+    let photo = try XCTUnwrap(imported.first)
+    XCTAssertEqual(Wire.parseDate(photo.metadata.sourceDate), Wire.parseDate(current)); XCTAssertEqual(photo.metadata.dateSource, "photos")
+    XCTAssertEqual(try Data(contentsOf: XCTUnwrap(photo.originalURL)), bytes)
+    let ledger = AnnotationLedger(store: store, accountId: secret.accountId)
+    var value = try XCTUnwrap(ledger.current(photo: photo, bundle: bundle, card: accounts.accounts[0]))
+    let capture = try XCTUnwrap(PhotoCaptureFacts.read(value.facts, originalSha256: photo.metadata.originalSha256))
+    XCTAssertEqual(capture.items.first { $0.k == "cameraModel" }?.v, "Fixture camera")
+    XCTAssertEqual(capture.items.first { $0.k == "width" && $0.p == .photos }?.v, "1000")
+    XCTAssertNil(value.location)
+    let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Wire.encode(photo.metadata)) as? [String: Any])
+    XCTAssertNil(fields["captureMetadata"]); XCTAssertNil(fields["cameraModel"])
+    value.labels = ["Owner words"]
+    try ledger.edit(value, photo: photo, bundle: bundle, card: accounts.accounts[0])
+    let before = try ledger.state(photo.id)
+    try await store.database.write { db in try ledger.seedMetadata(location: nil, capture: PhotoCaptureMetadata(), photo: photo, bundle: bundle, db: db) }
+    XCTAssertEqual(try ledger.state(photo.id)?.draft, before?.draft)
+    XCTAssertEqual(try ledger.current(photo: photo, bundle: bundle, card: accounts.accounts[0])?.labels, ["Owner words"])
+  }
+  func testFileExifRequiresActualOffsetAndMissingPhotosDateCannotResurrectOriginalDate() async throws {
+    let store = try LibraryStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
+    let secret = try fixture(FixtureAccounts.self, "accounts").testSecrets[0]
+    let bundle = AccountBundle(vaultKey: secret.vaultKey, boxSecretKey: secret.boxSecretKey, signingSecretKey: secret.signingSecretKey)
+    let importer = PhotoImport(store: store)
+    let offsetBytes = try originalWithCapture()
+    let explicit = try await importer.build(bytes: offsetBytes, filename: "original.jpg", accountId: secret.accountId, bundle: bundle)
+    XCTAssertEqual(explicit.metadata.dateSource, "exif")
+    XCTAssertEqual(Wire.parseDate(explicit.metadata.sourceDate), Wire.parseDate("2000-01-02T04:34:56.000Z"))
+    let missing = try await importer.build(bytes: try originalWithCapture(offset: nil), filename: "original.jpg", accountId: secret.accountId, bundle: bundle)
+    XCTAssertEqual(missing.metadata.dateSource, "import")
+    let removed = try await importer.build(bytes: offsetBytes, filename: "original.jpg", accountId: secret.accountId, bundle: bundle, permitOriginalCaptureDate: false)
+    XCTAssertEqual(removed.metadata.dateSource, "import")
+  }
   func testFileIntakeKeepsOriginalGPSInPrivateFactsAndOriginalBytesUnchanged() async throws {
     let bytes = try originalWithGPS()
     let store = try LibraryStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
