@@ -1,4 +1,4 @@
-/** Account-private capture evidence carried by the existing annotation facts wire. */
+// Account-private capture evidence carried by the existing annotation facts wire.
 export const CAPTURE_METADATA_PREFIX = "fotoro.capture.v1:";
 export const isCaptureMetadataFact = (fact: string) => fact.startsWith("fotoro.capture.");
 export type CaptureMetadataProvenance = "photos" | "original";
@@ -91,7 +91,7 @@ export function captureMetadataRows(metadata: PhotoCaptureMetadataV1): CaptureMe
     return {label: labels[item.k], value, provenance: item.p};
   });
 }
-/** Only useful, source-bound camera/media words enter Find; JSON and numeric settings do not. */
+// Only useful, source-bound camera/media words enter Find; JSON and numeric settings do not.
 export function captureMetadataSearchText(value: {facts?: readonly string[]; originalSha256?: string}, originalSha256: string): string[] {
   const metadata = annotationCaptureMetadata(value, originalSha256);
   if (!metadata) return [];

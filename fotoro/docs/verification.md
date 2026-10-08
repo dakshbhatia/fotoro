@@ -51,8 +51,10 @@ transaction. The selected Info loader reads their local original headers while
 keeping current Photos dates/GPS authoritative. Original GPS does not restore a
 location removed from Photos. The rendered full app shows the two retained GPS
 locations, the 30-day Places scope and the observed Info date/location/dimensions.
-Synthetic fixtures are Simulator-only, clean up by default and are retained only
-by an explicit local QA test setting. They are not production sample intake.
+The real PhotoKit test requires explicit local QA opt-in and reuses a dedicated
+three-photo synthetic album. It does not delete Photos or albums automatically,
+which avoids interactive OS prompts in unattended tests. These fixtures are
+Simulator-only and are not production sample intake.
 
 Nine geometry cases include 20,000 locations represented in at most 80 markers,
 late-indexed sources beyond the first browse page, dateline wrapping, stable

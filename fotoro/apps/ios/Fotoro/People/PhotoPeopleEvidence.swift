@@ -1,7 +1,7 @@
 import GRDB
 
 extension SearchIndex {
-  /// A current completed local scan, including zero faces, is distinct from never analyzed.
+  // A current completed local scan, including zero faces, is distinct from never analyzed.
   func detectedFaceCount(photoID: String, revision: String) throws -> Int? {
     try preparePeopleTables()
     return try database.read { db in

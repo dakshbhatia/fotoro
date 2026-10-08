@@ -89,18 +89,19 @@ final class PhotoCaptureMetadataTests: XCTestCase {
   }
   @MainActor func testSimulatorEditedPhotosMetadataAndLocalOriginalInfoLoader() async throws {
     #if targetEnvironment(simulator)
+    guard ProcessInfo.processInfo.environment["FOTORO_TEST_PHOTOKIT_METADATA"] == "true" else {
+      throw XCTSkip("Real PhotoKit fixture work requires explicit local metadata QA opt-in.")
+    }
     guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)) else {
       throw XCTSkip("Simulator Photos permission is required for the synthetic metadata integration test.")
     }
     let albumTitle = "Fotoro Synthetic Metadata QA"
     let filenames = ["FOTORO-QA-SYNTHETIC-SINGAPORE.jpg", "FOTORO-QA-SYNTHETIC-LONDON.jpg", "FOTORO-QA-SYNTHETIC-GPS-REMOVED.jpg"]
     let labels = ["SYNTHETIC QA · SINGAPORE", "SYNTHETIC QA · LONDON", "SYNTHETIC QA · GPS REMOVED"]
-    let keep = ProcessInfo.processInfo.environment["FOTORO_KEEP_METADATA_QA_FIXTURES"] == "true"
     let options = PHFetchOptions(); options.predicate = NSPredicate(format: "title == %@", albumTitle)
     let albums = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .albumRegular, options: options)
     XCTAssertLessThanOrEqual(albums.count, 1, "Never alter an ambiguous album.")
     guard albums.count <= 1 else { return }
-    var albumID = albums.firstObject?.localIdentifier ?? ""
     var ids: [String] = []
     if let album = albums.firstObject {
       let assets = PHAsset.fetchAssets(in: album, options: nil)
@@ -121,7 +122,7 @@ final class PhotoCaptureMetadataTests: XCTestCase {
         if let album = albums.firstObject { albumRequest = PHAssetCollectionChangeRequest(for: album) }
         else {
           let request = PHAssetCollectionChangeRequest.creationRequestForAssetCollection(withTitle: albumTitle)
-          albumID = request.placeholderForCreatedAssetCollection.localIdentifier; albumRequest = request
+          albumRequest = request
         }
         var placeholders: [PHObjectPlaceholder] = []
         for index in bytes.indices {
@@ -133,15 +134,6 @@ final class PhotoCaptureMetadataTests: XCTestCase {
           if let placeholder = request.placeholderForCreatedAsset { placeholders.append(placeholder); ids.append(placeholder.localIdentifier) }
         }
         albumRequest?.addAssets(placeholders as NSArray)
-      }
-    }
-    func cleanup() async throws {
-      guard !keep else { return }
-      let assets = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
-      let collection = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [albumID], options: nil)
-      try await PHPhotoLibrary.shared().performChanges {
-        PHAssetChangeRequest.deleteAssets(assets)
-        PHAssetCollectionChangeRequest.deleteAssetCollections(collection)
       }
     }
     do {
@@ -176,9 +168,6 @@ final class PhotoCaptureMetadataTests: XCTestCase {
         XCTAssertEqual(metadata.items.first { $0.k == "offsetTimeOriginal" && $0.p == .original }?.v, "+00:00")
         XCTAssertFalse(metadata.items.contains { $0.k == "latitude" || $0.k == "longitude" })
       }
-      try await cleanup()
-    } catch {
-      try await cleanup(); throw error
     }
     #else
     throw XCTSkip("Synthetic PhotoKit integration is Simulator-only.")

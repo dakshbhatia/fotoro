@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Presents measured capture details without turning technical metadata into user tags.
+// Presents measured capture details without turning technical metadata into user tags.
 struct PhotoMetadataSections: View {
   private let summary: PhotoMetadataPresentation
   init(metadata: PhotoCaptureMetadata) {
@@ -28,7 +28,7 @@ struct PhotoMetadataSections: View {
   }
 }
 
-/// Keeps current Photos dimensions prominent; original file measurements remain available.
+// Keeps current Photos dimensions prominent; original file measurements remain available.
 struct PhotoMetadataPresentation {
   var media: [PhotoCaptureMetadata.Row] = []
   var camera: [PhotoCaptureMetadata.Row] = []
