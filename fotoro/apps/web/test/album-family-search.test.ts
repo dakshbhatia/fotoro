@@ -100,7 +100,7 @@ function reviewed(photo: Photo, session: ReturnType<typeof requireVault>, name: 
 }
 
 test("A explicitly shares reviewed details; B accepts, finds People/place/time, contributes own copy and preserves both originals", () => scoped(async () => {
-  const data = await fixture(); const a = await open(0), aAccess = await AlbumAccess.open(data.overview(), {}), [aPhoto] = await aAccess.loadPhotos(), sourceA = reviewed(data.initial[0].photo, a, "Mum");
+  const data = await fixture(); const a = await open(0), aAccess = await AlbumAccess.open(data.overview(), {}), [aPhoto] = (await aAccess.loadPhotoPage()).photos, sourceA = reviewed(data.initial[0].photo, a, "Mum");
   assert.equal((await aAccess.loadFacts()).facts.size, 0);
   await aAccess.shareDetails(aPhoto, sourceA, {people: false, location: false}, 1);
   const empty = await aAccess.loadFacts(); assert.equal(searchAlbumPhotos([aPhoto], "Mum", () => true, Date.now(), {facts: empty.facts}).length, 0);
@@ -111,11 +111,11 @@ test("A explicitly shares reviewed details; B accepts, finds People/place/time, 
   const b = await open(1); await assert.rejects(trustedCard(accounts.accounts[0].accountId), /PIN_ACCOUNT_CARD/);
   const joined = await joinAlbumInvitation(data.overview(), {}, accounts.accounts[0]); assert.equal(joined.membership, "accepted");
   assert.deepEqual(await trustedCard(accounts.accounts[0].accountId), accounts.accounts[0]);
-  let bAccess = await AlbumAccess.open(data.overview(), {}), bPhotos = await bAccess.loadPhotos(), bFacts = await bAccess.loadFacts();
+  let bAccess = await AlbumAccess.open(data.overview(), {}), bPhotos = (await bAccess.loadPhotoPage()).photos, bFacts = await bAccess.loadFacts();
   assert.equal(searchAlbumPhotos(bPhotos, "Grove 2021", () => bAccess.current(), Date.now(), {facts: bFacts.facts}).length, 1);
   assert.equal(searchAlbumPhotos(bPhotos, "Mum", () => bAccess.current(), Date.now(), {facts: bFacts.facts}).length, 1);
   assert.equal(await bAccess.add([data.other.photo], () => [data.other.photo]), 1); bAccess.dispose();
-  bAccess = await AlbumAccess.open(data.overview(), {}); bPhotos = await bAccess.loadPhotos();
+  bAccess = await AlbumAccess.open(data.overview(), {}); bPhotos = (await bAccess.loadPhotoPage()).photos;
   const bPhoto = bPhotos.find(photo => photo.manifest.ownerAccountId === b.accountId)!, sourceB = reviewed(data.other.photo, b, "Dad");
   await assert.rejects(bAccess.shareDetails(bPhotos.find(photo => photo !== bPhoto)!, sourceB, {people: true, location: false}, 1), /SELECTION_CHANGED/);
   await bAccess.shareDetails(bPhoto, sourceB, {people: true, location: false}, 1); bFacts = await bAccess.loadFacts();
@@ -130,7 +130,7 @@ test("A explicitly shares reviewed details; B accepts, finds People/place/time, 
   await bAccess.shareDetails(bPhoto, sourceB, {people: false, location: false}, 2);
   assert.equal(searchAlbumPhotos(bPhotos, "Dad", () => bAccess.current(), Date.now(), {facts: (await bAccess.loadFacts()).facts}).length, 0);
   bAccess.dispose();
-  await open(0); const ownerAgain = await AlbumAccess.open(data.overview(), {}); await ownerAgain.loadPhotos(); await ownerAgain.end();
+  await open(0); const ownerAgain = await AlbumAccess.open(data.overview(), {}); await ownerAgain.loadPhotoPage(); await ownerAgain.end();
   await open(1); const beforeRead = data.counts().objectReads;
   await assert.rejects(AlbumAccess.open(data.overview(), {}), /ACCESS_ENDED/); assert.equal(data.counts().objectReads, beforeRead);
 }));
@@ -139,7 +139,9 @@ test("shared facts paging is bounded100, defers unmatched sources and distinguis
   const data = await fixture(101), a = await open(0);
   for (const item of data.initial) data.facts.set(item.photo.manifest.photoId, makeAlbumPhotoFacts({signedDefinition: data.made.signed, trustedOwner: a.card, entry: item.entry, manifest: item.signed,
     originalSha256: item.photo.metadata.originalSha256, albumKey: data.made.albumKey, revision: 1, people: ["Mum"], signingSecretKey: a.signingSecretKey}));
-  const access = await AlbumAccess.open(data.overview(), {}); await access.loadPhotos();
+  const access = await AlbumAccess.open(data.overview(), {}), firstPage = await access.loadPhotoPage();
+  assert.equal(firstPage.photos.length, 100); assert.equal(firstPage.hasMore, true);
+  const lastPage = await access.loadPhotoPage(firstPage.nextCursor); assert.equal(lastPage.photos.length, 1); assert.equal(lastPage.hasMore, false);
   const before = data.counts(), loaded = await access.loadFacts(); assert.equal(loaded.facts.size, 101); assert.equal(loaded.unmatched, 0);
   assert.equal(data.counts().lists - before.lists, 2); assert.equal(data.counts().singleReads - before.singleReads, 0); assert.equal(data.counts().objectReads, before.objectReads);
   data.entries.push(data.other); data.facts.set(data.other.photo.manifest.photoId, data.otherShared);
@@ -152,7 +154,7 @@ test("shared facts paging is bounded100, defers unmatched sources and distinguis
 
 test("late shared facts and changed owned annotations cannot publish across close/account/source changes", () => scoped(async () => {
   const data = await fixture(), a = await open(0), controller = new AbortController(), access = await AlbumAccess.open(data.overview(), {signal: controller.signal});
-  const [photo] = await access.loadPhotos(), ownedSource = reviewed(data.initial[0].photo, a, "Mum");
+  const [photo] = (await access.loadPhotoPage()).photos, ownedSource = reviewed(data.initial[0].photo, a, "Mum");
   data.initial[0].photo.annotations = {...data.initial[0].photo.annotations!, caption: "new private revision"};
   const before = data.counts().puts;
   await assert.rejects(access.shareDetails(photo, ownedSource, {people: true, location: true}, 1), /SELECTION_CHANGED/); assert.equal(data.counts().puts, before);

@@ -27,8 +27,8 @@ Cloudflare proposals become tasks here only when a consumer need admits them.
 | 6 | Search and Picks: text/date/label search, local visual retrieval, diverse suggestions and explicit incomplete-coverage feedback. Browsing starts at 30 days; all photos and historical date queries stay reachable. Browser Saved starts with a 100-record window and explicit further pages; date, Search and People coverage is limited to loaded photos until expanded. | Held-out retrieval and shortlist quality against human choices; cold/warm time to the intended photo. Suggestions cannot silently select, save or delete originals. |
 | 7 | Photo delivery and return: thumbnails/previews, owned URL leases, retry, cancellation and bounded native zoom/pan. Browser browsing hydrates bounded Saved windows and reuses verified unchanged metadata; an atomic 100 MiB cache ledger avoids ciphertext rescans. | Large-library frame pacing, memory, battery, motion playback and interruptions on supported phones. Explicit save/contribution synchronization can still traverse the full catalog; measure that path separately from bounded browsing. Missing derivatives cannot silently download originals. |
 | 8 | Organization and accessibility: optional sortable photo tables, observed columns, keyboard navigation across virtualized rows and responsive selection/viewers. iOS Places adapts geographic clusters to zoom, counts available location metadata in the viewport and opens individual photos. An explicit optional Apple Maps lookup labels up to eight map areas per action for the current view. | VoiceOver, Dynamic Type, physical gestures and broader hardware/browser acceptance. Area labels do not establish a photo's landmark or attendance; physical-device map performance remains unverified. |
-| 9 | Share and receive: system original sharing, private invitations, recipient-owned Save and live albums with explicit acceptance and later chosen owned-photo additions. Browser Join album combines reviewed owner verification and acceptance; Choose → Continue retains the exact album and selection. Native album selection pages through Saved in explicit 200-record batches; each contribution selects at most 100. Contributors can explicitly publish reviewed names and location for album People/place/capture-date search. Exact-original groups retain every copy. | Physical share-sheet completion and the family journey on installed devices; contact convergence, shared person identity across contributors and cross-trip landmark/family matching. |
-| 10 | Optional understanding and operation: preview consent → Gemini review → Keep, encrypted facts, account fences, request caps, conservative daily spend reservations and audited native artifacts. Provider remains disabled. PR 51 production and internal TestFlight 47 availability are verified. [Bounded diagnostics](diagnostics.md) link client actions to server requests, timings and fixed failure/waiting reasons, with local Copy/Share controls. | Deliberate provider activation and live cost/behavior evidence; physical TestFlight installation. Measure upload/commit failures, quota pressure, orphan allocation and restore behavior without private content in logs. Safe undo, deletion and garbage collection remain open. |
+| 9 | Share and receive: system original sharing, private invitations, recipient-owned Save and live albums with explicit acceptance and later chosen owned-photo additions. Browser and native Join album combine reviewed owner verification, contact trust and acceptance; Choose → Continue retains the exact album and selection. Native album selection pages through Saved in explicit 200-record batches; each contribution selects at most 100. Contributors can explicitly publish reviewed names and location for album People/place/capture-date search. Exact-original groups retain every copy. | Physical share-sheet completion and the family journey on installed devices; contact convergence, shared person identity across contributors and cross-trip landmark/family matching. |
+| 10 | Optional understanding and operation: preview consent → Gemini review → Keep, encrypted facts, account fences, request caps, conservative daily spend reservations and audited native artifacts. Provider remains disabled. PR 53 production and internal TestFlight 48 availability are verified. [Bounded diagnostics](diagnostics.md) link client actions to server requests, timings and fixed failure/waiting reasons, with local Copy/Share controls. | Deliberate provider activation and live cost/behavior evidence; physical TestFlight installation. Measure upload/commit failures, quota pressure, orphan allocation and restore behavior without private content in logs. Safe undo, deletion and garbage collection remain open. |
 
 These gates qualify the current implementation. Test coverage and a public
 fixture exchange do not prove a personal-library journey or a better product.
@@ -47,6 +47,9 @@ newly observed arrivals are admitted without inventing capture dates. Already sc
 Existing 10-day Sync anchors preserve their journal and exclusions until explicit
 expansion to 30 days. Date and reviewed-People metadata scope heavy processing;
 the next batch and unavailable-source retry remain explicit actions.
+Native API requests normalize URLSession cancellation to cancellation outcomes.
+Pause cancels active foreground transfer work while retaining its durable retry;
+interrupted work does not become a transfer failure solely because it was paused.
 Browser uploads stay explicit. The logical-original limit is 50 MiB, including
 complete Live Photo pairs; account allocation is 10 GiB of ciphertext. Excluded
 originals remain visible and are reported as incomplete sync.
@@ -85,6 +88,22 @@ Names remain contributor-scoped text snapshots. Album search intersects people,
 place and recorded capture dates on each copy before exact-original grouping.
 Import dates cannot satisfy capture-date filters. Grouping does not delete copies
 or change storage/capacity; every contribution stays reachable.
+Browser album opening loads the first 100 contributions; further pages require
+explicit continuation. Live refresh checks shared details even when the photo
+count is unchanged and preserves chosen People/place/date filters. A contributor
+can load their own details on demand through two signed metadata reads, without
+hydrating the full Saved catalog; Saved browsing remains bounded. These paths
+retain album membership, account, vault and source-binding checks.
+
+Cross-device private annotation merging treats reviewed People, location, capture
+details, optional observations, supplied text and unknown reserved facts as
+separate atomic categories. Changes in different categories merge; incompatible
+changes within one category require a choice. Explicit deletion is retained, and
+choosing local retains unrelated remote category edits. The encrypted facts wire
+format is unchanged. Native first-contact Join album pins only the reviewed,
+matching owner card, refreshes the invitation and requires the same signed album
+definition before accepting and opening it.
+
 Original files retain their embedded metadata, and ending access cannot recall
 previous downloads. Cross-trip landmark grouping and automatic attendance are
 not implemented.
@@ -100,7 +119,8 @@ passkey access directly. Device approval has API/crypto support but no consumer
 interface; it requires same-account authentication before transferring a sealed
 bundle. Sign in with Apple is not delivered. System sharing is the main original-file
 route; private invitations require accepted contacts. Contact synchronization
-across devices remains open.
+across devices remains open. Global family Find and a native Mac client remain
+open; album filters do not establish shared person identity across contributors.
 
 The current follow-up scopes native trusted cards to each owner and keeps ambiguous
 legacy contacts quarantined for explicit review. Native Saved restoration skips
@@ -118,7 +138,7 @@ server sign-in; failed visual checks no longer claim a successful empty result.
 Production browser-reader interruption/reopen tests now cover five media kinds,
 while physical qualification remains open. Full-app release audits now
 gate archive/export/upload. These changes and their local regression evidence
-are recorded in [verification](verification.md). PR 51 production and build 47
+are recorded in [verification](verification.md). PR 53 production and build 48
 availability through the existing internal TestFlight group are verified. Build 47
 adds bounded Saved album/People pages, direct welcome passkey access and optional
 map-area labels. The browser preserves chosen photos through further bounded

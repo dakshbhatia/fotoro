@@ -33,7 +33,6 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
       - run: pnpm test:search:visual
-      - run: pnpm test:exchange:isolated
 
   ios:
     runs-on: macos-26

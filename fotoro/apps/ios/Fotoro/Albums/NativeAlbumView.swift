@@ -12,6 +12,36 @@ struct NativeAlbumPresentation: Identifiable {
   }
 }
 
+// Called only after the owner identity shown in the review sheet was confirmed.
+@MainActor enum NativeAlbumReviewedJoin {
+  static func join(_ reviewed: NativeAlbumSummary, incoming: FotoroAlbumInvitation?, services: AppServices, model: NativeAlbumService) async throws {
+    try Task.checkCancellation()
+    guard let access = services.photoAccountAccess,
+      let owner = reviewed.definition.members.first(where: { $0.card.accountId == reviewed.definition.ownerAccountId })?.card,
+      reviewed.overview.endedAt == nil,
+      incoming?.albumId != reviewed.id || incoming?.ownerCard == owner else {
+      throw FotoroError("Album link identity does not match its owner.")
+    }
+    guard reviewed.definition.members.contains(where: { $0.card.accountId == access.account && $0.card == services.session.pinnedCards[access.account] }),
+      model.albums.contains(where: { $0.id == reviewed.id && $0.overview.definition == reviewed.overview.definition }) else {
+      throw FotoroError("Album invitation is unavailable for this account.")
+    }
+    let origin = services.api.baseURL.absoluteString
+    if services.session.pinnedCards[owner.accountId] != owner { try services.acceptContact(owner, name: "") }
+    try await model.refresh()
+    try Task.checkCancellation()
+    guard services.photoAccountAccess == access, services.api.baseURL.absoluteString == origin else { throw CancellationError() }
+    guard let fresh = model.albums.first(where: { $0.id == reviewed.id }),
+      fresh.overview.definition == reviewed.overview.definition, !fresh.needsTrust,
+      fresh.overview.endedAt == nil else { throw FotoroError("Album invitation changed. Review it again before joining.") }
+    if fresh.overview.membership == "invited" { try await model.accept(fresh.id, expectedOwner: owner) }
+    else if fresh.overview.membership != "accepted" { throw FotoroError("Album invitation is unavailable.") }
+    try Task.checkCancellation()
+    guard services.photoAccountAccess == access, services.api.baseURL.absoluteString == origin else { throw CancellationError() }
+    try await model.open(fresh.id)
+  }
+}
+
 struct NativeAlbumView: View {
   @Bindable var services: AppServices
   let selected: [LocalPhoto]
@@ -44,7 +74,7 @@ struct NativeAlbumView: View {
   private var binding: String {
     let access = services.photoAccountAccess
     return (access?.account ?? "") + (access?.vault.uuidString ?? "") + services.api.baseURL.absoluteString
-      + ((try? Wire.encode(services.session.pinnedCards).digest) ?? "") + String(describing: scenePhase)
+      + String(describing: scenePhase)
   }
   private var filteredItems: [NativeAlbumItem] {
     model.items.filter { familyFilter.includes($0, facts: model.sharedFacts[$0.id]) }
@@ -137,7 +167,8 @@ struct NativeAlbumView: View {
       .sheet(item: $trustCandidate) { album in
         NavigationStack {
           ScrollView { trustOwner(album).padding() }.navigationTitle("Verify sender").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { trustCandidate = nil } } }
+            .interactiveDismissDisabled(busy)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { trustCandidate = nil }.disabled(busy) } }
         }
       }
       .sheet(isPresented: Binding(get: { link != nil }, set: { if !$0 { link = nil } })) {
@@ -183,7 +214,7 @@ struct NativeAlbumView: View {
           if album.overview.endedAt != nil { Text("Access ended").foregroundStyle(.secondary) }
           else if album.needsTrust { Button("Verify sender", systemImage: "checkmark.shield") { trustCandidate = album }.buttonStyle(.bordered).disabled(busy) }
           else if album.overview.membership == "invited" {
-            Button("Accept invitation") { run {
+            Button("Join album") { run {
               try await model.accept(album.id, expectedOwner: incoming?.albumId == album.id ? incoming?.ownerCard : nil)
               try await model.open(album.id)
             } }.buttonStyle(.borderedProminent).disabled(busy).accessibilityIdentifier("albums.accept")
@@ -197,6 +228,7 @@ struct NativeAlbumView: View {
   private func trustOwner(_ album: NativeAlbumSummary) -> some View {
     VStack(alignment: .leading, spacing: 8) {
       Text("Confirm this album invitation came from its owner before accepting their contact.").font(.footnote)
+      if let feedback { Text(feedback).foregroundStyle(.secondary) }
       Text(album.definition.ownerAccountId).font(.caption.monospaced()).textSelection(.enabled)
       if let card = album.definition.members.first(where: { $0.card.accountId == album.definition.ownerAccountId })?.card {
         Text("Signing fingerprint").font(.caption)
@@ -204,11 +236,10 @@ struct NativeAlbumView: View {
         Text("Encryption fingerprint").font(.caption)
         Text(card.boxPublicKey).font(.caption.monospaced()).textSelection(.enabled)
       }
-      Button("Confirm sender") { run {
-        guard let card = album.definition.members.first(where: { $0.card.accountId == album.definition.ownerAccountId })?.card,
-          incoming?.albumId != album.id || incoming?.ownerCard == card else { throw FotoroError("Album link identity does not match its owner.") }
-        try services.acceptContact(card, name: ""); trustCandidate = nil; try await model.refresh(); try prepareInvitation()
-      } }.buttonStyle(.bordered).disabled(busy)
+      Button("Join album") { run {
+        try await NativeAlbumReviewedJoin.join(album, incoming: incoming, services: services, model: model)
+        trustCandidate = nil
+      } }.buttonStyle(.borderedProminent).disabled(busy).accessibilityIdentifier("albums.joinReviewed")
     }
   }
   private var create: some View {
@@ -317,7 +348,7 @@ struct NativeAlbumView: View {
     }
     invitationPrepared = true
     if album.overview.endedAt != nil { feedback = "Album access has ended." }
-    else { feedback = album.overview.membership == "invited" ? "Accept the album invitation below." : "Open the album below." }
+    else { feedback = album.overview.membership == "invited" ? "Join the album below." : "Open the album below." }
   }
   private func stop() { operation?.cancel(); operation = nil; operationID = nil; viewer = nil; showPicker = false; link = nil; familyFilter = NativeAlbumSearchFilter(); showFamilyFilters = false; showCreation = false; showDetails = false; trustCandidate = nil }
   private func run(_ action: @escaping @MainActor () async throws -> Void) {

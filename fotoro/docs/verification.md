@@ -5,6 +5,10 @@ work; [product](product.md) owns the intended experience. Earlier measurements a
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
 
+Current distribution is PR 53 in production and TestFlight 48, independently
+verified `VALID` and `IN_BETA_TESTING`; see [Deployment](deployment.md). The dated
+follow-ups below preserve their qualification state at the time of testing.
+
 ## October 8 live family search follow-up — locally qualified
 
 Live albums add optional contributor-authenticated encrypted photo details, with

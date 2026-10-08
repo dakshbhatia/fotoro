@@ -1476,8 +1476,11 @@ extension ConsumerCoreTests {
         do {
           try await services.sync()
           XCTFail("The controlled network failure must propagate")
+        } catch is CancellationError {
+          XCTAssertEqual(code, .cancelled)
         } catch let error as URLError {
           XCTAssertEqual(error.code, code)
+          XCTAssertNotEqual(code, .cancelled, "API transport cancellation uses CancellationError")
         }
         XCTAssertNil(try services.store.cursor())
         XCTAssertTrue(try services.store.photos().isEmpty)

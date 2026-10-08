@@ -479,3 +479,87 @@ test("local cloud and People deltas preserve newer account categories and suppli
     assert.equal(value.facts?.[0],"Newest account supplied fact"); assert.deepEqual(annotationLocation(value),gps);
   } finally {await clean();}
 });
+
+
+test("facts merge categories independently, preserving deletions and conservative conflicts", () => {
+  const people = "fotoro:people-source:v1:base", location = "fotoro.location.v1:base";
+  const base = ["supplied", people, location];
+  const remote = ["supplied", people, "fotoro.location.v1:remote", "fotoro.capture.v1:new"];
+  const independent = annotations.mergeAnnotationFacts(base, ["supplied", location], remote);
+  assert.equal(independent.conflict, false);
+  assert.deepEqual(independent.value, ["supplied", "fotoro.location.v1:remote", "fotoro.capture.v1:new"]);
+  const collision = annotations.mergeAnnotationFacts(base, ["supplied", "fotoro:people-source:v1:mine", location], ["remote supplied", "fotoro:people-source:v1:theirs", "fotoro.location.v1:remote"]);
+  assert.equal(collision.conflict, true);
+  assert.deepEqual(collision.value, ["remote supplied", "fotoro:people-source:v1:mine", "fotoro.location.v1:remote"]);
+  assert.equal(annotations.mergeAnnotationFacts(["unknown"], [], ["changed unknown"]).conflict, true);
+});
+
+test("encrypted revision rebase and local conflict choice retain unrelated remote fact categories", async () => {
+  for (const collision of [false, true]) {
+    await open(); const old = globalThis.fetch;
+    try {
+      const baseFacts = ["supplied", "fotoro:people-source:v1:base", "fotoro.location.v1:base"];
+      await annotations.cacheAnnotations(signed(1, {facts: baseFacts}), photoId);
+      await annotations.queueAnnotations(identity, {facts: ["supplied", "fotoro:people-source:v1:mine", "fotoro.location.v1:base"]});
+      const remoteFacts = ["supplied", collision ? "fotoro:people-source:v1:theirs" : "fotoro:people-source:v1:base", "fotoro.location.v1:remote"];
+      const remote = signed(2, {facts: remoteFacts});
+      let writes = 0;
+      globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
+        if (init.method !== "PUT") return reply({version: 1, annotations: remote});
+        if (++writes === 1) return new Response(JSON.stringify({code: "VERSION_CONFLICT", retryable: false}), {status: 409});
+        const outgoing = JSON.parse(init.body as string);
+        assert.deepEqual(annotations.verifyAnnotations(outgoing, identity).value.facts, ["supplied", "fotoro:people-source:v1:mine", "fotoro.location.v1:remote"]);
+        return reply(outgoing);
+      }) as any;
+      await annotations.flushAnnotations();
+      if (collision) {
+        assert.equal((await annotations.pendingAnnotations())[0].conflict, true);
+        await annotations.resolveAnnotationConflict(photoId, "local");
+        await annotations.flushAnnotations();
+      }
+      assert.equal(writes, 2);
+      assert.equal((await annotations.pendingAnnotations()).length, 0);
+    } finally {globalThis.fetch = old; await clean();}
+  }
+});
+
+test("remote conflict choice keeps independent local fact edits and explicit deletion", async () => {
+  for (const removeLocation of [false, true]) {
+    await open(); const old = globalThis.fetch;
+    try {
+      await annotations.cacheAnnotations(signed(1, {facts: ["base supplied", "fotoro.location.v1:base"]}), photoId);
+      await annotations.queueAnnotations(identity, {facts: ["mine supplied", ...(removeLocation ? [] : ["fotoro.location.v1:mine"])]});
+      const remote = signed(2, {facts: ["remote supplied", "fotoro.location.v1:base", "fotoro:people-source:v1:remote"]});
+      globalThis.fetch = (async (_url: unknown, init: RequestInit) => init.method === "PUT"
+        ? new Response(JSON.stringify({code: "VERSION_CONFLICT", retryable: false}), {status: 409})
+        : reply({version: 1, annotations: remote})) as any;
+      await annotations.flushAnnotations();
+      assert.equal((await annotations.pendingAnnotations())[0].conflict, true);
+      await annotations.resolveAnnotationConflict(photoId, "remote");
+      const pending = (await annotations.pendingAnnotations())[0];
+      assert.ok(pending, "Independent local category remains queued");
+      assert.equal(pending.conflict, false);
+      assert.deepEqual((await annotations.readAnnotations(identity))?.value.facts, ["remote supplied", "fotoro:people-source:v1:remote", ...(removeLocation ? [] : ["fotoro.location.v1:mine"])]);
+      assert.equal(annotations.verifyAnnotations(pending.signed, identity).revision, 3);
+    } finally {globalThis.fetch = old; await clean();}
+  }
+});
+
+test("remote conflict choice preserves independent non-facts field edits", async () => {
+  await open(); const old = globalThis.fetch;
+  try {
+    await annotations.cacheAnnotations(signed(1, {caption: "base", keywords: ["base keyword"]}), photoId);
+    await annotations.queueAnnotations(identity, {caption: "mine", keywords: []});
+    const remote = signed(2, {caption: "remote", keywords: ["base keyword"], favorite: true});
+    globalThis.fetch = (async (_url: unknown, init: RequestInit) => init.method === "PUT"
+      ? new Response(JSON.stringify({code: "VERSION_CONFLICT", retryable: false}), {status: 409})
+      : reply({version: 1, annotations: remote})) as any;
+    await annotations.flushAnnotations();
+    await annotations.resolveAnnotationConflict(photoId, "remote");
+    const value = (await annotations.readAnnotations(identity))!.value;
+    assert.equal(value.caption, "remote");
+    assert.deepEqual(value.keywords, []);
+    assert.equal(value.favorite, true);
+    assert.equal((await annotations.pendingAnnotations()).length, 1);
+  } finally {globalThis.fetch = old; await clean();}
+});

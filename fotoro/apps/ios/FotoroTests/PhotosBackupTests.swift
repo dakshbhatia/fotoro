@@ -5,6 +5,72 @@ import XCTest
 @testable import Fotoro
 
 final class PhotosBackupTests: XCTestCase {
+  @MainActor func testCancelledCommitPausesReviewedBackupWithoutFailureAndRetriesSameJournal() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
+    let services = try await context.enroll()
+    defer { services.vault.lock() }
+    let bytes = try Data(contentsOf: context.sample)
+    let reads = AutomaticSourceReads()
+    services.importer = PhotoImport(store: services.store, sourceReader: { source in
+      await reads.record(source.resourceIdentifier)
+      return (bytes, "public-sample.jpg", false)
+    }, sourceRevision: { _ in "reviewed" })
+    services.photosBackupSnapshot = { _ in [BackupCandidate(id: "chosen", sourceRevision: "reviewed")] }
+    PausedUploadProtocol.server.failCommitReads(.cancelled)
+    let selection = [RecentPhotoSource(id: "chosen", revision: "reviewed")]
+    try services.startPhotosBackup(selection: selection)
+    await services.backup.waitUntilSettled()
+    XCTAssertEqual(services.backup.status.phase, .paused)
+    XCTAssertEqual(services.backup.status.failed, 0)
+    XCTAssertEqual(services.backup.status.completed, 0)
+    let queued = try services.store.backupSource("chosen")
+    XCTAssertEqual(queued.phase, .queued)
+    XCTAssertNil(queued.message, "Cancellation cannot become a persistent source failure")
+    XCTAssertTrue(services.journal.errors.isEmpty)
+    let entry = try XCTUnwrap(services.journal.entries().first)
+    XCTAssertEqual(entry.reservations.count, 1)
+    XCTAssertTrue(entry.commits.isEmpty)
+    let reservation = try XCTUnwrap(entry.reservations.values.first)
+    XCTAssertTrue(PausedUploadProtocol.server.publishedPhotoIDs.isEmpty)
+
+    // A new reviewed run first drains existing work. Its transport cancellation
+    // must stop at preflight, rather than become an attention error or retry again.
+    let beforePreflight = PausedUploadProtocol.server.requests.count
+    PausedUploadProtocol.server.failCommitReads(.cancelled)
+    try services.startPhotosBackup(selection: selection)
+    await services.backup.waitUntilSettled()
+    XCTAssertEqual(services.backup.status.phase, .paused)
+    XCTAssertEqual(services.backup.status.failed, 0)
+    XCTAssertNil(try services.store.backupSource("chosen").message)
+    XCTAssertTrue(services.journal.errors.isEmpty)
+    XCTAssertEqual(PausedUploadProtocol.server.requests.count, beforePreflight + 1,
+      "Cancelled preflight cannot retry or check the catalog in the same run")
+    XCTAssertEqual(try services.journal.entries().first?.reservations.values.first?.uploadId, reservation.uploadId)
+
+    // Continue uses the same drain directly, with no enclosing Task cancellation.
+    let beforeContinue = PausedUploadProtocol.server.requests.count
+    PausedUploadProtocol.server.failCommitReads(.cancelled)
+    do { try await services.continueSync(); XCTFail("Cancelled transfer drain must stop Continue") }
+    catch { XCTAssertTrue(error is CancellationError) }
+    XCTAssertEqual(PausedUploadProtocol.server.requests.count, beforeContinue + 1,
+      "Cancelled Continue cannot proceed to annotation or catalog requests")
+    XCTAssertNil(try services.store.backupSource("chosen").message)
+    XCTAssertTrue(services.journal.errors.isEmpty)
+
+    try services.startPhotosBackup(selection: selection)
+    await services.backup.waitUntilSettled()
+    XCTAssertEqual(services.backup.status.phase, .complete)
+    XCTAssertEqual(services.backup.status.failed, 0)
+    let readIDs = await reads.values()
+    XCTAssertEqual(readIDs, ["chosen"], "Retry must reuse staged ciphertext")
+    XCTAssertTrue(try services.journal.entries().isEmpty)
+    XCTAssertEqual(PausedUploadProtocol.server.publishedPhotoIDs, [entry.photo.photoId])
+    XCTAssertEqual(PausedUploadProtocol.server.requests.filter { $0.path == "/v1/uploads/\(reservation.uploadId)/commit" }.count, 4)
+    XCTAssertEqual(PausedUploadProtocol.server.requests.filter { $0.path == "/v1/uploads/reserve" }.count,
+      entry.photo.manifest.representations.count + 1, "The interrupted reservation must be reused")
+  }
+
   @MainActor func testChosenSaveColdReopensPaddedSelectionWithoutRescanningOrUploading() async throws {
     let context = try PausedUploadContext()
     defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
@@ -386,7 +452,8 @@ final class PhotosBackupTests: XCTestCase {
     let continuing = Task { try await services.continueSync() }
     while try services.store.uploadsPaused() { await Task.yield() }
     gate.release.signal()
-    try await oldUpload.value
+    do { try await oldUpload.value; XCTFail("Paused journal pass must report cancellation") }
+    catch { XCTAssertTrue(error is CancellationError) }
     try await continuing.value
     XCTAssertTrue(try services.journal.entries().isEmpty, "Continue must resume after the cancelled journal pass releases its running guard")
     XCTAssertFalse(try services.store.syncEnabled())
@@ -1398,6 +1465,8 @@ private final class PausedUploadServer: @unchecked Sendable {
   var reservationGate: UploadRequestGate?
   private var annotationFailures = 0
   private var catalogFailures = 0
+  private var commitFailure: URLError.Code?
+  func failCommitReads(_ code: URLError.Code) { lock.lock(); defer { lock.unlock() }; commitFailure = code }
   func failCatalogReads(_ count: Int) { lock.lock(); defer { lock.unlock() }; catalogFailures = count }
   func failAnnotationWrites(_ count: Int) { lock.lock(); defer { lock.unlock() }; annotationFailures = count }
   var requests: [Request] {
@@ -1414,6 +1483,7 @@ private final class PausedUploadServer: @unchecked Sendable {
     reservationGate = nil
     annotationFailures = 0
     catalogFailures = 0
+    commitFailure = nil
   }
   func response(_ request: URLRequest) throws -> Data {
     if request.url?.path == "/v1/uploads/reserve" { reservationGate?.visit() }
@@ -1439,6 +1509,7 @@ private final class PausedUploadServer: @unchecked Sendable {
       return bytes
     default:
       if path.hasSuffix("/commit"), let input = reservations[request.url!.deletingLastPathComponent().lastPathComponent] {
+        if let code = commitFailure { commitFailure = nil; throw URLError(code) }
         // A commit probe found a previously uploaded immutable representation.
         return try Wire.encode(UploadCommitV1(version: 1, uploadId: request.url!.deletingLastPathComponent().lastPathComponent, objectId: Wire.id(), ciphertextBytes: input.ciphertextBytes, ciphertextSha256: input.ciphertextSha256))
       }

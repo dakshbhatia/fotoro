@@ -30,6 +30,32 @@ const cacheKey = (session: UnlockedVault, id: string) => session.accountId + ":a
 const outboxKey = (session: UnlockedVault, id: string) => session.accountId + ":annotation-outbox:" + id;
 const ordered = (value: unknown): unknown => Array.isArray(value) ? value.map(ordered) : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, ordered(item)])) : value;
 const same = (a: unknown, b: unknown) => JSON.stringify(ordered(a)) === JSON.stringify(ordered(b));
+// Keep each encoded record family atomic, including malformed or future records.
+// Unknown reserved records remain one conservative bucket rather than being parsed.
+const factCategories = ["supplied", "people", "location", "capture", "observation", "reserved"] as const;
+function factCategory(fact: string): typeof factCategories[number] {
+  if (isPeopleFact(fact)) return "people";
+  if (isLocationFact(fact)) return "location";
+  if (fact.startsWith("fotoro.capture.")) return "capture";
+  if (isCloudObservationFact(fact)) return "observation";
+  return fact.startsWith("fotoro.") || fact.startsWith("fotoro:") ? "reserved" : "supplied";
+}
+export function mergeAnnotationFacts(base: string[] | undefined, local: string[] | undefined, remote: string[] | undefined, choice: "local" | "remote" = "local") {
+  if (same(local, base)) return {value: remote, conflict: false};
+  if (same(remote, base) || same(local, remote)) return {value: local, conflict: false};
+  let conflict = false;
+  const value = factCategories.flatMap(category => {
+    const group = (facts: string[] | undefined) => (facts ?? []).filter(fact => factCategory(fact) === category);
+    const before = group(base), mine = group(local), theirs = group(remote);
+    if (same(mine, before)) return theirs;
+    if (!same(theirs, before) && !same(mine, theirs)) {
+      conflict = true;
+      if (choice === "remote") return theirs;
+    }
+    return mine;
+  });
+  return {value, conflict};
+}
 const serial = new WeakMap<UnlockedVault, Promise<unknown>>();
 export function serializeAnnotationWrites<T>(session: UnlockedVault, operation: () => Promise<T>): Promise<T> {
   const previous = serial.get(session) ?? Promise.resolve();
@@ -210,11 +236,14 @@ async function reconcile(id: string, remote: VerifiedAnnotations | undefined, se
     }
     const identity = identityFor(session, pending), base = remote?.value ?? empty(identity);
     const projected = verifyAnnotations(pending.signed, identity, session).value;
-    const conflicts = !sent && fields.some(field => Object.hasOwn(pending.patch, field) && !same(base[field], pending.base[field]) && !same(base[field], projected[field]));
+    const facts = mergeAnnotationFacts(pending.base.facts, projected.facts, base.facts);
+    const conflicts = !sent && fields.some(field => Object.hasOwn(pending.patch, field) && (field === "facts" ? facts.conflict : !same(base[field], pending.base[field]) && !same(base[field], projected[field])));
     const next = {...pending, conflict: conflicts};
     if (!conflicts) {
       next.base = base;
-      next.signed = createSigned(identity, {...base, ...pending.patch}, (remote?.revision ?? 0) + 1, session);
+      next.patch = {...pending.patch};
+      if (Object.hasOwn(next.patch, "facts")) next.patch.facts = facts.value;
+      next.signed = createSigned(identity, {...base, ...next.patch}, (remote?.revision ?? 0) + 1, session);
     }
     await put("settings", outboxKey(session, id), encryptPrivate(next));
     assertVault(session);
@@ -265,11 +294,21 @@ export async function resolveAnnotationConflict(photoId: string, choice: "local"
   await serializeAnnotationWrites(session, async () => {
     const pending = await pendingOne(photoId, session);
     if (!pending) return;
-    if (choice === "remote") {
+    const identity = identityFor(session, pending), remote = await cached(identity, session), base = remote?.value ?? empty(identity);
+    const projected = verifyAnnotations(pending.signed, identity, session).value;
+    const patch: AnnotationPatch = {};
+    for (const field of fields) {
+      if (!Object.hasOwn(pending.patch, field)) continue;
+      const localValue = projected[field], remoteValue = base[field], originalValue = pending.base[field];
+      const conflict = !same(remoteValue, originalValue) && !same(remoteValue, localValue);
+      const value = field === "facts" ? mergeAnnotationFacts(pending.base.facts, projected.facts, base.facts, choice).value
+        : same(localValue, originalValue) || (choice === "remote" && conflict) ? remoteValue : localValue;
+      if (!same(value, remoteValue)) (patch as Record<string, unknown>)[field] = value;
+    }
+    if (!Object.keys(patch).length) {
       await atomic([{store: "settings", key: outboxKey(session, photoId)}]);
     } else {
-      const identity = identityFor(session, pending), remote = await cached(identity, session), base = remote?.value ?? empty(identity);
-      const next = {...pending, base, conflict: false, signed: createSigned(identity, {...base, ...pending.patch}, (remote?.revision ?? 0) + 1, session)};
+      const next = {...pending, patch, base, conflict: false, signed: createSigned(identity, {...base, ...patch}, (remote?.revision ?? 0) + 1, session)};
       await put("settings", outboxKey(session, photoId), encryptPrivate(next));
     }
     assertVault(session);

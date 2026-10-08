@@ -342,6 +342,7 @@ struct BackupStatus: Codable {
             try store.putBackupSource(source)
           } catch {
             try fence()
+            if error is CancellationError, source.phase == .queued { throw error }
             // Stop at the first unresolved staged upload so Pending holds at most one new source.
             if (try store.backupSource(source.id)).phase == .queued {
               source = try store.backupSource(source.id)

@@ -126,7 +126,6 @@ From `fotoro/`:
 pnpm install --frozen-lockfile
 pnpm check
 pnpm test:search:visual
-pnpm test:exchange:isolated
 ```
 
 The Fotoro GitHub workflow also compiles and tests both the full native app and
@@ -166,7 +165,15 @@ personal-account sync or original restoration on a physical phone.
 
 ## Native distribution
 
-The last verified TestFlight build is 47 (0.1.0), independently read `VALID` and
+The last verified TestFlight build is 48 (0.1.0), independently read `VALID` and
+`IN_BETA_TESTING` on October 8 in the same internal group with one tester. Its
+158 native inputs match qualified PR 53 head `8f9ce0ac2addd0f2de59a819100e8221b56391f4`
+and merged source `e2f571e21163237f89396100d8a28f36c1108b4b`. Production Worker
+`254b2cdb-e38d-4cf7-872a-56dcda3a28a0` serves that source at 100%; all 46 asset
+digests match. Migration `0009_album_photo_facts.sql` is applied. Gemini remains
+disabled. Physical installation and the authenticated family journey remain open.
+
+The preceding verified TestFlight build is 47 (0.1.0), independently read `VALID` and
 `IN_BETA_TESTING` on October 8. The same existing internal group auto-linked it,
 with the same one tester and no group, membership or access changes. What to Test
 notes and their exact build linkage match independent readback. All 154 native

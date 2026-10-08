@@ -6,7 +6,7 @@ import {annotationLocation} from "@fotoro/contracts/location";
 import { ready } from "@fotoro/crypto";
 import { Library } from "./library/Library";
 import { Viewer } from "./library/Viewer";
-import { photoBytes, type Photo, type CatalogCoverage } from "./library/catalog";
+import { cacheOwnedPhotoDetails, photoBytes, type Photo, type CatalogCoverage } from "./library/catalog";
 import {projectLocalAnnotations} from "./library/annotation-projection";
 import {
   lockVault,
@@ -178,10 +178,11 @@ export default function CloudApp({
   const [saveReady, setSaveReady] = useState<UnlockedVault | null>(null);
   const [catalogCoverage, setCatalogCoverage] = useState<CatalogCoverage | null>(null);
   const catalogBrowse = useRef<{session: UnlockedVault; limit: number} | null>(null);
+  const albumDetailPhoto = useRef<{session: UnlockedVault; photoId: string} | null>(null);
   const [consumerSelection] = useState(() => new ConsumerSelectionRetention());
   const browseFor = (session: UnlockedVault) => {
     if (catalogBrowse.current?.session !== session) catalogBrowse.current = {session, limit: 100};
-    return {limit: catalogBrowse.current.limit, retainPhotoIds: [...new Set([...currentSelection.current, ...consumerSelection.idsFor(session, session.accountId, location.origin), ...(expiredSelection.current?.photoIdsFor(session.accountId) ?? [])])]};
+    return {limit: catalogBrowse.current.limit, retainPhotoIds: [...new Set([...currentSelection.current, ...consumerSelection.idsFor(session, session.accountId, location.origin), ...(expiredSelection.current?.photoIdsFor(session.accountId) ?? []), ...(albumDetailPhoto.current?.session === session ? [albumDetailPhoto.current.photoId] : [])])]};
   };
   const [passwordFallback, setPasswordFallback] = useState(false);
   useEffect(() => {setPasswordFallback(false);}, [account]);
@@ -1293,6 +1294,18 @@ export default function CloudApp({
         />
       )}
       {active && albumsOpen && unlocked && <AlbumPanel key={albumPanelKey} selection={albumEntryRevision.photos(albumSelection)} initialAlbumId={albumDestination?.current() ? albumDestination.albumId : undefined} currentPhotos={() => currentCatalog.current} currentOwnedPhotos={() => currentOwnedSnapshot.current}
+        onLoadOwnedPhoto={async (photo, signal) => {
+          const session = requireVault(), origin = location.origin;
+          const check = () => {signal.throwIfAborted(); if (!sameVault(session) || !activeRef.current || location.origin !== origin || photo.manifest.ownerAccountId !== session.accountId || photo.grantId) throw new DOMException("Photo source changed", "AbortError");};
+          check();
+          await cacheOwnedPhotoDetails({ownerAccountId: session.accountId, photoId: photo.manifest.photoId, originalSha256: photo.metadata.originalSha256, manifest: photo.manifest}, signal);
+          check(); albumDetailPhoto.current = {session, photoId: photo.manifest.photoId};
+          const result = await cachedSync(session, undefined, browseFor(session));
+          check(); setPhotos(result.photos); setCatalogCoverage(result.coverage);
+          // The album reads the new source-bound snapshot after React publishes it.
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+          check();
+        }}
         onClose={closeAlbums} onIncomingDone={() => {setAlbumDestination(null); onAlbumIncomingDone?.();}} onChoosePhotos={albumId => {const session = effectVault(); if (!session) return; const origin = location.origin; const invitation = albumIncomingRef.current?.pending && albumIncomingRef.current.link.albumId === albumId ? albumIncomingRef.current : undefined; setAlbumDestination({albumId, current: () => sameVault(session) && location.origin === origin && activeRef.current && (!invitation || invitation.current(session))}); setReceived(null); setReceivedContext(null); setSelecting(true);}} incoming={incomingAlbum ?? undefined}
         onRetryAccount={incomingAlbum?.pending ? () => {incomingAlbum.retryPassword(); setAlbumsOpen(false); setAlbumSelection(null); lockVault();} : undefined} />}
       {active && viewing && viewer && unlocked && (
