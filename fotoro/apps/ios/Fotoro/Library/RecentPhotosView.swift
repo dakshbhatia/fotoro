@@ -569,7 +569,7 @@ struct RecentPhotosView: View {
       }
   }
 #endif
-  private var sharedHome: some View {
+  private var homeChrome: some View {
     homeSearchContent.background(.black).preferredColorScheme(.dark)
         .navigationBarTitleDisplayMode(.inline)
         .toolbarVisibility(showsHomeNavigation ? .visible : .hidden, for: .navigationBar)
@@ -588,6 +588,9 @@ struct RecentPhotosView: View {
         .overlay {
           if preparingShare { ProgressView("Preparing original…").padding().glassEffect() }
         }
+  }
+  private var homePresentations: some View {
+    homeChrome
         .fullScreenCover(item: $viewer, onDismiss: {
           if let photo = pendingShare { pendingShare = nil; share([photo]) }
 #if !FOTORO_LOCAL_PREVIEW
@@ -627,6 +630,9 @@ struct RecentPhotosView: View {
         #if !FOTORO_LOCAL_PREVIEW
         .sheet(item: $people) { _ in PhotoPeopleView(search: search, services: services, findPhotos: { queryFocused = false }) }
         #endif
+  }
+  private var sharedHome: some View {
+    homePresentations
         .onChange(of: query) { cancelBestShots(); search.updateQuery(query) }
         .onChange(of: search.response.generation) { cancelBestShots() }
         .onChange(of: search.acceptedMeaningID) { cancelBestShots() }
@@ -654,29 +660,7 @@ struct RecentPhotosView: View {
 #endif
           store.refresh()
         }
-        .onChange(of: scenePhase) {
-          if scenePhase == .active {
-            restorePhotos()
-#if !FOTORO_LOCAL_PREVIEW
-            services?.setPhotoSyncForeground(true)
-            if let services { Task { await services.resumeSavedAccount() } }
-#endif
-          } else {
-            cancelBestShots()
-#if !FOTORO_LOCAL_PREVIEW
-            services?.setPhotoSyncForeground(false)
-            if scenePhase == .background {
-              shareTask?.cancel(); cleanupShare()
-              savedPassword = nil
-              homeAuthenticationTask?.cancel()
-              homeAuthenticationTask = nil
-              savedRefresh.cancel()
-            }
-#endif
-            store.pauseAnalysis()
-            search.pause()
-          }
-        }
+        .onChange(of: scenePhase) { handleScenePhaseChange(scenePhase) }
         .task {
           restorePhotos()
 #if !FOTORO_LOCAL_PREVIEW
@@ -699,6 +683,29 @@ struct RecentPhotosView: View {
         .alert("Fotoro", isPresented: Binding(get: { store.error != nil }, set: { if !$0 { store.error = nil } })) {
           Button("OK") { store.error = nil }
         } message: { Text(store.error ?? "") }
+  }
+  private func handleScenePhaseChange(_ phase: ScenePhase) {
+    if phase == .active {
+      restorePhotos()
+#if !FOTORO_LOCAL_PREVIEW
+      services?.setPhotoSyncForeground(true)
+      if let services { Task { await services.resumeSavedAccount() } }
+#endif
+    } else {
+      cancelBestShots()
+#if !FOTORO_LOCAL_PREVIEW
+      services?.setPhotoSyncForeground(false)
+      if phase == .background {
+        shareTask?.cancel(); cleanupShare()
+        savedPassword = nil
+        homeAuthenticationTask?.cancel()
+        homeAuthenticationTask = nil
+        savedRefresh.cancel()
+      }
+#endif
+      store.pauseAnalysis()
+      search.pause()
+    }
   }
   @ViewBuilder private var content: some View {
     #if !FOTORO_LOCAL_PREVIEW
