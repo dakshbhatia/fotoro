@@ -59,8 +59,8 @@ can open it, and can deliberately keep a copy. Measure that journey before addin
 invitation campaigns or contact import.
 
 Live albums reuse encrypted Saved originals without sending private annotation
-or reviewed People facts. Album search currently uses filenames and dates;
-private People, OCR and location search remain in the account's own finder.
+or reviewed People facts. Album search uses filenames, capture dates and explicitly shared reviewed names
+and locations. Private annotations and OCR remain in the account's own finder.
 Original files retain their existing embedded metadata. Albums allow 12 fixed
 members, 1,000 photos and 50 accepted active albums per account. Invitations need
 explicit acceptance, and downloaded originals cannot be recalled by ending

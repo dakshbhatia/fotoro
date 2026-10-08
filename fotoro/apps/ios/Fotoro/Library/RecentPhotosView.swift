@@ -272,7 +272,8 @@ struct RecentPhotosView: View {
   @State private var photoSyncPresentation: PhotoSyncPresentation?
   @State private var pendingPhotoSync: Bool?
   @State private var searchHits: [ConsumerSearchHit] = []
-  @State private var completedSearchID: ConsumerSearchPresentationID?
+  @State private var searchCompletion = ConsumerSearchCompletion()
+  @State private var searchAttempt: UInt64 = 0
   @State private var savedResults: [String: LocalPhoto] = [:]
   @State private var savedViewer: SavedPhotoViewerPresentation?
   @State private var pendingBackup = false
@@ -297,6 +298,7 @@ struct RecentPhotosView: View {
   @State private var scope = PhotoHomeScope.photos
   @State private var browseScrollIDs: [PhotoHomeScope: String] = [:]
   @State private var browseFilter = PhotoBrowseFilter.all
+  @State private var browseDates = PhotoBrowseDateScope.recent
   @State private var groupMoments = false
   @State private var viewer: RecentPhotoViewerPresentation?
   @State private var pendingShare: RecentPhoto?
@@ -350,7 +352,7 @@ struct RecentPhotosView: View {
       PhotoBrowseItem(source: RecentPhotoSource(photo), facts: RecentPhotoFacts(
         capturedAt: photo.capturedAt, favorite: photo.isFavorite, screenshot: photo.isScreenshot,
         livePhoto: photo.isLivePhoto, location: photo.location))
-    }, filter: browseFilter, grouping: groupMoments ? .moments : .days)
+    }, filter: browseFilter, grouping: groupMoments ? .moments : .days, dates: browseDates)
   }
   private var homePhotos: [RecentPhoto] {
     let current = Dictionary(baseHomePhotos.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
@@ -391,7 +393,7 @@ struct RecentPhotosView: View {
   }
 #if !FOTORO_LOCAL_PREVIEW
   private var currentSearchHits: [ConsumerSearchHit] {
-    guard let completedSearchID, completedSearchID.permitsResults(for: searchTaskID) else { return [] }
+    guard searchCompletion.permitsResults(for: searchTaskID) else { return [] }
     return searchHits
   }
   private var savedPhotos: [LocalPhoto] {
@@ -428,7 +430,7 @@ struct RecentPhotosView: View {
     return PhotoTimelinePolicy.groups(device: device, saved: saved,
       sources: (try? services?.store.backupSources()) ?? [],
       account: services?.photoAccountAccess?.account, filter: browseFilter,
-      grouping: groupMoments ? .moments : .days)
+      grouping: groupMoments ? .moments : .days, dates: browseDates)
   }
   private var savedDays: [(String, [LocalPhoto])] {
     let groups = Dictionary(grouping: ownedPhotos) { photo in
@@ -544,7 +546,7 @@ struct RecentPhotosView: View {
           if let services { backupAccount = PhotosAccountPresentation(services: services, selection: nil, incoming: incoming) }
         } catch { store.error = error.localizedDescription }
       }
-      .task(id: searchTaskID) { await updateSearch() }
+      .task(id: ConsumerSearchRequestID(presentation: searchTaskID, attempt: searchAttempt)) { await updateSearch() }
       .onChange(of: services?.consumerCatalogGeneration) {
         savedHasMore = true
         cancelBestShots(); validateSavedPresentation()
@@ -630,6 +632,11 @@ struct RecentPhotosView: View {
         .onChange(of: search.acceptedMeaningID) { cancelBestShots() }
         .onChange(of: search.peopleSelection) { cancelBestShots() }
         .onChange(of: store.status) { cancelBestShots() }
+        .onChange(of: browseDates) {
+          cancelBestShots()
+          browseScrollIDs = [:]
+          store.setBrowseDates(browseDates)
+        }
         .onChange(of: scope) {
           cancelBestShots()
           queryFocused = false
@@ -754,7 +761,10 @@ struct RecentPhotosView: View {
           }
 #else
           ConsumerSearchResultsView(hits: currentSearchHits, saved: savedResults, search: search, photos: store,
-            searchPending: completedSearchID != searchTaskID, review: bestShots.snapshot,
+            searchPending: searchCompletion.isPending(searchTaskID),
+            searchFailure: searchCompletion.failure(for: searchTaskID),
+            searchFinished: searchCompletion.hasCompleted(searchTaskID),
+            retrySearch: { search.error = nil; search.updateQuery(query); searchAttempt &+= 1 }, review: bestShots.snapshot,
             selected: selectedReferences, selecting: selecting,
             toggleDevice: toggleSelection, toggleSaved: toggleSavedSelection,
             inspectDevice: { queryFocused = false; openViewer($0) },
@@ -770,7 +780,16 @@ struct RecentPhotosView: View {
             if allPhotos { timelineFeedback }
           #endif
           gallery
-          if browseLibraryIsEmpty && !hasMoreBrowsePhotos {
+          if allPhotos, browseDates == .recent, browseGalleryIsEmpty, !hasMoreBrowsePhotos {
+            ContentUnavailableView {
+              Label(browseFilter == .all ? "No photos in the last 30 days" : "No matching photos in the last 30 days", systemImage: "photo")
+            } description: {
+              Text("Check older photos and photos without capture dates.")
+            } actions: {
+              Button("Show all dates") { browseDates = .all }
+                .accessibilityIdentifier("gallery.allDates")
+            }
+          } else if browseLibraryIsEmpty && !hasMoreBrowsePhotos {
             ContentUnavailableView("No photos", systemImage: "photo", description: Text("Choose photos Fotoro may access in Settings."))
           } else if browseFilter != .all, browseGalleryIsEmpty, !hasMoreBrowsePhotos {
             ContentUnavailableView("No matching photos", systemImage: "line.3.horizontal.decrease",
@@ -1086,7 +1105,7 @@ struct RecentPhotosView: View {
         Section {} footer: {
           ProgressView(browseFilter == .all ? "Loading photos…" : "Looking for matching photos…")
             .font(.footnote).padding().frame(maxWidth: .infinity)
-            .task(id: PhotoBrowseContinuation(page: store.browsePage, filter: browseFilter, isActive: scenePhase == .active)) {
+            .task(id: PhotoBrowseContinuation(page: store.browsePage, filter: browseFilter, dates: browseDates, isActive: scenePhase == .active)) {
               guard scenePhase == .active else { return }
               await store.loadMorePhotos(matching: browseFilter, whileActive: { scenePhase == .active })
             }
@@ -1129,7 +1148,7 @@ struct RecentPhotosView: View {
         Section {} footer: {
           ProgressView(browseFilter == .all ? "Loading photos…" : "Looking for matching photos…")
             .font(.footnote).padding().frame(maxWidth: .infinity)
-            .task(id: PhotoBrowseContinuation(page: store.browsePage, filter: browseFilter, isActive: scenePhase == .active)) {
+            .task(id: PhotoBrowseContinuation(page: store.browsePage, filter: browseFilter, dates: browseDates, isActive: scenePhase == .active)) {
               guard scenePhase == .active else { return }
               await store.loadMorePhotos(matching: browseFilter, whileActive: { scenePhase == .active })
             }
@@ -1139,7 +1158,7 @@ struct RecentPhotosView: View {
         Section {} footer: {
           ProgressView("Loading photos…").font(.footnote).padding().frame(maxWidth: .infinity)
             .task(id: SavedTimelinePage(count: services.photos.count, binding: SavedLibraryOpenBinding(services),
-              filter: browseFilter, isActive: scenePhase == .active)) {
+              filter: browseFilter, dates: browseDates, isActive: scenePhase == .active)) {
               guard !Task.isCancelled, scenePhase == .active, services.photoAccountAccess != nil else { return }
               do {
                 let count = services.photos.count
@@ -1184,7 +1203,7 @@ struct RecentPhotosView: View {
       #endif
       Button("Places", systemImage: "map") { queryFocused = false; places = PhotoPlacesPresentation() }
         .accessibilityIdentifier("home.places")
-      if !search.hasSearch, RecentPhotosPolicy.canRead(store.status) {
+      if !search.hasSearch, hasBrowseAccess {
         #if !FOTORO_LOCAL_PREVIEW
           if scope != .saved { deviceBrowseOptions }
         #else
@@ -1215,6 +1234,12 @@ struct RecentPhotosView: View {
   }
   private var deviceBrowseOptions: some View {
     Group {
+      if allPhotos {
+        Picker("Dates", selection: $browseDates) {
+          Text("Last 30 days").tag(PhotoBrowseDateScope.recent)
+          Text("All dates").tag(PhotoBrowseDateScope.all)
+        }.accessibilityIdentifier("gallery.dates")
+      }
       Picker("Show", selection: $browseFilter) {
         Text("All").tag(PhotoBrowseFilter.all)
         Text("Favorites").tag(PhotoBrowseFilter.favorites)
@@ -1496,13 +1521,14 @@ struct RecentPhotosView: View {
     } catch { store.error = error.localizedDescription }
   }
   private func updateSearch() async {
-    guard search.hasSearch else { searchHits = []; savedResults = [:]; completedSearchID = nil; return }
+    guard search.hasSearch else { searchHits = []; savedResults = [:]; searchCompletion = ConsumerSearchCompletion(); return }
     let token = searchTaskID
+    searchCompletion.begin(token)
     do {
       if !search.indexing { try await Task.sleep(for: .milliseconds(100)) }
       try Task.checkCancellation()
-      guard let services else { searchHits = []; savedResults = [:]; completedSearchID = token; return }
-      let hits = try await services.consumerSearch(query, local: search)
+      guard let services else { searchHits = []; savedResults = [:]; searchCompletion.succeed(token); return }
+      let hits = try await services.withDiagnosticAction(.search) { try await services.consumerSearch(query, local: search) }
       try Task.checkCancellation()
       guard token == searchTaskID else { return }
       var saved: [String: LocalPhoto] = [:]
@@ -1511,13 +1537,12 @@ struct RecentPhotosView: View {
       }
       searchHits = hits
       savedResults = saved
-      completedSearchID = token
+      searchCompletion.succeed(token)
     } catch is CancellationError {} catch {
       guard !Task.isCancelled, token == searchTaskID else { return }
       searchHits = []
       savedResults = [:]
-      completedSearchID = token
-      store.error = error.localizedDescription
+      searchCompletion.fail(token, message: error.localizedDescription)
     }
   }
   private func selectSearchResults() {
@@ -1840,16 +1865,17 @@ private struct SavedTimelinePage: Equatable {
   let count: Int
   let binding: SavedLibraryOpenBinding
   let filter: PhotoBrowseFilter
+  let dates: PhotoBrowseDateScope
   let isActive: Bool
 }
 
 enum PhotoTimelinePolicy {
   static func groups(device: [PhotoBrowseItem], saved: [PhotoTimelineSavedItem], sources: [BackupSource],
     account: String?, filter: PhotoBrowseFilter = .all, grouping: PhotoBrowseGrouping = .days,
-    calendar: Calendar = .current) -> [PhotoBrowseGroup] {
+    calendar: Calendar = .current, dates: PhotoBrowseDateScope = .all, now: Date = Date()) -> [PhotoBrowseGroup] {
     // Only current, permitted device revisions can hide their verified saved copy.
     // A saved favorite still appears when its device counterpart fails this filter.
-    let records = Dictionary(device.filter { filter.includes($0.facts) }.map {
+    let records = Dictionary(device.filter { filter.includes($0.facts) && dates.includes($0.facts.capturedAt, now: now, calendar: calendar) }.map {
       ($0.source.id, SearchRecord(id: $0.source.id, revision: $0.source.revision))
     }, uniquingKeysWith: { _, current in current })
     let copies = ConsumerSearchBinding.verifiedCopies(sources: sources, records: records)
@@ -1865,7 +1891,7 @@ enum PhotoTimelinePolicy {
       items.append(PhotoBrowseItem(source: RecentPhotoSource(id: ConsumerPhotoReference.saved(photo.id).id,
         revision: photo.metadata.originalSha256 + "|" + photo.manifest.metadataRepresentation.ciphertextSha256), facts: item.facts))
     }
-    return PhotoBrowsing.groups(items, filter: filter, grouping: grouping, calendar: calendar)
+    return PhotoBrowsing.groups(items, filter: filter, grouping: grouping, calendar: calendar, dates: dates, now: now)
   }
 }
 
@@ -1876,6 +1902,35 @@ enum SavedPhotosPresentationPolicy {
       return current.metadata == photo.metadata && current.manifest == photo.manifest
     }
   }
+}
+
+private struct ConsumerSearchRequestID: Equatable {
+  var presentation: ConsumerSearchPresentationID
+  var attempt: UInt64
+}
+
+struct ConsumerSearchCompletion {
+  private var requested: ConsumerSearchPresentationID?
+  private var completed: ConsumerSearchPresentationID?
+  private var failed: ConsumerSearchPresentationID?
+  private var message: String?
+  mutating func begin(_ id: ConsumerSearchPresentationID) {
+    requested = id; failed = nil; message = nil
+  }
+  mutating func succeed(_ id: ConsumerSearchPresentationID) {
+    guard requested == id else { return }
+    completed = id; failed = nil; message = nil
+  }
+  mutating func fail(_ id: ConsumerSearchPresentationID, message: String) {
+    guard requested == id else { return }
+    completed = nil; failed = id; self.message = message
+  }
+  func hasCompleted(_ id: ConsumerSearchPresentationID) -> Bool { completed == id }
+  func permitsResults(for id: ConsumerSearchPresentationID) -> Bool {
+    completed?.permitsResults(for: id) == true
+  }
+  func failure(for id: ConsumerSearchPresentationID) -> String? { failed == id ? message : nil }
+  func isPending(_ id: ConsumerSearchPresentationID) -> Bool { !hasCompleted(id) && failed != id }
 }
 
 struct ConsumerSearchPresentationID: Equatable {

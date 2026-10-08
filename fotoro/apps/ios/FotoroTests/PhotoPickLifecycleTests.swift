@@ -40,9 +40,19 @@ import XCTest
     XCTAssertTrue(browse.photos(in: -1..<1).isEmpty)
     XCTAssertEqual(reads.count, 51)
   }
+  func testDefaultBrowseExcludesHistoricalUndatedAndFuturePhotosBeforeReadingPixels() throws {
+    let now = Date()
+    let predicate = try XCTUnwrap(RecentPhotosPolicy.browseFetchOptions().predicate)
+    let image = PHAssetMediaType.image.rawValue
+    XCTAssertTrue(predicate.evaluate(with: ["mediaType": image, "creationDate": now.addingTimeInterval(-86400)] as [String: Any]))
+    for date in [now.addingTimeInterval(-31 * 86400), now.addingTimeInterval(86400)] {
+      XCTAssertFalse(predicate.evaluate(with: ["mediaType": image, "creationDate": date] as [String: Any]))
+    }
+    XCTAssertFalse(predicate.evaluate(with: ["mediaType": image]))
+  }
   func testBrowseFetchIncludesAllCaptureDatesWhilePicksKeepOnlyBoundedRecentStills() throws {
     let now = Date(timeIntervalSince1970: 1_780_315_200)
-    let browse = RecentPhotosPolicy.browseFetchOptions()
+    let browse = RecentPhotosPolicy.browseFetchOptions(dates: .all)
     let picks = RecentPhotosPolicy.pickFetchOptions(now: now)
     let browsePredicate = try XCTUnwrap(browse.predicate)
     let picksPredicate = try XCTUnwrap(picks.predicate)
@@ -64,6 +74,23 @@ import XCTest
     XCTAssertEqual(picks.fetchLimit, RecentPhotosPolicy.maximumPickCandidates)
     XCTAssertFalse(browse.includeHiddenAssets)
     XCTAssertTrue(browse.includeAllBurstAssets)
+  }
+  func testChangingBrowseDatesResetsPagesAndStopsThePreviousMetadataContinuation() async {
+    var reads: [Range<Int>] = []
+    let store = RecentPhotosStore(authorization: { .authorized }, readBrowseSource: { _ in
+      PhotoBrowseSource(count: 601) { range in reads.append(range); return [] }
+    }, readRecentPhotos: { _ in [] })
+    defer { store.pauseAnalysis() }
+    store.restoreAccess()
+    store.loadMorePhotos()
+    XCTAssertEqual(reads, [0..<200, 200..<400])
+    await store.loadMorePhotos(matching: .favorites, whileActive: {
+      store.setBrowseDates(.all)
+      return true
+    })
+    XCTAssertEqual(reads, [0..<200, 200..<400, 0..<200], "The old date scope cannot append another page after expansion")
+    XCTAssertEqual(store.browseDates, .all)
+    XCTAssertTrue(store.hasMorePhotos)
   }
   func testPermissionChangeDuringBrowseReadCannotPublishOrStartAnalysis() {
     var permission = PHAuthorizationStatus.authorized

@@ -20,6 +20,14 @@ final class PhotoBrowsingTests: XCTestCase {
       facts: RecentPhotoFacts(capturedAt: at, favorite: favorite, screenshot: screenshot,
         livePhoto: false, location: location))
   }
+  func testRecentDateScopeFiltersMetadataAndExplicitAllDatesKeepsUnknownDatesReachable() {
+    let items = [photo("recent", at: date(10, 2), favorite: true), photo("old", at: date(3, 1), favorite: true),
+      photo("undated", favorite: true), photo("future", at: date(11, 1), favorite: true)]
+    let recent = PhotoBrowsing.groups(items, filter: .favorites, calendar: calendar, dates: .recent, now: date(10, 8))
+    XCTAssertEqual(recent.flatMap(\.sources).map(\.id), ["recent"])
+    let all = PhotoBrowsing.groups(items, filter: .favorites, calendar: calendar, dates: .all, now: date(10, 8))
+    XCTAssertEqual(all.flatMap(\.sources).map(\.id), ["future", "recent", "old", "undated"])
+  }
   func testFiltersUseOnlyCurrentSuppliedFactsWithoutInferringPlaces() {
     let ordinary = photo("plain")
     let favorite = photo("favorite", favorite: true)

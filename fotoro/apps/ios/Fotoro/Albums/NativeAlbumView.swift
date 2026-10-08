@@ -22,12 +22,14 @@ struct NativeAlbumPresentation: Identifiable {
       incoming?.albumId != reviewed.id || incoming?.ownerCard == owner else {
       throw FotoroError("Album link identity does not match its owner.")
     }
-    guard reviewed.definition.members.contains(where: { $0.card.accountId == access.account && $0.card == services.session.pinnedCards[access.account] }),
+    guard try NativeAlbumWire.overview(reviewed.overview) == reviewed.definition,
+      reviewed.definition.members.contains(where: { $0.card.accountId == access.account && $0.card == services.session.pinnedCards[access.account] }),
       model.albums.contains(where: { $0.id == reviewed.id && $0.overview.definition == reviewed.overview.definition }) else {
       throw FotoroError("Album invitation is unavailable for this account.")
     }
+    _ = try CryptoAdapter().verify(reviewed.overview.definition, card: owner, kind: "album-v1")
     let origin = services.api.baseURL.absoluteString
-    if services.session.pinnedCards[owner.accountId] != owner { try services.acceptContact(owner, name: "") }
+    if services.session.pinnedCards[owner.accountId] != owner { try services.acceptContact(owner, name: nil) }
     try await model.refresh()
     try Task.checkCancellation()
     guard services.photoAccountAccess == access, services.api.baseURL.absoluteString == origin else { throw CancellationError() }
@@ -205,7 +207,10 @@ struct NativeAlbumView: View {
         Spacer()
         Button("New album", systemImage: "plus") { showCreation = true }.buttonStyle(.borderedProminent).disabled(busy)
       }
-      if model.albums.isEmpty { Text("No albums yet.").foregroundStyle(.secondary) }
+      if let error = model.inboxError {
+        Text(error).foregroundStyle(.secondary)
+        Button("Refresh albums") { run { try await model.refresh() } }.disabled(busy)
+      } else if model.albums.isEmpty { Text("No albums yet.").foregroundStyle(.secondary) }
       ForEach(model.albums) { album in
         VStack(alignment: .leading, spacing: 8) {
           Text(album.title ?? "Album invitation").font(.headline)
@@ -226,8 +231,10 @@ struct NativeAlbumView: View {
     }
   }
   private func trustOwner(_ album: NativeAlbumSummary) -> some View {
-    VStack(alignment: .leading, spacing: 8) {
-      Text("Confirm this album invitation came from its owner before accepting their contact.").font(.footnote)
+    let owner = album.definition.members.first(where: { $0.card.accountId == album.definition.ownerAccountId })?.card
+    let changed = services.session.pinnedCards[album.definition.ownerAccountId].map { $0 != owner } ?? false
+    return VStack(alignment: .leading, spacing: 8) {
+      Text(changed ? "This person's Fotoro keys have changed. Confirm the new album link with them before continuing." : "Confirm this album invitation came from its owner before accepting their contact.").font(.footnote)
       if let feedback { Text(feedback).foregroundStyle(.secondary) }
       Text(album.definition.ownerAccountId).font(.caption.monospaced()).textSelection(.enabled)
       if let card = album.definition.members.first(where: { $0.card.accountId == album.definition.ownerAccountId })?.card {
@@ -236,7 +243,7 @@ struct NativeAlbumView: View {
         Text("Encryption fingerprint").font(.caption)
         Text(card.boxPublicKey).font(.caption.monospaced()).textSelection(.enabled)
       }
-      Button("Join album") { run {
+      Button(changed ? "Join album with new identity" : "Join album") { run {
         try await NativeAlbumReviewedJoin.join(album, incoming: incoming, services: services, model: model)
         trustCandidate = nil
       } }.buttonStyle(.borderedProminent).disabled(busy).accessibilityIdentifier("albums.joinReviewed")

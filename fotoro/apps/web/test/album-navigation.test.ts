@@ -4,7 +4,7 @@ import {type ReactElement} from "react";
 import cards from "../../../fixtures/accounts.json";
 import {createAlbumLink, parseAlbumLink} from "@fotoro/contracts/albums-links";
 import {IncomingAlbumIntent} from "../src/albums/intent";
-import {AlbumEntryRevision} from "../src/albums/entry";
+import {AlbumEntryRevision, subscribeAlbumLifetime} from "../src/albums/entry";
 import {AlbumContinuation} from "../src/albums/AlbumContinuation";
 import {AlbumNameChoices} from "../src/albums/AlbumNameChoices";
 import {AlbumPanel} from "../src/albums/AlbumPanel";
@@ -98,6 +98,25 @@ test("a retained invitation resumes only after its original expired account unlo
   assert.equal(flow.incoming.current(renewed), true);
   assert.equal(flow.incoming.current(flow.session), false);
   assert.equal(albums(flow.reopen([])).incoming, flow.incoming);
+});
+
+test("mounted album teardown preserves account correction and same-account expiry until sign-in returns", () => {
+  for (const reason of ["retry", "expired"] as const) {
+    const flow = navigation(), windowTarget = new EventTarget(), documentTarget = Object.assign(new EventTarget(), {visibilityState: "visible"});
+    const request = new AbortController(); let disposed = 0;
+    windowTarget.addEventListener("fotoro-lock", () => flow.incoming.vaultLocked(reason === "retry" ? "manual" : "expired", flow.session.accountId));
+    const detach = subscribeAlbumLifetime(windowTarget, documentTarget, () => {disposed++; request.abort();}, albums(flow.render()).onClose);
+    if (reason === "retry") flow.incoming.retryPassword();
+    // lockVault dispatches synchronously before React can unmount the mounted panel.
+    windowTarget.dispatchEvent(new Event("fotoro-lock"));
+    assert.equal(flow.incoming.pending, true, "Lifecycle teardown must not invoke explicit invitation completion");
+    assert.equal(flow.state().completed, 0);
+    assert.equal(disposed, 1); assert.equal(request.signal.aborted, true, "Stale requests stop immediately while the public intent survives");
+    const ticket = flow.incoming.beginAuthentication(12), renewed = {accountId: cards.accounts[reason === "retry" ? 0 : 1].accountId};
+    flow.incoming.finishAuthentication(ticket, renewed, 13);
+    assert.equal(flow.incoming.current(renewed), true);
+    detach();
+  }
 });
 
 

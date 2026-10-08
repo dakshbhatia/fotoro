@@ -5,9 +5,32 @@ work; [product](product.md) owns the intended experience. Earlier measurements a
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
 
-Current distribution is PR 53 in production and TestFlight 48, independently
+Current distribution is PR 55 in production and TestFlight 49, independently
 verified `VALID` and `IN_BETA_TESTING`; see [Deployment](deployment.md). The dated
 follow-ups below preserve their qualification state at the time of testing.
+
+## October 8 first-use and invitation recovery — locally qualified
+
+iPhone Photos now defaults to the last 30 days at the PhotoKit metadata fetch and
+merged timeline. All dates is explicit; historical Search stays unrestricted.
+Failed merged Search offers Try again with raw errors under Details and uses the
+existing bounded action diagnostics. A changed owner identity reaches explicit
+review; signed-definition checks precede trust writes, verified albums survive
+an invalid invitation, and reviewed Join preserves existing contact names.
+
+Browser account correction and same-account expiry retain the exact incoming
+album. Actual local UI checks cover wrong account → switch → invited account →
+review → original album, expiry → sign in → original album, and explicit Close
+clearing the link. Console warnings/errors are empty. Fixtures are disposable
+local accounts and public NASA media. The existing-code regressions failed before
+the fixes. Full native passes 499 with two skips; preview passes 139 with two
+skips. Web passes 580 with one pre-build startup skip, all three fresh-build startup
+checks pass, and API passes 116. Core checks and production web build pass.
+
+The connected physical phone reports installed build 47. Its bounded diagnostic
+ring is readable (160 events, no failed actions); this does not qualify a family
+journey or install build 49. Current distribution remains the checkpoint above
+until new source passes hosted checks and release qualification.
 
 ## October 8 live family search follow-up — locally qualified
 

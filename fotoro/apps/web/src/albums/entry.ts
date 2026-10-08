@@ -14,3 +14,18 @@ export class AlbumEntryRevision {
   capture(photos: readonly Photo[]): AlbumEntrySelection {return {revision: this.revision, photos: [...photos]};}
   photos(selection: AlbumEntrySelection | null): Photo[] {return selection?.revision === this.revision ? selection.photos : [];}
 }
+
+export function subscribeAlbumLifetime(windowTarget: EventTarget, documentTarget: EventTarget & {visibilityState: string}, dispose: () => void, close: () => void) {
+  const hidden = () => {if (documentTarget.visibilityState === "hidden") close();};
+  // The account owner decides whether this lock retains an incoming invitation.
+  // Stop private work immediately without turning reauthentication into Close.
+  windowTarget.addEventListener("fotoro-lock", dispose);
+  windowTarget.addEventListener("pagehide", close);
+  documentTarget.addEventListener("visibilitychange", hidden);
+  return () => {
+    dispose();
+    windowTarget.removeEventListener("fotoro-lock", dispose);
+    windowTarget.removeEventListener("pagehide", close);
+    documentTarget.removeEventListener("visibilitychange", hidden);
+  };
+}
