@@ -5,10 +5,40 @@ work; [product](product.md) owns the intended experience. Earlier measurements a
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
 
-## October 8 bounded foundation follow-up — source qualification pending
+## October 8 bounded foundation follow-up — PR 51 production / TestFlight 47
 
-This batch follows the released PR 50/build 46 checkpoint below. Its hosted CI and shipping remain pending; these changes are not claimed
-as deployed or available in a new TestFlight build.
+Qualified PR 51 head `63e51fbf0d1c6244bf266d484a8b6a7c716ca2b3` completed all
+23 checks: seven success and 16 intentional skips. Guarded merge
+`bbf15c60a7afc6222eda30e6ced422be6539edde` has the identical tree. The first
+hosted native attempt failed with a loopback recovery-options connection reset
+and no matching Worker log entry; the unchanged rerun passes 468 full native tests
+with six skips and 138 isolated preview tests with five skips, without failures.
+No recovery retry or assertion was weakened. An existing API album-capacity test
+now seeds its same 1,000 records in bounded D1 batches; its assertions and default
+timeout remain unchanged.
+
+Production Worker `fc961e24-fc94-4b9a-a4b9-fdbecedbe01b` is at 100%, deployment
+`0323ca3a-13a3-4181-be90-2e4c61a12ba3`. All 46 non-HTML assets and root/Photos/Saved
+HTML match the fresh fixture-free merged build. Seven auth/route/association
+checks, the service check and all three startup checks pass. All eight bindings
+and runtime are unchanged; no migrations or provider activation occurred.
+Production Photos and Saved entry render without console warnings/errors.
+Keep PR 50's `a4f88a21-b35f-4def-a07e-5c57543b8464` for rollback.
+
+Build 47's full encrypted archive and Organizer distribution IPA pass audit. All
+154 native inputs and three release tools match the frozen qualified merged
+source through export and accepted upload. The existing cloud-managed identity
+signed it. Apple accepted the same pinned ONNX resource-stub symbol warning as
+46; main binary/static runtime and matching dSYM pass audit. The 54,182,911-byte
+IPA has SHA-256 `334e8a173d8ce6b9a404ee979f5c3fc5e4a6a713dc8c56590a8399ea4de1506c`.
+Independent Apple readback reports `VALID` and `IN_BETA_TESTING`. The same existing
+internal group auto-linked 47 with the same one tester; no membership or access
+changed. What to Test notes and exact build linkage match independent readback.
+The unchanged approved standard-encryption/France-exclusion basis qualifies the
+metadata documentation exemption; the binary encryption declaration is unchanged
+and no new declaration was created. App Store Connect visibly shows 0.1.0 (47) Testing in Fotoro Internal.
+The physical phone remains disconnected, so availability does not prove installation
+or installed-device acceptance.
 
 Browser Saved now opens a 100-record hydrated window and retrieves bounded change
 pages, with explicit Load more Saved photos. Coverage identifies unloaded cached
@@ -57,16 +87,18 @@ The isolated preview reports 138 tests: 136 pass and two skip. Actual browser QA
 opens the first 100 Saved records, loads the remaining page and preserves the
 chosen item without console errors. Photos search retains its 72 chosen items as
 Load more expands 72 matches to 105. This synthetic metadata/selection fixture
-contains an oversized preview that the existing dimension guard rejects, so it
-does not qualify viewer delivery. Original recovery passes the separate five
-isolated encrypted-exchange cases.
+contains an oversized preview that the existing dimension guard rejects, so that
+fixture qualifies only metadata/selection. A separate fresh encrypted public
+fixture, loaded through Settings → Refresh saved photos, opens a 1,600 × 1,000
+preview in the Saved viewer. Share → Download original restores 613,520 bytes
+with SHA-256 identical to the public original and no console warnings/errors.
+Original recovery also passes the separate five isolated encrypted-exchange cases.
 API qualification passes 111 tests across 20 files and TypeScript; the final focused
 inference suite passes 13. Full API output includes the existing deliberately
 injected upload-disconnect/network-loss warnings and exits successfully. The final full browser suite passes 553 tests, the focused paging/selection suite
 passes 112, and TypeScript/production build pass. All three startup checks pass
 at 442,116 bytes across nine static chunks. The pinned public visual-inference
-smoke case passes. Hosted and release evidence will be recorded after they
-actually complete. All ten foundations retain their physical quality,
+smoke case passes. All ten foundations retain their physical quality,
 performance and cross-device restore gates in the backlog.
 
 ## October 8 family-loop reliability qualification

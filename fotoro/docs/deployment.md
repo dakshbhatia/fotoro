@@ -17,9 +17,30 @@ Hono Worker with D1 and private R2. The upstream Ente application is a reference
   require separate preview consent and explicitly configured provider/work limits;
   that route remains disabled by default.
 
-### October 8 PR 50 checkpoint
+### October 8 PR 51 checkpoint
 
-The active Worker is `a4f88a21-b35f-4def-a07e-5c57543b8464` at 100%, deployment
+The active Worker is `fc961e24-fc94-4b9a-a4b9-fdbecedbe01b` at 100%, deployment
+`0323ca3a-13a3-4181-be90-2e4c61a12ba3`. Qualified PR 51 head
+`63e51fbf0d1c6244bf266d484a8b6a7c716ca2b3` completed all 23 checks: seven success
+and 16 intentional skips. Guarded merge `bbf15c60a7afc6222eda30e6ced422be6539edde`
+has the same tree. All 46 non-HTML assets and root/Photos/Saved HTML match the
+fresh fixture-free build. Seven auth/route/association checks, the service check
+and all three startup checks pass; startup is 442,116 bytes across nine chunks.
+All eight bindings and runtime are unchanged. No migrations or provider activation
+were needed. Keep PR 50's `a4f88a21-b35f-4def-a07e-5c57543b8464` for rollback.
+
+Browser Saved reads bounded windows, reports partial search coverage and preserves
+chosen Photos items through explicit further loading. Public browser UI verifies
+selection continuity, a correctly sized encrypted preview and byte-identical
+original download. Native source adds paged album selection and reviewed Saved
+People choices, direct passkey entry and optional current-view area names.
+Build 47's audited archive and distribution IPA were accepted by Apple and read
+back `VALID` / `IN_BETA_TESTING` in the same existing internal group. Physical
+installation and family acceptance remain open.
+
+### Earlier October 8 PR 50 checkpoint
+
+The previously verified Worker was `a4f88a21-b35f-4def-a07e-5c57543b8464` at 100%, deployment
 `26db1d26-de0a-4e28-b882-905684a1295f`. Qualified PR 50 head
 `7dfe96d90830f3adee5533b6aea19e2d1be5ff96` completed all 23 checks: seven success
 and 16 intentional skips. Guarded merge `ef4d85d91f974904d50759057859b57474328da9`
@@ -145,7 +166,22 @@ personal-account sync or original restoration on a physical phone.
 
 ## Native distribution
 
-The last verified TestFlight build is 46 (0.1.0), independently read `VALID` and
+The last verified TestFlight build is 47 (0.1.0), independently read `VALID` and
+`IN_BETA_TESTING` on October 8. The same existing internal group auto-linked it,
+with the same one tester and no group, membership or access changes. What to Test
+notes and their exact build linkage match independent readback. All 154 native
+inputs and three release tools match qualified merged source
+`bbf15c60a7afc6222eda30e6ced422be6539edde` through archive, Organizer distribution
+export and accepted upload. Full encrypted archive and IPA audits pass. The
+existing cloud-managed identity signed and uploaded it. Apple accepted the same
+pinned ONNX resource-stub dSYM warning as 46; the main binary/static runtime and
+matching dSYM pass audit. The unchanged approved encryption and France-exclusion
+facts qualify the documentation-exemption metadata; no new declaration was created.
+Build 47 adds paged Saved album/People choices, direct welcome passkey access and
+optional current-view map-area names. Physical installation and installed-device
+acceptance remain open.
+
+The preceding verified TestFlight build is 46 (0.1.0), independently read `VALID` and
 `IN_BETA_TESTING` on October 8. The same existing internal group auto-linked it,
 with the same one tester and no group, membership or access changes. What to Test
 notes and their exact build linkage match independent readback. All 154 native

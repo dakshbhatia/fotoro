@@ -28,7 +28,7 @@ Cloudflare proposals become tasks here only when a consumer need admits them.
 | 7 | Photo delivery and return: thumbnails/previews, owned URL leases, retry, cancellation and bounded native zoom/pan. Browser browsing hydrates bounded Saved windows and reuses verified unchanged metadata; an atomic 100 MiB cache ledger avoids ciphertext rescans. | Large-library frame pacing, memory, battery, motion playback and interruptions on supported phones. Explicit save/contribution synchronization can still traverse the full catalog; measure that path separately from bounded browsing. Missing derivatives cannot silently download originals. |
 | 8 | Organization and accessibility: optional sortable photo tables, observed columns, keyboard navigation across virtualized rows and responsive selection/viewers. iOS Places adapts geographic clusters to zoom, counts available location metadata in the viewport and opens individual photos. An explicit optional Apple Maps lookup labels up to eight map areas per action for the current view. | VoiceOver, Dynamic Type, physical gestures and broader hardware/browser acceptance. Area labels do not establish a photo's landmark or attendance; physical-device map performance remains unverified. |
 | 9 | Share and receive: system original sharing, private invitations, recipient-owned Save and live albums with explicit acceptance and later chosen owned-photo additions. Browser Choose photos retains its invited album; native invitations open independently of unrelated selections. Native album selection pages through Saved in explicit 200-record batches rather than truncating at 1,000; each contribution selects at most 100. Three-person browser acceptance/contribution/end and Safari original download pass. | Physical share-sheet completion and the family journey on installed devices; first-contact friction, contact convergence, album-scoped People facts and cross-trip landmark/family matching. |
-| 10 | Optional understanding and operation: preview consent → Gemini review → Keep, encrypted facts, account fences, request caps, conservative daily spend reservations and audited native artifacts. Provider remains disabled. PR 50 production and internal TestFlight 46 availability are verified; the current source batch is not yet released. [Bounded diagnostics](diagnostics.md) link client actions to server requests, timings and fixed failure/waiting reasons, with local Copy/Share controls. | Deliberate provider activation and live cost/behavior evidence; physical TestFlight installation. Measure upload/commit failures, quota pressure, orphan allocation and restore behavior without private content in logs. Safe undo, deletion and garbage collection remain open. |
+| 10 | Optional understanding and operation: preview consent → Gemini review → Keep, encrypted facts, account fences, request caps, conservative daily spend reservations and audited native artifacts. Provider remains disabled. PR 51 production and internal TestFlight 47 availability are verified. [Bounded diagnostics](diagnostics.md) link client actions to server requests, timings and fixed failure/waiting reasons, with local Copy/Share controls. | Deliberate provider activation and live cost/behavior evidence; physical TestFlight installation. Measure upload/commit failures, quota pressure, orphan allocation and restore behavior without private content in logs. Safe undo, deletion and garbage collection remain open. |
 
 These gates qualify the current implementation. Test coverage and a public
 fixture exchange do not prove a personal-library journey or a better product.
@@ -106,10 +106,12 @@ server sign-in; failed visual checks no longer claim a successful empty result.
 Production browser-reader interruption/reopen tests now cover five media kinds,
 while physical qualification remains open. Full-app release audits now
 gate archive/export/upload. These changes and their local regression evidence
-are recorded in [verification](verification.md). PR 50 production and build 46
-availability through the existing internal TestFlight group are verified. Build 46
-adds reviewed Saved People choices, album-selection continuity and retry/cancellation
-fixes. Physical installation and acceptance remain open.
+are recorded in [verification](verification.md). PR 51 production and build 47
+availability through the existing internal TestFlight group are verified. Build 47
+adds bounded Saved album/People pages, direct welcome passkey access and optional
+map-area labels. The browser preserves chosen photos through further bounded
+loading; a fresh public preview and byte-identical original recovery pass UI QA.
+Physical installation and acceptance remain open.
 
 ## Admit later work only with a complete job
 
