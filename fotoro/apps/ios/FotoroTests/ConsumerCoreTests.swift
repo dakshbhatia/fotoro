@@ -567,6 +567,121 @@ final class ConsumerCoreTests: XCTestCase {
     XCTAssertEqual(try services.annotations.ledger.pendingIDs(), [exif.id])
   }
 
+  @MainActor func testSavedReviewedPeopleChoicesFindAnyAndEveryoneWithoutPhotosPermission() async throws {
+    try await withSavedLibrary { services, _ in
+      let account = try XCTUnwrap(services.session.accountId)
+      let card = try services.session.requireCard(account), bundle = try services.vault.requireBundle()
+      let first = Wire.id(), second = Wire.id()
+      @MainActor func saved(_ assignments: [(String, String)], digest: String? = nil, state: String = "committed") throws -> LocalPhoto {
+        var photo = try self.samplePhoto(); photo.manifest.ownerAccountId = account; photo.transferState = state
+        try services.store.put(photo)
+        var annotation = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+        annotation.facts = try PhotoPeopleFacts.replacing([], with: assignments.enumerated().map {
+          PhotoPersonAssignment(p: $0.element.0, n: $0.element.1, b: [$0.offset*100,0,100,100])
+        }, originalSha256: digest ?? photo.metadata.originalSha256)
+        try services.annotations.ledger.edit(annotation, photo: photo, bundle: bundle, card: card)
+        return photo
+      }
+      let a = try saved([(first, "Family")]), b = try saved([(second, "Family")])
+      let together = try saved([(first, "Family"), (second, "Family")])
+      _ = try saved([(Wire.id(), "Wrong source")], digest: Data("other-original".utf8).digest)
+      _ = try saved([(Wire.id(), "Not saved")], state: "pending")
+      var foreign = try self.samplePhoto(); foreign.manifest.ownerAccountId = Wire.id(); try services.store.put(foreign)
+      let local = LocalSearchStore(index: try SearchIndex())
+      local.auditAuthorization(status: .denied)
+      XCTAssertFalse(local.peopleSnapshotReady)
+      let loaded = try await SavedPeopleSearchSnapshot.load(services)
+      let snapshot = try XCTUnwrap(loaded)
+      XCTAssertEqual(Set(snapshot.choices.map(\.id)), [first, second])
+      XCTAssertEqual(snapshot.choices.map(\.name), ["Family", "Family"], "Names alone must not merge different people UUIDs")
+      let any = PeopleSearchSelection(personIDs: [first, second])
+      XCTAssertTrue(PhotoPeopleSearchChoice.canFind(any, choices: snapshot.choices))
+      local.setPeopleSelection(any, names: Dictionary(uniqueKeysWithValues: snapshot.choices.map { ($0.id, $0.name) }))
+      let anyHits = try await services.consumerSearch("", local: local)
+      XCTAssertEqual(Set(anyHits.map(\.photo)), [.saved(a.id), .saved(b.id), .saved(together.id)])
+      local.setPeopleSelection(PeopleSearchSelection(personIDs: [first, second], match: .everyone))
+      let everyoneHits = try await services.consumerSearch("", local: local)
+      XCTAssertEqual(everyoneHits.map(\.photo), [.saved(together.id)])
+    }
+  }
+  @MainActor func testSavedPeopleChoicesInvalidateWithSourceAccountVaultOriginAndCatalog() async throws {
+    for interruption in ["source", "account", "lock", "origin", "catalog"] {
+      try await withSavedLibrary { services, _ in
+        var photo = try self.samplePhoto(); photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+        try services.store.put(photo)
+        var annotation = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+        annotation.facts = try PhotoPeopleFacts.replacing([], with: [PhotoPersonAssignment(p: Wire.id(), n: "Family", b: [0,0,100,100])], originalSha256: photo.metadata.originalSha256)
+        try services.annotations.ledger.edit(annotation, photo: photo, bundle: services.vault.requireBundle(),
+          card: services.session.requireCard(photo.manifest.ownerAccountId))
+        let loaded = try await SavedPeopleSearchSnapshot.load(services)
+        let snapshot = try XCTUnwrap(loaded)
+        XCTAssertTrue(snapshot.isCurrent(services))
+        switch interruption {
+        case "source": photo.metadata.originalSha256 = Data("replacement".utf8).digest; try services.store.put(photo)
+        case "account": services.session.accountId = Wire.id()
+        case "lock": services.vault.lock()
+        case "origin": services.api.baseURL = URL(string: "http://localhost:8796")!
+        default: try services.reload()
+        }
+        XCTAssertFalse(snapshot.isCurrent(services), interruption)
+      }
+    }
+  }
+  @MainActor func testRejectingLastReviewedLocalFaceInvalidatesSavedPeopleChoiceWithoutChangingOriginal() async throws {
+    try await withSavedLibrary { services, _ in
+      var photo = try self.samplePhoto(); photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+      try services.store.put(photo)
+      let record = SearchRecord(id: "local-family-source", revision: "current")
+      try services.store.putBackupSource(BackupSource(id: record.id, photoId: photo.id, phase: .committed,
+        sourceRevision: record.revision, originalSha256: photo.metadata.originalSha256))
+      services.photosBackupSnapshot = { _ in [BackupCandidate(id: record.id, capturedAt: Date(), sourceRevision: record.revision)] }
+      let index = try SearchIndex(); try index.setWorkGeneration(1)
+      try index.replacePermitted([record]); try index.setPeopleEnabled(true)
+      var vector = [Float](repeating: 0, count: 128); vector[0] = 1
+      XCTAssertTrue(try index.applyPeople([PhotoFaceEmbedding(box: [0,0,100,100], vector: vector)],
+        photoID: record.id, revision: record.revision, generation: 1))
+      let group = try XCTUnwrap(index.peopleGroups().first)
+      let local = LocalSearchStore(index: index)
+      services.bindLocalSearch(local)
+      for changed in try index.namePeopleGroup(group.id, name: "Family") {
+        try local.onRecordChanged?(changed, true)
+      }
+      let loaded = try await SavedPeopleSearchSnapshot.load(services)
+      let snapshot = try XCTUnwrap(loaded)
+      XCTAssertEqual(snapshot.choices.map(\.id), [group.id])
+      let face = try XCTUnwrap(index.peopleGroups().first?.faces.first)
+      let corrected = try index.splitPeopleFace(face.id, reject: true)
+      XCTAssertFalse(corrected.isEmpty)
+      for changed in corrected { try local.onRecordChanged?(changed, true) }
+      XCTAssertFalse(snapshot.isCurrent(services), "An annotation correction must invalidate choices even with the same original")
+      let current = try XCTUnwrap(services.consumerSavedPhoto(photo.id))
+      XCTAssertEqual(current.metadata, photo.metadata); XCTAssertEqual(current.manifest, photo.manifest)
+      XCTAssertTrue(PhotoPeopleFacts.read(services.annotation(current).facts ?? [], originalSha256: current.metadata.originalSha256).isEmpty)
+      let reloaded = try await SavedPeopleSearchSnapshot.load(services)
+      XCTAssertTrue(try XCTUnwrap(reloaded).choices.isEmpty)
+      let generation = services.consumerCatalogGeneration
+      for changed in corrected { try local.onRecordChanged?(changed, true) }
+      XCTAssertEqual(services.consumerCatalogGeneration, generation, "An unchanged People overlay must not repeatedly invalidate the catalog")
+    }
+  }
+  @MainActor func testSavedPeopleChoiceScanRejectsLateResultsAfterLockAndCancellation() async throws {
+    for interruption in ["lock", "cancel"] {
+      try await withSavedLibrary { services, _ in
+        var photo = try self.samplePhoto(); photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+        try services.store.put(photo)
+        let gate = CatalogScanGate()
+        services.catalogSearchWillRead = { gate.visit() }
+        defer { services.catalogSearchWillRead = nil }
+        let scan = Task { try await SavedPeopleSearchSnapshot.load(services) }
+        while gate.count == 0 { await Task.yield() }
+        if interruption == "lock" { services.vault.lock() } else { scan.cancel() }
+        gate.release.signal()
+        do { _ = try await scan.value; XCTFail("Withdrawn Saved choices must not publish") }
+        catch { XCTAssertTrue(error is CancellationError) }
+      }
+    }
+  }
+
   private func samplePhoto() throws -> LocalPhoto {
     let accounts = try fixture(FixtureAccounts.self, "accounts")
     let owner = accounts.testSecrets[0]

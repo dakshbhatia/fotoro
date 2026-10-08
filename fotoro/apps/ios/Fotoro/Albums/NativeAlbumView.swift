@@ -6,6 +6,9 @@ struct NativeAlbumPresentation: Identifiable {
   let id = UUID()
   var selected: [LocalPhoto] = []
   var incoming: FotoroAlbumInvitation?
+  static func opening(incoming: FotoroAlbumInvitation?, selection: () throws -> [LocalPhoto]) rethrows -> Self {
+    Self(selected: incoming == nil ? try selection() : [], incoming: incoming)
+  }
 }
 
 struct NativeAlbumView: View {

@@ -5,6 +5,41 @@ work; [product](product.md) owns the intended experience. Earlier measurements a
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
 
+## October 8 family-loop reliability qualification
+
+Browser Choose photos preserves the exact incoming live-album destination through
+Saved selection and reopening. Explicit Close still completes the incoming intent;
+lock, expiry and account replacement retain their existing fences. Native album
+invitations no longer resolve unrelated selected Saved photos before opening.
+Native People choices include source-bound reviewed names from owned Saved photos,
+so Any/Everyone works without local Photos permission. Corrections that change
+reviewed People facts invalidate an open Saved-name snapshot.
+
+Native transfer reconciliation stages bytes only after `UPLOAD_INCOMPLETE`.
+Transient commit failures preserve the original error and pending journal for Retry.
+Two fault-injected regressions promote actual ciphertext, remove staged files, then
+recover after a 503 or offline response without another reserve/PUT, extra allocation
+or duplicate catalog change. Removing the guard reproduces both failures. Removing
+the People correction invalidation reproduces the stale-choice regression.
+
+Final local full native qualification executes 456 tests: 454 pass, two opt-in/Vision
+cases skip and none fail. Isolated preview executes 134: 132 pass and two skip.
+Browser qualification passes 547 tests, TypeScript and the production build; API
+passes 108 and core/release checks pass. Startup remains 440,288 bytes across nine
+static chunks. All five isolated encrypted-exchange cases and the pinned public
+visual-inference smoke pass; neither establishes personal-library retrieval quality.
+
+Actual desktop browser QA against isolated local D1/R2 and disposable public NASA
+fixtures verifies invitation review/acceptance, Choose photos, Saved selection,
+reopening the same album with an explicit Add button, contribution and persisted
+readback after reopening. Explicit Close removes the incoming URL intent. Console
+warnings/errors are empty. The attempted viewport override did not change the
+reported desktop dimensions, so this run adds no mobile-layout qualification.
+Physical family acceptance, large-catalog hydration/performance and the native
+album picker's first-1,000 Saved-photo limit remain open. Production and TestFlight
+availability below still describe the preceding diagnostic release until a new
+release checkpoint is recorded.
+
 ## October 8 action diagnostics qualification
 
 Local full native qualification executes 448 tests: 446 pass, two opt-in/Vision

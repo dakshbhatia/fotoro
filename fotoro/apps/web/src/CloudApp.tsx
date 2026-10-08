@@ -84,8 +84,8 @@ import {inRecentSelectedRange, recentBrowseActive} from "./local/consumer-range"
 import {peopleSourceCurrent} from "./people/groups";
 import type {PeopleUpdate} from "./people/People";
 import type {IncomingAlbumIntent} from "./albums/intent";
+import {AlbumPanel} from "./albums/AlbumPanel";
 const People = lazy(() => import("./people/People").then(module => ({default: module.People})));
-const Albums = lazy(() => import("./albums/Albums").then(module => ({default: module.Albums})));
 interface SelectedOriginalContext {snapshot: ShareSelection; session: UnlockedVault; controller: AbortController;}
 const noLocalPhotos: LocalPhoto[] = [];
 const SearchIcon = () => (
@@ -881,7 +881,7 @@ export default function CloudApp({
     cancelOriginals(); setViewer(null); setExchange(false); setExchangePhotos([]); setPeopleOpen(false); setPlacesOpen(false); setMenu(false); menuRef.current = false;
     setAlbumSelection([...selection]); setAlbumsOpen(true);
   };
-  const closeAlbums = () => {setAlbumsOpen(false); setAlbumSelection([]); onAlbumIncomingDone?.(); onAlbumDone?.();};
+  const closeAlbums = () => {setAlbumsOpen(false); setAlbumSelection([]); onAlbumDone?.();};
   useEffect(() => {if (active && account && albumPhotos?.length) openAlbums(albumPhotos);}, [active, account, albumPhotos]);
   useEffect(() => {
     if (!active || !account || !sharePhotos?.length) return;
@@ -1257,9 +1257,9 @@ export default function CloudApp({
           }}
         />
       )}
-      {active && albumsOpen && unlocked && <Suspense fallback={<aside className="albums-sheet" role="dialog" aria-modal="true" aria-label="Live albums"><header><p role="status">Opening albums…</p><button autoFocus onClick={closeAlbums}>Close</button></header></aside>}><Albums key={account} selection={albumSelection} currentPhotos={() => currentCatalog.current}
-        onClose={closeAlbums} onChoosePhotos={() => {closeAlbums(); setReceived(null); setReceivedContext(null); setSelecting(true);}} incoming={incomingAlbum?.pending ? incomingAlbum : undefined}
-        onRetryAccount={incomingAlbum?.pending ? () => {incomingAlbum.retryPassword(); setAlbumsOpen(false); setAlbumSelection([]); lockVault();} : undefined} /></Suspense>}
+      {active && albumsOpen && unlocked && <AlbumPanel key={account} selection={albumSelection} currentPhotos={() => currentCatalog.current}
+        onClose={closeAlbums} onIncomingDone={onAlbumIncomingDone} onChoosePhotos={() => {setReceived(null); setReceivedContext(null); setSelecting(true);}} incoming={incomingAlbum ?? undefined}
+        onRetryAccount={incomingAlbum?.pending ? () => {incomingAlbum.retryPassword(); setAlbumsOpen(false); setAlbumSelection([]); lockVault();} : undefined} />}
       {active && viewing && viewer && unlocked && (
         <Viewer
           photos={shown}

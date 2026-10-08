@@ -2,6 +2,23 @@ import XCTest
 @testable import Fotoro
 
 final class NativeAlbumTests: XCTestCase {
+  func testIncomingAlbumInvitationDoesNotResolveUnrelatedStaleSavedSelection() throws {
+    let accounts = try fixture(FixtureAccounts.self, "accounts")
+    let incoming = FotoroAlbumInvitation(albumId: Wire.id(), ownerCard: accounts.accounts[0])
+    var selectionReads = 0
+    let presentation = try NativeAlbumPresentation.opening(incoming: incoming) {
+      selectionReads += 1
+      throw FotoroError("A selected photo changed.")
+    }
+    XCTAssertEqual(presentation.incoming, incoming)
+    XCTAssertTrue(presentation.selected.isEmpty)
+    XCTAssertEqual(selectionReads, 0)
+    XCTAssertThrowsError(try NativeAlbumPresentation.opening(incoming: nil) {
+      selectionReads += 1
+      throw FotoroError("A selected photo changed.")
+    })
+    XCTAssertEqual(selectionReads, 1, "Explicit contributions still validate the selected Saved sources")
+  }
   func testPublicAlbumLinkMatchesBrowserAndRejectsHiddenFieldsAndForeignOrigin() throws {
     let fixture = try fixture(FixtureAccounts.self, "accounts")
     let invitation = FotoroAlbumInvitation(albumId: "11111111-1111-4111-8111-111111111111", ownerCard: fixture.accounts[0])

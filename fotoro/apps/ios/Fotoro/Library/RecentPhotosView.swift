@@ -623,7 +623,7 @@ struct RecentPhotosView: View {
           #endif
         }
         #if !FOTORO_LOCAL_PREVIEW
-        .sheet(item: $people) { _ in PhotoPeopleView(search: search, findPhotos: { queryFocused = false }) }
+        .sheet(item: $people) { _ in PhotoPeopleView(search: search, services: services, findPhotos: { queryFocused = false }) }
         #endif
         .onChange(of: query) { cancelBestShots(); search.updateQuery(query) }
         .onChange(of: search.response.generation) { cancelBestShots() }
@@ -1309,8 +1309,9 @@ struct RecentPhotosView: View {
       queryFocused = false; pendingShare = nil; shareTask?.cancel(); cleanupShare()
       settings = false; viewer = nil; savedViewer = nil; people = nil; places = nil
       sharedSavedPhotos = nil; backupAccount = nil; photoSyncPresentation = nil
-      let selected = try selectedSavedPhotos.resolve(using: services.consumerSavedPhoto)
-      albumPresentation = NativeAlbumPresentation(selected: selected, incoming: incoming)
+      albumPresentation = try NativeAlbumPresentation.opening(incoming: incoming) {
+        try selectedSavedPhotos.resolve(using: services.consumerSavedPhoto)
+      }
     } catch { store.error = error.localizedDescription }
   }
   #endif

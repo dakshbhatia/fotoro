@@ -1519,6 +1519,7 @@ enum ReviewedPhotosBackupPolicy {
     let bundle = try vault.requireBundle()
     let card = try session.requireCard(account)
     var value = try annotations.ledger.current(photo: photo, bundle: bundle, card: card) ?? PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+    let priorPeopleFacts = (value.facts ?? []).filter(PhotoPeopleFacts.isReserved)
     var hasCompletedDerivedResult = false
     if value.location == nil, RecentPhotosPolicy.canRead(automaticPhotosPermission),
       source.originalSha256 == photo.metadata.originalSha256,
@@ -1571,6 +1572,9 @@ enum ReviewedPhotosBackupPolicy {
     guard !derivedOnly || hasCompletedDerivedResult else { return }
     try annotations.ledger.edit(value, photo: photo, bundle: bundle, card: card)
     photoAnnotations[photo.id] = value
+    if labelsChanged, priorPeopleFacts != (value.facts ?? []).filter(PhotoPeopleFacts.isReserved) {
+      consumerCatalogGeneration &+= 1
+    }
     if refreshSummary { refreshConsumerSyncSummary() }
   }
   private func captureLocalAnnotations(derivedOnly: Bool = false) throws {
