@@ -1179,10 +1179,10 @@ enum ReviewedPhotosBackupPolicy {
       api.baseURL = URL(string: "http://127.0.0.1:8790")!
       let accounts: FixtureAccounts = try await api.get("/__fixtures/accounts")
       fixtureAccounts = accounts
-      // Explicit public fixture account cards, never production server trust.
-      for card in accounts.accounts { try session.pin(card) }
       session.fixture = true
       session.accountId = accounts.accounts[index].accountId
+      // Explicit public fixture account cards, never production server trust.
+      for card in accounts.accounts { try session.pin(card) }
       UserDefaults.standard.set(session.accountId, forKey: "fotoro.fixtureAccount")
       try await vault.recover(secret: Data(b64: accounts.testSecrets[index].recoverySecret))
       try activateAccount()
@@ -1341,6 +1341,8 @@ enum ReviewedPhotosBackupPolicy {
       var ownedChanges: [ChangeV1] = []
       for c in page.changes where c.entity == "photo" && !c.deleted {
         guard let signed = c.payload else { throw FotoroError("Missing signed change") }
+        // Peer contributions share this feed; Saved admits only the owner's signed originals.
+        guard signed.accountId == authorizedAccount else { continue }
         let card = try session.requireCard(signed.accountId)
         let manifest = try Wire.decode(
           PhotoManifestV1.self, crypto.verify(signed, card: card, kind: CameraMedia.acceptedManifestKind(signed)))

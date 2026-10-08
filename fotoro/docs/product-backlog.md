@@ -98,6 +98,14 @@ bundle. Sign in with Apple is not delivered. System sharing is the main original
 route; private invitations require accepted contacts. Contact synchronization
 across devices remains open.
 
+The current follow-up scopes native trusted cards to each owner and keeps ambiguous
+legacy contacts quarantined for explicit review. Native Saved restoration skips
+peer contribution records before trust or object reads. Browser live-album entry
+can retry a failed availability/inbox check without losing its incoming invitation
+or accepting it implicitly. Local regressions, full suites and rendered browser
+recovery pass; release and physical acceptance evidence remain separate in
+[verification](verification.md).
+
 The current source fixes Sync checkpoints for excluded changed Photos revisions, obsolete
 synced OCR evidence, browser expiration recovery for the same account and local
 browser clearing when server logout cannot finish. Returning browsers can unlock

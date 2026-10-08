@@ -5,6 +5,41 @@ work; [product](product.md) owns the intended experience. Earlier measurements a
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
 
+## October 8 account and album recovery follow-up — locally qualified
+
+Native trusted account cards are now scoped to the active owner. Renewal keeps
+that owner's reviewed contacts; switching accounts or signing out removes them
+from the active session. A failed session replacement leaves the prior identity
+and trust intact. Legacy unscoped storage can supply only the owner's verification
+card for independently verified local unlock. Legacy contacts require explicit
+review again; contact names remain in their encrypted account catalog. Contact
+cards are still local and do not synchronize across devices.
+
+Native Saved sync filters peer-signed contribution records before contact lookup
+or object reads. Owned records still require authentic signatures and matching
+manifest identity. Filtered pages advance their cursor. A fresh owner can restore
+their own photos without trusting every peer in a historical contribution feed;
+shared access retains explicit contact/invitation checks. The regression reproduces
+the missing-card failure before the guard and passes afterward, together with the
+real authenticated second-device annotation/OCR restoration case.
+
+Browser live-album entry offers Try again after capability or inbox failure,
+preserving the exact incoming invitation. Retry repeats availability, inbox and
+owner verification without accepting membership, pinning a contact or contributing
+photos. Cancellation, account replacement and owner substitution remain fenced.
+Actual desktop and 390-pixel mobile UI QA forces the first capability request to
+503, then recovers the same invitation for explicit acceptance with no console
+warnings/errors. The rendered owner was already trusted; first-contact review is
+covered by signed/encrypted protocol regressions.
+
+Local qualification passes 472 full native tests with two skips, 136 isolated
+preview tests with two skips, 557 browser tests, 111 API tests, the remaining
+workspace checks and five isolated encrypted exchange cases. All three startup
+checks pass at 442,116 bytes across nine static chunks. Independent review finds
+no actionable defects. These fixes are local at this checkpoint; production and
+internal TestFlight 47 remain the prior release. Physical installation, real
+passkey ceremonies, contact convergence and large-library acceptance stay open.
+
 ## October 8 bounded foundation follow-up — PR 51 production / TestFlight 47
 
 Qualified PR 51 head `63e51fbf0d1c6244bf266d484a8b6a7c716ca2b3` completed all
