@@ -1829,18 +1829,20 @@ enum ReviewedPhotosBackupPolicy {
     }
     try await receive(detail.grant)
   }
-  func acceptContact(_ card: AccountCardV1, name: String) throws {
+  func acceptContact(_ card: AccountCardV1, name: String?) throws {
     let access = try sharingAccess()
     guard card.accountId != access.account else { throw FotoroError("This is your own Fotoro contact link.") }
-    let value = name.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard value.count <= 80 else { throw FotoroError("Use a shorter contact name.") }
     _ = try FotoroShareLinks.validatePublicAccountCard(card)
-    let secret = try Data(b64: vault.requireBundle().vaultKey)
-    let wrapped = try crypto.wrap(try Wire.encode(["accountId": card.accountId, "name": value]), key: secret)
-    let encoded = try Wire.encode(wrapped).b64
-    try store.database.write { db in
-      try db.execute(sql: "INSERT INTO state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        arguments: ["contact-name:" + card.accountId, encoded])
+    if let name {
+      let value = name.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard value.count <= 80 else { throw FotoroError("Use a shorter contact name.") }
+      let secret = try Data(b64: vault.requireBundle().vaultKey)
+      let wrapped = try crypto.wrap(try Wire.encode(["accountId": card.accountId, "name": value]), key: secret)
+      let encoded = try Wire.encode(wrapped).b64
+      try store.database.write { db in
+        try db.execute(sql: "INSERT INTO state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+          arguments: ["contact-name:" + card.accountId, encoded])
+      }
     }
     try session.pin(card)
   }

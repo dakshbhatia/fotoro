@@ -1,5 +1,13 @@
 import Foundation
 
+enum PhotoBrowseDateScope: String, CaseIterable, Identifiable, Hashable {
+  case recent, all
+  var id: String { rawValue }
+  func includes(_ date: Date?, now: Date, calendar: Calendar = .current) -> Bool {
+    self == .all || RecentPhotosPolicy.includes(date, now: now, calendar: calendar)
+  }
+}
+
 enum PhotoBrowseFilter: String, CaseIterable, Identifiable, Hashable {
   case all, favorites, screenshots, withLocation
   var id: String { rawValue }
@@ -36,7 +44,7 @@ enum PhotoBrowsing {
   static func groups(
     _ items: [PhotoBrowseItem], filter: PhotoBrowseFilter = .all,
     grouping: PhotoBrowseGrouping = .days, order: PhotoBrowseOrder = .newestFirst,
-    calendar: Calendar = .current
+    calendar: Calendar = .current, dates: PhotoBrowseDateScope = .all, now: Date = Date()
   ) -> [PhotoBrowseGroup] {
     // A refreshed source snapshot replaces an earlier occurrence of the same
     // photo; its current revision and filter facts travel together.
@@ -45,6 +53,7 @@ enum PhotoBrowsing {
     var dated: [DatedItem] = []
     var undated: [PhotoBrowseItem] = []
     for item in unique.values {
+      guard dates.includes(item.facts.capturedAt, now: now, calendar: calendar) else { continue }
       guard let date = item.facts.capturedAt, date.timeIntervalSince1970.isFinite,
         let day = calendar.dateInterval(of: .day, for: date)
       else { undated.append(item); continue }

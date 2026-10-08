@@ -352,6 +352,7 @@ final class NativeAlbumTests: XCTestCase {
   }
   @MainActor func testReviewedFirstContactJoinPinsAcceptsAndOpensExactAlbum() async throws {
     try await withAlbum(invited: true) { services, server, model in
+      try services.acceptContact(server.cards[0], name: "Mom")
       services.session.pinnedCards.removeValue(forKey: server.cards[0].accountId)
       try await model.refresh()
       let reviewed = try XCTUnwrap(model.albums.first)
@@ -360,8 +361,62 @@ final class NativeAlbumTests: XCTestCase {
       XCTAssertEqual(server.objectReads, 0)
       try await NativeAlbumReviewedJoin.join(reviewed, incoming: FotoroAlbumInvitation(albumId: reviewed.id, ownerCard: server.cards[0]), services: services, model: model)
       XCTAssertEqual(services.session.pinnedCards[server.cards[0].accountId], server.cards[0])
+      XCTAssertEqual(services.contactName(server.cards[0].accountId), "Mom")
       XCTAssertTrue(server.accepted)
       XCTAssertEqual(model.opened?.id, reviewed.id)
+    }
+  }
+  @MainActor func testChangedOwnerContactRequiresReviewAndJoinsWithoutImplicitTrust() async throws {
+    try await withAlbum(invited: true) { services, server, model in
+      var old = server.cards[0]; old.signingPublicKey = server.cards[1].signingPublicKey
+      try services.acceptContact(old, name: "Mom")
+      try await model.refresh()
+      let reviewed = try XCTUnwrap(model.albums.first)
+      XCTAssertTrue(reviewed.needsTrust)
+      XCTAssertEqual(services.session.pinnedCards[old.accountId], old)
+      XCTAssertFalse(server.accepted); XCTAssertEqual(server.objectReads, 0)
+      try await NativeAlbumReviewedJoin.join(reviewed, incoming: FotoroAlbumInvitation(albumId: reviewed.id, ownerCard: server.cards[0]), services: services, model: model)
+      XCTAssertEqual(services.session.pinnedCards[old.accountId], server.cards[0])
+      XCTAssertEqual(services.contactName(old.accountId), "Mom")
+      XCTAssertTrue(server.accepted); XCTAssertEqual(model.opened?.id, reviewed.id)
+    }
+  }
+  @MainActor func testInvalidInvitationsDoNotHideAcceptedAlbumOrChangeTrust() async throws {
+    try await withAlbum { services, server, model in
+      let trusted = services.session.pinnedCards
+      var invalid = server.definition; invalid.albumId = Wire.id()
+      var signed = try CryptoAdapter().sign(invalid, kind: "album-v1", accountId: server.cards[0].accountId, secret: Data(b64: server.bundles[0].signingSecretKey))
+      signed.signature = Data(repeating: 0, count: 64).b64
+      var unknownOwner = server.cards[0]; unknownOwner.accountId = Wire.id()
+      invalid.albumId = Wire.id(); invalid.ownerAccountId = unknownOwner.accountId; invalid.members[0].card = unknownOwner
+      var unknown = try CryptoAdapter().sign(invalid, kind: "album-v1", accountId: unknownOwner.accountId, secret: Data(b64: server.bundles[0].signingSecretKey))
+      unknown.signature = Data(repeating: 0, count: 64).b64
+      var malformed = signed; malformed.body = Data("{}".utf8).b64
+      server.extraInbox = [signed, unknown, malformed].map { AlbumOverviewV1(definition: $0, membership: "invited", endedAt: nil, photoCount: 0) }
+      try await model.refresh()
+      XCTAssertEqual(model.albums.map(\.id), [server.definition.albumId])
+      XCTAssertEqual(services.session.pinnedCards, trusted)
+      XCTAssertNotNil(model.inboxError)
+      try await model.open(server.definition.albumId)
+      XCTAssertEqual(model.items.count, 1)
+      server.extraInbox = []; try await model.refresh()
+      XCTAssertNil(model.inboxError); XCTAssertEqual(model.opened?.id, server.definition.albumId)
+    }
+  }
+  @MainActor func testReviewedJoinRejectsDefinitionNotBoundToReviewedSignatureBeforePinning() async throws {
+    try await withAlbum(invited: true) { services, server, model in
+      services.session.pinnedCards.removeValue(forKey: server.cards[0].accountId)
+      try await model.refresh()
+      let original = try XCTUnwrap(model.albums.first)
+      var changed = original.definition
+      changed.members[0].card.signingPublicKey = server.cards[1].signingPublicKey
+      let reviewed = NativeAlbumSummary(overview: original.overview, definition: changed, title: nil, needsTrust: true)
+      do {
+        try await NativeAlbumReviewedJoin.join(reviewed, incoming: nil, services: services, model: model)
+        XCTFail("Unbound reviewed definition joined")
+      } catch {}
+      XCTAssertNil(services.session.pinnedCards[server.cards[0].accountId])
+      XCTAssertFalse(server.accepted); XCTAssertEqual(server.objectReads, 0)
     }
   }
   @MainActor func testReviewedJoinRejectsLinkMismatchBeforeTrustOrAcceptance() async throws {
@@ -683,6 +738,7 @@ private final class AlbumTestServer: @unchecked Sendable {
   private var extraObjects: [String: Data] = [:]
   private var owned: [String: SignedPayloadV1] = [:]
   var creationBodies: [Data] = []; var loseCreateResponse = false; var failInbox = false
+  var extraInbox: [AlbumOverviewV1] = []
   var accessStatus: Int?
   var accountMismatchCount = 0; var authAccountHeader: String?
   var factsCapabilityStatus = 404
@@ -809,7 +865,7 @@ private final class AlbumTestServer: @unchecked Sendable {
       return (200, try Wire.encode(AlbumPhotoFactsReplyV1(version: 1, facts: sharedDetails[id])))
     }
     if path.hasSuffix("/capabilities") { return (200, try Wire.encode(AlbumCapabilitiesV1(version: 1, albumsVersion: 1, maxMembers: 12, maxPhotos: 1000, pageSize: 100))) }
-    if path == "/v1/albums" { if failInbox { throw URLError(.notConnectedToInternet) }; return (200, try Wire.encode(AlbumInboxV1(version: 1, albums: [overview]))) }
+    if path == "/v1/albums" { if failInbox { throw URLError(.notConnectedToInternet) }; return (200, try Wire.encode(AlbumInboxV1(version: 1, albums: extraInbox + [overview]))) }
     if path.hasSuffix("/accept") { accepted = true; var value = overview; value.membership = "accepted"; return (200, try Wire.encode(value)) }
     if path.hasPrefix("/v1/photos/"), path.hasSuffix("/manifest") {
       let id = String(path.split(separator: "/")[2])

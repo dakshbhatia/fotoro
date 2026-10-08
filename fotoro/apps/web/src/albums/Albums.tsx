@@ -22,6 +22,7 @@ import {albumDateTag, albumMemberLabel} from "./presentation";
 import {Icon} from "../library/icons";
 import {joinAlbumInvitation, loadAlbumEntry, unsupportedAlbumCapabilities} from "./bootstrap";
 import {shareOriginals} from "../library/system-share";
+import {subscribeAlbumLifetime} from "./entry";
 
 function readableError(error: unknown) {
   const code = error instanceof Error ? error.message : "";
@@ -86,11 +87,9 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     access?.signal.addEventListener("abort", clear, {once: true});
     return () => {access?.signal.removeEventListener("abort", clear); clearDownload();};
   }, [access, preview]);
-  useEffect(() => {
-    const hidden = () => {if (document.visibilityState === "hidden") close();};
-    window.addEventListener("fotoro-lock", close); window.addEventListener("pagehide", close); document.addEventListener("visibilitychange", hidden);
-    return () => {alive.current = false; controller.abort(); accessRef.current?.dispose(); chosenSnapshot.dispose(); window.removeEventListener("fotoro-lock", close); window.removeEventListener("pagehide", close); document.removeEventListener("visibilitychange", hidden);};
-  }, []);
+  useEffect(() => subscribeAlbumLifetime(window, document, () => {
+    alive.current = false; controller.abort(); accessRef.current?.dispose(); chosenSnapshot.dispose();
+  }, close), []);
   async function action(task: () => Promise<void>, background = false) {
     if (working.current || !scope.current?.()) return;
     working.current = true; setBusy(true); if (!background) {setError(""); setNotice("");}

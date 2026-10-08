@@ -521,6 +521,32 @@ final class RecentPhotosTests: XCTestCase {
     original.response = 2
     XCTAssertEqual(next, original)
   }
+  func testMergedSearchFailureDoesNotClaimEmptyCompletionAndRetryFencesOldDataset() {
+    let first = ConsumerSearchPresentationID(query: "receipt", library: 1,
+      results: [], indexed: 1, response: 1, acceptedMeaning: nil,
+      catalog: 1, account: "account", vault: UUID())
+    var state = ConsumerSearchCompletion()
+    state.begin(first)
+    state.fail(first, message: "Saved search unavailable")
+    XCTAssertFalse(state.hasCompleted(first))
+    XCTAssertFalse(state.permitsResults(for: first))
+    XCTAssertFalse(state.isPending(first))
+    XCTAssertEqual(state.failure(for: first), "Saved search unavailable")
+    state.begin(first)
+    XCTAssertTrue(state.isPending(first))
+    XCTAssertNil(state.failure(for: first))
+    state.succeed(first)
+    XCTAssertTrue(state.hasCompleted(first), "A successful empty search can complete")
+    var next = first
+    next.catalog = 2
+    state.begin(next)
+    state.fail(first, message: "Late failure")
+    XCTAssertNil(state.failure(for: next))
+    XCTAssertTrue(state.isPending(next))
+    XCTAssertFalse(state.permitsResults(for: next))
+    state.succeed(next)
+    XCTAssertTrue(state.hasCompleted(next))
+  }
   func testCurrentSearchCanKeepEnrichmentButCannotReuseAnotherQueryOrSource() {
     let original = ConsumerSearchPresentationID(query: "receipt", library: 1,
       results: [], indexed: 1, response: 1, acceptedMeaning: nil,

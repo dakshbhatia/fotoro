@@ -51,6 +51,7 @@ struct RecentPhotoSource: Hashable {
 struct PhotoBrowseContinuation: Hashable {
   let page: UUID
   let filter: PhotoBrowseFilter
+  var dates: PhotoBrowseDateScope = .recent
   let isActive: Bool
 }
 
@@ -81,7 +82,7 @@ enum RecentPhotosPolicy {
   static func canRead(_ status: PHAuthorizationStatus) -> Bool {
     status == .authorized || status == .limited
   }
-  static func browseFetchOptions() -> PHFetchOptions {
+  static func browseFetchOptions(dates: PhotoBrowseDateScope = .recent, now: Date = Date()) -> PHFetchOptions {
     let options = PHFetchOptions()
     #if FOTORO_LOCAL_PREVIEW
     options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
@@ -89,13 +90,17 @@ enum RecentPhotosPolicy {
     options.predicate = NSPredicate(format: "mediaType == %d OR mediaType == %d",
       PHAssetMediaType.image.rawValue, PHAssetMediaType.video.rawValue)
     #endif
+    if dates == .recent, let media = options.predicate {
+      options.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [media,
+        NSPredicate(format: "creationDate >= %@ AND creationDate <= %@", cutoff(now: now) as NSDate, now as NSDate)])
+    }
     options.includeHiddenAssets = false
     options.includeAllBurstAssets = true
     options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
     return options
   }
   static func pickFetchOptions(now: Date) -> PHFetchOptions {
-    let options = browseFetchOptions()
+    let options = browseFetchOptions(dates: .all)
     options.predicate = NSPredicate(
       format: "mediaType == %d AND creationDate >= %@ AND creationDate <= %@",
       PHAssetMediaType.image.rawValue, cutoff(now: now) as NSDate, now as NSDate)
@@ -193,6 +198,7 @@ struct PhotoPreviewProgress {
   private(set) var recentPhotos: [RecentPhoto] = []
   private(set) var hasMorePhotos = false
   private(set) var browsePage = UUID()
+  private(set) var browseDates = PhotoBrowseDateScope.recent
   private(set) var status = PHAuthorizationStatus.notDetermined
   private(set) var opened = false
   var error: String?
@@ -213,7 +219,7 @@ struct PhotoPreviewProgress {
   @ObservationIgnored private let authorization: () -> PHAuthorizationStatus
   @ObservationIgnored private let requestAccess: () async -> PHAuthorizationStatus
   @ObservationIgnored private let readPhotos: (@MainActor (Date) -> [RecentPhoto])?
-  @ObservationIgnored private let readBrowseSource: @MainActor (Date) -> PhotoBrowseSource<RecentPhoto>
+  @ObservationIgnored private let readBrowseSource: (@MainActor (Date) -> PhotoBrowseSource<RecentPhoto>)?
   @ObservationIgnored private let readRecentPhotos: @MainActor (Date) -> [RecentPhoto]
   @ObservationIgnored private var browseSource: PhotoBrowseSource<RecentPhoto>?
   @ObservationIgnored private var browseOffset = 0
@@ -224,7 +230,7 @@ struct PhotoPreviewProgress {
     authorization: @escaping () -> PHAuthorizationStatus = { PHPhotoLibrary.authorizationStatus(for: .readWrite) },
     requestAccess: @escaping () async -> PHAuthorizationStatus = { await PHPhotoLibrary.requestAuthorization(for: .readWrite) },
     readPhotos: (@MainActor (Date) -> [RecentPhoto])? = nil,
-    readBrowseSource: @escaping @MainActor (Date) -> PhotoBrowseSource<RecentPhoto> = RecentPhotosStore.fetchBrowseSource,
+    readBrowseSource: (@MainActor (Date) -> PhotoBrowseSource<RecentPhoto>)? = nil,
     readRecentPhotos: @escaping @MainActor (Date) -> [RecentPhoto] = RecentPhotosStore.fetchRecentPhotos,
     sourceRevisions: (@MainActor ([String]) -> [String: String])? = nil,
     picks: PhotoPickAnalyzer? = nil
@@ -348,6 +354,12 @@ struct PhotoPreviewProgress {
     }
     refresh()
   }
+  func setBrowseDates(_ dates: PhotoBrowseDateScope, now: Date = Date()) {
+    guard dates != browseDates else { return }
+    browseDates = dates
+    browseOffset = 0
+    refresh(now: now)
+  }
   func refresh(now: Date = Date()) {
     guard opened else { return }
     browseGeneration = UUID()
@@ -367,7 +379,7 @@ struct PhotoPreviewProgress {
     if !observing { PHPhotoLibrary.shared().register(self); observing = true }
     let loaded = max(RecentPhotosPolicy.browsePageSize, browseOffset)
     let supplied = readPhotos?(now)
-    let source = supplied.map(PhotoBrowseSource.init) ?? readBrowseSource(now)
+    let source = supplied.map(PhotoBrowseSource.init) ?? readBrowseSource?(now) ?? Self.fetchBrowseSource(now: now, dates: browseDates)
     let recent = supplied ?? readRecentPhotos(now)
     let nextOffset = min(source.count, loaded)
     let first = source.photos(in: 0..<nextOffset)
@@ -425,8 +437,8 @@ struct PhotoPreviewProgress {
       }) { return }
     }
   }
-  private static func fetchBrowseSource(now: Date) -> PhotoBrowseSource<RecentPhoto> {
-    let options = RecentPhotosPolicy.browseFetchOptions()
+  private static func fetchBrowseSource(now: Date, dates: PhotoBrowseDateScope) -> PhotoBrowseSource<RecentPhoto> {
+    let options = RecentPhotosPolicy.browseFetchOptions(dates: dates, now: now)
     let result = PHAsset.fetchAssets(with: options)
     return PhotoBrowseSource(count: result.count) { range in
       range.map { RecentPhoto(asset: result.object(at: $0)) }

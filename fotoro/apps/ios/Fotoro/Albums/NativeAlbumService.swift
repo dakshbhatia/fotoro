@@ -45,6 +45,7 @@ struct NativeAlbumAccess {
 @MainActor @Observable final class NativeAlbumService {
   let services: AppServices
   private(set) var albums: [NativeAlbumSummary] = []
+  private(set) var inboxError: String?
   private(set) var opened: NativeAlbumSummary?
   private(set) var items: [NativeAlbumItem] = []
   private(set) var directory: URL?
@@ -75,7 +76,7 @@ struct NativeAlbumAccess {
     }
   }
   func clear() {
-    epoch = UUID(); access = nil; opened = nil; items = []; albums = []; nextCursor = nil; cursors = []
+    epoch = UUID(); access = nil; opened = nil; items = []; albums = []; inboxError = nil; nextCursor = nil; cursors = []
     clearFacts()
     if let directory { try? FileManager.default.removeItem(at: directory) }
     directory = nil; ImageCache.shared.removeAll()
@@ -107,9 +108,11 @@ struct NativeAlbumAccess {
   }
   private func summary(_ overview: AlbumOverviewV1, context: NativeAlbumContext) throws -> NativeAlbumSummary {
     let definition = try NativeAlbumWire.overview(overview)
-    guard definition.members.contains(where: { $0.card.accountId == context.photo.account }) else { throw FotoroError("Album is for another account.") }
     let own = try services.session.requireCard(context.photo.account)
-    guard let owner = context.cards[definition.ownerAccountId] else {
+    guard definition.members.contains(where: { $0.card == own }),
+      let candidate = definition.members.first(where: { $0.card.accountId == definition.ownerAccountId })?.card else { throw FotoroError("Album is for another account.") }
+    guard let owner = context.cards[definition.ownerAccountId], owner == candidate else {
+      _ = try CryptoAdapter().verify(overview.definition, card: candidate, kind: "album-v1")
       return NativeAlbumSummary(overview: overview, definition: definition, title: nil, needsTrust: true)
     }
     let (_, _, title) = try crypto.open(overview.definition, expectedID: definition.albumId, trustedOwner: owner, recipient: own,
@@ -128,14 +131,21 @@ struct NativeAlbumAccess {
       capabilities.maxPhotos == 1000, capabilities.pageSize == 100 else { throw FotoroError("Albums need a newer Fotoro version.") }
     let inbox = try await request(AlbumInboxV1.self, path: "/v1/albums", context: captured)
     guard inbox.version == 1, inbox.albums.count <= 100 else { throw FotoroError("Invalid album inbox.") }
-    var ids = Set<String>(), next: [NativeAlbumSummary] = []
+    _ = try services.session.requireCard(captured.photo.account)
+    var ids = Set<String>(), next: [NativeAlbumSummary] = [], invalid = false
     for overview in inbox.albums {
-      let value = try summary(overview, context: captured)
-      guard ids.insert(value.id).inserted else { throw FotoroError("Duplicate album in inbox.") }
-      next.append(value)
+      do {
+        let value = try summary(overview, context: captured)
+        guard ids.insert(value.id).inserted else { throw FotoroError("Duplicate album in inbox.") }
+        next.append(value)
+      } catch {
+        try check(captured)
+        invalid = true
+      }
     }
     try check(captured); albums = next
-    if let opened, !next.contains(where: { $0.id == opened.id && $0.overview.definition == opened.overview.definition && $0.overview.endedAt == nil && $0.overview.membership == "accepted" }) {
+    inboxError = invalid ? "An album could not be verified. Refresh or ask its owner for a new invitation." : nil
+    if let opened, !next.contains(where: { $0.id == opened.id && $0.overview.definition == opened.overview.definition && $0.overview.endedAt == nil && $0.overview.membership == "accepted" && !$0.needsTrust }) {
       clearOpen()
     }
   }

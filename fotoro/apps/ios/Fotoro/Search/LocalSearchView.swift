@@ -57,7 +57,7 @@ struct LocalSearchView: View {
       if !matches.isEmpty, search.searching || search.indexing {
         SearchProgressFeedback(search: search).padding(.horizontal)
       }
-      if let error = search.error { Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal) }
+      if !matches.isEmpty, let error = search.error { DisclosureGroup("Details") { Text(error).textSelection(.enabled) }.font(.caption).padding(.horizontal) }
     }
   }
 }
@@ -89,12 +89,22 @@ private struct SearchEmptyResults: View {
   var searchPending = false
   var finished = true
   var reviewing = false
+  var failure: String?
+  var retry: (() -> Void)?
   var body: some View {
     if searchPending || search.searching || search.indexing {
       SearchProgressFeedback(search: search, searchPending: searchPending)
         .frame(maxWidth: .infinity).padding(.vertical, 40)
-    } else if search.error != nil {
-      ContentUnavailableView("Search unavailable", systemImage: "magnifyingglass")
+    } else if let failure = failure ?? search.error {
+      ContentUnavailableView {
+        Label("Search unavailable", systemImage: "magnifyingglass")
+      } description: {
+        Text("Try the same search again.")
+      } actions: {
+        if let retry { Button("Try again", action: retry).accessibilityIdentifier("search.retry") }
+        DisclosureGroup("Details") { Text(failure).textSelection(.enabled) }
+          .font(.footnote).foregroundStyle(.secondary)
+      }
     } else if !finished {
       ContentUnavailableView("Search paused", systemImage: "magnifyingglass")
     } else {
@@ -143,6 +153,9 @@ struct ConsumerSearchResultsView: View {
   let search: LocalSearchStore
   let photos: RecentPhotosStore
   var searchPending: Bool = false
+  var searchFailure: String?
+  var searchFinished = true
+  var retrySearch: (() -> Void)?
   var review: PhotoPicksSnapshot? = nil
   var selected: Set<ConsumerPhotoReference> = []
   var selecting = false
@@ -165,7 +178,7 @@ struct ConsumerSearchResultsView: View {
       SearchAlternatives(search: search, selected: choseAlternative)
       SearchAnalysisActions(search: search)
       if matches.isEmpty {
-        SearchEmptyResults(search: search, searchPending: searchPending, reviewing: review != nil)
+        SearchEmptyResults(search: search, searchPending: searchPending, finished: searchFinished, reviewing: review != nil, failure: searchFailure, retry: retrySearch)
       } else {
         if let selectResults {
           Button("Select results", systemImage: "checkmark.circle", action: selectResults)
@@ -184,8 +197,8 @@ struct ConsumerSearchResultsView: View {
       if !matches.isEmpty, searchPending || search.searching || search.indexing {
         SearchProgressFeedback(search: search, searchPending: searchPending).padding(.horizontal)
       }
-      if let error = search.error {
-        Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+      if !matches.isEmpty, let error = search.error {
+        DisclosureGroup("Details") { Text(error).textSelection(.enabled) }.font(.caption).padding(.horizontal)
       }
     }
   }

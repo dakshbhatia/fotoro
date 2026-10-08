@@ -17,9 +17,21 @@ Hono Worker with D1 and private R2. The upstream Ente application is a reference
   require separate preview consent and explicitly configured provider/work limits;
   that route remains disabled by default.
 
-### October 8 PR 51 checkpoint
+### October 8 PR 55 checkpoint
 
-The active Worker is `fc961e24-fc94-4b9a-a4b9-fdbecedbe01b` at 100%, deployment
+Worker `2f070b78-0bd6-41d5-af78-0e8a0f7cea7c` serves 100%, deployment
+`711d2a82-ca1a-439c-82f4-f4fbf933d28a`. Merged source
+`da8714c7b8ea3c25aee989ff330b4b6bef40de86` matches the qualified PR 55 tree.
+All 23 hosted checks completed: nine success and 14 intentional skips.
+All 46 non-HTML assets match built byte hashes; root/Photos/Saved HTML match after
+removing only Cloudflare's injected analytics beacon. The service check passes;
+all eight bindings and runtime are unchanged. Migration 0009 was already applied;
+Gemini remains disabled. Rollback is `254b2cdb-e38d-4cf7-872a-56dcda3a28a0`.
+TestFlight 0.1.0 (49) visibly shows Testing in the existing internal group.
+
+### Earlier October 8 PR 51 checkpoint
+
+The previously verified Worker was `fc961e24-fc94-4b9a-a4b9-fdbecedbe01b` at 100%, deployment
 `0323ca3a-13a3-4181-be90-2e4c61a12ba3`. Qualified PR 51 head
 `63e51fbf0d1c6244bf266d484a8b6a7c716ca2b3` completed all 23 checks: seven success
 and 16 intentional skips. Guarded merge `bbf15c60a7afc6222eda30e6ced422be6539edde`
@@ -165,13 +177,16 @@ personal-account sync or original restoration on a physical phone.
 
 ## Native distribution
 
-The last verified TestFlight build is 48 (0.1.0), independently read `VALID` and
+The last verified TestFlight build is 49 (0.1.0), independently read `VALID` and
 `IN_BETA_TESTING` on October 8 in the same internal group with one tester. Its
-158 native inputs match qualified PR 53 head `8f9ce0ac2addd0f2de59a819100e8221b56391f4`
-and merged source `e2f571e21163237f89396100d8a28f36c1108b4b`. Production Worker
-`254b2cdb-e38d-4cf7-872a-56dcda3a28a0` serves that source at 100%; all 46 asset
-digests match. Migration `0009_album_photo_facts.sql` is applied. Gemini remains
-disabled. Physical installation and the authenticated family journey remain open.
+158 native inputs and three release tools match qualified PR 55 head
+`9432a4e361398003315f5dc4b779452416d34034` and merged source
+`da8714c7b8ea3c25aee989ff330b4b6bef40de86`. Archive and distribution IPA audits pass;
+the accepted 54,428,636-byte IPA has SHA-256
+`67960d416fcfc2ec6ad4d8895b35061737f85e1860259ce5c7406ce760e1985d`.
+Release notes and their exact build linkage match independent readback. Existing
+compliance metadata and internal group access are unchanged. Build 49 installation
+and the authenticated physical family journey remain unverified.
 
 The preceding verified TestFlight build is 47 (0.1.0), independently read `VALID` and
 `IN_BETA_TESTING` on October 8. The same existing internal group auto-linked it,
