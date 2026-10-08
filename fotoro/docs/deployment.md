@@ -17,7 +17,27 @@ Hono Worker with D1 and private R2. The upstream Ente application is a reference
   require separate preview consent and explicitly configured provider/work limits;
   that route remains disabled by default.
 
-The last verified active Worker is `5314d5c1-6d9b-4081-9a6b-f27649fd0123`
+### October 7 PR 48 checkpoint
+
+The active Worker is `ba359106-30ac-4ac2-8f6a-0523c523a95a` at 100%,
+deployment `2f0d0d56-0cce-4d76-83e4-d2aa52f4b9b8`. Qualified PR 48 head
+`f302ca09f30a2df7d65fe0d7d92e38870277ac20` completed all 23 checks; guarded
+merge `2d14f8ba456fed053d2a0bd829e646c2172b1abc` has the same tree. All 46
+non-HTML asset digests and root/Photos/Saved HTML match the fresh fixture-free
+build. Seven auth/route/association checks and the service check pass. Startup
+passes all three cases at 436,081 bytes across nine chunks. Production bindings
+and runtime are unchanged, no migrations were needed, and optional inference
+remains disabled. Production Photos and Saved entry render without console
+errors. Preserve PR 47's `5314d5c1-6d9b-4081-9a6b-f27649fd0123` for rollback.
+
+The release adds source-bound capture details to native and web Info, local-only
+original-header reads, authoritative edited Photos dates/GPS, and adaptive native
+Places clusters. Physical iCloud, background, passkey and family acceptance remain
+open; geographic clusters do not establish resolved city identities.
+
+### Earlier PR 47 checkpoint
+
+The previously verified Worker was `5314d5c1-6d9b-4081-9a6b-f27649fd0123`
 at 100%, deployment `910a7e1e-e2f7-4d19-8984-4bbd1bb72985` (2026-10-07,
 merged [PR 47](https://github.com/dakshbhatia/fotoro/pull/47)). All 45 non-HTML
 asset digests match the qualified build; Photos and Saved HTML routes match the
@@ -86,7 +106,21 @@ personal-account sync or original restoration on a physical phone.
 
 ## Native distribution
 
-The last verified TestFlight build is 43 (0.1.0), independently read `VALID` and
+The last verified TestFlight build is 44 (0.1.0), independently read `VALID` and
+`IN_BETA_TESTING` on October 7. The existing internal group shows Testing for 44,
+with the same one tester as 43. Only this build's assignment was added; tester
+membership is unchanged. What to Test notes and their build linkage match
+independent readback. All 154 native inputs and release tools match qualified head
+`f302ca09f30a2df7d65fe0d7d92e38870277ac20`, the immutable archive and the audited
+Organizer distribution IPA. Both Xcode 26 hosted suites and Xcode 27 local suites
+pass. Organizer used the existing cloud-managed distribution identity after CLI
+export could not see the account. Apple accepted the pinned resource-stub dSYM
+warning; main binary/static runtime and matching dSYM pass the release audit.
+The same known encryption and approved France exclusion qualify documentation
+exemption metadata; the binary declaration is unchanged and no new declaration
+was created. Physical installation and installed-device acceptance remain open.
+
+The preceding verified TestFlight build is 43 (0.1.0), independently read `VALID` and
 `IN_BETA_TESTING` on October 7. Its existing internal group auto-linked it, with
 the same one tester and no assignment or permission mutation. What to Test notes
 and their exact build linkage match independent readback. Source

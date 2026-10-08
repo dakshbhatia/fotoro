@@ -5,6 +5,38 @@ work; [product](product.md) owns the intended experience. Earlier measurements a
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
 
+## October 7 production PR 48 and TestFlight 44 checkpoint
+
+Qualified head `f302ca09f30a2df7d65fe0d7d92e38870277ac20` completed all 23
+checks: eight success and 15 intentional skips. Guarded merge
+`2d14f8ba456fed053d2a0bd829e646c2172b1abc` has the same tree. Hosted Xcode 26
+full native executes 444 tests: 438 pass and six opt-in/Photos-permission cases
+skip. Preview executes 134: 129 pass and five such cases skip. Local Xcode 27
+with real PhotoKit metadata opt-in passes 443 full tests and 133 preview tests,
+with one existing Vision classifier skip in each. Both SDKs compile the metadata
+reader; animation observations are omitted where the public SDK symbol is absent.
+
+Worker `ba359106-30ac-4ac2-8f6a-0523c523a95a` serves 100%, deployment
+`2f0d0d56-0cce-4d76-83e4-d2aa52f4b9b8`. All 46 non-HTML asset digests and
+root/Photos/Saved HTML match the fresh fixture-free build. Seven route/auth/AASA
+checks and the service check pass; eight bindings and runtime are unchanged.
+Startup passes all three cases at 436,081 bytes across nine chunks. No migration
+was needed and optional inference remains disabled. Production Photos and Saved
+entry render without console errors. PR 47's preceding Worker is retained for
+rollback. Exact-head web/API counts are 534 web passes plus one pre-build startup
+skip, 98 API passes, nine contract passes and five isolated exchange passes.
+
+Build 44 (0.1.0) is independently read `VALID` and `IN_BETA_TESTING`. The existing
+internal group visibly shows Testing, with the same one tester as 43. The exact
+group assignment, membership, testing notes and notes/build linkage are verified.
+All 154 native inputs and release tools remain unchanged before/after archive,
+distribution export and upload. Full archive and Organizer IPA audits pass;
+Apple accepted the pinned resource-stub dSYM warning while main/static-runtime
+dSYM pairing passes. The known standard encryption and approved France exclusion
+are unchanged; documentation-exemption metadata is read back and no declaration
+was created. These checks qualify availability. Physical installation, iCloud,
+VoiceOver, background work and family-device acceptance remain open.
+
 ## October 7 production PR 47 and TestFlight 43 checkpoint
 
 Qualified head `332891661eb37927a55ff2101ae0cb0668281dd8` passed all 23 checks
@@ -74,8 +106,8 @@ physical-device frame pacing, iCloud behavior, VoiceOver or resolved city names.
 Local checks on the metadata/Places source pass nine contract tests (five existing
 wire cases and four capture-reader cases), all 535 web tests, TypeScript and the
 web build. The fresh emitted startup check passes all three cases at 436,081
-static JavaScript bytes across nine chunks. These checks do not change the
-production PR 47 or TestFlight 43 checkpoint above or qualify a new native build.
+static JavaScript bytes across nine chunks. Distribution audits and Apple
+readbacks qualify the PR 48/TestFlight 44 availability checkpoint above.
 
 Capture details use account-private, original-digest-bound `fotoro.capture.v1:`
 facts inside the unchanged `PhotoAnnotationsV1` format. A group contains one
