@@ -697,34 +697,63 @@ final class RecoveryTests: XCTestCase {
     }
   }
   @MainActor func testPasskeyTaskCancellationReleasesCeremonyAndIgnoresOldControllerCallback() async throws {
-    let firstStarted = expectation(description: "First ceremony started")
-    let secondStarted = expectation(description: "Replacement ceremony started")
+    // Wait for the injected controller callback, not a hosted scheduling deadline.
+    // Finishing each stream when its task exits also reports an early failure.
+    let firstStarted = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    let secondStarted = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    var firstEvents = firstStarted.stream.makeAsyncIterator()
+    var secondEvents = secondStarted.stream.makeAsyncIterator()
     var controllers: [ASAuthorizationController] = [], cancellations = 0
     let ceremony = PasskeyCeremony(performRequests: { controller in
       controllers.append(controller)
-      (controllers.count == 1 ? firstStarted : secondStarted).fulfill()
+      (controllers.count == 1 ? firstStarted.continuation : secondStarted.continuation).yield(())
     }, cancelRequest: { _ in cancellations += 1 })
     func request() -> ASAuthorizationRequest {
       ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: "fotoro.cloud")
         .createCredentialAssertionRequest(challenge: Data([1]))
     }
-    let first = Task { try await ceremony.perform(request()) }
-    await fulfillment(of: [firstStarted], timeout: 2)
+    let first = Task {
+      defer { firstStarted.continuation.finish() }
+      return try await ceremony.perform(request())
+    }
+    var firstStartupTimedOut = false
+    let firstWatchdog = Task {
+      do { try await Task.sleep(for: .seconds(30)) } catch { return }
+      guard !Task.isCancelled else { return }
+      firstStartupTimedOut = true
+      first.cancel(); firstStarted.continuation.finish()
+    }
+    defer { firstWatchdog.cancel(); first.cancel() }
+    let firstSignal = await firstEvents.next()
+    firstWatchdog.cancel()
+    try XCTUnwrap(firstStartupTimedOut ? nil : firstSignal, "First ceremony exited or timed out before starting its controller")
+    let firstController = try XCTUnwrap(controllers.first)
     first.cancel()
     do { _ = try await first.value; XCTFail("Cancelled ceremony returned a credential") }
     catch { XCTAssertTrue(error is CancellationError) }
     XCTAssertEqual(cancellations, 1)
     var secondCompleted = false
     let second = Task {
-      defer { secondCompleted = true }
+      defer { secondCompleted = true; secondStarted.continuation.finish() }
       return try await ceremony.perform(request())
     }
-    await fulfillment(of: [secondStarted], timeout: 2)
-    ceremony.authorizationController(controller: controllers[0], didCompleteWithError:
+    var secondStartupTimedOut = false
+    let secondWatchdog = Task {
+      do { try await Task.sleep(for: .seconds(30)) } catch { return }
+      guard !Task.isCancelled else { return }
+      secondStartupTimedOut = true
+      second.cancel(); secondStarted.continuation.finish()
+    }
+    defer { secondWatchdog.cancel(); second.cancel() }
+    let secondSignal = await secondEvents.next()
+    secondWatchdog.cancel()
+    try XCTUnwrap(secondStartupTimedOut ? nil : secondSignal, "Replacement ceremony exited or timed out before starting its controller")
+    let secondController = try XCTUnwrap(controllers.count == 2 ? controllers.last : nil)
+    ceremony.authorizationController(controller: firstController, didCompleteWithError:
       NSError(domain: ASAuthorizationError.errorDomain, code: ASAuthorizationError.Code.canceled.rawValue))
     await Task.yield()
     XCTAssertFalse(secondCompleted)
-    ceremony.authorizationController(controller: controllers[1], didCompleteWithError:
+    ceremony.authorizationController(controller: secondController, didCompleteWithError:
       NSError(domain: ASAuthorizationError.errorDomain, code: ASAuthorizationError.Code.failed.rawValue))
     do { _ = try await second.value; XCTFail("Failed replacement returned a credential") }
     catch let error as ASAuthorizationError { XCTAssertEqual(error.code, .failed) }
