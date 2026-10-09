@@ -182,7 +182,7 @@ test("a returned contribution keeps Choose photos available for a second selecti
   let adds = 0;
   const actions = AlbumContributionActions({albumId: id, chosen: 1, busy: false, onChoosePhotos: reopened.onChoosePhotos, onAdd() {adds++;}});
   const children = actions.type === "button" ? [actions] : Children.toArray(actions.props.children).filter(isValidElement) as ReactElement<any>[];
-  const choose = children.find(child => child.props.children === "Choose photos");
+  const choose = children.find(child => child.props.children === "From Saved");
   assert.ok(choose, "Choose photos must remain available alongside Add");
   const add = children.find(child => child.props.className === "primary-action");
   assert.ok(add); add.props.onClick(); assert.equal(adds, 1);
