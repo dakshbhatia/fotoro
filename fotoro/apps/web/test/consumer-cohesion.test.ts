@@ -6,7 +6,7 @@ import {renderToStaticMarkup} from "react-dom/server";
 import {subscribeSavedRefresh} from "../src/library/consumer-refresh";
 import {photoChangeState, type ConsumerPhotoChanges} from "../src/library/consumer-changes";
 import {requireVault} from "../src/vault/vault";
-import {LocalTrial} from "../src/local/LocalTrial";
+import {LocalTrial, bestShotSelectionRequestCurrent} from "../src/local/LocalTrial";
 
 test("foreground and reconnect read refresh survive paused writes, while hidden and withdrawn accounts stay quiet", () => {
   const windowTarget = new EventTarget(), documentTarget = Object.assign(new EventTarget(), {visibilityState: "hidden"});
@@ -50,4 +50,53 @@ test("viewer correction state follows the exact original and exposes a conflicti
   assert.equal(photoChangeState({...changes, errorSource: undefined}, "a", "digest-a", "owner").error, "Storage is unavailable");
   assert.equal(photoChangeState({...changes, pending: [], errorSource: undefined}, "a", "digest-a", "owner").error, "");
   assert.deepEqual(photoChangeState({...changes, current: () => false}, "a", "digest-a", "owner"), {pending: false, conflict: false, busy: false, error: ""});
+});
+
+test("loaded Saved photos enter the browse grid, and a stale account returns to first use", () => {
+  let current = true;
+  const ownedPhotos = {accountId: "owner", token: {}, current: () => current,
+    photos: [{manifest: {photoId: "saved-one", ownerAccountId: "owner"},
+      metadata: {filename: "saved.jpg", sourceDate: "2026-10-06", dateSource: "import", originalSha256: "A".repeat(43)}}],
+    preview: async () => new Blob()};
+  const render = () => renderToStaticMarkup(createElement(LocalTrial, {onBackup() {}, ownedPhotos: ownedPhotos as any}));
+  const markup = render();
+  assert.match(markup, /aria-label="Photo grid"/);
+  assert.match(markup, /aria-label="Search photos"/);
+  assert.match(markup, /aria-pressed="false"[^>]*>Select<\/button>/, "Saved-only browsing keeps the primary selection action visible");
+  assert.doesNotMatch(markup, /Open photos from this device/);
+  current = false;
+  const stale = render();
+  assert.match(stale, /Open photos from this device/);
+  assert.doesNotMatch(stale, /aria-label="Photo grid"|aria-label="Search photos"/);
+});
+
+
+test("a delayed best-shot selection follows user intent across metadata refreshes and manual edits", async () => {
+  const source = {};
+  let selectionRevision = 0;
+  const request = {scope: "trip", source, selectionRevision};
+  let selected = new Set(["manual"]);
+  let complete!: (recommendations: string[]) => void;
+  const recommendations = new Promise<string[]>(resolve => {complete = resolve;});
+  const apply = recommendations.then(ids => {
+    if (bestShotSelectionRequestCurrent(request, "trip", source, selectionRevision)) selected = new Set([...selected, ...ids]);
+  });
+  selected = new Set(selected); // OCR refreshed derived records without user selection changes.
+  assert.equal(bestShotSelectionRequestCurrent(request, "trip", source, selectionRevision), true);
+  complete(["recommended"]);
+  await apply;
+  assert.deepEqual([...selected], ["manual", "recommended"], "Metadata updates preserve additive completion");
+
+  for (const edits of [[[]], [["different-manual"]], [["different-manual"], ["manual"]]]) {
+    selected = new Set(["manual"]);
+    const pendingRequest = {scope: "trip", source, selectionRevision};
+    const pending = Promise.resolve(["recommended"]).then(ids => {
+      if (bestShotSelectionRequestCurrent(pendingRequest, "trip", source, selectionRevision)) selected = new Set([...selected, ...ids]);
+    });
+    for (const ids of edits) {selected = new Set(ids); selectionRevision++;}
+    await pending;
+    assert.deepEqual([...selected], edits.at(-1), "Pending completion cannot undo Clear or edit-away-and-back intent");
+  }
+  assert.equal(bestShotSelectionRequestCurrent(request, "different filter", source, request.selectionRevision), false);
+  assert.equal(bestShotSelectionRequestCurrent(request, "trip", {}, request.selectionRevision), false);
 });

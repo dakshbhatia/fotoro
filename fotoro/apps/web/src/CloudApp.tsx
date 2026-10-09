@@ -1132,8 +1132,9 @@ export default function CloudApp({
               <button disabled={busy || sharingOriginals} onClick={() => {if (!running.current) setSelected(new Set());}}>Clear</button>
               <AlbumContinuation destination={albumDestination} photos={chosen} disabled={busy || preparingOriginals || sharingOriginals} onContinue={(items, albumId) => {if (!running.current) openAlbums(items, albumId);}} />
               <button ref={originalButton} className="primary-action" disabled={busy || preparingOriginals || sharingOriginals} onClick={() => void prepareSelectedOriginals()}>{preparingOriginals ? "Preparing…" : "Share"}</button>
+              {!publicDemo && !albumDestination?.current() && <button disabled={busy || preparingOriginals || sharingOriginals} onClick={() => {if (!running.current) openAlbums(chosen);}}>Add to trip</button>}
               <details className="selection-more" onKeyDown={event => {if (event.key === "Escape") {event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();}}}>
-                <summary>More</summary><div><button disabled={busy || preparingOriginals || sharingOriginals} onClick={() => {if (!running.current) openSharing(chosen);}}>Share in Fotoro</button>{!publicDemo && <button disabled={busy || preparingOriginals || sharingOriginals} onClick={() => {if (!running.current) openAlbums(chosen);}}>Add to live album</button>}</div>
+                <summary>More</summary><div><button disabled={busy || preparingOriginals || sharingOriginals} onClick={() => {if (!running.current) openSharing(chosen);}}>Share in Fotoro</button></div>
               </details>
             </div>}
             <input

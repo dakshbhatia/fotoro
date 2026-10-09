@@ -358,6 +358,7 @@ struct RecentPhotosView: View {
   @State private var pendingPlace: PhotoPlaceItem?
   @Environment(\.scenePhase) private var scenePhase
   @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
   private var photoColumns: [GridItem] { [GridItem(.adaptive(minimum: 160, maximum: 260), spacing: 3)] }
   private var allPhotos: Bool { scope == .photos }
@@ -961,10 +962,10 @@ struct RecentPhotosView: View {
       HStack(spacing: 12) {
         if bestShots.showing || preparingBestShots {
           Button("All matches", action: cancelBestShots)
-            .accessibilityIdentifier("find.allMatches")
+            .frame(minHeight: 44).accessibilityIdentifier("find.allMatches")
         } else {
-          Button("Best shots", systemImage: "sparkles", action: beginBestShots)
-            .disabled(searchMatchCount == 0 || preparingShare)
+          Button("Select best shots", systemImage: "sparkles", action: beginBestShots)
+            .frame(minHeight: 44).disabled(searchMatchCount == 0 || preparingShare)
             .accessibilityIdentifier("find.bestShots")
         }
         Spacer(minLength: 0)
@@ -980,15 +981,10 @@ struct RecentPhotosView: View {
           Text("\(result.recommendations.unassessed) previews unavailable. All matches keeps every photo reviewable.")
             .font(.caption).foregroundStyle(.secondary)
         }
-        if !result.recommendations.ids.isEmpty {
-          Button("Select best shots", action: selectBestShots)
-            .buttonStyle(.borderedProminent).disabled(preparingShare || showShare)
-            .accessibilityIdentifier("find.selectBestShots")
-        }
       }
       if let error = bestShots.error {
         Text(error).font(.caption).foregroundStyle(.secondary)
-        Button("Try again", action: beginBestShots)
+        Button("Try again", action: beginBestShots).frame(minHeight: 44)
       }
     }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.bottom, 12)
   }
@@ -1026,7 +1022,10 @@ struct RecentPhotosView: View {
     let library = search.libraryGeneration
     let response = search.response.generation
     let meaning = search.acceptedMeaningID
+    let selection = selectedPhotos.mapValues(\.source)
+    let selectionMode = selecting
     #if !FOTORO_LOCAL_PREVIEW
+      let savedSelection = selectedSavedPhotos.ids
       let token = searchTaskID
       let hits = searchHits
       let originalServices = services
@@ -1125,6 +1124,14 @@ struct RecentPhotosView: View {
             })
           }, valid: valid)
         #endif
+        preparingBestShots = false
+        await bestShots.completedReview()
+        try Task.checkCancellation()
+        guard valid(), selection == selectedPhotos.mapValues(\.source), selectionMode == selecting else { return }
+        #if !FOTORO_LOCAL_PREVIEW
+          guard savedSelection == selectedSavedPhotos.ids else { return }
+        #endif
+        selectBestShots()
       } catch is CancellationError {
         if bestShotsRequest == request { cancelBestShots() }
       } catch {
@@ -1167,23 +1174,61 @@ struct RecentPhotosView: View {
     #endif
   }
   private func dayHeader(_ group: PhotoBrowseGroup) -> some View {
-    dayHeader(start: group.start, count: group.sources.count, moment: groupMoments)
+    dayHeader(start: group.start, count: group.sources.count, moment: groupMoments, sources: group.sources)
   }
-  private func dayHeader(start: Date?, count: Int, moment: Bool = false) -> some View {
+  private func dayHeader(start: Date?, count: Int, moment: Bool = false,
+    sources: [RecentPhotoSource]? = nil) -> some View {
     HStack(spacing: 8) {
-      Text(dayTitle(start)).font(.headline)
-      if moment, let start {
-        Text(start, format: .dateTime.hour().minute()).font(.subheadline).foregroundStyle(.secondary)
+      HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 4) {
+          Text(dayTitle(start)).font(.headline).fixedSize(horizontal: false, vertical: true)
+          if moment, let start {
+            Text(start, format: .dateTime.hour().minute()).font(.subheadline).foregroundStyle(.secondary)
+          }
+        }
+        Spacer(minLength: 8)
+        Text(count, format: .number).font(.caption).monospacedDigit().foregroundStyle(.secondary)
+          .accessibilityLabel("\(count) photos")
+      }.accessibilityElement(children: .combine).accessibilityAddTraits(.isHeader)
+      if let sources {
+        Button { selectGroup(sources) } label: {
+          Image(systemName: "checkmark.circle").font(.title3).frame(width: 44, height: 44)
+        }.buttonStyle(.plain).disabled(preparingShare || showShare)
+          .accessibilityLabel(moment ? "Select moment" : "Select photos from \(dayTitle(start))")
+          .accessibilityHint("Adds these \(count) visible photos to your selection")
+          .accessibilityIdentifier("gallery.group.select")
       }
-      Spacer(minLength: 8)
-      Text(count, format: .number).font(.caption).monospacedDigit().foregroundStyle(.secondary)
-        .accessibilityLabel("\(count) photos")
-    }.padding(.horizontal, 16).padding(.vertical, 12)
+    }.padding(.horizontal, 16).padding(.vertical, sources == nil ? 12 : 0)
       .background {
         if reduceTransparency { Color.black }
         else { Rectangle().fill(.ultraThinMaterial) }
       }
-      .accessibilityElement(children: .combine).accessibilityAddTraits(.isHeader)
+  }
+  private func selectGroup(_ sources: [RecentPhotoSource]) {
+    guard !preparingShare, !showShare, scenePhase == .active else { return }
+    queryFocused = false
+    let device = homePhotoLookup
+    for source in sources {
+      #if !FOTORO_LOCAL_PREVIEW
+      if source.id.hasPrefix("saved:") {
+        let id = String(source.id.dropFirst("saved:".count))
+        guard !selectedSavedPhotos.contains(id), let services,
+          let photo = try? services.consumerSavedPhoto(id),
+          photo.metadata.originalSha256 + "|" + photo.manifest.metadataRepresentation.ciphertextSha256 == source.revision
+        else { continue }
+        toggleSavedSelection(photo)
+        continue
+      }
+      let id = allPhotos ? String(source.id.dropFirst("device:".count)) : source.id
+      #else
+      let id = source.id
+      #endif
+      guard !selected.contains(id), let photo = device[id], photo.sourceRevision == source.revision,
+        store.validatePresentation(viewer: [], selection: [RecentPhotoSource(photo)], share: []).selectedIDs.contains(id)
+      else { continue }
+      toggleSelection(photo)
+    }
+    if selectedCount > 0 { selecting = true }
   }
   private func dayTitle(_ date: Date?) -> String {
     guard let date else { return "Date unavailable" }
@@ -1401,8 +1446,8 @@ struct RecentPhotosView: View {
         services.map({ $0.session.accountId == nil
           || NativeBackupPolicy.allowsPrivatePhotos(accountId: $0.session.accountId, fixture: $0.session.fixture) }) != false {
         Button("Turn on sync", systemImage: "icloud.and.arrow.up") { openPhotoSync(startAutomaticSync: true) }
-          .font(.subheadline.weight(.semibold)).buttonStyle(.borderedProminent)
-          .frame(minHeight: 44).fixedSize(horizontal: false, vertical: true)
+          .labelStyle(.iconOnly).font(.title3)
+          .frame(width: 44, height: 44)
           .accessibilityHint("Choose to save your photos across your devices")
           .accessibilityIdentifier("home.sync")
       } else {
@@ -1414,21 +1459,36 @@ struct RecentPhotosView: View {
     }
   #endif
   private var selectionTray: some View {
-    ViewThatFits(in: .horizontal) {
-      HStack(spacing: 12) {
-        selectionSummary
-        Spacer(minLength: 0)
-        selectionActions
+    Group {
+      if dynamicTypeSize.isAccessibilitySize {
+        HStack(spacing: 12) {
+          selectionSummary
+          Spacer(minLength: 0)
+          Menu { selectionActions } label: {
+            Label("Actions", systemImage: "ellipsis").labelStyle(.iconOnly)
+              .frame(width: 44, height: 44)
+          }
+            .accessibilityLabel("Selected photo actions")
+            .accessibilityIdentifier("selection.actions")
+        }
+      } else {
+        ViewThatFits(in: .horizontal) {
+          HStack(spacing: 12) {
+            selectionSummary
+            Spacer(minLength: 0)
+            selectionActions
+          }
+          VStack(alignment: .leading, spacing: 8) {
+            selectionSummary
+            HStack(spacing: 12) { selectionActions; Spacer(minLength: 0) }
+          }
+          VStack(alignment: .leading, spacing: 8) {
+            selectionSummary
+            selectionActions
+          }
+        }
       }
-      VStack(alignment: .leading, spacing: 8) {
-        selectionSummary
-        HStack(spacing: 12) { selectionActions; Spacer(minLength: 0) }
-      }
-      VStack(alignment: .leading, spacing: 8) {
-        selectionSummary
-        selectionActions
-      }
-    }.padding(14).glassEffect(.regular, in: .rect(cornerRadius: 24))
+    }.controlSize(.large).padding(14).glassEffect(.regular, in: .rect(cornerRadius: 24))
       .padding(.horizontal, 12).padding(.bottom, 8)
   }
   private var selectionSummary: some View {
@@ -1441,21 +1501,24 @@ struct RecentPhotosView: View {
       #if !FOTORO_LOCAL_PREVIEW
         selectedSavedPhotos.removeAll()
       #endif
-    }.buttonStyle(.bordered).fixedSize(horizontal: true, vertical: false).disabled(selectedCount == 0 || preparingShare)
+    }.buttonStyle(.bordered).fixedSize(horizontal: true, vertical: false).frame(minHeight: 44)
+      .disabled(selectedCount == 0 || preparingShare)
       .accessibilityIdentifier("selection.clear")
     #if !FOTORO_LOCAL_PREVIEW
-    Button(selected.isEmpty && selectedSavedPhotos.count > 0 ? "Saved" : "Save", systemImage: "icloud.and.arrow.up") {
-      reviewSave(selectedPhotos.values.map(\.source).sorted { $0.id < $1.id })
-    }.buttonStyle(.borderedProminent).fixedSize(horizontal: true, vertical: false).accessibilityIdentifier("selection.save")
-      .disabled(selected.isEmpty || preparingShare || showShare)
     Button("Share", systemImage: "square.and.arrow.up", action: shareSelectedOriginals)
-      .buttonStyle(.bordered).fixedSize(horizontal: true, vertical: false)
+      .buttonStyle(.borderedProminent).fixedSize(horizontal: true, vertical: false).frame(minHeight: 44)
       .disabled(selectedCount == 0 || preparingShare || showShare)
     if selectedSavedPhotos.count > 0 {
-      Button(selected.isEmpty ? "Trip" : "Trip · \(selectedSavedPhotos.count) Saved", systemImage: "rectangle.stack") { openAlbums() }
-        .buttonStyle(.bordered).disabled(preparingShare || showShare)
+      Button(selected.isEmpty ? "Add to trip" : "Add Saved to trip", systemImage: "rectangle.stack") { openAlbums() }
+        .buttonStyle(.bordered).frame(minHeight: 44).disabled(preparingShare || showShare)
         .accessibilityHint(selected.isEmpty ? "Add the selected Saved photos to a trip" : "Only the selected Saved photos will be added. Save device photos to include them.")
         .accessibilityIdentifier("selection.album")
+    }
+    if !selected.isEmpty {
+      Button("Save", systemImage: "icloud.and.arrow.up") {
+        reviewSave(selectedPhotos.values.map(\.source).sorted { $0.id < $1.id })
+      }.buttonStyle(.bordered).fixedSize(horizontal: true, vertical: false).frame(minHeight: 44)
+        .accessibilityIdentifier("selection.save").disabled(preparingShare || showShare)
     }
     #else
     Button("Share", systemImage: "square.and.arrow.up", action: shareSelectedDevicePhotos)
