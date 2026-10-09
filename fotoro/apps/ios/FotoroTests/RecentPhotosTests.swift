@@ -1,3 +1,4 @@
+import GRDB
 import Photos
 import UIKit
 import XCTest
@@ -7,8 +8,10 @@ import XCTest
 final class RecentPhotosTests: XCTestCase {
   @MainActor func testThumbnailCacheReusesOnlyMatchingPreviewAndRejectsWithdrawnAccessAndOldCallbacks() {
     var permission = PHAuthorizationStatus.authorized
-    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in [] })
     let source = RecentPhotoSource(id: "photo", revision: "current")
+    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in [] },
+      sourceRevisions: { _ in [source.id: source.revision] })
+    defer { store.pauseAnalysis() }
     let target = CGSize(width: 384, height: 384)
     let image = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).image { context in
       UIColor.red.setFill(); context.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
@@ -18,7 +21,7 @@ final class RecentPhotosTests: XCTestCase {
     XCTAssertTrue(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true) === image)
     XCTAssertNil(store.cachedThumbnail(for: source, targetSize: CGSize(width: 512, height: 512), networkAllowed: true))
     XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: false))
-    XCTAssertNil(store.cachedThumbnail(for: RecentPhotoSource(id: "photo", revision: "edited"), targetSize: target, networkAllowed: true))
+    XCTAssertNil(store.cachedThumbnail(for: RecentPhotoSource(id: source.id, revision: "edited"), targetSize: target, networkAllowed: true))
     permission = .denied
     XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true))
     permission = .authorized
@@ -32,9 +35,11 @@ final class RecentPhotosTests: XCTestCase {
     let limited = store.thumbnailGeneration
     store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: limited)
     store.restoreAccess()
-    defer { store.pauseAnalysis() }
-    store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: limited)
-    XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true), "A Photos refresh must clear thumbnails and reject its old callbacks")
+    XCTAssertNotEqual(store.thumbnailGeneration, limited)
+    let late = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).image { _ in }
+    store.cacheThumbnail(late, for: source, targetSize: target, networkAllowed: true, generation: limited)
+    XCTAssertTrue(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true) === image,
+      "An unchanged refresh must retain its warm thumbnail and reject old callbacks")
   }
   @MainActor func testThumbnailCacheDoesNotRetainViewerSizedImages() {
     let store = RecentPhotosStore(authorization: { .authorized }, readPhotos: { _ in [] })
@@ -43,6 +48,57 @@ final class RecentPhotosTests: XCTestCase {
     let target = CGSize(width: 1600, height: 1600)
     store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: store.thumbnailGeneration)
     XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true))
+  }
+  @MainActor func testThumbnailRefreshRetainsUnchangedButEvictsChangedAndRemovedSources() {
+    let source = RecentPhotoSource(id: "photo", revision: "current")
+    var revision: String? = source.revision
+    let store = RecentPhotosStore(authorization: { .authorized }, readPhotos: { _ in [] },
+      sourceRevisions: { ids in revision.map { value in Dictionary(uniqueKeysWithValues: ids.map { ($0, value) }) } ?? [:] })
+    store.restoreAccess()
+    defer { store.pauseAnalysis() }
+    let target = CGSize(width: 384, height: 384)
+    let image = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).image { _ in }
+    func warm() {
+      store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: store.thumbnailGeneration)
+      XCTAssertTrue(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true) === image)
+    }
+    warm()
+    store.refresh()
+    XCTAssertTrue(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true) === image)
+    for nextRevision in ["edited", nil] as [String?] {
+      let generation = store.thumbnailGeneration
+      revision = nextRevision
+      store.refresh()
+      XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true))
+      store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: generation)
+      XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true))
+      revision = source.revision
+      store.refresh()
+      XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true), "Withdrawn images must not return when their source becomes readable again")
+      warm()
+    }
+  }
+  @MainActor func testThumbnailRefreshRejectsAccessChangedDuringRevisionValidation() {
+    var permission = PHAuthorizationStatus.authorized
+    var withdrawDuringRead = false
+    let source = RecentPhotoSource(id: "photo", revision: "current")
+    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in [] },
+      sourceRevisions: { _ in
+        if withdrawDuringRead { permission = .limited }
+        return [source.id: source.revision]
+      })
+    defer { store.pauseAnalysis() }
+    let target = CGSize(width: 384, height: 384)
+    let image = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).image { _ in }
+    let generation = store.thumbnailGeneration
+    store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: generation)
+    withdrawDuringRead = true
+    store.restoreAccess()
+    XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true))
+    permission = .authorized
+    store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: generation)
+    XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true),
+      "A permission transition during refresh must evict retained images and fence old callbacks")
   }
   @MainActor func testUnavailableSavedPreviewCanRetryWithoutUploadingOrReplacingTheOriginal() async throws {
     let services = try await previewServices()
@@ -146,6 +202,84 @@ final class RecentPhotosTests: XCTestCase {
         XCTAssertEqual(try services.store.backupPhoto(photo.id)?.transferState, "received")
       }
     }
+  }
+  @MainActor func testSavedPaginationFindsFavoriteBeyondEmptyFilteredPagesAndStopsAtRawEnd() async throws {
+    let services = try await previewServices()
+    let account = try XCTUnwrap(services.session.accountId)
+    defer { services.vault.lock(); Keychain.remove(account); try? FileManager.default.removeItem(at: services.storageRoot) }
+    let (template, _, _) = try previewPhoto(owner: account)
+    let photos = (0...2000).map { index in
+      var photo = template
+      photo.photoId = String(format: "00000000-0000-4000-8000-%012d", index)
+      photo.manifest.photoId = photo.id
+      photo.manifest.metadataRepresentation.binding.photoId = photo.id
+      for representation in photo.manifest.representations.indices {
+        photo.manifest.representations[representation].binding.photoId = photo.id
+      }
+      let original = Data(photo.id.utf8)
+      photo.metadata.originalSha256 = original.digest
+      photo.metadata.originalBytes = original.count
+      if index == 0 { photo.transferState = "pending" }
+      return photo
+    }
+    let peerAccount = Wire.id()
+    let peers = (0...1000).map { index in
+      var photo = template
+      photo.photoId = String(format: "10000000-0000-4000-8000-%012d", index)
+      photo.manifest.photoId = photo.id
+      photo.manifest.ownerAccountId = peerAccount
+      photo.metadata.sourceDate = "2099-01-01T00:00:00.000Z"
+      return photo
+    }
+    let oldest = try XCTUnwrap(photos.last)
+    let catalog = services.store
+    try await catalog.database.write { db in
+      for photo in photos + peers { try catalog.put(photo, db: db) }
+    }
+    XCTAssertTrue(try catalog.photos(limit: 1000).allSatisfy { $0.manifest.ownerAccountId == peerAccount },
+      "The raw first page contains only peer photos; filtering after its limit would hide every owned photo")
+    let plan = try await catalog.database.read { db in
+      try Row.fetchAll(db, sql: """
+        EXPLAIN QUERY PLAN SELECT value FROM photos
+        WHERE json_extract(CAST(value AS TEXT),'$.manifest.ownerAccountId')=?
+        ORDER BY sourceDate DESC,id LIMIT 1000
+        """, arguments: [account]).map { row -> String in row["detail"] }
+    }
+    XCTAssertTrue(plan.contains { $0.contains("photos_owned_browse") }, plan.joined(separator: "; "))
+    XCTAssertFalse(plan.contains { $0.contains("TEMP B-TREE") }, plan.joined(separator: "; "))
+    var favorite = PhotoAnnotationsV1(photoId: oldest.id, originalSha256: oldest.metadata.originalSha256)
+    favorite.favorite = true
+    try AnnotationCrypto.validate(favorite, photo: oldest, accountId: account)
+    try services.annotations.ledger.edit(favorite, photo: oldest, bundle: services.vault.requireBundle(),
+      card: services.session.requireCard(account))
+    try services.reload()
+    XCTAssertEqual(services.photos.count, 1000)
+    XCTAssertTrue(services.photos.allSatisfy { $0.manifest.ownerAccountId == account })
+    XCTAssertEqual(services.photos.first?.transferState, "pending", "Ownership paging must preserve existing transfer-state visibility")
+    XCTAssertTrue(services.photos.filter { services.annotation($0).favorite == true }.isEmpty)
+    XCTAssertEqual(try SavedLibraryPageLoading.load(services, expected: SavedLibraryPageID(services), isActive: true), true)
+    XCTAssertEqual(services.photos.count, 2000, "Each footer task must load at most one bounded page")
+    XCTAssertTrue(services.photos.filter { services.annotation($0).favorite == true }.isEmpty)
+    XCTAssertEqual(try SavedLibraryPageLoading.load(services, expected: SavedLibraryPageID(services), isActive: true), true)
+    XCTAssertEqual(services.photos.filter { services.annotation($0).favorite == true }.map(\.id), [oldest.id])
+    XCTAssertEqual(try SavedLibraryPageLoading.load(services, expected: SavedLibraryPageID(services), isActive: true), false)
+    XCTAssertEqual(Set(services.photos.map(\.id)).count, 2001)
+    XCTAssertEqual(try catalog.consumerCommittedCount(accountId: peerAccount), peers.count,
+      "Filtering the owned projection must preserve shared catalog rows")
+  }
+  @MainActor func testSavedPaginationRejectsInactiveOrReplacedCatalogAndLockedAccount() async throws {
+    let services = try await previewServices()
+    let account = try XCTUnwrap(services.session.accountId)
+    defer { services.vault.lock(); Keychain.remove(account); try? FileManager.default.removeItem(at: services.storageRoot) }
+    let request = SavedLibraryPageID(services)
+    XCTAssertNil(try SavedLibraryPageLoading.load(services, expected: request, isActive: false))
+    try services.reload()
+    XCTAssertNil(try SavedLibraryPageLoading.load(services, expected: request, isActive: true),
+      "An older catalog task must not consume the replacement cursor")
+    let unlocked = SavedLibraryPageID(services)
+    services.vault.lock()
+    XCTAssertNil(try SavedLibraryPageLoading.load(services, expected: unlocked, isActive: true))
+    XCTAssertTrue(services.photos.isEmpty)
   }
   @MainActor private func previewServices() async throws -> AppServices {
     let configuration = URLSessionConfiguration.ephemeral

@@ -1280,19 +1280,17 @@ enum ReviewedPhotosBackupPolicy {
     UserDefaults.standard.set(url.absoluteString, forKey: "fotoro.api")
   }
   func loadMore() throws {
-    guard let last = photos.last else { return }
-    let page = try store.photos(after: last.id, limit: 1000).filter {
-      $0.manifest.ownerAccountId == session.accountId
-    }
+    guard let account = session.accountId, let last = photos.last,
+      last.manifest.ownerAccountId == account else { return }
+    let page = try store.ownedPhotos(accountId: account, after: last.id, limit: 1000)
     guard !page.isEmpty else { return }
     photos += page
     try reloadAnnotations()
   }
   func reload() throws {
     guard vault.isUnlocked else { return }
-    photos = try store.photos(limit: 1000).filter {
-      $0.manifest.ownerAccountId == session.accountId
-    }
+    if let account = session.accountId { photos = try store.ownedPhotos(accountId: account, limit: 1000) }
+    else { photos = [] }
     try reloadAnnotations()
     refreshConsumerSyncSummary()
   }

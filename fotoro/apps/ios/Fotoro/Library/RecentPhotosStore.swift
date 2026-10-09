@@ -218,6 +218,7 @@ struct PhotoPreviewProgress {
   @ObservationIgnored private var analysisPermitted = true
   @ObservationIgnored private(set) var thumbnailGeneration = UUID()
   @ObservationIgnored private var thumbnailAuthorization: PHAuthorizationStatus?
+  @ObservationIgnored private var thumbnailSources: [NSString: RecentPhotoSource] = [:]
   @ObservationIgnored private let thumbnails: NSCache<NSString, UIImage> = {
     let cache = NSCache<NSString, UIImage>()
     cache.totalCostLimit = 32 * 1024 * 1024
@@ -373,7 +374,7 @@ struct PhotoPreviewProgress {
   }
   func refresh(now: Date = Date()) { refresh(now: now, refreshPicks: true) }
   private func refresh(now: Date, refreshPicks: Bool) {
-    clearThumbnails()
+    refreshThumbnails()
     guard opened else { return }
     browseGeneration = UUID()
     browsePage = UUID()
@@ -405,6 +406,7 @@ struct PhotoPreviewProgress {
     let revisions = !validatesBrowsingSources || ids.isEmpty ? [:] : sourceRevisions(ids)
     guard authorization() == status, RecentPhotosPolicy.canRead(status) else {
       status = authorization()
+      clearThumbnails()
       pauseAnalysis(); picksSnapshot = nil
       photos = []; browseIndices = [:]; recentPhotos = []; browseSource = nil; browseOffset = 0; hasMorePhotos = false
       return
@@ -485,8 +487,9 @@ struct PhotoPreviewProgress {
     }
   }
   func cachedThumbnail(for source: RecentPhotoSource, targetSize: CGSize, networkAllowed: Bool) -> UIImage? {
-    guard thumbnailAccessAllowed(), let key = thumbnailKey(source, targetSize, networkAllowed) else { return nil }
-    return thumbnails.object(forKey: key)
+    guard thumbnailAccessAllowed(), let key = thumbnailKey(source, targetSize, networkAllowed),
+      let image = thumbnails.object(forKey: key), thumbnailSources[key] == source else { return nil }
+    return image
   }
   // Call only for a completed, nondegraded thumbnail, using the generation captured before its request.
   func cacheThumbnail(_ image: UIImage, for source: RecentPhotoSource, targetSize: CGSize,
@@ -496,7 +499,14 @@ struct PhotoPreviewProgress {
     let width = image.size.width * image.scale, height = image.size.height * image.scale
     guard width.isFinite, height.isFinite, width > 0, height > 0, width <= 1024, height <= 1024 else { return }
     let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? Int(ceil(width) * ceil(height) * 4)
+    // NSCache eviction does not notify this index; prune it and keep its own bound.
+    thumbnailSources = thumbnailSources.filter { thumbnails.object(forKey: $0.key) != nil }
+    if thumbnailSources[key] == nil, thumbnailSources.count >= 80, let evicted = thumbnailSources.keys.first {
+      thumbnails.removeObject(forKey: evicted)
+      thumbnailSources.removeValue(forKey: evicted)
+    }
     thumbnails.setObject(image, forKey: key, cost: cost)
+    thumbnailSources[key] = source
   }
   private func thumbnailKey(_ source: RecentPhotoSource, _ target: CGSize, _ networkAllowed: Bool) -> NSString? {
     guard target.width.isFinite, target.height.isFinite,
@@ -510,8 +520,23 @@ struct PhotoPreviewProgress {
     thumbnailAuthorization = permission
     return true
   }
+  private func refreshThumbnails() {
+    // Refreshes fence in-flight requests without discarding unchanged warm tiles.
+    thumbnailGeneration = UUID()
+    guard thumbnailAccessAllowed(), !thumbnailSources.isEmpty else { return }
+    let permission = authorization()
+    let revisions = sourceRevisions(Array(Set(thumbnailSources.values.map(\.id))))
+    guard authorization() == permission, thumbnailAccessAllowed() else { clearThumbnails(); return }
+    for (key, source) in thumbnailSources {
+      if revisions[source.id] != source.revision || thumbnails.object(forKey: key) == nil {
+        thumbnails.removeObject(forKey: key)
+        thumbnailSources.removeValue(forKey: key)
+      }
+    }
+  }
   private func clearThumbnails() {
     thumbnails.removeAllObjects()
+    thumbnailSources.removeAll()
     thumbnailGeneration = UUID()
     thumbnailAuthorization = nil
   }

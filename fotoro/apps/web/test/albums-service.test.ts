@@ -301,3 +301,165 @@ test("overlapping album page requests cannot corrupt the active traversal", () =
   assert.equal(first.photos.length, 1); assert.equal(second.photos.length, 1); assert.equal(second.hasMore, false);
   assert.ok(first.photos[0].metadataKey.some(byte => byte !== 0)); access.dispose();
 }));
+
+test("concurrent access fences share a queued request, but later fences never join an older request", () => scoped(async () => {
+  const data = await fixture(), access = await AlbumAccess.open(overview(data), {});
+  let requests = 0, releaseFirst!: () => void, firstStarted!: () => void;
+  const started = new Promise<void>(resolve => {firstStarted = resolve;});
+  const released = new Promise<void>(resolve => {releaseFirst = resolve;});
+  globalThis.fetch = async path => {
+    assert.ok(String(path).endsWith("/access"));
+    if (++requests === 1) {firstStarted(); await released;}
+    return response(overview(data));
+  };
+  const first = Array.from({length: 12}, () => access.assertAccess());
+  await started;
+  const next = Array.from({length: 12}, () => access.assertAccess());
+  assert.equal(requests, 1, "only one access request may run at a time");
+  releaseFirst();
+  await Promise.all([...first, ...next]);
+  assert.equal(requests, 2, "the later cohort requires its own access request");
+  access.dispose();
+}));
+
+test("a fence queued behind an in-flight check detects revocation instead of reusing its success", () => scoped(async () => {
+  const data = await fixture(), access = await AlbumAccess.open(overview(data), {});
+  let requests = 0, releaseFirst!: () => void, firstStarted!: () => void;
+  const started = new Promise<void>(resolve => {firstStarted = resolve;});
+  const released = new Promise<void>(resolve => {releaseFirst = resolve;});
+  globalThis.fetch = async () => {
+    if (++requests === 1) {firstStarted(); await released; return response(overview(data));}
+    return response({code: "ALBUM_INACTIVE"}, 403);
+  };
+  const first = access.assertAccess(); await started;
+  const next = access.assertAccess(), rejected = assert.rejects(next, /ALBUM_INACTIVE/);
+  releaseFirst(); await first; await rejected;
+  assert.equal(requests, 2); assert.equal(access.signal.aborted, true);
+}));
+
+test("disposal while an access check runs prevents both cohorts from publishing and skips queued network work", () => scoped(async () => {
+  const data = await fixture(), access = await AlbumAccess.open(overview(data), {});
+  let requests = 0, release!: () => void, requestStarted!: () => void;
+  const started = new Promise<void>(resolve => {requestStarted = resolve;});
+  const released = new Promise<void>(resolve => {release = resolve;});
+  globalThis.fetch = async () => {requests++; requestStarted(); await released; return response(overview(data));};
+  const first = access.assertAccess(); await started;
+  const next = access.assertAccess();
+  const results = Promise.allSettled([first, next]);
+  access.dispose(); release();
+  assert.ok((await results).every(result => result.status === "rejected"));
+  assert.equal(requests, 1);
+}));
+
+test("raster revisits keep both access fences and same-source refresh preserves Photo identity and active URLs", () => scoped(async () => {
+  const data = await fixture(), actualRevoke = URL.revokeObjectURL, revoked: string[] = []; let accessRequests = 0;
+  URL.revokeObjectURL = url => {revoked.push(url); actualRevoke(url);};
+  try {
+    globalThis.fetch = async path => {
+      if (String(path).endsWith("/access")) {accessRequests++; return response(overview(data));}
+      if (String(path).startsWith("/v1/albums/")) return response({...overview(data), version: 1, entries: [data.entry], manifests: [data.signed], nextCursor: null, hasMore: false});
+      return new Response(new Uint8Array(data.objects.get(String(path).split("/").at(-1)!)!));
+    };
+    const access = await AlbumAccess.open(overview(data), {}), [photo] = (await access.loadPhotoPage()).photos;
+    const first = new AbortController(), url = await access.leaseRaster(photo, "thumbnail", first.signal);
+    const refreshed = await AlbumAccess.open(overview(data), {}), page = await refreshed.loadPhotoPage();
+    const temporary = page.photos[0], retained = access.adoptRefresh(refreshed, page.photos);
+    assert.equal(retained[0], photo); assert.equal(access.signal.aborted, false); assert.equal(refreshed.signal.aborted, true);
+    assert.ok(photo.metadataKey.some(value => value !== 0)); assert.ok(temporary.metadataKey.every(value => value === 0));
+    assert.deepEqual(revoked, [], "verified unchanged source keeps its displayed URL alive");
+    const prior = accessRequests, second = new AbortController();
+    const nextURL = await access.leaseRaster(photo, "thumbnail", second.signal);
+    assert.equal(accessRequests - prior, 2, "a cache hit checks membership before and after retrieval");
+    first.abort(); assert.deepEqual(revoked, [url]);
+    access.dispose(); assert.deepEqual(revoked, [url, nextURL]); second.abort();
+    assert.equal(revoked.length, 2);
+  } finally {URL.revokeObjectURL = actualRevoke;}
+}));
+
+test("a refreshed signed metadata revision replaces identity, wipes the old key and revokes its visible raster", () => scoped(async () => {
+  const data = await fixture(), actualRevoke = URL.revokeObjectURL, revoked: string[] = [];
+  URL.revokeObjectURL = url => {revoked.push(url); actualRevoke(url);};
+  try {
+    let entry = data.entry, signed = data.signed;
+    globalThis.fetch = async path => {
+      if (String(path).endsWith("/access")) return response(overview(data));
+      if (String(path).startsWith("/v1/albums/")) return response({...overview(data), version: 1, entries: [entry], manifests: [signed], nextCursor: null, hasMore: false});
+      return new Response(new Uint8Array(data.objects.get(String(path).split("/").at(-1)!)!));
+    };
+    const access = await AlbumAccess.open(overview(data), {}), [photo] = (await access.loadPhotoPage()).photos;
+    const lease = new AbortController(), url = await access.leaseRaster(photo, "thumbnail", lease.signal);
+    const binding = {...photo.manifest.metadataRepresentation.binding, representationId: crypto.randomUUID()};
+    const encrypted = await collect(encryptMedia(source(utf8({...photo.metadata, filename: "revised.jpg"})), data.photo.metadataKey, binding));
+    const objectId = crypto.randomUUID(); data.objects.set(objectId, encrypted);
+    const manifest = {...photo.manifest, metadataRepresentation: {binding, objectId, header: b64(encrypted.subarray(0, 24)), ciphertextBytes: encrypted.length, ciphertextSha256: digest(encrypted)}};
+    signed = signPayload("photo-manifest", data.owner.accountId, utf8(manifest), data.owner.signingSecretKey);
+    const opened = openAlbumDefinition({signed: data.made.signed, trustedOwner: data.owner.card, recipientCard: data.owner.card, recipientSecretKey: data.owner.boxSecretKey, expectedAlbumId: data.made.definition.albumId});
+    try {entry = makeAlbumPhoto({definition: opened.definition, manifest: signed, metadataKey: data.photo.metadataKey, albumKey: opened.albumKey, signingSecretKey: data.owner.signingSecretKey});}
+    finally {opened.albumKey.fill(0);}
+    const refreshed = await AlbumAccess.open(overview(data), {}), page = await refreshed.loadPhotoPage();
+    const [replacement] = access.adoptRefresh(refreshed, page.photos);
+    assert.notEqual(replacement, photo); assert.equal(replacement.metadata.filename, "revised.jpg");
+    assert.ok(photo.metadataKey.every(value => value === 0)); assert.deepEqual(revoked, [url]);
+    await assert.rejects(access.leaseRaster(photo, "thumbnail", lease.signal), /ALBUM_PHOTO_CHANGED/);
+    const next = new AbortController(); await access.leaseRaster(replacement, "thumbnail", next.signal);
+    next.abort(); access.dispose();
+  } finally {URL.revokeObjectURL = actualRevoke;}
+}));
+
+test("revocation after a cached raster read prevents publication and revokes existing leases", () => scoped(async () => {
+  const data = await fixture(), actualRevoke = URL.revokeObjectURL, revoked: string[] = [];
+  URL.revokeObjectURL = url => {revoked.push(url); actualRevoke(url);};
+  try {
+    let untilRevoked = Infinity;
+    globalThis.fetch = async path => {
+      if (String(path).endsWith("/access")) return --untilRevoked <= 0 ? response({code: "ALBUM_INACTIVE"}, 403) : response(overview(data));
+      if (String(path).startsWith("/v1/albums/")) return response({...overview(data), version: 1, entries: [data.entry], manifests: [data.signed], nextCursor: null, hasMore: false});
+      return new Response(new Uint8Array(data.objects.get(String(path).split("/").at(-1)!)!));
+    };
+    const access = await AlbumAccess.open(overview(data), {}), [photo] = (await access.loadPhotoPage()).photos;
+    const lease = new AbortController(), url = await access.leaseRaster(photo, "thumbnail", lease.signal);
+    untilRevoked = 2;
+    await assert.rejects(access.leaseRaster(photo, "thumbnail", new AbortController().signal), /ALBUM_INACTIVE/);
+    assert.deepEqual(revoked, [url]); assert.equal(access.signal.aborted, true);
+    assert.ok(photo.metadataKey.every(value => value === 0));
+  } finally {URL.revokeObjectURL = actualRevoke;}
+}));
+
+test("album raster cache cannot cross accounts or fall back from missing preview to an original", () => scoped(async () => {
+  const data = await fixture(), actualRevoke = URL.revokeObjectURL, revoked: string[] = []; let reads = 0;
+  URL.revokeObjectURL = url => {revoked.push(url); actualRevoke(url);};
+  try {
+    globalThis.fetch = async path => {
+      if (String(path).endsWith("/access")) return response(overview(data));
+      if (String(path).startsWith("/v1/albums/")) return response({...overview(data), version: 1, entries: [data.entry], manifests: [data.signed], nextCursor: null, hasMore: false});
+      reads++; return new Response(new Uint8Array(data.objects.get(String(path).split("/").at(-1)!)!));
+    };
+    const access = await AlbumAccess.open(overview(data), {}), [photo] = (await access.loadPhotoPage()).photos;
+    const beforeMissing = reads;
+    await assert.rejects(access.leaseRaster(photo, "preview", new AbortController().signal), /PREVIEW_UNAVAILABLE/);
+    assert.equal(reads, beforeMissing);
+    const lease = new AbortController(), url = await access.leaseRaster(photo, "thumbnail", lease.signal);
+    const beforeAccount = reads; await open(1);
+    await assert.rejects(access.leaseRaster(photo, "thumbnail", new AbortController().signal));
+    assert.equal(reads, beforeAccount); assert.deepEqual(revoked, [url]);
+    assert.ok(photo.metadataKey.every(value => value === 0)); assert.equal(access.signal.aborted, true);
+  } finally {URL.revokeObjectURL = actualRevoke;}
+}));
+
+test("closing the album scope immediately revokes displayed cache leases without another read", () => scoped(async () => {
+  const data = await fixture(), actualRevoke = URL.revokeObjectURL, revoked: string[] = [];
+  URL.revokeObjectURL = url => {revoked.push(url); actualRevoke(url);};
+  try {
+    globalThis.fetch = async path => {
+      if (String(path).endsWith("/access")) return response(overview(data));
+      if (String(path).startsWith("/v1/albums/")) return response({...overview(data), version: 1, entries: [data.entry], manifests: [data.signed], nextCursor: null, hasMore: false});
+      return new Response(new Uint8Array(data.objects.get(String(path).split("/").at(-1)!)!));
+    };
+    const scope = new AbortController(), access = await AlbumAccess.open(overview(data), {signal: scope.signal});
+    const [photo] = (await access.loadPhotoPage()).photos;
+    const url = await access.leaseRaster(photo, "thumbnail", new AbortController().signal);
+    scope.abort();
+    assert.deepEqual(revoked, [url]); assert.equal(access.signal.aborted, true);
+    assert.ok(photo.metadataKey.every(value => value === 0));
+  } finally {URL.revokeObjectURL = actualRevoke;}
+}));

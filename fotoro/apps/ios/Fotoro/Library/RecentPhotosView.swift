@@ -527,16 +527,22 @@ struct RecentPhotosView: View {
                     open: {
                       if selecting { toggleSavedSelection(photo) }
                       else { savedViewer = SavedPhotoViewerPresentation(initial: photo, photos: ownedPhotos) }
-                    }, toggleSelection: { toggleSavedSelection(photo) }, appeared: {
-                      if photo.id == ownedPhotos.last?.id { try? services.loadMore() }
-                    }, services: services).id(photo.id)
+                    }, toggleSelection: { toggleSavedSelection(photo) }, services: services).id(photo.id)
                 }
               } header: {
                 dayHeader(start: Double(day.0).map { Date(timeIntervalSince1970: $0) }, count: day.1.count)
               }
             }
+            if savedHasMore, !services.photos.isEmpty {
+              Section {} footer: {
+                SavedLibraryPaginationFooter(services: services, hasMore: $savedHasMore,
+                  isActive: scenePhase == .active && !savedRefresh.isRefreshing,
+                  failed: { store.error = $0 })
+              }
+            }
           }
-          if ownedPhotos.isEmpty && !savedRefresh.isRefreshing {
+          if ownedPhotos.isEmpty && !savedRefresh.isRefreshing,
+            !savedHasMore || services.photos.isEmpty {
             ContentUnavailableView("No saved photos", systemImage: "photo.stack",
               description: Text(savedLibraryEmptyMessage(sync: services.automaticPhotoSync,
                 favoritesOnly: savedFavoritesOnly)))
@@ -612,6 +618,7 @@ struct RecentPhotosView: View {
         } catch { store.error = error.localizedDescription }
       }
       .task(id: ConsumerSearchRequestID(presentation: searchTaskID, attempt: searchAttempt)) { await updateSearch() }
+      .onChange(of: services.map(SavedLibraryOpenBinding.init)) { savedHasMore = true }
       .onChange(of: services?.consumerCatalogGeneration) {
         savedHasMore = true
         cancelBestShots(); validateSavedPresentation()
@@ -1240,7 +1247,7 @@ struct RecentPhotosView: View {
               LibraryPhotoCell(photo: photo, isSelected: selectedSavedPhotos.contains(photo.id), open: {
                 if selecting { toggleSavedSelection(photo) }
                 else { savedViewer = SavedPhotoViewerPresentation(initial: photo, photos: allOwnedPhotos) }
-              }, toggleSelection: { toggleSavedSelection(photo) }, appeared: {}, services: services)
+              }, toggleSelection: { toggleSavedSelection(photo) }, services: services)
                 .id(source.id)
             }
           }
@@ -1260,16 +1267,9 @@ struct RecentPhotosView: View {
       }
       if savedHasMore, let services, services.photoAccountAccess != nil {
         Section {} footer: {
-          ProgressView("Loading photos…").font(.footnote).padding().frame(maxWidth: .infinity)
-            .task(id: SavedTimelinePage(count: services.photos.count, binding: SavedLibraryOpenBinding(services),
-              filter: browseFilter, dates: browseDates, isActive: scenePhase == .active)) {
-              guard !Task.isCancelled, scenePhase == .active, services.photoAccountAccess != nil else { return }
-              do {
-                let count = services.photos.count
-                try services.loadMore()
-                savedHasMore = services.photos.count > count
-              } catch { savedHasMore = false; store.error = error.localizedDescription }
-            }
+          SavedLibraryPaginationFooter(services: services, hasMore: $savedHasMore,
+            isActive: scenePhase == .active && !savedRefresh.isRefreshing,
+            failed: { store.error = $0 })
         }
       }
     }
@@ -1821,16 +1821,7 @@ struct RecentPhotosView: View {
             return try await services.consumerShareOriginal(photo)
           }, expandSaved: { url, photo in
             if photo.metadata.mediaType == CameraMedia.liveType {
-              let metadata = photo.metadata, directory = url.deletingLastPathComponent()
-              let work = Task.detached(priority: .userInitiated) {
-                try Task.checkCancellation()
-                let bytes = try Data(contentsOf: url)
-                try Task.checkCancellation()
-                let urls = try CameraMedia.exportOriginals(bytes, metadata: metadata, directory: directory)
-                try Task.checkCancellation()
-                return urls
-              }
-              return try await withTaskCancellationHandler { try await work.value } onCancel: { work.cancel() }
+              return try await CameraMedia.exportOriginalFile(url, metadata: photo.metadata)
             }
             return [url]
           }, removeDevice: removeShareFiles, removeSaved: ConsumerShareExports.remove)
@@ -1990,14 +1981,6 @@ private struct RecentLivePhotoPlayer: UIViewRepresentable {
       throw error
     }
   }
-}
-
-private struct SavedTimelinePage: Equatable {
-  let count: Int
-  let binding: SavedLibraryOpenBinding
-  let filter: PhotoBrowseFilter
-  let dates: PhotoBrowseDateScope
-  let isActive: Bool
 }
 
 enum SavedPhotosPresentationPolicy {

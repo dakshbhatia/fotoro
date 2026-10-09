@@ -241,6 +241,19 @@ enum CameraMedia {
       return url
     }
   }
+  // File reads, verification and Live Photo expansion must not stall UI gestures.
+  // The caller owns the export directory and removes it on failure or cancellation.
+  static func exportOriginalFile(_ url: URL, metadata: PhotoMetadataV1) async throws -> [URL] {
+    let work = Task.detached(priority: .userInitiated) {
+      try Task.checkCancellation()
+      let bytes = try Data(contentsOf: url)
+      try Task.checkCancellation()
+      let urls = try exportOriginals(bytes, metadata: metadata, directory: url.deletingLastPathComponent())
+      try Task.checkCancellation()
+      return urls
+    }
+    return try await withTaskCancellationHandler { try await work.value } onCancel: { work.cancel() }
+  }
   static func restoreToPhotos(_ urls: [URL], mediaType: String) async throws {
     guard !urls.isEmpty, urls.count == (mediaType == liveType ? 2 : 1) else { throw FotoroError("Complete original resources are required") }
     try await PHPhotoLibrary.shared().performChanges {

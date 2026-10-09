@@ -42,6 +42,10 @@ final class LibraryStore: @unchecked Sendable {
           json_extract(CAST(value AS TEXT),'$.metadata.originalSha256'),
           json_extract(CAST(value AS TEXT),'$.transferState'))
         """)
+      try db.execute(sql: """
+        CREATE INDEX IF NOT EXISTS photos_owned_browse ON photos(
+          json_extract(CAST(value AS TEXT),'$.manifest.ownerAccountId'), sourceDate DESC, id)
+        """)
       // Legacy change feeds hid unsupported media while advancing the same cursor.
       // Re-read once with this reader's capability; the marker and cursor reset commit together.
       if try String.fetchOne(db, sql: "SELECT value FROM state WHERE key='mediaCatalogVersion'") != "1" {
@@ -119,6 +123,27 @@ final class LibraryStore: @unchecked Sendable {
         rows = try Row.fetchAll(
           db, sql: "SELECT value FROM photos ORDER BY sourceDate DESC,id LIMIT ?",
           arguments: [min(1000, max(1, limit))])
+      }
+      return try rows.map { rebased(try Wire.decode(LocalPhoto.self, $0["value"] as Data)) }
+    }
+  }
+  // Apply ownership before the page limit; shared rows cannot hide an owned cursor.
+  // Keep every transfer state, matching the existing saved catalog projection.
+  func ownedPhotos(accountId: String, after id: String? = nil, limit: Int = 100) throws -> [LocalPhoto] {
+    try database.read { db in
+      let rows: [Row]
+      let owner = "json_extract(CAST(value AS TEXT),'$.manifest.ownerAccountId')"
+      if let id, let date = try String.fetchOne(db,
+        sql: "SELECT sourceDate FROM photos WHERE id=? AND \(owner)=?", arguments: [id, accountId]) {
+        rows = try Row.fetchAll(db, sql: """
+          SELECT value FROM photos WHERE \(owner)=?
+            AND (sourceDate < ? OR (sourceDate = ? AND id > ?))
+          ORDER BY sourceDate DESC,id LIMIT ?
+          """, arguments: [accountId, date, date, id, min(1000, max(1, limit))])
+      } else {
+        rows = try Row.fetchAll(db, sql: """
+          SELECT value FROM photos WHERE \(owner)=? ORDER BY sourceDate DESC,id LIMIT ?
+          """, arguments: [accountId, min(1000, max(1, limit))])
       }
       return try rows.map { rebased(try Wire.decode(LocalPhoto.self, $0["value"] as Data)) }
     }

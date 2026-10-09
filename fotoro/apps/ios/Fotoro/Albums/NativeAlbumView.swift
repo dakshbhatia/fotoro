@@ -383,7 +383,7 @@ struct NativeAlbumView: View {
       LazyVGrid(columns: [GridItem(.adaptive(minimum: 96))], spacing: 4) {
         ForEach(photoGroups) { group in
           VStack {
-            Button { viewer = group.representative } label: { NativeAlbumThumbnail(model: model, item: group.representative) }
+            NativeAlbumThumbnail(model: model, item: group.representative) { viewer = group.representative }
               .buttonStyle(.plain).accessibilityLabel(NativeAlbumPhotoAccessibility.label(group.representative.photo, member: memberName(group.representative.photo.manifest.ownerAccountId, in: album.definition)))
             if group.copies.count > 1 {
               Menu("\(group.copies.count) copies") {
@@ -749,16 +749,57 @@ private struct NativeAlbumPhotoPicker: View {
 private struct NativeAlbumThumbnail: View {
   let model: NativeAlbumService
   let item: NativeAlbumItem
+  let open: () -> Void
   @State private var url: URL?
+  @State private var unavailable = false
+  @State private var retry = 0
+  @State private var loadedIdentity: Identity?
+  private struct Identity: Equatable {
+    let id: String
+    let signature: String
+    let access: PhotoAccountAccess?
+    let retry: Int
+  }
+  private var identity: Identity {
+    Identity(id: item.id, signature: item.signedManifest.signature,
+      access: model.currentOpenedPhotoAccess, retry: retry)
+  }
   var body: some View {
-    LazyImage(url: url) { state in
-      if let image = state.image { image.resizable().scaledToFill() }
-      else { Rectangle().fill(.secondary.opacity(0.2)).overlay { Image(systemName: "photo") } }
+    let current = identity
+    LazyImage(url: loadedIdentity == current && current.access != nil ? url : nil) { state in
+      if loadedIdentity == current, current.access != nil, let image = state.image {
+        Button(action: open) { image.resizable().scaledToFill() }.buttonStyle(.plain)
+      } else if loadedIdentity == current && (unavailable || state.error != nil) {
+        Rectangle().fill(.secondary.opacity(0.2)).overlay {
+          VStack(spacing: 8) {
+            Button(action: open) {
+              Label("Preview unavailable", systemImage: "icloud.slash").font(.caption)
+            }.buttonStyle(.plain)
+            Button("Try again") {
+              guard current.access != nil, identity == current else { return }
+              retry += 1
+            }.frame(minHeight: 44).accessibilityIdentifier("albums.thumbnail.retry")
+          }.padding(4)
+        }
+      } else {
+        Button(action: open) {
+          Rectangle().fill(.secondary.opacity(0.2)).overlay { ProgressView() }
+        }.buttonStyle(.plain)
+      }
     }.frame(height: 110).clipped()
-      .task(id: item.id + item.signedManifest.signature) {
-        url = nil
-        do { let loaded = try await model.thumbnail(item); try Task.checkCancellation(); url = loaded }
-        catch { if !Task.isCancelled { url = nil } }
+      .task(id: current) {
+        url = nil; unavailable = false; loadedIdentity = current
+        guard current.access != nil else { return }
+        do {
+          let loaded = try await model.thumbnail(item, preservingTransientFailure: true)
+          try Task.checkCancellation()
+          guard identity == current else { return }
+          url = loaded; unavailable = loaded == nil
+        } catch is CancellationError {
+        } catch {
+          guard !Task.isCancelled, identity == current else { return }
+          unavailable = true
+        }
       }
   }
 }

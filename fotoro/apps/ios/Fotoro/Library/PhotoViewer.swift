@@ -178,7 +178,12 @@ struct PhotoViewer: View {
           services.session.accountId == account, services.store === catalog,
           let current = try services.consumerSavedPhoto(photo.id),
           current.metadata == photo.metadata, current.manifest == photo.manifest else { throw CancellationError() }
-        let urls = try CameraMedia.exportOriginals(try Data(contentsOf: url), metadata: photo.metadata, directory: url.deletingLastPathComponent())
+        let urls = try await CameraMedia.exportOriginalFile(url, metadata: photo.metadata)
+        try Task.checkCancellation()
+        guard services.vault.isUnlocked, services.vault.generation == generation,
+          services.session.accountId == account, services.store === catalog,
+          let current = try services.consumerSavedPhoto(photo.id),
+          current.metadata == photo.metadata, current.manifest == photo.manifest else { throw CancellationError() }
         originalExports = urls
         sharedOriginal = ConsumerSharedOriginal(urls: urls)
         pendingExport = nil
@@ -203,7 +208,8 @@ struct PhotoViewer: View {
         let url = try await services.consumerShareOriginal(photo)
         exported = [url]
         try check()
-        exported = try CameraMedia.exportOriginals(try Data(contentsOf: url), metadata: photo.metadata, directory: url.deletingLastPathComponent())
+        exported = try await CameraMedia.exportOriginalFile(url, metadata: photo.metadata)
+        try check()
         let permission = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
         try check()
         guard permission == .authorized || permission == .limited else { throw FotoroError("Allow adding originals to Photos in Settings and retry") }
@@ -349,7 +355,7 @@ private struct SavedPhotoPage: View {
         pending = [original]
         try Task.checkCancellation()
         guard isCurrent, request == identity, motionGeneration == token, scenePhase == .active else { throw CancellationError() }
-        let urls = try CameraMedia.exportOriginals(try Data(contentsOf: original), metadata: photo.metadata, directory: original.deletingLastPathComponent())
+        let urls = try await CameraMedia.exportOriginalFile(original, metadata: photo.metadata)
         pending = urls
         try Task.checkCancellation()
         guard isCurrent, request == identity, motionGeneration == token,

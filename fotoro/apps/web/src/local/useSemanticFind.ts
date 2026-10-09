@@ -1,7 +1,7 @@
 import {useLayoutEffect, useMemo, useRef, useState} from "react";
 import type {LocalPhoto} from "./resources";
 import type {SearchResult} from "./search";
-import {SemanticFindSession, addSemanticMatches, eligibleSemanticPhotos, semanticPreviewStatus, subscribeSemanticLifecycle} from "./semantic-find";
+import {SemanticFindSession, addSemanticMatches, eligibleSemanticPhotos, permitsSemanticMatches, semanticPreviewStatus, subscribeSemanticLifecycle} from "./semantic-find";
 export function useSemanticFind(photos: LocalPhoto[], base: SearchResult, active: boolean, source: unknown, committedMeaning?: string) {
   const session = useRef<SemanticFindSession | null>(null);
   const [foreground, setForeground] = useState(0);
@@ -10,7 +10,7 @@ export function useSemanticFind(photos: LocalPhoto[], base: SearchResult, active
   const invalidated = useRef(false);
   const [result, setResult] = useState<{input: typeof input; scores?: ReadonlyMap<string, number>; pending: boolean; visualStatus?: SearchResult["visualStatus"]} | undefined>();
   const canSearch = active && !invalidated.current && (typeof document === "undefined" || document.visibilityState !== "hidden")
-    && !committedMeaning && eligibleSemanticPhotos(photos, base.query).length > 0;
+    && permitsSemanticMatches(base, committedMeaning) && eligibleSemanticPhotos(photos, base.query).length > 0;
   useLayoutEffect(() => {
     session.current?.clear(); session.current = null; setResult(undefined);
     invalidated.current = false;
@@ -40,7 +40,7 @@ export function useSemanticFind(photos: LocalPhoto[], base: SearchResult, active
     const matched = canSearch && current && result.scores ? addSemanticMatches(base, result.scores,
       new Set(photos.filter(photo => photo.current?.() !== false).map(photo => photo.id)), committedMeaning) : base;
     const visualStatus = canSearch && current ? result.visualStatus
-      : active && !invalidated.current && !committedMeaning && (typeof document === "undefined" || document.visibilityState !== "hidden")
+      : active && !invalidated.current && permitsSemanticMatches(base, committedMeaning) && (typeof document === "undefined" || document.visibilityState !== "hidden")
         ? semanticPreviewStatus(photos, base.query) : undefined;
     return canSearch && (!current || result.pending) ? {...matched, searching: true}
       : visualStatus ? {...matched, visualStatus} : matched;
