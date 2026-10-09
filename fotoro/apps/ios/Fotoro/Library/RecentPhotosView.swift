@@ -1443,8 +1443,9 @@ struct RecentPhotosView: View {
       .buttonStyle(.bordered).fixedSize(horizontal: true, vertical: false)
       .disabled(selectedCount == 0 || preparingShare || showShare)
     if selectedSavedPhotos.count > 0 {
-      Button("Album", systemImage: "rectangle.stack") { openAlbums() }
+      Button(selected.isEmpty ? "Album" : "Album · \(selectedSavedPhotos.count) Saved", systemImage: "rectangle.stack") { openAlbums() }
         .buttonStyle(.bordered).disabled(preparingShare || showShare)
+        .accessibilityHint(selected.isEmpty ? "Add the selected Saved photos to an album" : "Only the selected Saved photos will be added. Save device photos to include them.")
         .accessibilityIdentifier("selection.album")
     }
     #else

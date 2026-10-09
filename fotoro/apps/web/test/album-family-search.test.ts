@@ -57,6 +57,7 @@ async function fixture(count = 1) {
   globalThis.fetch = async (input, init) => {
     const path = String(input), url = new URL(path, "https://public.test"), actor = new Headers(init?.headers).get("X-Fotoro-Account-Id")!;
     assert.equal(actor, requireVault().accountId);
+    if (path === "/v1/albums") return response({version: 1, albums: [overview()]});
     if (path.endsWith("/accept")) {verifyAlbumAction({signedDefinition: made.signed, trustedOwner: accounts.accounts[0], signed: JSON.parse(String(init?.body)).action, action: "accept"}); accepted.add(actor); return response(overview());}
     if (ended || !accepted.has(actor)) return response({code: "ALBUM_INACTIVE"}, 403);
     if (path.endsWith("/end")) {verifyAlbumAction({signedDefinition: made.signed, trustedOwner: accounts.accounts[0], signed: JSON.parse(String(init?.body)).action, action: "end"}); ended = true; return response(overview());}
