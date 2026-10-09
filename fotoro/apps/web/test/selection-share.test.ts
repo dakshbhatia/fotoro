@@ -4,7 +4,7 @@ import {shareSelectedOriginals} from "../src/local/selection-share";
 import {captureGroup} from "../src/local/capture-groups";
 import type {LocalPhoto} from "../src/local/resources";
 import {availablePhotoSelection, ownedPhotoForLocal, selectedOwnedPhotos, reconcileSavedSelection} from "../src/local/selection";
-import type {OwnedPhotoSnapshot} from "../src/library/consumer-search";
+import {savedSearchPhotos, type OwnedPhotoSnapshot} from "../src/library/consumer-search";
 import type {Photo} from "../src/library/catalog";
 
 const photo = (id: string): LocalPhoto => ({id, filename: id + ".png", date: "2026-10-01", dateSource: "selected", file: new File([id], id + ".png")});
@@ -38,7 +38,7 @@ test("capture groups use real capture evidence and local calendar boundaries", (
   assert.equal(captureGroup({date: new Date(2026, 9, 3, 1).toISOString(), dateSource: "exif"}, now).heading, "Today");
   assert.equal(captureGroup({date: new Date(2026, 9, 2, 23).toISOString(), dateSource: "exif"}, now).heading, "Yesterday");
   assert.deepEqual(captureGroup({date: now.toISOString(), dateSource: "selected"}, now), {key: "undated", heading: "Capture date unavailable"});
-  assert.deepEqual(captureGroup({date: "not a date", dateSource: "exif"}, now), {key: "undated", heading: "Capture date unavailable"});
+  for (const dateSource of ["exif", "photos"] as const) assert.deepEqual(captureGroup({date: "not a date", dateSource}, now), {key: "undated", heading: "Capture date unavailable"});
 });
 
 test("Find selects only current owned saved sources and drops withdrawn, received, or switched-account records", () => {
@@ -112,4 +112,23 @@ test("saved selection cannot transfer after account loss, source withdrawal, or 
     const result = reconcileSavedSelection(snapshot, token, ids, [unavailable]);
     assert.equal(result.localIDs.size, 0); assert.deepEqual([...result.savedIDs], ["own", "distinct"]);
   }
+});
+
+test("Saved Photos capture dates group by day while imported selection dates remain undated", () => {
+  const now = new Date(2026, 9, 3, 12);
+  const stored = (id: string, sourceDate: string, dateSource: "photos" | "exif" | "import") => ({
+    manifest: {photoId: id, ownerAccountId: "owner"},
+    metadata: {filename: id + ".jpg", sourceDate, dateSource, originalSha256: id},
+  }) as Photo;
+  const captured = new Date(2026, 9, 3, 1).toISOString();
+  const snapshot: OwnedPhotoSnapshot = {accountId: "owner", token: {}, current: () => true,
+    photos: [stored("native-today", captured, "photos"), stored("native-yesterday", new Date(2026, 9, 2, 23).toISOString(), "photos"),
+      stored("exif-today", captured, "exif"), stored("imported", captured, "import")], preview: async () => new Blob()};
+  const records = savedSearchPhotos(snapshot, []);
+  assert.equal(records[0].dateSource, "photos");
+  assert.equal(captureGroup(records[0], now).heading, "Today");
+  assert.equal(captureGroup(records[1], now).heading, "Yesterday");
+  assert.deepEqual(captureGroup(records[0], now), captureGroup(records[2], now));
+  assert.equal(records[3].dateSource, "selected");
+  assert.deepEqual(captureGroup(records[3], now), {key: "undated", heading: "Capture date unavailable"});
 });

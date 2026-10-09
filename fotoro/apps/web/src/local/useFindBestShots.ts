@@ -28,10 +28,15 @@ export function useFindBestShots(photos: LocalPhoto[], scope: string, source: un
     };
     setState({input, done: 0});
     const current = () => {try {check(); return true;} catch {return false;}};
+    const cancelCurrent = () => {
+      if (!alive || latest.current.input !== input) return;
+      setChosenScope(undefined); setState(undefined);
+    };
     void runCurrentFindReview(analyzer, photos, (photo, signal) => readPickSignals(photo, resources, signal), current,
       completed => {setState({input, done: completed});}).then(result => {
-      try {check(); if (result) setState({input, done: photos.length, recommendations: result});} catch {}
-    });
+      if (!result || !current()) {cancelCurrent(); return;}
+      setState({input, done: photos.length, recommendations: result});
+    }).catch(cancelCurrent);
     return () => {alive = false; analyzer.cancel();};
   }, [active, input, analyzer, resources, photos]);
   useLayoutEffect(() => {

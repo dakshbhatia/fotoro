@@ -63,7 +63,12 @@ export function LocalLibrary({
   const visibleColumns = photoColumns.filter(column => columns.has(column.id)).map(column => column.id);
   return <>
     <div className="photo-view-controls">
-      <div role="group" aria-label="Photo view"><button aria-pressed={view === "grid"} onClick={() => setView("grid")}>Grid</button><button aria-pressed={view === "table"} onClick={() => setView("table")}>Table</button></div>
+      <details className="photo-view-options" onKeyDown={event => {
+        if (event.key === "Escape") {event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();}
+      }}><summary>View</summary><div role="group" aria-label="Photo view">
+        <button aria-pressed={view === "grid"} onClick={event => {setView("grid"); const menu = event.currentTarget.closest("details"); if (menu) {menu.open = false; menu.querySelector("summary")?.focus();}}}>Grid</button>
+        <button aria-pressed={view === "table"} onClick={event => {setView("table"); const menu = event.currentTarget.closest("details"); if (menu) {menu.open = false; menu.querySelector("summary")?.focus();}}}>Table</button>
+      </div></details>
       {view === "table" && <details className="photo-column-options" onKeyDown={event => {
         if(event.key === "Escape") {event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();}
       }}><summary>Columns</summary><fieldset><legend className="visually-hidden">Visible columns</legend>
@@ -113,7 +118,7 @@ function LocalGrid({
       const group = days.get(day);
       group ? group.push(photo) : days.set(day, [photo]);
     }
-    const result: { key: string; photos: LocalPhoto[]; heading?: string }[] =
+    const result: { key: string; photos: LocalPhoto[]; heading?: string; group?: LocalPhoto[] }[] =
       [];
     for (const [day, group] of days) {
       for (let i = 0; i < group.length; i += columns) {
@@ -121,6 +126,7 @@ function LocalGrid({
         result.push({
           key: day + ":" + items[0].id,
           photos: items,
+          group: i === 0 ? group : undefined,
           heading:
             i === 0
               ? captureGroup(group[0]).heading
@@ -191,7 +197,13 @@ function LocalGrid({
             }}
           >
             {rows[row.index].heading && (
-              <p className="date">{rows[row.index].heading}</p>
+              <div className="photo-day-heading"><p className="date">{rows[row.index].heading}</p>
+                {selection && <button disabled={selection.disabled} onClick={() => {
+                  const group = rows[row.index].group!;
+                  const checked = !group.every(photo => selection.ids.has(photo.id));
+                  for (const photo of group) selection.onChange(photo.id, checked);
+                }}>{rows[row.index].group!.every(photo => selection.ids.has(photo.id)) ? "Deselect" : "Select"}<span className="visually-hidden"> photos from {rows[row.index].heading}</span></button>}
+              </div>
             )}
             <div
               className="grid"
