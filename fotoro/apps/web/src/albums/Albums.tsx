@@ -1,5 +1,6 @@
 import {TripDownloadLease} from "./download-lease";
 import {cleanupTripDownloads, prepareTripDownload, type TripDownloadProgress} from "./download";
+import {TripPicks} from "./TripPicks";
 import {AlbumNameChoices} from "./AlbumNameChoices";
 import {useEffect, useMemo, useRef, useState} from "react";
 import type {AccountCardV1} from "@fotoro/contracts";
@@ -29,6 +30,9 @@ import {subscribeAlbumLifetime} from "./entry";
 
 function readableError(error: unknown) {
   const code = error instanceof Error ? error.message : "";
+  if (code === "TRIP_CHOOSE_1_TO_100_FILES") return "Choose 1 to 100 device photos at a time.";
+  if (code === "TRIP_SAVE_INCOMPLETE") return "Saving has not finished. Check Saved and retry before adding these photos to the trip.";
+  if (/SUPPORTED_ORIGINALS|SOURCE_FORMAT|SOURCE_DIMENSIONS|EMPTY_ORIGINAL|ORIGINAL_EXCEEDS/.test(code)) return "Choose JPEG, PNG or HEIC photos up to 50 MiB each.";
   if (code === "TRIP_MEMORY_LIMIT") return "This trip is too large for this browser’s 128 MiB download limit. Try a browser with temporary disk storage.";
   if (code === "TRIP_ZIP_LIMIT") return "This trip is too large for one ZIP download. Download individual originals instead.";
   if (code === "TRIP_CHANGED") return "New trip photos arrived while checking. Try Download trip again to include them.";
@@ -68,10 +72,11 @@ function AlbumImage({access, photo, preview = false, onOpen}: {access: AlbumAcce
 export function AlbumContributionActions({albumId, chosen, busy, onChoosePhotos, onAdd}: {albumId: string; chosen: number; busy: boolean; onChoosePhotos: (albumId: string) => void; onAdd: () => void}) {
   return <><button disabled={busy} onClick={() => onChoosePhotos(albumId)}>Choose photos</button>{chosen > 0 && <button className="primary-action" disabled={busy} onClick={onAdd}>Add {chosen} {chosen === 1 ? "photo" : "photos"}</button>}</>;
 }
-export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incoming, onRetryAccount, currentOwnedPhotos, onLoadOwnedPhoto, initialAlbumId}: {selection: readonly Photo[]; initialAlbumId?: string; currentPhotos: () => readonly Photo[]; onClose: () => void; onChoosePhotos: (albumId: string) => void; incoming?: IncomingAlbumIntent; onRetryAccount?: () => void; currentOwnedPhotos?: () => OwnedPhotoSnapshot | null; onLoadOwnedPhoto?: (photo: Photo, signal: AbortSignal) => Promise<void>}) {
+export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incoming, onRetryAccount, currentOwnedPhotos, onLoadOwnedPhoto, onImportPhotos, initialAlbumId}: {selection: readonly Photo[]; initialAlbumId?: string; onImportPhotos?: (files: readonly File[], signal: AbortSignal, current: () => boolean) => Promise<Photo[]>; currentPhotos: () => readonly Photo[]; onClose: () => void; onChoosePhotos: (albumId: string) => void; incoming?: IncomingAlbumIntent; onRetryAccount?: () => void; currentOwnedPhotos?: () => OwnedPhotoSnapshot | null; onLoadOwnedPhoto?: (photo: Photo, signal: AbortSignal) => Promise<void>}) {
   const [session] = useState(requireVault), [controller] = useState(() => new AbortController());
   const [chosenSnapshot] = useState(() => new ShareSelection([...selection]));
   const creationDraft = useRef<AlbumCreationDraft>({});
+  const deviceInput = useRef<HTMLInputElement>(null);
   const panel = useRef<HTMLElement>(null), alive = useRef(true), accessRef = useRef<AlbumAccess | null>(null), working = useRef(false);
   const [available, setAvailable] = useState<boolean | null>(null), [items, setItems] = useState<AlbumOverviewV1[]>([]), [cards, setCards] = useState<AccountCardV1[]>([]), [names, setNames] = useState(new Map<string, string>());
   const [titles, setTitles] = useState(new Map<string, string>()), previewPanel = useRef<HTMLElement>(null);
@@ -327,6 +332,26 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
           </> : <>
             <div className="album-toolbar"><input type="search" aria-label="Search trip people, places, filenames or capture dates" placeholder="Search trip" value={query} onChange={event => setQuery(event.target.value)} />
               <button disabled={busy || !photoCount || downloadStarted} onClick={() => void downloadTrip()}>Download trip</button>
+              {onImportPhotos && <><button disabled={busy} onClick={() => deviceInput.current?.click()}>Save and add device photos</button><input ref={deviceInput} type="file" accept="image/jpeg,image/png,image/heic,image/heif,.heic,.heif" multiple hidden aria-label="Choose device photos to save and add to trip" onChange={event => {
+                const files = Array.from(event.target.files ?? []); event.target.value = "";
+                if (!files.length) return;
+                void action(async () => {
+                  clearTripDownload(); clearDownload();
+                  const opened = access;
+                  const current = () => !!scope.current?.() && accessRef.current === opened && opened.current();
+                  const signal = AbortSignal.any([controller.signal, opened.signal]);
+                  setNotice("Saving chosen photos before adding…");
+                  let saved: Photo[];
+                  try {saved = await onImportPhotos(files, signal, current);} catch (failure) {if (scope.current?.()) setNotice(""); throw failure;}
+                  if (!current()) throw new DOMException("Trip closed", "AbortError");
+                  setNotice("Adding chosen photos…");
+                  let added: number;
+                  try {added = await opened.add(saved, () => current() ? currentPhotos() : []);} catch (failure) {if (scope.current?.()) setNotice(""); throw failure;}
+                  const list = await loadInbox(), updated = list?.find(item => item.definition.body === opened.overview.definition.body);
+                  if (updated) await refreshOpened(opened, updated);
+                  if (scope.current?.()) setNotice(`${added} ${added === 1 ? "photo added" : "photos added"}.`);
+                });
+              }} /></>}
               <AlbumContributionActions albumId={access.albumId} chosen={chosen} busy={busy} onChoosePhotos={onChoosePhotos} onAdd={() => void action(async () => {const added = await access.add(chosenSnapshot.photos, currentPhotos); const list = await loadInbox(); const updated = list?.find(item => item.definition.body === access.overview.definition.body); if (updated) await refreshOpened(access, updated); setNotice(added ? `${added} ${added === 1 ? "photo added" : "photos added"}.` : "Already in this album.");})} />
             </div>
             {downloadStarted && <button onClick={() => {clearTripDownload(); setNotice("");}}>Done downloading</button>}
@@ -344,6 +369,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
             {busy && !photos.length && <p className="hint" role="status">Loading photos…</p>}
             {(query || peopleFilter.ids.size > 0 || from || through) && <p role="status">{shown.length} matching {shown.length === 1 ? "photo" : "photos"}</p>}
             {groups.length < shown.length && <p className="hint">{groups.length} exact originals · {shown.length} contributed copies. All copies are kept.</p>}
+            <TripPicks access={access} photos={shown} hasMore={page.hasMore} disabled={busy} renderPhoto={photo => <AlbumImage access={access} photo={photo} onOpen={() => setPreview(photo)} />} />
             <div className="album-grid">{groups.map(group => {const photo = group.photo, shared = sharedAlbumDetails(photo, facts), date = albumDateTag(photo.metadata); return <div className="tile" key={photo.manifest.photoId}><AlbumImage access={access} photo={photo} onOpen={() => setPreview(photo)} /><div className="album-photo-tags" aria-label="Photo information"><span aria-label="Contributor">{contributor(photo.manifest.ownerAccountId)}</span>{date && <span aria-label={date.label}>{date.text}</span>}{shared?.people.map(name => <span key={name} aria-label="Shared reviewed person">{name}</span>)}{shared?.location?.name && <span aria-label="Shared place">{shared.location.name}</span>}</div>
               {group.copies.length > 1 && <details className="album-copies"><summary>{group.copies.length} copies</summary>{group.copies.map(copy => <button key={copy.manifest.photoId} onClick={() => setPreview(copy)}>{contributor(copy.manifest.ownerAccountId)} · {copy.metadata.filename}</button>)}</details>}</div>;})}</div>
             {page.hasMore && <div className="hint" aria-label="Album coverage"><p role="status">{photos.length} of {page.photoCount} photos loaded. Search covers loaded photos.</p><button disabled={busy} onClick={() => void action(() => loadPage(access, page.nextCursor))}>Load more photos</button></div>}

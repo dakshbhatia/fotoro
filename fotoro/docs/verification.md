@@ -1,15 +1,49 @@
-# Verification — October 8, 2026
+# Verification — October 9, 2026
 
 This is the current evidence record. [The backlog](product-backlog.md) owns next
 work; [product](product.md) owns the intended experience. Earlier measurements and
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
 
-Current browser distribution is PR 58 in production. Native PR 58 is TestFlight
-0.1.0 (52), independently verified `VALID` and `IN_BETA_TESTING` in the existing
-internal group. The available phone diagnostic window still covers builds 49–50;
-build 52 installation and physical family acceptance remain unverified. The dated
-follow-ups below preserve their qualification state at the time of testing.
+Current browser distribution is PR 59 in production, Worker
+`00b834ed-9187-4f03-9404-574f7505cd33`. Native PR 59 is TestFlight
+0.1.0 (53), verified `VALID` and `IN_BETA_TESTING` in the existing internal
+group. All 23 hosted contexts passed on qualified head
+`b2bc3c64f91b48d9e5925e02d8cb9acb23881c2e`; merge
+`1a2bb71db731300ff4297d8a446bb21436edea09` has the same tree. Migration 0010
+is applied. Physical installation and family acceptance remain unverified.
+
+## October 9 direct Trip contribution and scoped Picks — locally qualified
+
+Native and browser Trips now offer direct device photo selection. Existing Save
+pipelines commit the chosen sources before contribution. Failed, cancelled or
+changed sources cannot contribute an incomplete set; completed private saves
+remain in Saved. Contributions use only the chosen, current owned sources and
+omit exact duplicates. Browser hydration reads the selected committed manifests
+explicitly when browsing metadata has not caught up. Native invitation entry
+preserves the intended Trip and still requires explicit acceptance for an invite.
+
+Trip best shots uses existing local quality and diversity rules on at most 200
+matching unique loaded images, using small derivatives without original fallback.
+Suggestions show reasons and incomplete coverage; originals remain untouched.
+Capture grouping uses verified capture dates rather than import dates. Work and
+cached results remain bound to current account, access and signed source revision.
+Provider understanding remains disabled.
+
+Saved day grouping and favorite filtering now reuse an invalidated projection.
+Favorite corrections invalidate that projection. Native Trip thumbnail/preview
+files reuse verified data with current membership checks and revision-specific
+paths; temporary membership failures preserve an opened Trip, while confirmed
+revocation clears it.
+
+Local qualification passes 629 browser tests, 122 API tests, 544 native tests and
+142 isolated preview tests. Native and preview each have two simulator skips and
+no failures. Production browser build and startup checks pass. Actual browser
+file-picker QA chooses three public fixture files including an exact duplicate;
+two photos reach the Trip, Picks produces a suggestion, and the downloaded ZIP
+contains the two byte-identical chosen originals. Browser warning/error logs are
+empty. These checks do not establish physical-device frame pacing, cross-device
+restore, shared face identity, Safari large-ZIP acceptance or recoverable deletion.
 
 ## October 8 Trips and encrypted contacts — locally qualified
 

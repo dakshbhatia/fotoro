@@ -339,6 +339,7 @@ struct RecentPhotosView: View {
   @State private var deviceLookup = RecentPhotoLookup()
   #if !FOTORO_LOCAL_PREVIEW
   @State private var timelineProjection = PhotoBrowseProjection()
+  @State private var savedProjection = PhotoBrowseValueProjection<SavedPhotoBrowseProjectionID, SavedPhotoBrowseSnapshot>()
   #endif
   @State private var viewer: RecentPhotoViewerPresentation?
   @State private var pendingShare: RecentPhoto?
@@ -463,8 +464,26 @@ struct RecentPhotosView: View {
   private var selectedReferences: Set<ConsumerPhotoReference> {
     Set(selected.map(ConsumerPhotoReference.device) + selectedSavedPhotos.ids.map(ConsumerPhotoReference.saved))
   }
-  private var ownedPhotos: [LocalPhoto] {
-    allOwnedPhotos.filter { !savedFavoritesOnly || services?.annotation($0).favorite == true }
+  private var ownedPhotos: [LocalPhoto] { savedSnapshot.photos }
+  private var savedSnapshot: SavedPhotoBrowseSnapshot {
+    let calendar = Calendar.current
+    let identity = SavedPhotoBrowseProjectionID(binding: services.map(SavedLibraryOpenBinding.init),
+      permitted: services?.photoAccountAccess != nil, catalog: services?.consumerCatalogGeneration ?? 0,
+      favoritesOnly: savedFavoritesOnly, calendar: calendar)
+    return savedProjection.value(for: identity) {
+      guard let services, identity.permitted else { return SavedPhotoBrowseSnapshot() }
+      let photos = allOwnedPhotos.filter { !savedFavoritesOnly || services.annotation($0).favorite == true }
+      let groups = Dictionary(grouping: photos) { photo in
+        Wire.parseDate(photo.metadata.sourceDate).map { calendar.startOfDay(for: $0).timeIntervalSince1970.description }
+          ?? "unknown"
+      }
+      let days = groups.keys.sorted {
+        if $0 == "unknown" { return false }
+        if $1 == "unknown" { return true }
+        return (Double($0) ?? 0) > (Double($1) ?? 0)
+      }.map { ($0, groups[$0]!) }
+      return SavedPhotoBrowseSnapshot(photos: photos, days: days)
+    }
   }
   private var allOwnedPhotos: [LocalPhoto] {
     guard let services, services.photoAccountAccess != nil else { return [] }
@@ -492,17 +511,7 @@ struct RecentPhotosView: View {
         grouping: groupMoments ? .moments : .days, dates: browseDates)
     }
   }
-  private var savedDays: [(String, [LocalPhoto])] {
-    let groups = Dictionary(grouping: ownedPhotos) { photo in
-      Wire.parseDate(photo.metadata.sourceDate).map { Calendar.current.startOfDay(for: $0).timeIntervalSince1970.description }
-        ?? "unknown"
-    }
-    return groups.keys.sorted {
-      if $0 == "unknown" { return false }
-      if $1 == "unknown" { return true }
-      return (Double($0) ?? 0) > (Double($1) ?? 0)
-    }.map { ($0, groups[$0]!) }
-  }
+  private var savedDays: [(String, [LocalPhoto])] { savedSnapshot.days }
   @ViewBuilder private var savedContent: some View {
     if let services {
       if services.photoAccountAccess == nil || services.auth.startPassword != nil {

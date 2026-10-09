@@ -54,6 +54,33 @@ final class PhotoBrowsingTests: XCTestCase {
     XCTAssertTrue(groups().isEmpty, "Another account must not reuse the prior projection")
     XCTAssertEqual(builds, 4)
   }
+  #if !FOTORO_LOCAL_PREVIEW
+  @MainActor func testSavedProjectionReusesReadsAndInvalidatesCatalogFavoritesAccessAndCalendar() {
+    let projection = PhotoBrowseValueProjection<SavedPhotoBrowseProjectionID, [String]>()
+    var identity = SavedPhotoBrowseProjectionID(binding: nil, permitted: true, catalog: 1,
+      favoritesOnly: false, calendar: calendar)
+    var builds = 0
+    func read() -> [String] {
+      projection.value(for: identity) {
+        builds += 1
+        return identity.permitted ? ["snapshot-\(identity.catalog)-\(identity.favoritesOnly)"] : []
+      }
+    }
+    for _ in 0..<100 { XCTAssertEqual(read(), ["snapshot-1-false"]) }
+    XCTAssertEqual(builds, 1, "Cell appearance and selection reads reuse catalog derivation")
+    identity.catalog += 1
+    XCTAssertEqual(read(), ["snapshot-2-false"])
+    identity.favoritesOnly = true
+    XCTAssertEqual(read(), ["snapshot-2-true"])
+    identity.permitted = false
+    XCTAssertTrue(read().isEmpty, "Withdrawn saved-library access cannot reuse photos")
+    identity.permitted = true
+    XCTAssertEqual(read(), ["snapshot-2-true"])
+    identity.calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    _ = read()
+    XCTAssertEqual(builds, 6, "Day buckets must follow the current calendar")
+  }
+  #endif
   func testFiltersUseOnlyCurrentSuppliedFactsWithoutInferringPlaces() {
     let ordinary = photo("plain")
     let favorite = photo("favorite", favorite: true)
