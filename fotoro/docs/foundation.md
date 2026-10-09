@@ -67,7 +67,7 @@ renamed equivalent Live Photo pairs export once. Distinct motion resources stay
 complete. One ZIP uses safe per-photo paths; interrupted, changed or incomplete
 work produces no completed archive. Native stages protected temporary files and
 uses Foundation ZIP coordination off the main actor. Browser ZIP creation reuses
-fflate 0.8.2 with its MIT notice, streams to a temporary file under an origin-wide
+fflate 0.8.3 with its MIT notice, streams to a temporary file under an origin-wide
 lock where supported, and uses a bounded 128 MiB fallback otherwise. Browser ZIP
 output remains below 4 GiB. Published browser temporary output stays available
 until explicit download cleanup or leaving the trip; keep the trip open until
