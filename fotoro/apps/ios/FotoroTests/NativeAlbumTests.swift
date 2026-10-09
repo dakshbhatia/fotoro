@@ -977,6 +977,65 @@ final class NativeAlbumTests: XCTestCase {
       XCTAssertFalse(model.hasPendingAddition)
     }
   }
+  @MainActor func testFailedAppendMembershipKeepsPickerAndRevalidatesSameSelection() async throws {
+    try await withAlbum(owner: true) { services, server, model in
+      server.included = false
+      try services.store.put(server.source); try services.reload()
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let picker = NativeAlbumPhotoPickerStore()
+      picker.open(services, initial: [server.source]); await picker.waitUntilSettled()
+      let access = model.currentOpenedPhotoAccess
+      server.accessStatus = 503
+      do { try await model.append(picker.chosen(services)); XCTFail("Unavailable membership reported success") } catch {}
+      XCTAssertEqual(model.opened?.id, server.definition.albumId)
+      XCTAssertEqual(model.currentOpenedPhotoAccess, access)
+      XCTAssertEqual(try picker.chosen(services).map(\.id), [server.source.id])
+      XCTAssertTrue(server.appendBodies.isEmpty, "Failed membership cannot contribute a photo")
+      server.accessStatus = nil
+      let checks = server.accessReads
+      try await model.append(picker.chosen(services))
+      XCTAssertGreaterThan(server.accessReads, checks, "Retry must revalidate membership before contributing")
+      XCTAssertEqual(model.items.map { $0.photo.id }, try picker.chosen(services).map(\.id))
+      XCTAssertEqual(server.appendBodies.count, 1)
+      server.accessStatus = 403
+      do { try await model.append(picker.chosen(services)); XCTFail("Denied membership reported success") } catch {}
+      XCTAssertNil(model.opened); XCTAssertNil(model.currentOpenedPhotoAccess)
+      XCTAssertNotNil(try services.consumerSavedPhoto(server.source.id))
+      picker.clear()
+    }
+  }
+  @MainActor func testCancelledAppendMembershipKeepsTripForExplicitRetry() async throws {
+    try await withAlbum(owner: true) { services, server, model in
+      server.included = false
+      try services.store.put(server.source); try services.reload()
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let gate = AlbumFactsRequestGate(started: expectation(description: "Held append membership"))
+      defer { gate.release.signal() }
+      server.accessGate = gate
+      let adding = Task { try await model.append([server.source]) }
+      await fulfillment(of: [gate.started], timeout: 3)
+      adding.cancel(); gate.release.signal()
+      do { try await adding.value; XCTFail("Cancelled addition reported success") } catch is CancellationError {} catch { XCTFail("Unexpected error: \(error)") }
+      XCTAssertEqual(model.opened?.id, server.definition.albumId)
+      XCTAssertNotNil(model.currentOpenedPhotoAccess); XCTAssertTrue(server.appendBodies.isEmpty)
+      try await model.append([server.source])
+      XCTAssertEqual(model.items.map { $0.photo.id }, [server.source.id])
+      XCTAssertEqual(server.appendBodies.count, 1)
+    }
+  }
+  @MainActor func testTransientInboxRefreshKeepsVerifiedTripForNextChosenAction() async throws {
+    try await withAlbum(owner: true) { _, server, model in
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let items = model.items.map(\.id), access = model.currentOpenedPhotoAccess
+      server.failInbox = true
+      do { try await model.refresh(); XCTFail("Offline refresh reported success") } catch {}
+      XCTAssertEqual(model.opened?.id, server.definition.albumId)
+      XCTAssertEqual(model.items.map(\.id), items); XCTAssertEqual(model.currentOpenedPhotoAccess, access)
+      server.failInbox = false; server.accessStatus = 403
+      do { try await model.checkOpenedAccess(); XCTFail("Denied access reported success") } catch {}
+      XCTAssertNil(model.opened); XCTAssertNil(model.currentOpenedPhotoAccess)
+    }
+  }
   @MainActor func testLostAppendResponseRetriesDurableExactBodyAndOriginalBrowserSignature() async throws {
     try await withAlbum(owner: true) { services, server, model in
       server.included = false; server.loseAppendResponse = true

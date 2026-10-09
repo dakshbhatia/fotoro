@@ -140,7 +140,10 @@ struct NativeAlbumAccess {
   func refresh() async throws {
     let refreshEpoch = epoch
     do { try await refreshInbox() }
-    catch { if refreshEpoch == epoch { clearOpen() }; throw error }
+    catch {
+      if refreshEpoch == epoch, !Self.preservesReadAccess(error) { clearOpen() }
+      throw error
+    }
     try await refreshSharedDetails()
   }
   private func refreshInbox() async throws {
@@ -237,6 +240,12 @@ struct NativeAlbumAccess {
     guard detail.version == 1, detail.definition == access.signedDefinition, detail.membership == "accepted", detail.endedAt == nil,
       detail.entries.count == detail.manifests.count, detail.entries.count <= 100, detail.entries.count <= detail.photoCount,
       detail.hasMore == (detail.nextCursor != nil), detail.nextCursor.map({ !$0.isEmpty && $0.utf8.count <= 256 && $0.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil }) ?? true else { throw FotoroError("Album access has ended or changed.") }
+  }
+  private static func preservesReadAccess(_ error: Error) -> Bool {
+    if error is CancellationError { return true }
+    if error is URLError { return true }
+    let status = (error as? FotoroError)?.statusCode ?? 0
+    return status == 408 || status == 429 || (500...599).contains(status)
   }
   @discardableResult private func membership(_ access: NativeAlbumAccess, preservingTransientFailure: Bool = false) async throws -> AlbumOverviewV1 {
     do {
@@ -699,7 +708,7 @@ struct NativeAlbumAccess {
       pending.albumId == reading.albumID, pending.definition == reading.signedDefinition else { throw FotoroError("Pending album addition belongs to another context.") }
     guard NativeAlbumWire.uuid(pending.request.operationId), pending.request.version == 1,
       (1...100).contains(pending.request.entries.count), pending.request.entries.count == pending.request.manifests.count else { throw FotoroError("Invalid pending album addition.") }
-    try await membership(reading)
+    try await membership(reading, preservingTransientFailure: true)
     // Recheck each source before retrying the exact signed bytes after a lost response.
     for (entry, signed) in zip(pending.request.entries, pending.request.manifests) {
       let (manifest, _) = try crypto.photo(entry, manifestSigned: signed, definition: reading.definition, key: reading.key)
@@ -708,7 +717,7 @@ struct NativeAlbumAccess {
     let result = try await request(AlbumAppendResultV1.self, path: "/v1/albums/\(reading.albumID)/photos", context: reading.context, body: Wire.encode(pending.request))
     guard result.version == 1, result.albumId == reading.albumID, result.operationId == pending.request.operationId,
       (0...pending.request.entries.count).contains(result.added), (0...1000).contains(result.photoCount) else { throw FotoroError("Album contribution binding failed.") }
-    try await membership(reading); try check(reading.context)
+    try await membership(reading, preservingTransientFailure: true); try check(reading.context)
     let completedID = journalID(reading)
     try await services.store.database.write { db in try db.execute(sql: "DELETE FROM operations WHERE id=?", arguments: [completedID]) }
     try await refresh(); try await open(reading.albumID)
@@ -732,7 +741,7 @@ struct NativeAlbumAccess {
     if try services.store.existingOperation(journalID(reading), as: NativeAlbumPendingAppend.self) != nil {
       throw FotoroError("Retry the previous addition before choosing more photos.")
     }
-    try await membership(reading)
+    try await membership(reading, preservingTransientFailure: true)
     let current = try selected(photos, reading: reading), already = try await existing(current, reading: reading)
     _ = try selected(current, reading: reading)
     let missing = current.filter { !already.contains($0.id) }

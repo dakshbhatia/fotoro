@@ -30,7 +30,10 @@ preview, access and original verification still gate publication. Temporary Trip
 refresh failures preserve the opened reader; confirmed access or integrity failures
 clear it. The native Add picker retains selection and source revisions after
 failure, supports explicit retry and cancellation, and closes only after a
-successful addition in the current account and Trip.
+successful addition in the current account and Trip. A failed membership check or
+inbox refresh preserves that verified context only for temporary failures; every
+retry rechecks current membership. Confirmed access loss closes the picker, and
+early cancellation releases the busy state.
 
 The full core/API/browser check passes. Browser tests pass 679 with one emitted
 startup-budget check deferred until build; all three startup checks then pass

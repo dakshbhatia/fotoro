@@ -204,7 +204,7 @@ struct NativeAlbumView: View {
         catch { feedback = error.localizedDescription }
         while !Task.isCancelled {
           do { try await Task.sleep(for: .seconds(15)) } catch { return }
-          guard scenePhase == .active, !busy, searchTask == nil else { continue }
+          guard scenePhase == .active, !busy, searchTask == nil, !showPicker else { continue }
           let openedID = model.opened?.id, count = model.opened?.overview.photoCount
           run {
             try await refreshAlbums()
@@ -222,7 +222,9 @@ struct NativeAlbumView: View {
       .onChange(of: scenePhase) { _, phase in
         if phase != .active { suspendAlbum() }
       }
-      .onChange(of: model.opened?.id) { _, id in if id == nil { cleanupTripDownload(); viewer = nil; link = nil; showFamilyFilters = false } }
+      .onChange(of: model.opened?.id) { _, id in
+        if id == nil { cleanupTripDownload(); viewer = nil; link = nil; showFamilyFilters = false; showPicker = false }
+      }
       .onDisappear { resumeState.intent = nil; stop(); authenticationTask?.cancel(); authenticationTask = nil; model.clear() }
       .sheet(isPresented: $showCreation) {
         NavigationStack {
@@ -661,9 +663,9 @@ struct NativeAlbumView: View {
     pendingSearch?.cancel(); searchTask = nil; searchTaskID = nil
     operation?.cancel(); let id = UUID(); operationID = id; feedback = nil
     operation = Task {
+      defer { if operationID == id { operation = nil; operationID = nil } }
       await pendingSearch?.value
       guard !Task.isCancelled, operationID == id else { return }
-      defer { if operationID == id { operation = nil; operationID = nil } }
       do { try await services.withDiagnosticAction(.albums, action) }
       catch is CancellationError {} catch { if operationID == id { feedback = error.localizedDescription } }
     }
