@@ -83,204 +83,282 @@ struct LibraryView: View {
     }.map { ($0, groups[$0]!) }
   }
   var body: some View {
-    NavigationStack {
-      Group {
-        if reopeningAccount || invitationPasswordRetry?.awaitingPassword == true || services.auth.startPassword != nil || services.photoAccountAccess == nil {
-          VStack(alignment: .leading, spacing: 0) {
-            if let saveSelection {
-              Text("Open Fotoro to save \(saveSelection.count) \(saveSelection.count == 1 ? "photo" : "photos")")
-                .font(.headline).padding(.horizontal).padding(.top)
-            }
-            if invitationPasswordRetry?.awaitingPassword == true {
-              Text("Open the Fotoro this invitation was sent to.").font(.headline).padding(.horizontal).padding(.top)
-            }
-            AccountView(services: services, enterPassword: invitationPasswordRetry?.awaitingPassword == true,
-              reauthenticate: catalogRefresh.requiresAuthentication(services), diagnosticDetail: catalogRefresh.authenticationFailure(services), onSignedIn: openedAccount,
-              onAuthenticationTask: { authenticationTask = $0 })
+    NavigationStack { libraryAlerts }.preferredColorScheme(.dark)
+  }
+  @ViewBuilder private var libraryContent: some View {
+    Group {
+      if reopeningAccount || invitationPasswordRetry?.awaitingPassword == true
+        || services.auth.startPassword != nil || services.photoAccountAccess == nil
+      {
+        accountContent
+      } else if authenticationTask != nil {
+        ProgressView("Opening Fotoro…")
+      } else {
+        savedGallery
+      }
+    }
+  }
+  private var accountContent: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      if let saveSelection {
+        Text(
+          "Open Fotoro to save \(saveSelection.count) \(saveSelection.count == 1 ? "photo" : "photos")"
+        )
+        .font(.headline).padding(.horizontal).padding(.top)
+      }
+      if invitationPasswordRetry?.awaitingPassword == true {
+        Text("Open the Fotoro this invitation was sent to.").font(.headline).padding(.horizontal)
+          .padding(.top)
+      }
+      AccountView(
+        services: services, enterPassword: invitationPasswordRetry?.awaitingPassword == true,
+        reauthenticate: catalogRefresh.requiresAuthentication(services),
+        diagnosticDetail: catalogRefresh.authenticationFailure(services), onSignedIn: openedAccount,
+        onAuthenticationTask: { authenticationTask = $0 })
+    }
+  }
+  private var savedGallery: some View {
+    ScrollView {
+      savingFeedback
+      catalogFeedback
+      searchFeedback
+      photoGrid
+      emptyLibraryFeedback
+      ForEach(services.notices, id: \.self) { Text($0).font(.caption).padding() }
+    }.scrollPosition(id: $scrollID, anchor: .top)
+      .scrollDismissesKeyboard(.interactively)
+      .refreshable { await catalogRefresh.refresh(services) }
+      .task(id: SavedLibraryReadPresentation(services, isActive: scenePhase == .active)) {
+        await openSavedCatalog()
+      }
+      .searchable(text: $query, prompt: "Search")
+      .task(
+        id: SavedCatalogSearchRequestID(
+          presentation: searchID,
+          isActive: scenePhase == .active, attempt: searchAttempt)
+      ) {
+        await searchSavedCatalog()
+      }
+      .toolbar { galleryToolbar }
+  }
+  private var photoGrid: some View {
+    LazyVGrid(
+      columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 2), spacing: 3
+    ) {
+      ForEach(days, id: \.0) { day in
+        Section {
+          ForEach(day.1) { photo in
+            LibraryPhotoCell(
+              photo: photo, isSelected: selection.contains(photo.id),
+              open: { viewer = SavedPhotoViewerPresentation(initial: photo, photos: filtered) },
+              toggleSelection: { selection.toggle(photo) }
+            ).id(photo.id)
           }
-        } else if authenticationTask != nil {
-          ProgressView("Opening Fotoro…")
-        } else {
-          ScrollView {
-            savingFeedback
-            catalogFeedback
-            searchFeedback
-            LazyVGrid(
-              columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 2), spacing: 3
-            ) {
-              ForEach(days, id: \.0) { day in
-                Section {
-                  ForEach(day.1) { photo in
-                    LibraryPhotoCell(
-                      photo: photo, isSelected: selection.contains(photo.id),
-                      open: { viewer = SavedPhotoViewerPresentation(initial: photo, photos: filtered) },
-                      toggleSelection: { selection.toggle(photo) }
-                    ).id(photo.id)
-                  }
-                } header: {
-                  Text(day.0).font(.headline).frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 12)
-                }
-              }
-              if !hasQuery, savedHasMore, !services.photos.isEmpty {
-                Section {} footer: {
-                  SavedLibraryPaginationFooter(services: services, hasMore: $savedHasMore,
-                    isActive: scenePhase == .active && !catalogRefresh.isRefreshing,
-                    failed: { services.error = $0 })
-                }
-              }
-            }.scrollTargetLayout()
-            if filtered.isEmpty && !catalogRefresh.isRefreshing,
-              hasQuery || !savedHasMore || services.photos.isEmpty,
-              !hasQuery || (catalogSearch.hasCompleted(searchID) && catalogSearch.failure(for: searchID) == nil) {
-              ContentUnavailableView(
-                hasQuery ? "No photos found" : "No photos", systemImage: "photo",
-                description: Text(!hasQuery ? savedLibraryEmptyMessage(sync: services.automaticPhotoSync,
-                  favoritesOnly: favoritesOnly) : "Try a label, filename or words in a photo."))
-            }
-            ForEach(services.notices, id: \.self) { Text($0).font(.caption).padding() }
-          }.scrollPosition(id: $scrollID, anchor: .top)
-            .scrollDismissesKeyboard(.interactively)
-            .refreshable { await catalogRefresh.refresh(services) }
-            .task(id: SavedLibraryReadPresentation(services, isActive: scenePhase == .active)) {
-              guard !Task.isCancelled else { return }
-              guard scenePhase == .active else { catalogRefresh.cancel(); return }
-              await catalogRefresh.open(services, recheck: true)
-            }
-            .searchable(text: $query, prompt: "Search")
-            .task(id: SavedCatalogSearchRequestID(presentation: searchID,
-              isActive: scenePhase == .active, attempt: searchAttempt)) {
-              guard !Task.isCancelled else { return }
-              guard scenePhase == .active, hasQuery, services.photoAccountAccess != nil else {
-                catalogSearch.cancel(clearResults: true)
-                return
-              }
-              let searched = searchID
-              await catalogSearch.search(searched, current: { searchID }) {
-                let found = try await services.searchCatalog(searched.query)
-                // Search may span catalog pages. Recheck each returned saved source before presentation.
-                return try found.compactMap { photo in
-                  guard let current = try services.consumerSavedPhoto(photo.id),
-                    current.metadata == photo.metadata, current.manifest == photo.manifest else { return nil }
-                  return current
-                }
-              }
-            }
-            .toolbar {
-              if selection.count > 0 {
-                ToolbarItem(placement: .bottomBar) {
-                  Button("Clear selection", systemImage: "xmark.circle") { selection.removeAll() }
-                    .disabled(preparingShare || sharingOriginals)
-                    .accessibilityIdentifier("saved.selection.clear")
-                }
-                ToolbarItem(placement: .bottomBar) {
-                  Menu("Share \(selection.count)", systemImage: "square.and.arrow.up") {
-                    Button("Share photos") { shareOriginals() }
-                    Button("Share in Fotoro") { shareInFotoro() }
-                  }.disabled(preparingShare || sharingOriginals)
-                }
-              }
-              ToolbarItem(placement: .topBarTrailing) {
-                Menu("Saved options", systemImage: "ellipsis.circle") {
-                  Toggle("Favorites", isOn: $favoritesOnly)
-                  Button("Refresh", systemImage: "arrow.clockwise") {
-                    Task { await catalogRefresh.refresh(services) }
-                  }.accessibilityIdentifier("saved.refresh")
-                }
-              }
-            }
+        } header: {
+          Text(day.0).font(.headline).frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 12)
         }
-      }.navigationTitle("Saved photos").navigationBarTitleDisplayMode(.inline)
-        .task {
-          resumeSelectedSave()
-          openIncomingLink()
+      }
+      if !hasQuery, savedHasMore, !services.photos.isEmpty {
+        Section {
+        } footer: {
+          SavedLibraryPaginationFooter(
+            services: services, hasMore: $savedHasMore,
+            isActive: scenePhase == .active && !catalogRefresh.isRefreshing,
+            failed: { services.error = $0 })
         }
-        .toolbar {
-          if services.photoAccountAccess != nil {
-            ToolbarItem(placement: .topBarLeading) {
-              Button("Shared photos", systemImage: "person.2") { sharedPhotos = SharedPhotosPresentation() }
+      }
+    }.scrollTargetLayout()
+  }
+  @ViewBuilder private var emptyLibraryFeedback: some View {
+    if filtered.isEmpty && !catalogRefresh.isRefreshing,
+      hasQuery || !savedHasMore || services.photos.isEmpty,
+      !hasQuery
+        || (catalogSearch.hasCompleted(searchID) && catalogSearch.failure(for: searchID) == nil)
+    {
+      ContentUnavailableView(
+        hasQuery ? "No photos found" : "No photos", systemImage: "photo",
+        description: Text(
+          !hasQuery
+            ? savedLibraryEmptyMessage(
+              sync: services.automaticPhotoSync,
+              favoritesOnly: favoritesOnly) : "Try a label, filename or words in a photo."))
+    }
+  }
+  @ToolbarContentBuilder private var galleryToolbar: some ToolbarContent {
+    if selection.count > 0 {
+      ToolbarItem(placement: .bottomBar) {
+        Button("Clear selection", systemImage: "xmark.circle") { selection.removeAll() }
+          .disabled(preparingShare || sharingOriginals)
+          .accessibilityIdentifier("saved.selection.clear")
+      }
+      ToolbarItem(placement: .bottomBar) {
+        Menu("Share \(selection.count)", systemImage: "square.and.arrow.up") {
+          Button("Share photos") { shareOriginals() }
+          Button("Share in Fotoro") { shareInFotoro() }
+        }.disabled(preparingShare || sharingOriginals)
+      }
+    }
+    ToolbarItem(placement: .topBarTrailing) {
+      Menu("Saved options", systemImage: "ellipsis.circle") {
+        Toggle("Favorites", isOn: $favoritesOnly)
+        Button("Refresh", systemImage: "arrow.clockwise") {
+          Task { await catalogRefresh.refresh(services) }
+        }.accessibilityIdentifier("saved.refresh")
+      }
+    }
+  }
+  private func openSavedCatalog() async {
+    guard !Task.isCancelled else { return }
+    guard scenePhase == .active else { catalogRefresh.cancel(); return }
+    await catalogRefresh.open(services, recheck: true)
+  }
+  private func searchSavedCatalog() async {
+    guard !Task.isCancelled else { return }
+    guard scenePhase == .active, hasQuery, services.photoAccountAccess != nil else {
+      catalogSearch.cancel(clearResults: true)
+      return
+    }
+    let searched = searchID
+    await catalogSearch.search(searched, current: { searchID }) {
+      let found = try await services.searchCatalog(searched.query)
+      // Search may span catalog pages. Recheck each returned saved source before presentation.
+      return try found.compactMap { photo in
+        guard let current = try services.consumerSavedPhoto(photo.id),
+          current.metadata == photo.metadata, current.manifest == photo.manifest
+        else { return nil }
+        return current
+      }
+    }
+  }
+  private var libraryNavigation: some View {
+    libraryContent.navigationTitle("Saved photos").navigationBarTitleDisplayMode(.inline)
+      .task {
+        resumeSelectedSave()
+        openIncomingLink()
+      }
+      .toolbar {
+        if services.photoAccountAccess != nil {
+          ToolbarItem(placement: .topBarLeading) {
+            Button("Shared photos", systemImage: "person.2") {
+              sharedPhotos = SharedPhotosPresentation()
             }
           }
-          ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
         }
-        .overlay { if services.busy { ProgressView().padding().glassEffect() } }
-        .fullScreenCover(item: $viewer, onDismiss: { viewer = nil }) { presentation in
-          PhotoViewer(
-            services: services, initialID: presentation.initial.id, displayedPhotos: presentation.photos)
-        }
-        .sheet(item: $sharedPhotos, onDismiss: {
+        ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
+      }
+      .overlay { if services.busy { ProgressView().padding().glassEffect() } }
+  }
+  private var libraryPresentations: some View {
+    libraryNavigation
+      .fullScreenCover(item: $viewer, onDismiss: { viewer = nil }) { presentation in
+        PhotoViewer(
+          services: services, initialID: presentation.initial.id,
+          displayedPhotos: presentation.photos)
+      }
+      .sheet(
+        item: $sharedPhotos,
+        onDismiss: {
           if invitationPasswordRetry?.presented == true { invitationPasswordRetry = nil }
-        }) { presentation in
-          ExchangeView(services: services, selected: presentation.photos, incoming: presentation.incoming,
-            onRetryPassword: retryInvitationPassword)
         }
-        .onChange(of: authenticationTask == nil) { openIncomingLink() }
-        .onChange(of: services.photoAccountAccess) {
+      ) { presentation in
+        ExchangeView(
+          services: services, selected: presentation.photos, incoming: presentation.incoming,
+          onRetryPassword: retryInvitationPassword)
+      }
+  }
+  private var libraryAccountLifecycle: some View {
+    libraryPresentations
+
+      .onChange(of: authenticationTask == nil) { openIncomingLink() }
+      .onChange(of: services.photoAccountAccess) {
+        resumeSelectedSave()
+        openIncomingLink()
+      }
+      .onChange(of: scenePhase) {
+        if scenePhase == .background {
+          catalogSearch.cancel(clearResults: true)
+          pendingIncoming = nil; sharedPhotos = nil
+          cancelAuthentication()
+          services.setPhotoSyncForeground(false)
+        } else if scenePhase == .active {
+          services.setPhotoSyncForeground(true)
           resumeSelectedSave()
           openIncomingLink()
+        } else {
+          services.setPhotoSyncForeground(false)
         }
-        .onChange(of: scenePhase) {
-          if scenePhase == .background {
-            catalogSearch.cancel(clearResults: true)
-            pendingIncoming = nil; sharedPhotos = nil
-            cancelAuthentication()
-            services.setPhotoSyncForeground(false)
-          } else if scenePhase == .active {
-            services.setPhotoSyncForeground(true)
-            resumeSelectedSave()
-            openIncomingLink()
-          } else {
-            services.setPhotoSyncForeground(false)
+      }
+      .sheet(isPresented: $sharingOriginals, onDismiss: cleanupShare) {
+        OriginalShareSheet(urls: originalURLs) { _ in cleanupShare() }
+      }
+  }
+  private var libraryVaultLifecycle: some View {
+    libraryAccountLifecycle
+
+      .onChange(of: services.vault.isUnlocked) { _, unlocked in
+        if !unlocked {
+          if authenticationTask == nil { saveIntent?.cancel(); pendingIncoming = nil }
+          if authenticationTask == nil && invitationPasswordRetry?.awaitingPassword != true {
+            invitationPasswordRetry = nil
           }
-        }
-        .sheet(isPresented: $sharingOriginals, onDismiss: cleanupShare) {
-          OriginalShareSheet(urls: originalURLs) { _ in cleanupShare() }
-        }
-        .onChange(of: services.vault.isUnlocked) { _, unlocked in
-          if !unlocked {
-            if authenticationTask == nil { saveIntent?.cancel(); pendingIncoming = nil }
-            if authenticationTask == nil && invitationPasswordRetry?.awaitingPassword != true { invitationPasswordRetry = nil }
-            sharedPhotos = nil
-            viewer = nil
-            shareTask?.cancel()
-            cleanupShare()
-            selection.removeAll()
-            catalogSearch.cancel(clearResults: true)
-            catalogRefresh.cancel()
-          }
-        }
-        .onChange(of: services.vault.generation) {
+          sharedPhotos = nil
+          viewer = nil
+          shareTask?.cancel()
+          cleanupShare()
+          selection.removeAll()
           catalogSearch.cancel(clearResults: true)
-          if !services.vault.isUnlocked {
-            sharedPhotos = nil
-            if authenticationTask == nil { pendingIncoming = nil }
-          }
-          shareTask?.cancel(); cleanupShare(); selection.removeAll(); catalogRefresh.cancel()
+          catalogRefresh.cancel()
         }
-        .onChange(of: services.session.accountId) {
-          catalogSearch.cancel(clearResults: true)
-          if authenticationTask == nil && invitationPasswordRetry?.isAuthorized(services.photoAccountAccess, origin: services.api.origin) != true {
-            pendingIncoming = nil; sharedPhotos = nil; invitationPasswordRetry = nil
-          }
+      }
+      .onChange(of: services.vault.generation) {
+        catalogSearch.cancel(clearResults: true)
+        if !services.vault.isUnlocked {
+          sharedPhotos = nil
+          if authenticationTask == nil { pendingIncoming = nil }
         }
-        .onChange(of: services.api.origin) { pendingIncoming = nil; sharedPhotos = nil; cancelAuthentication() }
-        .onChange(of: services.consumerCatalogGeneration) { savedHasMore = true; validateSelection() }
-        .onChange(of: SavedLibraryOpenBinding(services)) { savedHasMore = true }
-        .onDisappear {
-          cancelAuthentication(); shareTask?.cancel(); cleanupShare(); catalogRefresh.cancel()
-          catalogSearch.cancel(clearResults: true)
+        shareTask?.cancel(); cleanupShare(); selection.removeAll(); catalogRefresh.cancel()
+      }
+      .onChange(of: services.session.accountId) {
+        catalogSearch.cancel(clearResults: true)
+        if authenticationTask == nil
+          && invitationPasswordRetry?.isAuthorized(
+            services.photoAccountAccess, origin: services.api.origin) != true
+        {
+          pendingIncoming = nil; sharedPhotos = nil; invitationPasswordRetry = nil
         }
-        .alert(
-          "Fotoro",
-          isPresented: Binding(
-            get: { services.error != nil && services.vault.isUnlocked && viewer == nil && !sharingOriginals },
-            set: { if !$0 && viewer == nil && !sharingOriginals { services.error = nil } })
-        ) {
-          Button("OK") { services.error = nil }
-        } message: {
-          Text(services.error ?? "")
-        }
-    }.preferredColorScheme(.dark)
+      }
+      .onChange(of: services.api.origin) {
+        pendingIncoming = nil; sharedPhotos = nil; cancelAuthentication()
+      }
+  }
+  private var libraryLifecycle: some View {
+    libraryVaultLifecycle
+
+      .onChange(of: services.consumerCatalogGeneration) {
+        savedHasMore = true; validateSelection()
+      }
+      .onChange(of: SavedLibraryOpenBinding(services)) { savedHasMore = true }
+      .onDisappear {
+        cancelAuthentication(); shareTask?.cancel(); cleanupShare(); catalogRefresh.cancel()
+        catalogSearch.cancel(clearResults: true)
+      }
+  }
+  private var libraryAlerts: some View {
+    libraryLifecycle
+
+      .alert(
+        "Fotoro",
+        isPresented: Binding(
+          get: {
+            services.error != nil && services.vault.isUnlocked && viewer == nil && !sharingOriginals
+          },
+          set: { if !$0 && viewer == nil && !sharingOriginals { services.error = nil } })
+      ) {
+        Button("OK") { services.error = nil }
+      } message: {
+        Text(services.error ?? "")
+      }
   }
 
   private func openedAccount() {
