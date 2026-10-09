@@ -1605,6 +1605,128 @@
           "$ref": "#/$defs/LivePhotoResourceV1"
         }
       }
+    },
+    "AccountContactV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accountId",
+        "card",
+        "name"
+      ],
+      "properties": {
+        "accountId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "card": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountCardV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 80
+        }
+      }
+    },
+    "AccountContactsV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "ownerAccountId",
+        "entries"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "ownerAccountId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "entries": {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "$ref": "#/$defs/AccountContactV1"
+          }
+        }
+      }
+    },
+    "AccountContactsUpdateV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "revision",
+        "encrypted"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "encrypted": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "nonce",
+            "ciphertext"
+          ],
+          "properties": {
+            "version": {
+              "const": 1
+            },
+            "nonce": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]*$",
+              "minLength": 32,
+              "maxLength": 32
+            },
+            "ciphertext": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]*$",
+              "minLength": 22,
+              "maxLength": 262144
+            }
+          }
+        }
+      }
+    },
+    "AccountContactsReplyV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "contacts"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "contacts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SignedPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
     }
   }
 }

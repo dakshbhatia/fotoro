@@ -54,6 +54,49 @@ struct ExchangeView: View {
   private var receivedGrants: [GrantV1] { services.grants.filter { $0.recipientAccountId == account } }
   private var sentGrants: [GrantV1] { services.grants.filter { $0.ownerAccountId == account } }
 
+  @ViewBuilder private var contactSyncReview: some View {
+    if !services.contactsSyncConflicts.isEmpty || services.contactsSyncMessage != nil {
+      Section("Contact updates") {
+        if let message = services.contactsSyncMessage {
+          Text(message).font(.footnote).foregroundStyle(.secondary)
+          Button("Try again") { perform { try await services.syncContacts() } }.disabled(services.contactsSyncBusy)
+        }
+        ForEach(services.contactsSyncConflicts) { conflict in
+          VStack(alignment: .leading, spacing: 8) {
+            Text(services.contactName(conflict.accountId)).font(.headline)
+            Text("Choose which contact to keep on this device.").font(.footnote)
+            Text("This device: \(conflict.local?.name ?? "Removed contact")")
+            Text("Synced: \(conflict.synced?.name ?? "Removed contact")")
+            if conflict.fields.contains("deleted") {
+              Text("This contact was removed on one device and edited on another.").font(.footnote)
+            }
+            if conflict.fields.contains("card") {
+              Text("The trusted keys differ. Confirm the synced keys with this person before accepting.").font(.footnote)
+              DisclosureGroup("Review contact keys") {
+                contactKeys(conflict.local?.card, label: "This device's keys")
+                contactKeys(conflict.synced?.card, label: "Synced keys")
+              }
+            }
+            Button("Keep this device") {
+              perform { try services.resolveContactSyncConflict(conflict, keepLocal: true) }
+            }
+            Button("Use synced contact") {
+              perform { try services.resolveContactSyncConflict(conflict, keepLocal: false) }
+            }
+          }.disabled(services.contactsSyncBusy)
+        }
+      }
+    }
+  }
+  @ViewBuilder private func contactKeys(_ card: AccountCardV1?, label: String) -> some View {
+    if let card {
+      VStack(alignment: .leading, spacing: 4) {
+        Text(label).font(.caption)
+        Text(card.signingPublicKey).font(.caption.monospaced()).textSelection(.enabled)
+        Text(card.boxPublicKey).font(.caption.monospaced()).textSelection(.enabled)
+      }
+    } else { Text("Removed contact").font(.caption) }
+  }
   var body: some View {
     NavigationStack {
       ScrollView {
@@ -79,7 +122,7 @@ struct ExchangeView: View {
                 candidate = nil; link = ""; name = ""
                 feedback = openingPhotos ? "Photos opened." : "Contact added."
               }
-            }.disabled(services.busy || name.count > 80)
+            }.disabled(services.busy || name.utf16.count > 80)
             if candidateIsMoment, let candidate, let onRetryPassword {
               Button("Use another Fotoro password") {
                 focusedField = nil
@@ -199,6 +242,7 @@ struct ExchangeView: View {
           }
         }
         }
+        contactSyncReview
         Section(selected.isEmpty ? "People" : "Add a person") {
           if selected.isEmpty, let account, let card = try? services.session.requireCard(account),
             let url = try? FotoroShareLinks.contactURL(card, origin: services.api.origin) {

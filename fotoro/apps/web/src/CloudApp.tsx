@@ -69,6 +69,7 @@ import {useDialogFocus} from "./library/dialog-focus";
 import {AccountAccess} from "./vault/AccountAccess";
 import {ChosenSaveIntent, type ChosenSaveSnapshot} from "./exchange/chosen-save";
 import type {UnlockedVault} from "./vault/vault";
+import {syncContacts, subscribeContacts} from "./exchange/contacts";
 import {subscribeSavedRefresh} from "./library/consumer-refresh";
 import {saveQueuedAnnotations} from "./library/consumer-annotation-save";
 import type {ConsumerPhotoChanges} from "./library/consumer-changes";
@@ -480,6 +481,20 @@ export default function CloudApp({
     if (!effectVault()) return;
     return subscribeSavedRefresh(window, document, () => {void run(refresh);});
   }, [account]);
+  useEffect(() => {
+    if (!active || !account) return;
+    const session = effectVault(); if (!session) return;
+    const controller = new AbortController(), origin = location.origin;
+    const current = () => activeRef.current && sameVault(session) && location.origin === origin && !controller.signal.aborted;
+    const synchronize = () => {
+      if (!current() || !navigator.onLine || document.visibilityState !== "visible") return;
+      // Contact approval has its own encrypted queue; photo Pause does not pause it.
+      void syncContacts(session, {signal: controller.signal, current}).catch(() => {});
+    };
+    synchronize();
+    const refresh = subscribeSavedRefresh(window, document, synchronize), edits = subscribeContacts(synchronize);
+    return () => {controller.abort(); refresh(); edits();};
+  }, [active, account]);
   useEffect(() => {
     setReceivedNow(Date.now());
     if (!active || !account || !receivedContext) return;
@@ -926,7 +941,7 @@ export default function CloudApp({
             else if (event.target.value === "shared") openSharing();
             else if (event.target.value === "albums") openAlbums(albumDestination?.current() ? chosen : []);
             else {setReceived(null); setReceivedContext(null); setQuery(""); setCommittedMeaning(undefined);}
-          }}><option value="photos">Photos</option><option value="saved">Saved</option><option value="shared">Shared</option><option value="places">Places</option>{!publicDemo && <option value="albums">Live albums</option>}</select></nav> : <h1>Fotoro</h1>}
+          }}><option value="photos">Photos</option><option value="saved">Saved</option><option value="shared">Shared</option><option value="places">Places</option>{!publicDemo && <option value="albums">Trips</option>}</select></nav> : <h1>Fotoro</h1>}
           <div className="header-actions">
           {!unlocked && <button
             ref={backButton}

@@ -5,10 +5,56 @@ work; [product](product.md) owns the intended experience. Earlier measurements a
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
 
-Current browser distribution is PR 56 in production. Native PR 57 is TestFlight
-0.1.0 (51), independently verified `VALID` and `IN_BETA_TESTING` in the existing
-internal group; see [Deployment](deployment.md). The dated
+Current browser distribution is PR 58 in production. Native PR 58 is TestFlight
+0.1.0 (52), independently verified `VALID` and `IN_BETA_TESTING` in the existing
+internal group. The available phone diagnostic window still covers builds 49–50;
+build 52 installation and physical family acceptance remain unverified. The dated
 follow-ups below preserve their qualification state at the time of testing.
+
+## October 8 Trips and encrypted contacts — locally qualified
+
+Trips use the existing live album membership: invited people can add chosen Saved
+photos over time. Download trip independently traverses the full bounded inventory,
+verifies originals and current access, and creates one ZIP. Exact original copies
+and renamed identical Live Photo bundles are omitted from the export; contributed
+copies remain in the Trip. Complete Live pairs keep their resources together.
+Cancellation, incomplete paging, late contributions, revoked access and output
+failures discard the incomplete archive. Browser backing files remain available
+until Done downloading or Trip cleanup; the Trip must stay open during download.
+
+Reviewed contacts and names now synchronize as an encrypted, signed owner journal,
+independently of photo Pause. Explicit conflict review preserves concurrent edits
+and requires review for changed identity keys. Migration 0010 adds only the contact
+table; contact names and cards stay inside the encrypted payload.
+
+Local checks pass 618 browser tests, 122 API tests, 538 native tests and 142 isolated
+preview tests. Native and preview each have two simulator skips and no failures.
+The final filename portability change passes all 13 export/lease regressions,
+typecheck and browser build. All three startup checks pass at 442,350 bytes across
+nine static chunks. Actual browser QA uses two disposable loopback accounts and
+public fixtures: four contributions export three byte-identical originals, with
+one exact duplicate omitted; a filtered view still exports the whole Trip.
+Published-file cleanup and an empty browser warning/error log are verified.
+These checks do not establish physical-device, Safari large-ZIP, family face
+identity, real passkey or large-library acceptance. Release qualification remains
+the distribution checkpoint above until hosted checks and deployment complete.
+
+## October 8 family-loop release — PR 58 / build 52
+
+Qualified head `ae0aa55c83e19df950318469dd4de8538584801c` passed all 23 hosted
+contexts (seven success, 16 intentional skips). Merge
+`4092bd9e6797c21cfbd0844dac485330a03697da` has the same tree. Production Worker
+`cec37239-cc1a-4d0b-b1c5-3b8843bc3829` serves the exact 46 built assets;
+bindings, API script and runtime were unchanged. TestFlight build 52 was uploaded
+and read back as `VALID` / `IN_BETA_TESTING` for the existing internal group.
+
+Album entry can explicitly review an owner on a fresh browser, subsequent
+contributions can choose more photos, failed native page hydration retains its
+retry checkpoint, and return restores the same album and filters. Local
+qualification passed 585 browser tests, 116 API tests, 515 native tests and 140
+isolated preview tests; the native and preview runs each had two skips. Actual
+local browser/mobile and simulator journeys used public synthetic data. They do
+not establish physical-device restore, face quality or frame pacing.
 
 ## October 8 native photo delivery — released as build 51
 

@@ -33,6 +33,7 @@ export function readableShareError(error: unknown) {
     VERSION_CONFLICT: "Access changed while you were working. Open the invitation again.",
     PUBLIC_TEST_ACCOUNT_UPLOAD_DISABLED: "Private uploads are disabled in the public test account.",
     SHARE_LINK_INVALID: "That link could not be opened. Ask the sender for a new Fotoro link.",
+    CONTACT_REVIEW_CHANGED: "This synced contact changed again. Review the latest contact before choosing.",
     CONTACT_NAME_TOO_LONG: "Use a contact name with 80 characters or fewer.",
     SHARE_LINK_COPY_UNAVAILABLE: "Copy is unavailable in this browser. Select and copy the link below.",
   };

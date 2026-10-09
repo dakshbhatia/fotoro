@@ -6,5 +6,5 @@ export function AlbumContinuation({destination, photos, disabled, onContinue}: {
   if (!destination?.current()) return null;
   return <button className="primary-action" disabled={disabled || !photos.length} onClick={() => {
     if (!disabled && photos.length && destination.current()) onContinue([...photos], destination.albumId);
-  }}>Continue to album</button>;
+  }}>Continue to trip</button>;
 }

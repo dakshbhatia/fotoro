@@ -9,6 +9,7 @@ import * as albums from "./albums";
 import * as albumPhotoFacts from "./album-photo-facts";
 import { savePhoto } from "./saves";
 import * as annotations from "./annotations";
+import * as contacts from "./contacts";
 import * as intelligence from "./intelligence";
 import {beginDiagnostic, diagnosticFailure, finalDiagnostic, type RequestDiagnostic} from "./diagnostics";
 import { readJson } from "./requests";
@@ -217,6 +218,14 @@ app.get("/v1/photos/:id/annotations", async (c) => {
 app.put("/v1/photos/:id/annotations", async (c) => {
   c.header("Cache-Control", "no-store");
   return c.json(await annotations.putAnnotations(c.env, c.get("actor"), c.req.param("id"), await annotations.readAnnotationRequest(c.req.raw)));
+});
+app.get("/v1/contacts", async (c) => {
+  c.header("Cache-Control", "no-store");
+  return c.json(await contacts.getContacts(c.env, c.get("actor")));
+});
+app.put("/v1/contacts", async (c) => {
+  c.header("Cache-Control", "no-store");
+  return c.json(await contacts.putContacts(c.env, c.get("actor"), await contacts.readContactsRequest(c.req.raw)));
 });
 app.get("/v1/changes", async (c) =>
   c.json(

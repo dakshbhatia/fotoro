@@ -51,7 +51,7 @@ Photo GPS and confirmed Google Timeline imports support Places/Timeline locally.
 Raw imported location data and local vectors are not uploaded. Reviewed People groups now use the existing local index and encrypted facts.
 Automatically inferred trips and automatic cleanup remain open product work.
 
-Live albums reuse encrypted originals and the existing accepted-member roster.
+Trips present the existing live albums and reuse encrypted originals and the accepted-member roster.
 Optional photo details use an additive signed/encrypted sidecar, authenticated
 against the contributor, immutable album definition, manifest and original digest.
 Only the contributor can revise it. Explicit reviewed names and location support
@@ -59,6 +59,29 @@ album People/place/capture-date search; private OCR and unrelated annotations ar
 excluded. Names are contributor-scoped snapshots, not a shared face-identity graph.
 Filtering precedes exact-original grouping, which preserves all contributed copies.
 Older servers can still serve albums without this optional details capability.
+
+Download trip enumerates the complete bounded contribution list independently of
+the visible gallery and filters. It authenticates originals sequentially, groups
+exact originals, and additionally compares ordered verified resource bundles so
+renamed equivalent Live Photo pairs export once. Distinct motion resources stay
+complete. One ZIP uses safe per-photo paths; interrupted, changed or incomplete
+work produces no completed archive. Native stages protected temporary files and
+uses Foundation ZIP coordination off the main actor. Browser ZIP creation reuses
+fflate 0.8.2 with its MIT notice, streams to a temporary file under an origin-wide
+lock where supported, and uses a bounded 128 MiB fallback otherwise. Browser ZIP
+output remains below 4 GiB. Published browser temporary output stays available
+until explicit download cleanup or leaving the trip; keep the trip open until
+the browser finishes downloading. This is an explicit export, not cloud AI work.
+
+Approved contact cards and names have one account-private encrypted journal,
+separate from photo upload consent and Pause. The account signs an encrypted
+contact book; the service stores only its owner, revision and signed ciphertext.
+Clients retain exact pending requests across interruptions and merge independent
+edits. Changing an identity already trusted on this device, overlapping name edits
+or removal conflicts requires an explicit choice. Removed entries retain
+tombstones so an older offline device cannot silently restore them. Contact sync
+does not add album members or share photos. Browser reads stay within contact
+records; native state is scoped to the account catalog and API origin.
 
 ## Intelligence wiring — October 2026
 
@@ -116,7 +139,7 @@ local intelligence creates no upload intent; opted-in Sync can run during browsi
 
 ## October 6 foundation implementation
 
-Automatic native Sync now anchors its first intake to the last 10 days. The
+Automatic native Sync now anchors its first intake to the last 30 days. The
 checkpoint excludes older or undated initial assets, then admits newly observed
 identifiers without inventing a capture date. This includes later permission
 grants and backdated imports; it is an initial intake boundary, not a permanent

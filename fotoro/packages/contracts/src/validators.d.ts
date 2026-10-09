@@ -42,3 +42,7 @@ export function StartOptionsV1(value:unknown):boolean;
 export function StartVerifyRequestV1(value:unknown):boolean;
 export function LivePhotoResourceV1(value:unknown):boolean;
 export function LivePhotoArchiveHeaderV1(value:unknown):boolean;
+export function AccountContactV1(value:unknown):boolean;
+export function AccountContactsV1(value:unknown):boolean;
+export function AccountContactsUpdateV1(value:unknown):boolean;
+export function AccountContactsReplyV1(value:unknown):boolean;

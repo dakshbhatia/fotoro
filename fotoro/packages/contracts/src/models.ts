@@ -7,6 +7,25 @@ export interface AccountCardV1 {
   boxPublicKey: Base64Url;
   signingPublicKey: Base64Url;
 }
+export interface AccountContactV1 {
+  accountId: UUID;
+  card: AccountCardV1 | null;
+  name: string;
+}
+export interface AccountContactsV1 {
+  version: 1;
+  ownerAccountId: UUID;
+  entries: AccountContactV1[];
+}
+export interface AccountContactsUpdateV1 {
+  version: 1;
+  revision: number;
+  encrypted: WrappedKeyV1;
+}
+export interface AccountContactsReplyV1 {
+  version: 1;
+  contacts: SignedPayloadV1 | null;
+}
 export interface MediaBinding {
   version: 1;
   photoId: UUID;

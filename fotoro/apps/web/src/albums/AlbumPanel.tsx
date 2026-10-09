@@ -12,7 +12,7 @@ export function AlbumPanel({onClose, onChoosePhotos, onIncomingDone, incoming, .
     if (incoming?.pending && incoming.link.albumId !== albumId) onIncomingDone?.();
     onChoosePhotos(albumId);
   };
-  return <Suspense fallback={<aside className="albums-sheet" role="dialog" aria-modal="true" aria-label="Live albums"><header><p role="status">Opening albums…</p><button autoFocus onClick={close}>Close</button></header></aside>}>
+  return <Suspense fallback={<aside className="albums-sheet" role="dialog" aria-modal="true" aria-label="Trips"><header><p role="status">Opening trips…</p><button autoFocus onClick={close}>Close</button></header></aside>}>
     <Albums {...props} onClose={close} onChoosePhotos={choosePhotos} incoming={incoming?.pending ? incoming : undefined} />
   </Suspense>;
 }
