@@ -1,6 +1,8 @@
 import AVKit
 import NukeUI
 import Observation
+import Photos
+import PhotosUI
 import SwiftUI
 
 struct NativeAlbumPresentation: Identifiable {
@@ -105,6 +107,7 @@ struct NativeAlbumView: View {
   @State private var feedback: String?
   @State private var viewer: NativeAlbumItem?
   @State private var showPicker = false
+  @State private var savingDevicePhotos = false
   @State private var showCreation = false
   @State private var showDetails = false
   @State private var trustCandidate: NativeAlbumSummary?
@@ -229,7 +232,9 @@ struct NativeAlbumView: View {
       .sheet(isPresented: Binding(get: { link != nil }, set: { if !$0 { link = nil } })) {
         if let link { OriginalShareSheet(urls: [link]) { _ in self.link = nil } }
       }
-      .sheet(isPresented: $showPicker) { NativeAlbumPhotoPicker(services: services, initial: selected) { photos in
+      .sheet(isPresented: $showPicker) { NativeAlbumPhotoPicker(services: services, initial: selected, addDevice: { sources in
+        showPicker = false; run { try await addDevicePhotos(sources); feedback = "Photos added." }
+      }) { photos in
         showPicker = false; run { try await model.append(photos); feedback = "Photos added." }
       } }
       .sheet(isPresented: $showTripShare, onDismiss: cleanupTripDownload) {
@@ -251,7 +256,13 @@ struct NativeAlbumView: View {
   private var albumContent: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
-        if busy && downloadProgress == nil { ProgressView("Working…") }
+        if busy && downloadProgress == nil {
+          ProgressView(savingDevicePhotos ? "Saving chosen photos before adding…" : "Working…")
+          if savingDevicePhotos {
+            Button("Cancel adding photos", role: .cancel) { operation?.cancel() }
+              .accessibilityIdentifier("albums.device.cancel")
+          }
+        }
         if let feedback { Text(feedback).foregroundStyle(.secondary).accessibilityIdentifier("albums.feedback") }
         if let opened = model.opened { detail(opened) }
         else { inbox }
@@ -269,7 +280,7 @@ struct NativeAlbumView: View {
         Text(error).foregroundStyle(.secondary)
         Button("Refresh trips") { run { try await model.refresh() } }.disabled(busy)
       } else if model.albums.isEmpty { Text("No trips yet.").foregroundStyle(.secondary) }
-      ForEach(model.albums) { album in
+      ForEach(model.albums.sorted { ($0.id == incoming?.albumId ? 0 : 1) < ($1.id == incoming?.albumId ? 0 : 1) }) { album in
         VStack(alignment: .leading, spacing: 8) {
           Text(album.title ?? "Trip invitation").font(.headline)
           Text("\(album.definition.members.count) members · \(album.overview.photoCount) photos").font(.subheadline).foregroundStyle(.secondary)
@@ -368,6 +379,7 @@ struct NativeAlbumView: View {
             .disabled(busy).accessibilityIdentifier("albums.details.loadMore")
         }
       }
+      NativeTripPicks(model: model, items: filteredItems, hasMore: model.nextCursor != nil, disabled: busy) { viewer = $0 }
       LazyVGrid(columns: [GridItem(.adaptive(minimum: 96))], spacing: 4) {
         ForEach(photoGroups) { group in
           VStack {
@@ -454,7 +466,7 @@ struct NativeAlbumView: View {
       }
     }
   }
-  private func prepareInvitation() throws {
+  private func prepareInvitation() async throws {
     guard let incoming, !invitationPrepared else { return }
     guard let album = model.albums.first(where: { $0.id == incoming.albumId }),
       album.definition.ownerAccountId == incoming.ownerCard.accountId,
@@ -463,7 +475,36 @@ struct NativeAlbumView: View {
     }
     invitationPrepared = true
     if album.overview.endedAt != nil { feedback = "Album access has ended." }
-    else { feedback = album.overview.membership == "invited" ? "Join the album below." : "Open the album below." }
+    else if album.needsTrust { trustCandidate = album }
+    else if album.overview.membership == "accepted" { try await model.open(album.id) }
+    else { feedback = "Join the album below." }
+  }
+  private func addDevicePhotos(_ sources: [RecentPhotoSource]) async throws {
+    guard let context = NativeAlbumPickerContext.current(services), let album = model.opened,
+      model.currentOpenedPhotoAccess == context.access else { throw CancellationError() }
+    try NativeAlbumDeviceSelection.validate(sources)
+    let worker = services.backup
+    try services.startPhotosBackup(selection: sources)
+    savingDevicePhotos = true
+    defer { savingDevicePhotos = false }
+    await withTaskCancellationHandler {
+      await worker.waitUntilSettled()
+    } onCancel: {
+      Task { @MainActor in worker.pause() }
+    }
+    try Task.checkCancellation()
+    guard scenePhase == .active, NativeAlbumPickerContext.current(services) == context,
+      model.currentOpenedPhotoAccess == context.access, model.opened?.id == album.id,
+      model.opened?.overview.definition == album.overview.definition else { throw CancellationError() }
+    let sourceRecords = Dictionary(try services.store.backupSources().map { ($0.id, $0) },
+      uniquingKeysWith: { first, _ in first })
+    let photos = try NativeAlbumDeviceSelection.resolve(sources, lookupSource: { sourceRecords[$0] }, lookupPhoto: services.consumerSavedPhoto, sourceCurrent: { source in
+      guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+        let asset = PHAsset.fetchAssets(withLocalIdentifiers: [source.id], options: nil).firstObject,
+        !asset.isHidden else { return false }
+      return RecentPhoto.sourceRevision(asset) == source.revision
+    })
+    try await model.append(photos)
   }
   private func suspendAlbum() {
     if let intent = NativeAlbumReturnIntent.capture(from: model, filter: familyFilter) {
@@ -480,11 +521,11 @@ struct NativeAlbumView: View {
       try Task.checkCancellation()
       guard resumeState.intent?.id == returning.id else { throw CancellationError() }
       if let filter { familyFilter = filter; feedback = nil }
-      else { resumeState.intent = nil; try prepareInvitation() }
+      else { resumeState.intent = nil; try await prepareInvitation() }
       resumeState.intent = nil
     } else {
       if let openedID { try await model.open(openedID) }
-      try prepareInvitation()
+      try await prepareInvitation()
     }
   }
   private func stop() { cleanupTripDownload(); operation?.cancel(); operation = nil; operationID = nil; viewer = nil; showPicker = false; link = nil; familyFilter = NativeAlbumSearchFilter(); showFamilyFilters = false; showCreation = false; showDetails = false; trustCandidate = nil }
@@ -616,7 +657,10 @@ enum NativeAlbumPhotoAccessibility {
 private struct NativeAlbumPhotoPicker: View {
   @Bindable var services: AppServices
   let initial: [LocalPhoto]
+  let addDevice: ([RecentPhotoSource]) -> Void
   let add: ([LocalPhoto]) -> Void
+  @State private var showDevicePicker = false
+  @State private var permissionTask: Task<Void, Never>?
   @State private var picker = NativeAlbumPhotoPickerStore()
   @State private var feedback: String?
   @Environment(\.dismiss) private var dismiss
@@ -627,7 +671,17 @@ private struct NativeAlbumPhotoPicker: View {
   var body: some View {
     NavigationStack {
       List {
-        Text("Choose up to 100 of your Saved photos. Save device photos first.").font(.footnote).foregroundStyle(.secondary)
+        Button("Choose from Photos", systemImage: "photo.on.rectangle") {
+          let captured = context
+          permissionTask?.cancel()
+          permissionTask = Task {
+            let permission = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+            guard !Task.isCancelled, captured != nil, captured == context else { return }
+            if RecentPhotosPolicy.canRead(permission) { showDevicePicker = true }
+            else { feedback = "Allow Photos access to choose device photos." }
+          }
+        }.accessibilityIdentifier("albums.picker.device")
+        Text("Choose up to 100 photos. Device originals are saved in Fotoro before they are added to this trip.").font(.footnote).foregroundStyle(.secondary)
         if let message = feedback ?? picker.feedback { Text(message).foregroundStyle(.secondary) }
         ForEach(picker.isCurrent(services) ? picker.photos : []) { photo in
           Toggle(isOn: Binding(get: { picker.selection.contains(photo.id) }, set: { enabled in
@@ -657,7 +711,7 @@ private struct NativeAlbumPhotoPicker: View {
           Button("Refresh Saved photos") { feedback = nil; picker.refresh(services) }
             .accessibilityIdentifier("albums.picker.refresh")
         }
-      }.navigationTitle("Add Saved photos")
+      }.navigationTitle("Add photos")
       .toolbar {
         ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
         ToolbarItem(placement: .confirmationAction) {
@@ -671,7 +725,23 @@ private struct NativeAlbumPhotoPicker: View {
         feedback = nil
         if context == nil { picker.clear() } else { picker.open(services, initial: initial) }
       }
-      .onDisappear { picker.clear() }
+      .sheet(isPresented: $showDevicePicker) {
+        NativeAlbumDevicePicker { selection in
+          showDevicePicker = false
+          guard let ids = selection else { feedback = "A selected photo is unavailable. Choose it again."; return }
+          guard context != nil, picker.isCurrent(services), !ids.isEmpty else { return }
+          do {
+            let sources = try ids.map { id -> RecentPhotoSource in
+              guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject,
+                !asset.isHidden else { throw FotoroError("A selected photo is unavailable. Choose it again.") }
+              return RecentPhotoSource(RecentPhoto(asset: asset))
+            }
+            try NativeAlbumDeviceSelection.validate(sources)
+            addDevice(sources)
+          } catch { feedback = error.localizedDescription }
+        }
+      }
+      .onDisappear { permissionTask?.cancel(); permissionTask = nil; picker.clear() }
     }
   }
 }
@@ -685,7 +755,11 @@ private struct NativeAlbumThumbnail: View {
       if let image = state.image { image.resizable().scaledToFill() }
       else { Rectangle().fill(.secondary.opacity(0.2)).overlay { Image(systemName: "photo") } }
     }.frame(height: 110).clipped()
-      .task(id: item.id) { do { url = try await model.thumbnail(item) } catch { url = nil } }
+      .task(id: item.id + item.signedManifest.signature) {
+        url = nil
+        do { let loaded = try await model.thumbnail(item); try Task.checkCancellation(); url = loaded }
+        catch { if !Task.isCancelled { url = nil } }
+      }
   }
 }
 
@@ -764,5 +838,54 @@ private struct NativeAlbumPhotoView: View {
   private func cleanup() {
     for url in exports { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
     exports = []; showShare = false
+  }
+}
+
+
+// Only the explicitly reviewed revisions may become contributions; partial saves
+// remain in Saved and never silently produce a partial trip addition.
+enum NativeAlbumDeviceSelection {
+  static func validate(_ sources: [RecentPhotoSource]) throws {
+    guard (1...100).contains(sources.count), Set(sources.map(\.id)).count == sources.count,
+      sources.allSatisfy({ !$0.id.isEmpty && !$0.revision.isEmpty }) else {
+      throw FotoroError("Choose 1–100 different photos.")
+    }
+  }
+  static func resolve(_ sources: [RecentPhotoSource], lookupSource: (String) throws -> BackupSource?,
+    lookupPhoto: (String) throws -> LocalPhoto?, sourceCurrent: (RecentPhotoSource) -> Bool) throws -> [LocalPhoto] {
+    try validate(sources)
+    var ids = Set<String>()
+    return try sources.compactMap { selected in
+      guard sourceCurrent(selected), let source = try lookupSource(selected.id),
+        source.sourceRevision == selected.revision, source.phase == .committed,
+        let photo = try lookupPhoto(source.photoId), photo.id == source.photoId,
+        source.originalSha256 == photo.metadata.originalSha256,
+        ["saved", "committed"].contains(photo.transferState) else {
+        throw FotoroError("Some selected photos could not be saved or changed. Review Saved photos before adding them.")
+      }
+      return ids.insert(photo.id).inserted ? photo : nil
+    }
+  }
+}
+
+private struct NativeAlbumDevicePicker: UIViewControllerRepresentable {
+  let finished: ([String]?) -> Void
+  func makeCoordinator() -> Coordinator { Coordinator(finished: finished) }
+  func makeUIViewController(context: Context) -> PHPickerViewController {
+    var configuration = PHPickerConfiguration(photoLibrary: .shared())
+    configuration.selectionLimit = 100
+    configuration.filter = .any(of: [.images, .videos])
+    let picker = PHPickerViewController(configuration: configuration)
+    picker.delegate = context.coordinator
+    return picker
+  }
+  func updateUIViewController(_ controller: PHPickerViewController, context: Context) {}
+  final class Coordinator: NSObject, PHPickerViewControllerDelegate {
+    let finished: ([String]?) -> Void
+    init(finished: @escaping ([String]?) -> Void) { self.finished = finished }
+    func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+      guard results.allSatisfy({ $0.assetIdentifier != nil }) else { finished(nil); return }
+      finished(results.compactMap(\.assetIdentifier))
+    }
   }
 }

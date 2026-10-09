@@ -85,6 +85,7 @@ import {inRecentSelectedRange, recentBrowseActive} from "./local/consumer-range"
 import {peopleSourceCurrent} from "./people/groups";
 import type {PeopleUpdate} from "./people/People";
 import type {IncomingAlbumIntent} from "./albums/intent";
+import {saveTripFiles, tripSavedSources} from "./albums/import";
 import {AlbumPanel} from "./albums/AlbumPanel";
 import {AlbumEntryRevision, type AlbumEntrySelection} from "./albums/entry";
 import {AlbumContinuation, type AlbumDestination} from "./albums/AlbumContinuation";
@@ -1309,6 +1310,27 @@ export default function CloudApp({
         />
       )}
       {active && albumsOpen && unlocked && <AlbumPanel key={albumPanelKey} selection={albumEntryRevision.photos(albumSelection)} initialAlbumId={albumDestination?.current() ? albumDestination.albumId : undefined} currentPhotos={() => currentCatalog.current} currentOwnedPhotos={() => currentOwnedSnapshot.current}
+        onImportPhotos={async (files, signal, current) => {
+          const session = requireVault();
+          const check = () => {signal.throwIfAborted(); if (!current() || !sameVault(session) || !activeRef.current) throw new DOMException("Trip closed", "AbortError");};
+          check(); if (publicDemo) throw new Error("PUBLIC_TEST_ACCOUNT_UPLOAD_DISABLED");
+          if (!files.length || files.length > 100) throw new Error("TRIP_CHOOSE_1_TO_100_FILES");
+          await continueSync(session); check();
+          return saveTripFiles(files, {signal, current: () => current() && sameVault(session) && activeRef.current,
+            stage: async file => {check(); const staged = await stageImport(file, undefined, signal); check(); return staged.photoId;},
+            drain: async () => {check(); await saveSync(session, signal); check();},
+            unresolved: async () => {const pending = await pendingImports(); check(); return pending.some(item => item.state !== "committed");},
+            load: async photoIds => {
+              const pending = await pendingImports(); check();
+              const sources = tripSavedSources(photoIds, session.accountId, pending);
+              for (const source of sources) {check(); await cacheOwnedPhotoDetails(source, signal); check();}
+              const browse = browseFor(session);
+              const result = await cachedSync(session, undefined, {...browse, retainPhotoIds: [...(browse.retainPhotoIds ?? []), ...photoIds]});
+              check(); currentCatalog.current = result.photos; setPhotos(result.photos); setCatalogCoverage(result.coverage);
+              return result.photos;
+            },
+          });
+        }}
         onLoadOwnedPhoto={async (photo, signal) => {
           const session = requireVault(), origin = location.origin;
           const check = () => {signal.throwIfAborted(); if (!sameVault(session) || !activeRef.current || location.origin !== origin || photo.manifest.ownerAccountId !== session.accountId || photo.grantId) throw new DOMException("Photo source changed", "AbortError");};

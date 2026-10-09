@@ -64,6 +64,31 @@ struct PhotoBrowseProjectionID: Equatable {
   func clear() { identity = nil; value = [] }
 }
 
+// Keep catalog derivation outside repeated cell and selection render reads.
+@MainActor final class PhotoBrowseValueProjection<Identity: Equatable, Value> {
+  private var cached: (identity: Identity, value: Value)?
+  func value(for identity: Identity, makeValue: () -> Value) -> Value {
+    if let cached, cached.identity == identity { return cached.value }
+    let value = makeValue()
+    cached = (identity, value)
+    return value
+  }
+}
+
+#if !FOTORO_LOCAL_PREVIEW
+struct SavedPhotoBrowseProjectionID: Equatable {
+  var binding: SavedLibraryOpenBinding?
+  var permitted: Bool
+  var catalog: UInt64
+  var favoritesOnly: Bool
+  var calendar: Calendar
+}
+struct SavedPhotoBrowseSnapshot {
+  var photos: [LocalPhoto] = []
+  var days: [(String, [LocalPhoto])] = []
+}
+#endif
+
 enum PhotoBrowsing {
   static let maximumMomentSpan: TimeInterval = 2 * 3600
 

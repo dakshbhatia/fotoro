@@ -51,7 +51,7 @@ function valid(signal: PhotoSignals) {
     signal.color.length === 3 && signal.color.every(value => Number.isFinite(value) && value >= 0 && value <= 255);
 }
 function captured(photo: LocalPhoto) {
-  const time = photo.captureVerified === true && photo.dateSource === "exif" ? Date.parse(photo.date) : NaN;
+  const time = photo.captureVerified === true && ["exif", "photos"].includes(photo.dateSource) ? Date.parse(photo.date) : NaN;
   return Number.isFinite(time) ? time : undefined;
 }
 function similar(a: LocalPhoto, b: LocalPhoto, x: PhotoSignals, y: PhotoSignals) {

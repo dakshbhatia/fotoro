@@ -2,6 +2,90 @@ import XCTest
 @testable import Fotoro
 
 final class NativeAlbumTests: XCTestCase {
+  @MainActor func testTripPreviewsReuseVerifiedFilesAndRecheckMembershipWithoutReadingOriginals() async throws {
+    try await withAlbum { _, server, model in
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let item = try XCTUnwrap(model.items.first)
+      let thumbnail = try await model.thumbnail(item), preview = try await model.preview(item)
+      let reads = server.objectReads, accessReads = server.accessReads
+      let repeatedThumbnail = try await model.thumbnail(item), repeatedPreview = try await model.preview(item)
+      XCTAssertEqual(repeatedThumbnail, thumbnail); XCTAssertEqual(repeatedPreview, preview)
+      XCTAssertEqual(server.objectReads, reads); XCTAssertEqual(server.originalReads, 0)
+      XCTAssertGreaterThan(server.accessReads, accessReads)
+      server.accessStatus = 503
+      do { _ = try await model.thumbnail(item, preservingTransientFailure: true); XCTFail("Unavailable membership must not publish a cached thumbnail") } catch {}
+      XCTAssertNotNil(model.opened, "Transient review failure keeps the trip retryable")
+      server.accessStatus = 403
+      do { _ = try await model.thumbnail(item, preservingTransientFailure: true); XCTFail("Revoked access must reject cached media") } catch {}
+      XCTAssertNil(model.opened); XCTAssertNil(model.directory)
+    }
+  }
+  func testTripPickScopeFiltersMotionAndDuplicatesBeforeBoundingUniqueImages() throws {
+    let server = try AlbumTestServer()
+    func item(_ index: Int, type: String = "image/jpeg", digest: String? = nil) -> NativeAlbumItem {
+      var photo = server.source
+      photo.photoId = "scope-\(index)"; photo.manifest.photoId = photo.id
+      photo.metadata.originalSha256 = digest ?? Data("unique-\(index)".utf8).digest
+      photo.metadata.mediaType = type
+      return NativeAlbumItem(entry: server.entry, signedManifest: server.manifest, photo: photo)
+    }
+    let images = (0..<205).map { item($0) }
+    let videos = (205..<410).map { item($0, type: "video/quicktime") }
+    let duplicate = item(411, digest: images[0].photo.metadata.originalSha256)
+    let chosen = NativeTripPickScope.items(videos + [duplicate] + images)
+    XCTAssertEqual(chosen.count, 200)
+    XCTAssertEqual(chosen.first?.id, duplicate.id)
+    XCTAssertFalse(chosen.contains { $0.id == images[0].id })
+    XCTAssertEqual(chosen.last?.id, images[199].id)
+    XCTAssertTrue(chosen.allSatisfy { $0.photo.metadata.mediaType == "image/jpeg" })
+    XCTAssertEqual(NativeTripPickScope.items([item(500, type: CameraMedia.liveType)]).count, 1)
+  }
+  func testTripPickCandidateUsesOnlyGenuineCaptureDateAndAuthenticatedSourceRevision() throws {
+    let server = try AlbumTestServer()
+    let date = "2026-01-20T12:00:00.000Z"
+    for provenance in ["photos", "exif", "import"] {
+      var photo = server.source
+      photo.metadata.sourceDate = date; photo.metadata.dateSource = provenance
+      let item = NativeAlbumItem(entry: server.entry, signedManifest: server.manifest, photo: photo)
+      let candidate = NativeTripPickScope.candidate(item, width: 256, height: 180)
+      XCTAssertEqual(candidate.sourceRevision, server.manifest.signature)
+      XCTAssertEqual(candidate.id, item.id)
+      XCTAssertEqual(candidate.capturedAt, provenance == "import" ? nil : Wire.parseDate(date))
+      XCTAssertEqual(candidate.width, 256); XCTAssertEqual(candidate.height, 180)
+      XCTAssertFalse(candidate.favorite); XCTAssertFalse(candidate.isScreenshot)
+      var revisedManifest = server.manifest; revisedManifest.signature = "changed-authenticated-revision"
+      let revised = NativeAlbumItem(entry: server.entry, signedManifest: revisedManifest, photo: photo)
+      XCTAssertNotEqual(NativeTripPickScope.candidate(revised).sourceRevision, candidate.sourceRevision)
+    }
+  }
+  func testDeviceTripSelectionRequiresBoundedExplicitDistinctRevisions() throws {
+    let one = RecentPhotoSource(id: "chosen", revision: "reviewed")
+    XCTAssertNoThrow(try NativeAlbumDeviceSelection.validate([one]))
+    XCTAssertThrowsError(try NativeAlbumDeviceSelection.validate([]))
+    XCTAssertThrowsError(try NativeAlbumDeviceSelection.validate([one, one]))
+    XCTAssertThrowsError(try NativeAlbumDeviceSelection.validate([RecentPhotoSource(id: "chosen", revision: "")]))
+    XCTAssertThrowsError(try NativeAlbumDeviceSelection.validate((0...100).map { RecentPhotoSource(id: "\($0)", revision: "r") }))
+  }
+  func testDeviceTripSelectionResolvesOnlyCompleteCurrentCommittedOriginalsAndDedupes() throws {
+    let server = try AlbumTestServer(), photo = server.source
+    let sources = [RecentPhotoSource(id: "first", revision: "r1"), RecentPhotoSource(id: "second", revision: "r2")]
+    var current = sources.map { BackupSource(id: $0.id, photoId: photo.id, phase: .committed,
+      sourceRevision: $0.revision, originalSha256: photo.metadata.originalSha256) }
+    func resolve(_ available: Bool = true) throws -> [LocalPhoto] {
+      try NativeAlbumDeviceSelection.resolve(sources, lookupSource: { id in current.first { $0.id == id } },
+        lookupPhoto: { _ in photo }, sourceCurrent: { _ in available })
+    }
+    XCTAssertEqual(try resolve().map(\.id), [photo.id])
+    XCTAssertThrowsError(try resolve(false))
+    current[1].phase = .queued
+    XCTAssertThrowsError(try resolve())
+    current[1].phase = .committed; current[1].sourceRevision = "changed"
+    XCTAssertThrowsError(try resolve())
+    current[1].sourceRevision = "r2"; current[1].originalSha256 = Data("wrong original".utf8).digest
+    XCTAssertThrowsError(try resolve())
+    current.removeLast()
+    XCTAssertThrowsError(try resolve())
+  }
   func testSharedAlbumFactsAuthenticateContributorContextAndOriginalWithoutPrivateFields() throws {
     let server = try AlbumTestServer(), access = try factsAccess(server)
     let item = NativeAlbumItem(entry: server.entry, signedManifest: server.manifest, photo: server.source)

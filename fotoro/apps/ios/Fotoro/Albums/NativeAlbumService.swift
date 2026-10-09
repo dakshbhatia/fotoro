@@ -47,7 +47,8 @@ struct NativeAlbumAccess {
   private(set) var albums: [NativeAlbumSummary] = []
   private(set) var inboxError: String?
   private(set) var opened: NativeAlbumSummary?
-  private(set) var items: [NativeAlbumItem] = []
+  private(set) var items: [NativeAlbumItem] = [] { didSet { itemsGeneration &+= 1 } }
+  private(set) var itemsGeneration: UInt64 = 0
   private(set) var directory: URL?
   private var access: NativeAlbumAccess?
   private(set) var nextCursor: String?
@@ -477,19 +478,32 @@ struct NativeAlbumAccess {
       throw FotoroError("Shared details changed. Refresh and review before updating.")
     }
   }
-  func thumbnail(_ item: NativeAlbumItem) async throws -> URL? {
+  func checkOpenedAccess() async throws {
+    guard let reading = access else { throw CancellationError() }
+    _ = try await membership(reading, preservingTransientFailure: true)
+    try check(reading.context)
+  }
+  func thumbnail(_ item: NativeAlbumItem, preservingTransientFailure: Bool = false) async throws -> URL? {
     guard let reading = access, items.contains(where: { $0.id == item.id && $0.entry == item.entry && $0.signedManifest == item.signedManifest }),
       let rep = item.photo.manifest.representations.first(where: { $0.binding.kind == "thumbnail" }),
       let encoded = item.photo.metadata.representationKeys[rep.binding.representationId] else { return nil }
-    let bytes = try await object(rep, key: Data(b64: encoded), access: reading)
-    return try write(bytes, name: item.id + "-thumbnail.jpg", access: reading)
+    let name = item.id + "-" + Data(item.signedManifest.signature.utf8).digest + "-thumbnail.jpg"
+    if let cached = directory?.appendingPathComponent(name), FileManager.default.fileExists(atPath: cached.path) {
+      try await membership(reading, preservingTransientFailure: preservingTransientFailure)
+      try check(reading.context)
+      return cached
+    }
+    let bytes = try await object(rep, key: Data(b64: encoded), access: reading, preservingTransientFailure: preservingTransientFailure)
+    return try write(bytes, name: name, access: reading)
   }
   func preview(_ item: NativeAlbumItem) async throws -> URL? {
     guard let reading = access, items.contains(where: { $0.id == item.id && $0.entry == item.entry && $0.signedManifest == item.signedManifest }) else { throw CancellationError() }
     try await membership(reading)
     if let rep = item.photo.manifest.representations.first(where: { $0.binding.kind == "preview" }), let encoded = item.photo.metadata.representationKeys[rep.binding.representationId] {
+      let name = item.id + "-" + Data(item.signedManifest.signature.utf8).digest + "-preview.jpg"
+      if let cached = directory?.appendingPathComponent(name), FileManager.default.fileExists(atPath: cached.path) { return cached }
       let bytes = try await object(rep, key: Data(b64: encoded), access: reading)
-      return try write(bytes, name: item.id + "-preview.jpg", access: reading)
+      return try write(bytes, name: name, access: reading)
     }
     return try await thumbnail(item)
   }
