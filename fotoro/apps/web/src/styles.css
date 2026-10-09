@@ -949,7 +949,9 @@ main:has(.consumer-selection) .local-search { padding-bottom: calc(140px + env(s
 .albums-sheet input[type=checkbox] { flex-shrink: 0; }
 .albums-content fieldset { max-height: 260px; overflow-y: auto; border: 1px solid var(--photo-selected); border-radius: 12px; margin: 12px 0; }
 .album-toolbar { position: sticky; top: 0; z-index: 3; display: grid; gap: 10px; padding: 8px 0 12px; margin-bottom: 12px; background: var(--photo-background); border-bottom: 1px solid var(--photo-selected); }
-.album-search { display: flex; align-items: center; border: 1px solid var(--photo-selected); border-radius: 14px; background: var(--photo-surface); }
+.album-toolbar:has(.album-filters[open]) { position: static; }
+.album-search-row { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: start; gap: 8px; }
+.album-search { min-width: 0; display: flex; align-items: center; border: 1px solid var(--photo-selected); border-radius: 14px; background: var(--photo-surface); }
 .albums-content .album-search input { min-width: 0; flex: 1; width: 100%; margin: 0; border: 0; background: transparent; padding: 12px; }
 .album-search input::-webkit-search-cancel-button { display: none; }
 .album-search .album-icon-button { margin-right: 4px; }
@@ -957,6 +959,8 @@ main:has(.consumer-selection) .local-search { padding-bottom: calc(140px + env(s
 .album-actions button { flex-shrink: 0; }
 .album-actions > button:last-child { margin-left: auto; }
 .trip-picks { margin: 12px 0 18px; }
+.trip-picks-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.trip-picks-heading h3 { margin: 0; }
 .album-empty { padding: 24px 0; color: var(--photo-muted); }
 .album-inbox { display: grid; gap: 10px; }
 .album-inbox-card { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 20px; width: 100%; text-align: left; border: 0; border-radius: 16px; }
@@ -971,7 +975,7 @@ main:has(.consumer-selection) .local-search { padding-bottom: calc(140px + env(s
 .album-thumbnail img { height: 100%; width: 100%; object-fit: cover; }
 .album-photo-tags { color: var(--photo-muted); padding: 8px 2px; }
 .album-photo-tags > span { max-width: 100%; overflow-wrap: anywhere; }
-.album-photo-tags > span[aria-label="Shared reviewed person"], .album-photo-tags > span[aria-label="Shared place"] { border-radius: 12px; padding: 4px 7px; background: var(--photo-surface); }
+.album-photo-tags > span[aria-label="Shared reviewed person"], .album-photo-tags > span[aria-label="Shared reviewed people"], .album-photo-tags > span[aria-label="Shared place"] { border-radius: 12px; padding: 4px 7px; background: var(--photo-surface); }
 .album-photo-tags > span[aria-label="Contributor"] { color: var(--photo-text); }
 .album-photo-tags > span[aria-label$="date"] { flex-basis: 100%; }
 .album-preview { position: absolute; inset: 0; z-index: 6; background: var(--photo-background); display: flex; flex-direction: column; overflow-y: auto; align-items: center; }
@@ -991,11 +995,23 @@ main:has(.consumer-selection) .local-search { padding-bottom: calc(140px + env(s
 @media (max-width: 600px) { .albums-sheet { inset: 8px; border-radius: 16px; } .albums-sheet > header { min-height: 64px; padding: 10px; gap: 4px; } .album-heading h2 { font-size: 20px; } .albums-content { padding: 6px 10px 16px; } .album-grid { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; } .album-actions button { font-size: 12px; padding: 8px 12px; } .album-photo-tags { gap: 3px; font-size: 11px; } .album-inbox-card { padding: 16px; } .album-menu > summary { padding: 12px 6px; } }
 
 
-.album-filters { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:8px 0; }
-.album-filters > details { position:relative; }
-.album-filters summary,.album-copies summary { padding:12px 8px; cursor:pointer; }
-.album-range { padding:12px; border:1px solid var(--photo-selected); border-radius:12px; background:var(--photo-surface); }
-.album-range label { flex-wrap:wrap; }
+.album-filters { display: contents; }
+.album-filters::details-content { display: contents; }
+.album-filters:not([open]) > .album-filter-options { display: none; }
+.album-filters > summary { display: flex; align-items: center; gap: 4px; padding: 12px 8px; cursor: pointer; border-radius: 12px; background: var(--photo-surface); }
+.album-filters > summary::before { content: "+"; width: 20px; text-align: center; }
+.album-filters[open] > summary::before { content: "−"; }
+.album-filters > summary > span { color: var(--photo-muted); font-size: 12px; max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 600px) { .album-filters > summary > span { max-width: 64px; } }
+.album-filter-options { grid-column: 1 / -1; min-width: 0; padding: 4px 0 0; }
+.album-filter-options fieldset { margin: 0 0 12px; padding: 8px 12px; }
+.album-filter-options label, .album-filter-options select { min-height: 44px; }
+.album-filter-options fieldset > label, .album-filter-options > label:has(input[type=checkbox]) { display: flex; flex-direction: row; justify-content: flex-start; align-items: center; gap: 8px; max-width: 100%; margin: 0; text-align: left; }
+.album-filter-options > label:has(select) { flex-direction: row; flex-wrap: wrap; justify-content: flex-start; }
+.album-filter-options input[type=checkbox] { width: 20px; height: 20px; min-height: 20px; margin: 0; accent-color: var(--photo-accent); }
+.album-filter-options select { min-width: 0; max-width: 100%; }
+.album-range { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
+.album-range label { display: block; min-width: 0; }
 .album-range input[type=date] { min-width:0; max-width:100%; }
 .album-copies { border-top:1px solid var(--photo-selected); }
 .album-copies button { display:block; width:100%; text-align:left; padding:10px; overflow-wrap:anywhere; }

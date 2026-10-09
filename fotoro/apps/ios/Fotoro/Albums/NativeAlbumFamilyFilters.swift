@@ -2,6 +2,7 @@ import SwiftUI
 
 struct NativeAlbumFamilyFilters: View {
   @Binding var filter: NativeAlbumSearchFilter
+  @Binding var groupDuplicates: Bool
   let choices: [NativeAlbumPersonChoice]
   var loadingChoices = false
   var searchError: String?
@@ -19,11 +20,11 @@ struct NativeAlbumFamilyFilters: View {
   var body: some View {
     NavigationStack {
       Form {
-        Section("Shared names") {
-          Picker("People match", selection: $filter.match) {
+        Section("People") {
+          Picker("Match", selection: $filter.match) {
             ForEach(PeopleSearchMatch.allCases) { Text($0.title).tag($0) }
           }
-          Text("Everyone must be labeled in the same contributing photo. Matching names from different contributors remain separate; this does not establish who visited a place.")
+          Text("Names are separate for each contributor. Everyone must match one photo. Names do not confirm visits.")
             .font(.footnote).foregroundStyle(.secondary)
           ForEach(choices) { choice in
             Toggle(choice.name + " · " + memberName(choice.contributor), isOn: Binding(get: { filter.people.contains(choice.id) }, set: { selected in
@@ -31,13 +32,13 @@ struct NativeAlbumFamilyFilters: View {
             }))
           }
           if let searchError {
-            Text("Search is incomplete. " + searchError).foregroundStyle(.secondary)
-            if let retrySearch { Button("Retry trip search", action: retrySearch) }
-          } else if loadingChoices { Text("Loading shared names across the trip…").foregroundStyle(.secondary) }
-          else if choices.isEmpty { Text("No shared names in this trip.").foregroundStyle(.secondary) }
+            DisclosureGroup("Search incomplete") { Text(searchError).textSelection(.enabled) }.foregroundStyle(.secondary)
+            if let retrySearch { Button("Retry", action: retrySearch).accessibilityLabel("Retry trip search") }
+          } else if loadingChoices { Text("Loading names…").foregroundStyle(.secondary) }
+          else if choices.isEmpty { Text("No shared names.").foregroundStyle(.secondary) }
         }
-        Section("Shared location") { TextField("Place name or coordinates", text: $filter.place) }
-        Section("Capture dates") {
+        Section("Place") { TextField("Place or coordinates", text: $filter.place) }
+        Section("Dates") {
           Toggle("Date range", isOn: dateRange)
           if dateRange.wrappedValue {
             DatePicker("From", selection: Binding(get: { filter.from ?? Date() }, set: { filter.from = Calendar.current.startOfDay(for: $0) }), displayedComponents: .date)
@@ -45,10 +46,15 @@ struct NativeAlbumFamilyFilters: View {
               Calendar.current.date(byAdding: .day, value: -1, to: filter.until ?? Date()) ?? Date()
             }, set: { filter.until = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: $0)) }), displayedComponents: .date)
           }
-          Text("Only recorded Photos or original capture dates match. Import dates are excluded.").font(.footnote).foregroundStyle(.secondary)
+          Text("Capture dates only; import dates are excluded.").font(.footnote).foregroundStyle(.secondary)
         }
-        Button("Clear filters") { filter = NativeAlbumSearchFilter() }
-      }.navigationTitle("Filter trip").navigationBarTitleDisplayMode(.inline)
+        Section {
+          Toggle("Group exact copies", isOn: $groupDuplicates)
+          if filter.hasFilters || !groupDuplicates {
+            Button("Clear filters") { filter = NativeAlbumSearchFilter(); groupDuplicates = true }
+          }
+        }
+      }.navigationTitle("Filters").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
     }
   }

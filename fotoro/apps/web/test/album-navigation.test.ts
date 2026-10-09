@@ -194,3 +194,18 @@ test("a returned contribution keeps Choose photos available for a second selecti
   const returnedAgain = albums(flow.reopen([second]));
   assert.equal(returnedAgain.incoming.link.albumId, id); assert.deepEqual(returnedAgain.selection, [second]);
 });
+
+test("device-import trips hide the Saved chooser while selected Saved photos keep their Add action", () => {
+  let added = 0;
+  const props = {albumId: crypto.randomUUID(), busy: false, onChoosePhotos() {}, onAdd() {added++;}};
+  const selected = AlbumContributionActions({...props, chosen: 2, showSaved: false});
+  const actions = Children.toArray(selected.props.children).filter(isValidElement) as ReactElement<any>[];
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].props.className, "primary-action");
+  actions[0].props.onClick(); assert.equal(added, 1);
+  const unselected = AlbumContributionActions({...props, chosen: 0, showSaved: false});
+  assert.equal(Children.toArray(unselected.props.children).filter(isValidElement).length, 0);
+  const fallback = AlbumContributionActions({...props, chosen: 0});
+  const fallbackActions = Children.toArray(fallback.props.children).filter(isValidElement) as ReactElement<any>[];
+  assert.equal(fallbackActions[0].props.children, "From Saved");
+});

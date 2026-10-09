@@ -19,10 +19,10 @@ struct NativeAlbumSharedDetailsEditor: View {
         if let feedback { Section { Text(feedback).foregroundStyle(.secondary) } }
         if let review, model.isCurrent(review.context) {
           Section("Share details") {
-            Text("Choose details everyone in this album may search. Existing shared details stay selected when they still match this photo. New details start off.")
+            Text("Choose what everyone in this trip can search. Unchanged shared details stay selected; new details start off.")
               .font(.footnote).foregroundStyle(.secondary)
             if NativeAlbumFactsSelection(people: review.people, location: review.location, shared: review.shared).unavailableSharedDetails {
-              Text("Some previously shared details changed or are no longer available. Saving replaces them with your selections.")
+              Text("Changed or unavailable shared details will be replaced by these selections.")
                 .font(.footnote).foregroundStyle(.secondary)
             }
             ForEach(review.people.map { NativeAlbumPersonChoice(contributor: review.source.manifest.ownerAccountId, name: $0) }) { choice in
@@ -33,7 +33,7 @@ struct NativeAlbumSharedDetailsEditor: View {
             if let location = review.location {
               Toggle("Share location", isOn: $includeLocation).disabled(busy || needsReview)
               Text(location.displayName + " · " + location.provenance).font(.caption).foregroundStyle(.secondary)
-              Text("Includes exact coordinates for everyone with album access.").font(.caption).foregroundStyle(.secondary)
+              Text("Shares exact coordinates with everyone in this trip.").font(.caption).foregroundStyle(.secondary)
             }
             if review.people.isEmpty && review.location == nil {
               Text("This Saved photo has no reviewed names or location to share.").foregroundStyle(.secondary)
