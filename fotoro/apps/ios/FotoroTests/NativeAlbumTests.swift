@@ -913,6 +913,202 @@ final class NativeAlbumTests: XCTestCase {
     XCTAssertTrue(a.contains("Photo date")); XCTAssertTrue(b.contains("Import date"))
     XCTAssertTrue(a.contains("Member 1")); XCTAssertFalse(a.contains(server.cards[0].accountId))
   }
+  @MainActor func testTripDownloadReadsEveryPageDeduplicatesAndLeavesVisibleGalleryBounded() async throws {
+    try await withAlbum { _, server, model in
+      let extra = try server.extraOwnedPhotos(count: 108); try server.contribute(extra)
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let visibleIDs = model.items.map(\.id), cursor = model.nextCursor
+      XCTAssertEqual(visibleIDs.count, 100)
+      let result = try await model.downloadTrip()
+      defer { result.remove() }
+      XCTAssertEqual(result.originals, 2); XCTAssertEqual(result.omittedCopies, 107)
+      XCTAssertEqual(server.originalReads, 2, "Read one original for each authenticated exact group")
+      XCTAssertEqual(model.items.map(\.id), visibleIDs); XCTAssertEqual(model.nextCursor, cursor)
+      let zip = try Data(contentsOf: result.archive)
+      XCTAssertEqual(zip.prefix(4), Data([0x50, 0x4b, 0x03, 0x04]))
+      XCTAssertNotNil(zip.range(of: Data(server.source.metadata.filename.utf8)))
+      XCTAssertNotNil(zip.range(of: Data("public-batch.jpg".utf8)))
+      XCTAssertFalse(FileManager.default.fileExists(atPath: result.directory.appendingPathComponent("Trip").path))
+      XCTAssertTrue(FileManager.default.fileExists(atPath: result.archive.path), "The ZIP must outlive the coordinator accessor")
+    }
+  }
+  @MainActor func testTripDownloadPreservesSameFilenameDifferentOriginals() async throws {
+    try await withAlbum { _, server, model in
+      let other = try server.extraOwnedPhotos(count: 1, filename: server.source.metadata.filename); try server.contribute(other)
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let result = try await model.downloadTrip(archive: { folder, destination in
+        let directories = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
+        XCTAssertEqual(directories.count, 2)
+        let files = try directories.map { try XCTUnwrap(FileManager.default.contentsOfDirectory(at: $0, includingPropertiesForKeys: nil).first) }
+        XCTAssertEqual(Set(files.map(\.lastPathComponent)), [server.source.metadata.filename])
+        XCTAssertNotEqual(try Data(contentsOf: files[0]), try Data(contentsOf: files[1]))
+        try NativeTripArchive.create(folder: folder, destination: destination)
+      })
+      defer { result.remove() }
+      XCTAssertEqual(result.originals, 2); XCTAssertEqual(result.omittedCopies, 0)
+    }
+  }
+  @MainActor func testTripDownloadIncompleteOrCyclicPagesNeverExportPartialTrip() async throws {
+    for invalid in ["missing", "cursor"] {
+      try await withAlbum { _, server, model in
+        let extra = try server.extraOwnedPhotos(count: 100); try server.contribute(extra)
+        try await model.refresh(); try await model.open(server.definition.albumId)
+        server.omitLastPageItem = invalid == "missing"; server.repeatPageCursor = invalid == "cursor"
+        do { _ = try await model.downloadTrip(archive: { _, _ in XCTFail("Incomplete traversal cannot package") }); XCTFail("Invalid traversal completed") } catch {}
+        XCTAssertEqual(server.originalReads, 0)
+      }
+    }
+  }
+  @MainActor func testTripDownloadCanUseAnotherVerifiedIdenticalCopyAfterOneOriginalFails() async throws {
+    try await withAlbum { _, server, model in
+      let bytes = try Data(contentsOf: Bundle.main.url(forResource: "singapore", withExtension: "jpg")!)
+      let duplicate = try server.extraOwnedPhotos(count: 1, originalBytes: bytes); try server.contribute(duplicate)
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      server.failObjectOnce = server.source.manifest.representations.first { $0.binding.kind == "original" }?.objectId
+      let result = try await model.downloadTrip()
+      defer { result.remove() }
+      XCTAssertEqual(result.originals, 1); XCTAssertEqual(result.omittedCopies, 1); XCTAssertEqual(server.originalReads, 2)
+    }
+  }
+  @MainActor func testTripDownloadOriginalFailureOrRevocationCleansAllStaging() async throws {
+    for failure in ["object", "ended", "disk"] {
+      try await withAlbum { _, server, model in
+        try await model.refresh(); try await model.open(server.definition.albumId)
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        if failure == "object" { server.failObjectOnce = server.source.manifest.representations.first { $0.binding.kind == "original" }?.objectId }
+        if failure == "ended" { server.endOnOriginal = true }
+        do {
+          _ = try await model.downloadTrip(temporaryRoot: temporary, archive: { _, _ in
+            guard failure == "disk" else { XCTFail("Unavailable original cannot package"); return }
+            throw CocoaError(.fileWriteOutOfSpace)
+          })
+          XCTFail("Partial trip cannot complete")
+        } catch {}
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: temporary.path).isEmpty, failure)
+      }
+    }
+  }
+  @MainActor func testTripDownloadLateArchiveCannotPublishAfterScopeChangeOrCancellation() async throws {
+    for change in ["cancel", "vault", "account", "origin", "catalog", "definition", "end", "count"] {
+      try await withAlbum { services, server, model in
+        try await model.refresh(); try await model.open(server.definition.albumId)
+        let gate = AlbumFactsRequestGate(started: expectation(description: "Trip ZIP " + change))
+        defer { gate.release.signal() }
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let download = Task { try await model.downloadTrip(temporaryRoot: temporary, archive: { _, destination in
+          gate.started.fulfill(); _ = gate.release.wait(timeout: .now() + 5)
+          try Data("controlled archive".utf8).write(to: destination)
+        }) }
+        await fulfillment(of: [gate.started], timeout: 3)
+        switch change {
+        case "cancel": download.cancel()
+        case "vault": services.vault.lock()
+        case "account": services.session.accountId = server.cards[0].accountId
+        case "origin": services.api.baseURL = URL(string: "http://localhost:8798")!
+        case "catalog": services.store = try LibraryStore(root: temporary.appendingPathComponent("catalog"))
+        case "definition": server.signed = try NativeAlbumCrypto().make(title: "Changed trip", owner: server.cards[0], members: [server.cards[1]], bundle: server.bundles[0])
+        case "end": server.ended = true
+        default: try server.contribute(server.extraOwnedPhotos(count: 1))
+        }
+        gate.release.signal()
+        do { let unexpected = try await download.value; unexpected.remove(); XCTFail("Late ZIP escaped \(change) fence") } catch {}
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: temporary.path).filter { $0.hasPrefix("fotoro-album-download-") }
+        XCTAssertTrue(leftovers.isEmpty, change)
+      }
+    }
+  }
+  func testTripResourceFingerprintDeduplicatesRenamedCompleteLivePairsWithoutDroppingDistinctMotion() throws {
+    let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "camera-live", withExtension: "fotoro-live"))
+    let bytes = try Data(contentsOf: url), pair = try CameraMedia.decodeLivePhoto(bytes)
+    var still = pair.still, motion = pair.motion
+    still.filename = "renamed." + URL(fileURLWithPath: still.filename).pathExtension
+    motion.filename = "renamed." + URL(fileURLWithPath: motion.filename).pathExtension
+    let renamed = try CameraMedia.encodeLivePhoto(still: still, motion: motion)
+    var metadata = try AlbumTestServer().source.metadata; metadata.mediaType = CameraMedia.liveType
+    XCTAssertNotEqual(bytes.digest, renamed.digest)
+    XCTAssertEqual(try NativeTripArchive.fingerprint(bytes, metadata: metadata), try NativeTripArchive.fingerprint(renamed, metadata: metadata))
+    motion.bytes.append(0)
+    let changed = try CameraMedia.encodeLivePhoto(still: still, motion: motion)
+    XCTAssertNotEqual(try NativeTripArchive.fingerprint(bytes, metadata: metadata), try NativeTripArchive.fingerprint(changed, metadata: metadata))
+    var incomplete = bytes; incomplete.removeLast()
+    XCTAssertThrowsError(try NativeTripArchive.fingerprint(incomplete, metadata: metadata))
+  }
+  @MainActor func testTripDownloadDeduplicatesRenamedLivePairsAndArchivesBothOriginalResources() async throws {
+    try await withAlbum { _, server, model in
+      let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "camera-live", withExtension: "fotoro-live"))
+      let bytes = try Data(contentsOf: url), pair = try CameraMedia.decodeLivePhoto(bytes)
+      var still = pair.still, motion = pair.motion
+      still.filename = "renamed." + URL(fileURLWithPath: still.filename).pathExtension
+      motion.filename = "renamed." + URL(fileURLWithPath: motion.filename).pathExtension
+      let renamed = try CameraMedia.encodeLivePhoto(still: still, motion: motion)
+      server.included = false
+      try server.contribute(server.extraOwnedPhotos(count: 1, originalBytes: bytes, filename: "live.fotoro-live", mediaType: CameraMedia.liveType))
+      try server.contribute(server.extraOwnedPhotos(count: 1, originalBytes: renamed, filename: "renamed.fotoro-live", mediaType: CameraMedia.liveType))
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let result = try await model.downloadTrip(archive: { folder, destination in
+        let directories = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
+        XCTAssertEqual(directories.count, 1)
+        let directory = try XCTUnwrap(directories.first)
+        let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        XCTAssertEqual(Set(files.map(\.lastPathComponent)), [pair.still.filename, pair.motion.filename])
+        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent(pair.still.filename)), pair.still.bytes)
+        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent(pair.motion.filename)), pair.motion.bytes)
+        try NativeTripArchive.create(folder: folder, destination: destination)
+      })
+      defer { result.remove() }
+      XCTAssertEqual(result.originals, 1); XCTAssertEqual(result.omittedCopies, 1); XCTAssertEqual(server.originalReads, 2)
+    }
+  }
+  @MainActor func testTripDownloadSanitizesCrossPlatformFilenamesWithoutChangingOriginalResources() async throws {
+    for sourceName in ["..\\outside.jpg", "C:outside.jpg", "line\nname.jpg", "CON.jpg", "trailing.jpg.", "live"] {
+      try await withAlbum { _, server, model in
+        server.included = false
+        let bytes: Data, type: String, filename: String, expected: [Data]
+        if sourceName == "live" {
+          let source = try Data(contentsOf: XCTUnwrap(Bundle(for: Self.self).url(forResource: "camera-live", withExtension: "fotoro-live")))
+          var pair = try CameraMedia.decodeLivePhoto(source)
+          pair.motion.filename = "unsafe:" + pair.motion.filename
+          bytes = try CameraMedia.encodeLivePhoto(still: pair.still, motion: pair.motion)
+          type = CameraMedia.liveType; filename = "live.fotoro-live"; expected = [pair.still.bytes, pair.motion.bytes]
+        } else { bytes = Data("controlled original".utf8); type = "image/jpeg"; filename = sourceName; expected = [bytes] }
+        try server.contribute(server.extraOwnedPhotos(count: 1, originalBytes: bytes, filename: filename, mediaType: type))
+        try await model.refresh(); try await model.open(server.definition.albumId)
+        let result = try await model.downloadTrip(archive: { folder, destination in
+          let directory = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil).first)
+          let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+          XCTAssertEqual(files.count, expected.count)
+          for url in files {
+            XCTAssertEqual(NativeTripArchive.safeFilename(url.lastPathComponent), url.lastPathComponent)
+            XCTAssertTrue(expected.contains(try Data(contentsOf: url)))
+          }
+          try NativeTripArchive.create(folder: folder, destination: destination)
+        })
+        defer { result.remove() }
+        XCTAssertEqual(result.originals, 1)
+      }
+    }
+  }
+  func testTripExportSanitizationPreservesCollidingResourcesAndRejectsLiveTraversal() throws {
+    let directory = try NativeTripArchive.prepareDirectory(in: FileManager.default.temporaryDirectory)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let a = directory.appendingPathComponent("same:name.jpg"), b = directory.appendingPathComponent("same?name.jpg")
+    let first = Data("first original".utf8), second = Data("second original".utf8)
+    try first.write(to: a); try second.write(to: b)
+    let renamed = try NativeTripArchive.sanitizeExports([a, b], directory: directory)
+    XCTAssertEqual(renamed.map(\.lastPathComponent), ["same_name.jpg", "same_name-2.jpg"])
+    XCTAssertEqual(try Data(contentsOf: renamed[0]), first); XCTAssertEqual(try Data(contentsOf: renamed[1]), second)
+    XCTAssertEqual(NativeTripArchive.safeFilename("CON .jpg"), "_CON .jpg")
+    let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "camera-live", withExtension: "fotoro-live"))
+    let pair = try CameraMedia.decodeLivePhoto(Data(contentsOf: url))
+    var traversal = pair.motion; traversal.filename = "../outside.mov"
+    XCTAssertThrowsError(try CameraMedia.encodeLivePhoto(still: pair.still, motion: traversal))
+    traversal.filename = "..\\outside.mov"
+    XCTAssertThrowsError(try CameraMedia.encodeLivePhoto(still: pair.still, motion: traversal))
+  }
   @MainActor private func withAlbum(invited: Bool = false, owner: Bool = false, _ run: (AppServices, AlbumTestServer, NativeAlbumService) async throws -> Void) async throws {
     let previous = UserDefaults.standard.object(forKey: "fotoro.pinnedCards")
     let server = try AlbumTestServer(); server.accepted = !invited; AlbumTestProtocol.server = server
@@ -964,6 +1160,11 @@ private final class AlbumTestServer: @unchecked Sendable {
   let cards: [AccountCardV1]; let bundles: [AccountBundle]; var signed: SignedPayloadV1; var definition: AlbumDefinitionV1
   let source: LocalPhoto; let metadataKey: Data; let entry: SignedPayloadV1; let manifest: SignedPayloadV1
   private let objects: [String: Data]
+  private var originalIDs = Set<String>()
+  private(set) var originalReads = 0
+  var omitLastPageItem = false
+  var repeatPageCursor = false
+  var endOnOriginal = false
   var accepted = true; var endOnObject = false; var ended = false
   var failObjectOnce: String?
   var included = true; var loseAppendResponse = false; var appendBodies: [Data] = []
@@ -996,16 +1197,18 @@ private final class AlbumTestServer: @unchecked Sendable {
     let crypto = CryptoAdapter(), photoID = Wire.id(), metaKey = crypto.randomKey(); metadataKey = metaKey
     let bytes = try Data(contentsOf: Bundle.main.url(forResource: "singapore", withExtension: "jpg")!)
     var keys: [String: String] = [:], reps: [RepresentationV1] = [], encrypted: [String: Data] = [:]
+    var initialOriginalIDs = Set<String>()
     for kind in ["original", "thumbnail", "preview"] {
       let binding = MediaBinding(photoId: photoID, representationId: Wire.id(), kind: kind), secret = crypto.randomKey()
       let container = try crypto.encrypt(bytes, key: secret, binding: binding), objectID = Wire.id()
       reps.append(RepresentationV1(binding: binding, objectId: objectID, header: container.prefix(24).b64, ciphertextBytes: container.count, ciphertextSha256: container.digest))
       keys[binding.representationId] = secret.b64; encrypted[objectID] = container
+      if kind == "original" { initialOriginalIDs.insert(objectID) }
     }
     let metadata = PhotoMetadataV1(filename: "public-album-fixture.jpg", mediaType: "image/jpeg", sourceDate: Wire.date(), dateSource: "import", originalBytes: bytes.count, originalSha256: bytes.digest, representationKeys: keys)
     let binding = MediaBinding(photoId: photoID, representationId: Wire.id(), kind: "metadata"), container = try crypto.encrypt(Wire.encode(metadata), key: metaKey, binding: binding), id = Wire.id()
     let rep = RepresentationV1(binding: binding, objectId: id, header: container.prefix(24).b64, ciphertextBytes: container.count, ciphertextSha256: container.digest)
-    encrypted[id] = container; objects = encrypted
+    encrypted[id] = container; objects = encrypted; originalIDs = initialOriginalIDs
     let value = PhotoManifestV1(photoId: photoID, ownerAccountId: cards[0].accountId, representations: reps, metadataRepresentation: rep, ownerWrappedMetadataKey: try crypto.wrap(metaKey, key: Data(b64: bundles[0].vaultKey)))
     source = LocalPhoto(photoId: photoID, manifest: value, metadata: metadata, transferState: "committed")
     entry = try c.append(source, definition: definition, albumKey: key, card: cards[0], bundle: bundles[0]).0
@@ -1013,19 +1216,20 @@ private final class AlbumTestServer: @unchecked Sendable {
     let browserBody = try "{\"version\":1,\"photoId\":" + text(value.photoId) + ",\"ownerAccountId\":" + text(value.ownerAccountId) + ",\"representations\":" + text(value.representations) + ",\"metadataRepresentation\":" + text(value.metadataRepresentation) + ",\"ownerWrappedMetadataKey\":" + text(value.ownerWrappedMetadataKey) + "}"
     manifest = try crypto.signBytes(Data(browserBody.utf8), kind: "photo-manifest", accountId: cards[0].accountId, secret: Data(b64: bundles[0].signingSecretKey))
   }
-  func extraOwnedPhotos(count: Int) throws -> [LocalPhoto] {
+  func extraOwnedPhotos(count: Int, originalBytes: Data? = nil, filename: String = "public-batch.jpg", mediaType: String = "image/jpeg") throws -> [LocalPhoto] {
     let crypto = CryptoAdapter(); var photos: [LocalPhoto] = []
     for _ in 0..<count {
       let photoID = Wire.id(), originalKey = crypto.randomKey(), key = crypto.randomKey()
-      let bytes = Data("public batch fixture".utf8), originalBinding = MediaBinding(photoId: photoID, representationId: Wire.id(), kind: "original")
+      let bytes = originalBytes ?? Data("public batch fixture".utf8), originalBinding = MediaBinding(photoId: photoID, representationId: Wire.id(), kind: "original")
       let original = try crypto.encrypt(bytes, key: originalKey, binding: originalBinding), originalID = Wire.id()
       let rep = RepresentationV1(binding: originalBinding, objectId: originalID, header: original.prefix(24).b64, ciphertextBytes: original.count, ciphertextSha256: original.digest)
-      let metadata = PhotoMetadataV1(filename: "public-batch.jpg", mediaType: "image/jpeg", sourceDate: Wire.date(), dateSource: "import", originalBytes: bytes.count, originalSha256: bytes.digest, representationKeys: [originalBinding.representationId: originalKey.b64])
+      let metadata = PhotoMetadataV1(filename: filename, mediaType: mediaType, sourceDate: Wire.date(), dateSource: "import", originalBytes: bytes.count, originalSha256: bytes.digest, representationKeys: [originalBinding.representationId: originalKey.b64])
       let metaBinding = MediaBinding(photoId: photoID, representationId: Wire.id(), kind: "metadata"), meta = try crypto.encrypt(Wire.encode(metadata), key: key, binding: metaBinding), metaID = Wire.id()
       let metaRep = RepresentationV1(binding: metaBinding, objectId: metaID, header: meta.prefix(24).b64, ciphertextBytes: meta.count, ciphertextSha256: meta.digest)
       let value = PhotoManifestV1(photoId: photoID, ownerAccountId: cards[0].accountId, representations: [rep], metadataRepresentation: metaRep, ownerWrappedMetadataKey: try crypto.wrap(key, key: Data(b64: bundles[0].vaultKey)))
-      let signed = try crypto.sign(value, kind: "photo-manifest", accountId: cards[0].accountId, secret: Data(b64: bundles[0].signingSecretKey))
+      let signed = try crypto.sign(value, kind: CameraMedia.manifestKind(for: mediaType), accountId: cards[0].accountId, secret: Data(b64: bundles[0].signingSecretKey))
       extraObjects[originalID] = original; extraObjects[metaID] = meta; owned[photoID] = signed
+      originalIDs.insert(originalID)
       photos.append(LocalPhoto(photoId: photoID, manifest: value, metadata: metadata, transferState: "committed"))
     }
     return photos
@@ -1129,6 +1333,7 @@ private final class AlbumTestServer: @unchecked Sendable {
     if path.hasSuffix("/access") { accessCount += 1; if let accessStatus { if accessStatus == 0 { throw URLError(.timedOut) }; return (accessStatus, Data()) }; return accepted && !ended ? (200, try Wire.encode(overview)) : (403, Data("{\"code\":\"ALBUM_INACTIVE\"}".utf8)) }
     if path.hasPrefix("/v1/objects/") {
       objectCount += 1; if endOnObject { ended = true }
+      if originalIDs.contains(request.url!.lastPathComponent) { originalReads += 1; if endOnOriginal { ended = true } }
       if request.url!.lastPathComponent == failObjectOnce {
         failObjectOnce = nil; throw URLError(.networkConnectionLost)
       }
@@ -1136,8 +1341,9 @@ private final class AlbumTestServer: @unchecked Sendable {
     }
     if path == "/v1/albums/" + definition.albumId {
       let cursor = Int(URLComponents(url: request.url!, resolvingAgainstBaseURL: true)?.queryItems?.first(where: { $0.name == "cursor" })?.value ?? "0") ?? 0
-      let slice = accepted && !ended ? Array(all.dropFirst(cursor).prefix(100)) : []
-      let next = cursor + slice.count < all.count ? String(cursor + slice.count) : nil
+      var slice = accepted && !ended ? Array(all.dropFirst(cursor).prefix(100)) : []
+      if omitLastPageItem, cursor + slice.count == all.count, !slice.isEmpty { slice.removeLast() }
+      let next = repeatPageCursor ? "0" : (cursor + slice.count < all.count && !omitLastPageItem ? String(cursor + slice.count) : nil)
       return (200, try Wire.encode(AlbumDetailV1(version: 1, definition: signed, membership: overview.membership, endedAt: overview.endedAt, photoCount: all.count, entries: slice.map(\.0), manifests: slice.map(\.1), nextCursor: next, hasMore: next != nil)))
     }
     return (404, Data())

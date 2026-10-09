@@ -233,12 +233,13 @@ struct NativeAlbumAccess {
       detail.entries.count == detail.manifests.count, detail.entries.count <= 100, detail.entries.count <= detail.photoCount,
       detail.hasMore == (detail.nextCursor != nil), detail.nextCursor.map({ !$0.isEmpty && $0.utf8.count <= 256 && $0.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil }) ?? true else { throw FotoroError("Album access has ended or changed.") }
   }
-  private func membership(_ access: NativeAlbumAccess, preservingTransientFailure: Bool = false) async throws {
+  @discardableResult private func membership(_ access: NativeAlbumAccess, preservingTransientFailure: Bool = false) async throws -> AlbumOverviewV1 {
     do {
       let value = try await request(AlbumOverviewV1.self, path: "/v1/albums/\(access.albumID)/access", context: access.context)
       _ = try NativeAlbumWire.overview(value)
       guard value.definition == access.signedDefinition, value.membership == "accepted", value.endedAt == nil else { throw FotoroError("Album access has ended or changed.") }
       try check(access.context)
+      return value
     } catch {
       let status = (error as? FotoroError)?.statusCode ?? 0
       let transient = (error as? URLError).map { $0.code != .cancelled } ?? (status == 408 || status == 429 || (500...599).contains(status))
@@ -247,12 +248,12 @@ struct NativeAlbumAccess {
       throw error
     }
   }
-  private func object(_ rep: RepresentationV1, key: Data, access: NativeAlbumAccess) async throws -> Data {
-    try await membership(access)
+  private func object(_ rep: RepresentationV1, key: Data, access: NativeAlbumAccess, preservingTransientFailure: Bool = false) async throws -> Data {
+    try await membership(access, preservingTransientFailure: preservingTransientFailure)
     let ciphertext = try await services.api.request("/v1/objects/\(rep.objectId)")
-    try check(access.context); try await membership(access)
+    try check(access.context); try await membership(access, preservingTransientFailure: preservingTransientFailure)
     let bytes = try await Task.detached { try CryptoAdapter().decrypt(ciphertext, key: key, representation: rep) }.value
-    try check(access.context); try await membership(access); try check(access.context); return bytes
+    try check(access.context); try await membership(access, preservingTransientFailure: preservingTransientFailure); try check(access.context); return bytes
   }
   private func write(_ bytes: Data, name: String, access: NativeAlbumAccess) throws -> URL {
     try check(access.context)
@@ -264,9 +265,9 @@ struct NativeAlbumAccess {
     let url = directory!.appendingPathComponent(name)
     try bytes.write(to: url, options: [.atomic, .completeFileProtection]); return url
   }
-  private func photo(_ entry: SignedPayloadV1, manifestSigned: SignedPayloadV1, access: NativeAlbumAccess) async throws -> NativeAlbumItem {
+  private func photo(_ entry: SignedPayloadV1, manifestSigned: SignedPayloadV1, access: NativeAlbumAccess, preservingTransientFailure: Bool = false) async throws -> NativeAlbumItem {
     let (manifest, key) = try crypto.photo(entry, manifestSigned: manifestSigned, definition: access.definition, key: access.key)
-    let bytes = try await object(manifest.metadataRepresentation, key: key, access: access)
+    let bytes = try await object(manifest.metadataRepresentation, key: key, access: access, preservingTransientFailure: preservingTransientFailure)
     let metadata = try NativeAlbumWire.decode(PhotoMetadataV1.self, bytes)
     guard metadata.version == 1, CameraMedia.supportedTypes.contains(metadata.mediaType),
       metadata.originalBytes > 0, metadata.originalBytes <= CameraMedia.maximumOriginalBytes,
@@ -503,6 +504,114 @@ struct NativeAlbumAccess {
     let output = directory!.appendingPathComponent("original-" + Wire.id())
     let urls = try CameraMedia.exportOriginals(bytes, metadata: item.photo.metadata, directory: output)
     try check(reading.context); return urls
+  }
+  func downloadTrip(temporaryRoot: URL = FileManager.default.temporaryDirectory,
+    progress: @escaping @MainActor (NativeTripDownloadProgress) -> Void = { _ in },
+    archive: @escaping @Sendable (URL, URL) throws -> Void = { try NativeTripArchive.create(folder: $0, destination: $1) }
+  ) async throws -> NativeTripDownloadResult {
+    guard let reading = access, opened?.id == reading.albumID else { throw FotoroError("Open a trip before downloading it.") }
+    let captured = reading.context
+    let overview = try await membership(reading, preservingTransientFailure: true)
+    let expected = overview.photoCount
+    guard (1...1000).contains(expected) else { throw FotoroError("This trip has no photos to download.") }
+    var snapshot: [NativeAlbumItem] = [], seen = Set<String>(), cursors = Set<String>(), cursor: String?
+    progress(.init(phase: .listing, completed: 0, total: expected))
+    // Read a separate bounded snapshot. Downloading never expands the visible
+    // gallery, starts thumbnail reads, or fetches shared details.
+    for pageNumber in 0..<10 {
+      let path = "/v1/albums/\(reading.albumID)" + (cursor.map { "?cursor=" + $0 } ?? "")
+      let detail = try await request(AlbumDetailV1.self, path: path, context: captured)
+      try validate(detail, access: reading)
+      guard detail.photoCount == expected, !detail.entries.isEmpty else { throw FotoroError("The trip changed. Try downloading it again.") }
+      for offset in stride(from: 0, to: detail.entries.count, by: 4) {
+        let end = min(offset + 4, detail.entries.count)
+        let batch = try await withThrowingTaskGroup(of: (Int, NativeAlbumItem).self) { group in
+          for index in offset..<end {
+            group.addTask { @MainActor in
+              (index, try await self.photo(detail.entries[index], manifestSigned: detail.manifests[index], access: reading, preservingTransientFailure: true))
+            }
+          }
+          var values: [(Int, NativeAlbumItem)] = []
+          for try await value in group { values.append(value) }
+          return values.sorted { $0.0 < $1.0 }.map(\.1)
+        }
+        try check(captured)
+        for item in batch {
+          guard seen.insert(item.id).inserted, snapshot.count < expected else { throw FotoroError("The trip photo list could not be verified. Try again.") }
+          snapshot.append(item)
+        }
+        progress(.init(phase: .listing, completed: snapshot.count, total: expected))
+      }
+      cursor = detail.nextCursor
+      if let cursor {
+        guard pageNumber < 9, cursors.insert(cursor).inserted else { throw FotoroError("The trip photo list could not be verified. Try again.") }
+      } else { break }
+    }
+    guard cursor == nil, snapshot.count == expected,
+      try await membership(reading, preservingTransientFailure: true).photoCount == expected else {
+      throw FotoroError("The trip changed. Try downloading it again.")
+    }
+    let groups = NativeAlbumSearch.groups(snapshot)
+    let root = try NativeTripArchive.prepareDirectory(in: temporaryRoot)
+    var handedOff = false
+    defer { if !handedOff { try? FileManager.default.removeItem(at: root) } }
+    let folder = root.appendingPathComponent("Trip", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false,
+      attributes: [.protectionKey: FileProtectionType.complete, .posixPermissions: 0o700])
+    var fingerprints = Set<String>(), originals = 0
+    progress(.init(phase: .originals, completed: 0, total: groups.count))
+    for (index, group) in groups.enumerated() {
+      let destination = folder.appendingPathComponent(String(format: "%04d", index + 1), isDirectory: true)
+      var fingerprint: String?
+      for (copyIndex, item) in group.copies.enumerated() {
+        do { fingerprint = try await exportTripOriginal(item, reading: reading, directory: destination); break }
+        catch {
+          try check(captured)
+          // Another authenticated identical contribution may hold a usable copy.
+          // Revocation, a changed scope, or an offline access check always stops.
+          guard copyIndex + 1 < group.copies.count else { throw error }
+          try await membership(reading, preservingTransientFailure: true)
+        }
+      }
+      guard let fingerprint else { throw FotoroError("A complete trip original is unavailable. Try again.") }
+      if fingerprints.insert(fingerprint).inserted { originals += 1 }
+      else { try FileManager.default.removeItem(at: destination) }
+      try check(captured)
+      progress(.init(phase: .originals, completed: index + 1, total: groups.count))
+    }
+    guard try await membership(reading, preservingTransientFailure: true).photoCount == expected else { throw FotoroError("The trip changed. Try downloading it again.") }
+    progress(.init(phase: .packaging, completed: groups.count, total: groups.count))
+    let zip = root.appendingPathComponent("Trip.zip")
+    let packaging = Task.detached(priority: .userInitiated) { try Task.checkCancellation(); try archive(folder, zip); try Task.checkCancellation() }
+    try await withTaskCancellationHandler { try await packaging.value } onCancel: { packaging.cancel() }
+    try check(captured)
+    guard try await membership(reading, preservingTransientFailure: true).photoCount == expected,
+      FileManager.default.fileExists(atPath: zip.path) else { throw FotoroError("The trip changed. Try downloading it again.") }
+    try FileManager.default.removeItem(at: folder)
+    NativeDiagnosticTrace.current?.completed(.export)
+    handedOff = true
+    return NativeTripDownloadResult(directory: root, archive: zip, originals: originals, omittedCopies: expected - originals)
+  }
+  private func exportTripOriginal(_ item: NativeAlbumItem, reading: NativeAlbumAccess, directory: URL) async throws -> String {
+    guard let representation = item.photo.manifest.representations.first(where: { $0.binding.kind == "original" }),
+      let encoded = item.photo.metadata.representationKeys[representation.binding.representationId] else {
+      throw FotoroError("A complete trip original is unavailable. Try again.")
+    }
+    let bytes = try await object(representation, key: Data(b64: encoded), access: reading, preservingTransientFailure: true)
+    let metadata = item.photo.metadata
+    guard bytes.count == metadata.originalBytes, bytes.digest == metadata.originalSha256 else { throw FotoroError("A trip original could not be verified. Try again.") }
+    try check(reading.context)
+    let output = Task.detached(priority: .userInitiated) {
+      do {
+        try Task.checkCancellation()
+        let fingerprint = try NativeTripArchive.fingerprint(bytes, metadata: metadata)
+        let urls = try CameraMedia.exportOriginals(bytes, metadata: metadata, directory: directory)
+        _ = try NativeTripArchive.sanitizeExports(urls, directory: directory)
+        try Task.checkCancellation(); return fingerprint
+      } catch { try? FileManager.default.removeItem(at: directory); throw error }
+    }
+    let fingerprint = try await withTaskCancellationHandler { try await output.value } onCancel: { output.cancel() }
+    try check(reading.context); return fingerprint
   }
   private func journalID(_ reading: NativeAlbumAccess) -> String {
     "albumappend-" + Data((reading.context.origin + "|" + reading.albumID).utf8).digest

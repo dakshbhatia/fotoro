@@ -31,6 +31,18 @@ JSON request bodies are capped at 2 MiB while annotation PUTs retain their 512 K
 cap. Both declared and streamed sizes are checked before parsing. Encrypted media
 uploads use the separately reserved ciphertext byte limit.
 
+`GET/PUT /v1/contacts` stores one encrypted contact book for the authenticated
+owner. Both replies are `{version:1,contacts:<signed payload or null>}`. PUT accepts
+a direct `account-contacts` signed payload with body `{version:1,revision,encrypted}`;
+only an existing trusted device and the owner's signing key can write it. The
+server stores the owner, revision and signed ciphertext, without contact cards or
+names in plaintext. Ciphertext is capped at 262,144 base64url characters and PUT
+requests at 512 KiB. Revisions start at one and advance exactly once; identical
+current retries succeed, while competing or stale edits return `VERSION_CONFLICT`
+(409). Clients must read, merge and re-sign after a conflict. Replies use
+`Cache-Control: no-store`; contact books do not add a legacy change-stream entity.
+Apply migration `0010_account_contacts.sql` before deploying these routes.
+
 Ordinary upload staging PUT requires a session and a scoped capability. Native
 background PUT uses `/v1/background/uploads/:id/staging`: the already reserved,
 expiring capability permits only that ciphertext staging write, with no account

@@ -51,6 +51,20 @@ enum ReviewedPhotosBackupPolicy {
 
 @MainActor @Observable final class AppServices: Identifiable {
   let id = UUID()
+  var contactsSyncConflicts: [ContactSyncConflict] = []
+  var contactsSyncMessage: String?
+  var contactsSyncBusy = false
+  private var contactNames: [String: String] = [:]
+  @ObservationIgnored private var contactSyncEngine: ContactSync?
+  var contactSyncForeground: Bool { photoSyncForeground }
+  private var contactSync: ContactSync {
+    if let contactSyncEngine { return contactSyncEngine }
+    let engine = ContactSync(services: self); contactSyncEngine = engine; return engine
+  }
+  private func suspendContactSync() {
+    contactSyncEngine?.pause(); contactsSyncBusy = false
+    contactsSyncMessage = nil; contactsSyncConflicts = []; contactNames = [:]
+  }
   let deviceTrust: DeviceTrust
   let auth: NativeAuth
   let session: AccountSession
@@ -588,6 +602,7 @@ enum ReviewedPhotosBackupPolicy {
     }
     ImageCache.shared.costLimit = 48 * 1024 * 1024
     vault.onLock = { [weak self] in
+      self?.suspendContactSync()
       self?.invalidateSavedVisualSearch()
       self?.cancelSharedMomentRefresh()
       self?.suspendAutomaticPhotoSync(reason: .locked)
@@ -618,6 +633,7 @@ enum ReviewedPhotosBackupPolicy {
     return access == activatedPhotoAccount ? access : nil
   }
   func activateAccount() throws {
+    suspendContactSync()
     suspendAutomaticPhotoSync()
     activatedPhotoAccount = nil
     backup.pause()
@@ -645,6 +661,7 @@ enum ReviewedPhotosBackupPolicy {
     try hydrateLocalAnnotations()
     resetConsumerSyncObservation()
     activatedPhotoAccount = PhotoAccountAccess(account: id, vault: vault.generation, catalog: ObjectIdentifier(store))
+    do { try contactSync.activate() } catch { contactsSyncMessage = "Contacts could not open. Try again." }
     kickAutomaticPhotoSync()
   }
   func startPhotosBackup(selection: [RecentPhotoSource]? = nil) throws {
@@ -763,6 +780,7 @@ enum ReviewedPhotosBackupPolicy {
     refreshConsumerSyncSummary()
   }
   func setPhotoSyncForeground(_ active: Bool) {
+    contactSyncEngine?.foreground(active)
     guard photoSyncForeground != active else {
       if active { kickAutomaticPhotoSync() }
       return
@@ -1939,28 +1957,52 @@ enum ReviewedPhotosBackupPolicy {
     let access = try sharingAccess()
     guard card.accountId != access.account else { throw FotoroError("This is your own Fotoro contact link.") }
     _ = try FotoroShareLinks.validatePublicAccountCard(card)
-    if let name {
-      let value = name.trimmingCharacters(in: .whitespacesAndNewlines)
-      guard value.count <= 80 else { throw FotoroError("Use a shorter contact name.") }
-      let secret = try Data(b64: vault.requireBundle().vaultKey)
-      let wrapped = try crypto.wrap(try Wire.encode(["accountId": card.accountId, "name": value]), key: secret)
-      let encoded = try Wire.encode(wrapped).b64
-      try store.database.write { db in
-        try db.execute(sql: "INSERT INTO state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-          arguments: ["contact-name:" + card.accountId, encoded])
+    let value = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard (value?.utf16.count ?? 0) <= 80 else { throw FotoroError("Use a shorter contact name.") }
+    try contactSync.edit(card, name: value)
+  }
+  func storedContactName(_ account: String) throws -> String? {
+    guard let raw = try store.database.read({ db in
+      try String.fetchOne(db, sql: "SELECT value FROM state WHERE key=?", arguments: ["contact-name:" + account])
+    }) else { return nil }
+    let plain = try crypto.unwrap(Wire.decode(WrappedKeyV1.self, Data(b64: raw)), key: Data(b64: vault.requireBundle().vaultKey))
+    let value = try Wire.decode([String: String].self, plain)
+    guard value["accountId"] == account, let name = value["name"], name.utf16.count <= 80 else { throw FotoroError("Invalid saved contact name.") }
+    return name
+  }
+  func applyContactProjection(_ book: AccountContactsV1, owner: String) throws {
+    guard photoAccountAccess?.account == owner else { throw CancellationError() }
+    try ContactCrypto.validate(book, owner: owner)
+    let names = Dictionary(uniqueKeysWithValues: book.entries.compactMap { entry in
+      entry.card == nil ? nil : (entry.accountId, entry.name)
+    })
+    let secret = try Data(b64: vault.requireBundle().vaultKey)
+    // Keep the legacy encrypted name rows for compatibility; unchanged refreshes do no writes.
+    try store.database.write { db in
+      for entry in book.entries {
+        if entry.card == nil {
+          try db.execute(sql: "DELETE FROM state WHERE key=?", arguments: ["contact-name:" + entry.accountId])
+        } else if contactNames[entry.accountId] != entry.name {
+          let wrapped = try crypto.wrap(Wire.encode(["accountId": entry.accountId, "name": entry.name]), key: secret)
+          try db.execute(sql: "INSERT INTO state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            arguments: ["contact-name:" + entry.accountId, try Wire.encode(wrapped).b64])
+        }
       }
     }
-    try session.pin(card)
+    try session.applyContacts(book.entries.compactMap(\.card), owner: owner)
+    if names != contactNames { contactNames = names }
   }
   func contactName(_ account: String) -> String {
-    guard let raw = try? store.database.read({ db in
-      try String.fetchOne(db, sql: "SELECT value FROM state WHERE key=?", arguments: ["contact-name:" + account])
-    }), let secret = try? Data(b64: vault.requireBundle().vaultKey),
-      let wrapped = try? Wire.decode(WrappedKeyV1.self, Data(b64: raw)),
-      let plain = try? crypto.unwrap(wrapped, key: secret),
-      let value = try? Wire.decode([String: String].self, plain), value["accountId"] == account,
-      let name = value["name"], !name.isEmpty else { return "Contact " + account.suffix(8) }
+    guard photoAccountAccess != nil, let name = contactNames[account], !name.isEmpty else { return "Contact " + account.suffix(8) }
     return name
+  }
+  func syncContacts() async throws { try await contactSync.syncNow() }
+  func recordContactSyncState(completed: Int, pending: Int) {
+    diagnostics.record(NativeDiagnosticEvent(phase: .share, outcome: .changed,
+      completed: completed, pending: pending, step: .persist))
+  }
+  func resolveContactSyncConflict(_ expected: ContactSyncConflict, keepLocal: Bool) throws {
+    try contactSync.resolve(expected, keepLocal: keepLocal)
   }
   func endSharedAccess(_ grant: GrantV1) async throws {
     let access = try sharingAccess()

@@ -1,0 +1,1591 @@
+{
+  "version": 1,
+  "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+  "mergeCases": [
+    {
+      "name": "restore verified names on a fresh device",
+      "base": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": []
+      },
+      "local": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": []
+      },
+      "remote": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "expected": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "conflicts": [],
+      "unresolved": []
+    },
+    {
+      "name": "independent new contacts converge",
+      "base": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": []
+      },
+      "local": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "remote": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000003",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000003",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Dad"
+          }
+        ]
+      },
+      "expected": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          },
+          {
+            "accountId": "00000000-0000-4000-8000-000000000003",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000003",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Dad"
+          }
+        ]
+      },
+      "conflicts": [],
+      "unresolved": []
+    },
+    {
+      "name": "rename from another device",
+      "base": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "local": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "remote": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mom"
+          }
+        ]
+      },
+      "expected": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mom"
+          }
+        ]
+      },
+      "conflicts": [],
+      "unresolved": []
+    },
+    {
+      "name": "offline rename survives an unchanged server",
+      "base": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "local": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mom"
+          }
+        ]
+      },
+      "remote": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "expected": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mom"
+          }
+        ]
+      },
+      "conflicts": [],
+      "unresolved": []
+    },
+    {
+      "name": "same rename converges",
+      "base": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "local": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mom"
+          }
+        ]
+      },
+      "remote": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mom"
+          }
+        ]
+      },
+      "expected": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mom"
+          }
+        ]
+      },
+      "conflicts": [],
+      "unresolved": []
+    },
+    {
+      "name": "concurrent rename needs a choice",
+      "base": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "local": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mom"
+          }
+        ]
+      },
+      "remote": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mother"
+          }
+        ]
+      },
+      "expected": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mom"
+          }
+        ]
+      },
+      "conflicts": [
+        {
+          "accountId": "00000000-0000-4000-8000-000000000002",
+          "fields": [
+            "name"
+          ]
+        }
+      ],
+      "unresolved": []
+    },
+    {
+      "name": "name conflict survives another foreground refresh",
+      "base": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mother"
+          }
+        ]
+      },
+      "local": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mom"
+          }
+        ]
+      },
+      "remote": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mother"
+          }
+        ]
+      },
+      "expected": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mom"
+          }
+        ]
+      },
+      "conflicts": [
+        {
+          "accountId": "00000000-0000-4000-8000-000000000002",
+          "fields": [
+            "name"
+          ]
+        }
+      ],
+      "unresolved": [
+        {
+          "accountId": "00000000-0000-4000-8000-000000000002",
+          "fields": [
+            "name"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "explicit keep this name can upload after rebase",
+      "base": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mother"
+          }
+        ]
+      },
+      "local": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mom"
+          }
+        ]
+      },
+      "remote": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mother"
+          }
+        ]
+      },
+      "expected": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mom"
+          }
+        ]
+      },
+      "conflicts": [],
+      "unresolved": []
+    },
+    {
+      "name": "changed remote keys require review",
+      "base": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "local": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "remote": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "GxtY3VDqFLYNoXt5DNAnVNlwybq4ZOuzwPMBb-UdP1c",
+              "signingPublicKey": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "expected": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "conflicts": [
+        {
+          "accountId": "00000000-0000-4000-8000-000000000002",
+          "fields": [
+            "card"
+          ]
+        }
+      ],
+      "unresolved": []
+    },
+    {
+      "name": "local verified key change can upload",
+      "base": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "local": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "GxtY3VDqFLYNoXt5DNAnVNlwybq4ZOuzwPMBb-UdP1c",
+              "signingPublicKey": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "remote": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "expected": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "GxtY3VDqFLYNoXt5DNAnVNlwybq4ZOuzwPMBb-UdP1c",
+              "signingPublicKey": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "conflicts": [],
+      "unresolved": []
+    },
+    {
+      "name": "changed remote keys merge an unrelated name",
+      "base": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "local": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mom"
+          }
+        ]
+      },
+      "remote": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "GxtY3VDqFLYNoXt5DNAnVNlwybq4ZOuzwPMBb-UdP1c",
+              "signingPublicKey": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "expected": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mom"
+          }
+        ]
+      },
+      "conflicts": [
+        {
+          "accountId": "00000000-0000-4000-8000-000000000002",
+          "fields": [
+            "card"
+          ]
+        }
+      ],
+      "unresolved": []
+    },
+    {
+      "name": "changed remote keys remain blocked after rebase",
+      "base": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "GxtY3VDqFLYNoXt5DNAnVNlwybq4ZOuzwPMBb-UdP1c",
+              "signingPublicKey": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "local": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "remote": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "GxtY3VDqFLYNoXt5DNAnVNlwybq4ZOuzwPMBb-UdP1c",
+              "signingPublicKey": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "expected": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "conflicts": [
+        {
+          "accountId": "00000000-0000-4000-8000-000000000002",
+          "fields": [
+            "card"
+          ]
+        }
+      ],
+      "unresolved": [
+        {
+          "accountId": "00000000-0000-4000-8000-000000000002",
+          "fields": [
+            "card"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "explicit keep current keys can upload after rebase",
+      "base": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "GxtY3VDqFLYNoXt5DNAnVNlwybq4ZOuzwPMBb-UdP1c",
+              "signingPublicKey": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "local": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "remote": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "GxtY3VDqFLYNoXt5DNAnVNlwybq4ZOuzwPMBb-UdP1c",
+              "signingPublicKey": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "expected": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "conflicts": [],
+      "unresolved": []
+    },
+    {
+      "name": "matching approved key changes converge",
+      "base": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "local": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "GxtY3VDqFLYNoXt5DNAnVNlwybq4ZOuzwPMBb-UdP1c",
+              "signingPublicKey": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "remote": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "GxtY3VDqFLYNoXt5DNAnVNlwybq4ZOuzwPMBb-UdP1c",
+              "signingPublicKey": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "expected": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "GxtY3VDqFLYNoXt5DNAnVNlwybq4ZOuzwPMBb-UdP1c",
+              "signingPublicKey": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "conflicts": [],
+      "unresolved": []
+    },
+    {
+      "name": "initial conflicting trust is never auto accepted",
+      "base": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": []
+      },
+      "local": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "remote": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "GxtY3VDqFLYNoXt5DNAnVNlwybq4ZOuzwPMBb-UdP1c",
+              "signingPublicKey": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "expected": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "conflicts": [
+        {
+          "accountId": "00000000-0000-4000-8000-000000000002",
+          "fields": [
+            "card"
+          ]
+        }
+      ],
+      "unresolved": []
+    },
+    {
+      "name": "remote removal preserves a tombstone",
+      "base": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "local": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "remote": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": null,
+            "name": ""
+          }
+        ]
+      },
+      "expected": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": null,
+            "name": ""
+          }
+        ]
+      },
+      "conflicts": [],
+      "unresolved": []
+    },
+    {
+      "name": "offline removal survives an unchanged server",
+      "base": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "local": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": null,
+            "name": ""
+          }
+        ]
+      },
+      "remote": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "expected": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": null,
+            "name": ""
+          }
+        ]
+      },
+      "conflicts": [],
+      "unresolved": []
+    },
+    {
+      "name": "concurrent rename and removal needs a choice",
+      "base": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "local": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mom"
+          }
+        ]
+      },
+      "remote": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": null,
+            "name": ""
+          }
+        ]
+      },
+      "expected": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mom"
+          }
+        ]
+      },
+      "conflicts": [
+        {
+          "accountId": "00000000-0000-4000-8000-000000000002",
+          "fields": [
+            "deleted"
+          ]
+        }
+      ],
+      "unresolved": []
+    },
+    {
+      "name": "removal conflict remains until reviewed",
+      "base": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": null,
+            "name": ""
+          }
+        ]
+      },
+      "local": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mom"
+          }
+        ]
+      },
+      "remote": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": null,
+            "name": ""
+          }
+        ]
+      },
+      "expected": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mom"
+          }
+        ]
+      },
+      "conflicts": [
+        {
+          "accountId": "00000000-0000-4000-8000-000000000002",
+          "fields": [
+            "deleted"
+          ]
+        }
+      ],
+      "unresolved": [
+        {
+          "accountId": "00000000-0000-4000-8000-000000000002",
+          "fields": [
+            "deleted"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "old book omission cannot resurrect a removed contact",
+      "base": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "local": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": null,
+            "name": ""
+          }
+        ]
+      },
+      "remote": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": []
+      },
+      "expected": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": null,
+            "name": ""
+          }
+        ]
+      },
+      "conflicts": [],
+      "unresolved": []
+    },
+    {
+      "name": "other contacts merge alongside a name conflict",
+      "base": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "local": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mom"
+          }
+        ]
+      },
+      "remote": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mother"
+          },
+          {
+            "accountId": "00000000-0000-4000-8000-000000000003",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000003",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Dad"
+          }
+        ]
+      },
+      "expected": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mom"
+          },
+          {
+            "accountId": "00000000-0000-4000-8000-000000000003",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000003",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Dad"
+          }
+        ]
+      },
+      "conflicts": [
+        {
+          "accountId": "00000000-0000-4000-8000-000000000002",
+          "fields": [
+            "name"
+          ]
+        }
+      ],
+      "unresolved": []
+    },
+    {
+      "name": "a pending key review does not block a later unrelated rename",
+      "base": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "GxtY3VDqFLYNoXt5DNAnVNlwybq4ZOuzwPMBb-UdP1c",
+              "signingPublicKey": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "local": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mum"
+          }
+        ]
+      },
+      "remote": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "GxtY3VDqFLYNoXt5DNAnVNlwybq4ZOuzwPMBb-UdP1c",
+              "signingPublicKey": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E"
+            },
+            "name": "Mom"
+          }
+        ]
+      },
+      "expected": {
+        "version": 1,
+        "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+        "entries": [
+          {
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "card": {
+              "version": 1,
+              "accountId": "00000000-0000-4000-8000-000000000002",
+              "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+              "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+            },
+            "name": "Mom"
+          }
+        ]
+      },
+      "conflicts": [
+        {
+          "accountId": "00000000-0000-4000-8000-000000000002",
+          "fields": [
+            "card"
+          ]
+        }
+      ],
+      "unresolved": [
+        {
+          "accountId": "00000000-0000-4000-8000-000000000002",
+          "fields": [
+            "card"
+          ]
+        }
+      ]
+    }
+  ],
+  "crypto": {
+    "book": {
+      "version": 1,
+      "ownerAccountId": "00000000-0000-4000-8000-000000000001",
+      "entries": [
+        {
+          "accountId": "00000000-0000-4000-8000-000000000002",
+          "card": {
+            "version": 1,
+            "accountId": "00000000-0000-4000-8000-000000000002",
+            "boxPublicKey": "YDRufJEaX2uhVBKRdMr-dbKUrDu9VUljL0jOxiZvhBA",
+            "signingPublicKey": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw"
+          },
+          "name": "Mum \u00b7 \u5988\u5988 \ud83d\udc9b"
+        },
+        {
+          "accountId": "00000000-0000-4000-8000-000000000003",
+          "card": null,
+          "name": ""
+        }
+      ]
+    },
+    "update": {
+      "version": 1,
+      "revision": 7,
+      "encrypted": {
+        "version": 1,
+        "nonce": "QlrfcbBYqGRBoqk77qLrpHDisfzFTOTP",
+        "ciphertext": "ICkfyVlfGOl9u461MpjZoFpsF3yLrNKCl0n_836MlGnLX6EMPt-fN7AvEe-474c3e-NkvXQPdPoY9fcKKygD5g4S1N4hEtrCEhNXjXoiGolx0GiANXJJnCRy2IPw-0AIh2glQ2KUf_asOBWTylRQOikp8miyDoxDk1y5RrfJEfgulIwID2Zvv-K4oF-JGMTwOOXf1fyUHMzH3vULTeCG0Q9-EkFlFbzRzhgae3thjNBAvpOaQ2qlzfF86R208LfFcRv5ptCeZ5kk5fE708E2RV78Pl6YcpKu-aBgsOX3vfD0uyN6b5kqgV1KcNR_oU7ZcFx2ttvHBsb0zbcIulJGESXV8YpAdBBBDLRIhbc2fFOiDIvlR6CJzU_SN0CbmewXMo2NXefx_TY4RPLpttnIrcmuE3H1fGKd7VCfqSINDv75Wu7MUwxePgeE_-Iz9yI6DwkL3v7IH25ivalEJ3Tufnbyq_LO8lUE-tiD9xS75J-PT7KY0GNknkIjosMiga7EF-RquMKCTIhKVpViSWR7i-Qsm_vUcBYkiJecfsZfZ-S3AOD5_bv2Eq3tIH4Ss2FcwuQFdoshhQqTdlWbIJhKaYqNCw"
+      }
+    },
+    "signed": {
+      "version": 1,
+      "kind": "account-contacts",
+      "accountId": "00000000-0000-4000-8000-000000000001",
+      "body": "eyJ2ZXJzaW9uIjoxLCJyZXZpc2lvbiI6NywiZW5jcnlwdGVkIjp7InZlcnNpb24iOjEsIm5vbmNlIjoiUWxyZmNiQllxR1JCb3FrNzdxTHJwSERpc2Z6RlRPVFAiLCJjaXBoZXJ0ZXh0IjoiSUNrZnlWbGZHT2w5dTQ2MU1walpvRnBzRjN5THJOS0NsMG5fODM2TWxHbkxYNkVNUHQtZk43QXZFZS00NzRjM2UtTmt2WFFQZFBvWTlmY0tLeWdENWc0UzFONGhFdHJDRWhOWGpYb2lHb2x4MEdpQU5YSkpuQ1J5MklQdy0wQUloMmdsUTJLVWZfYXNPQldUeWxSUU9pa3A4bWl5RG94RGsxeTVScmZKRWZndWxJd0lEMlp2di1LNG9GLUpHTVR3T09YZjFmeVVITXpIM3ZVTFRlQ0cwUTktRWtGbEZielJ6aGdhZTN0aGpOQkF2cE9hUTJxbHpmRjg2UjIwOExmRmNSdjVwdENlWjVrazVmRTcwOEUyUlY3OFBsNlljcEt1LWFCZ3NPWDN2ZkQwdXlONmI1a3FnVjFLY05SX29VN1pjRngydHR2SEJzYjB6YmNJdWxKR0VTWFY4WXBBZEJCQkRMUkloYmMyZkZPaURJdmxSNkNKelVfU04wQ2JtZXdYTW8yTlhlZnhfVFk0UlBMcHR0bklyY211RTNIMWZHS2Q3VkNmcVNJTkR2NzVXdTdNVXd4ZVBnZUVfLUl6OXlJNkR3a0wzdjdJSDI1aXZhbEVKM1R1Zm5ieXFfTE84bFVFLXRpRDl4Uzc1Si1QVDdLWTBHTmtua0lqb3NNaWdhN0VGLVJxdU1LQ1RJaEtWcFZpU1dSN2ktUXNtX3ZVY0JZa2lKZWNmc1pmWi1TM0FPRDVfYnYyRXEzdElINFNzMkZjd3VRRmRvc2hoUXFUZGxXYklKaEthWXFOQ3cifX0",
+      "signature": "iBxeKLBUMtGyCXV-QD3zY4nbFluJCbSDq_mIcr4x8g9lu5hT9k5M_-HB0KJi5cK7TA8APP-HcQV0vFYcZeODCg"
+    }
+  }
+}

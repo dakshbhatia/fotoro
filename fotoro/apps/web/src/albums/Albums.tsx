@@ -1,8 +1,11 @@
+import {TripDownloadLease} from "./download-lease";
+import {cleanupTripDownloads, prepareTripDownload, type TripDownloadProgress} from "./download";
 import {AlbumNameChoices} from "./AlbumNameChoices";
 import {useEffect, useMemo, useRef, useState} from "react";
 import type {AccountCardV1} from "@fotoro/contracts";
 import {ALBUM_DEFINITION_KIND, readAlbumSignedBody, validateAlbumDefinition, type AlbumOverviewV1} from "@fotoro/contracts/albums";
 import {createAlbumLink} from "@fotoro/contracts/albums-links";
+import {subscribeContacts} from "../exchange/contacts";
 import {contacts, contactNames, type ShareScope} from "../exchange/share-service";
 import {identityLabel, ShareSelection} from "../exchange/sharing";
 import {requireVault} from "../vault/vault";
@@ -26,6 +29,11 @@ import {subscribeAlbumLifetime} from "./entry";
 
 function readableError(error: unknown) {
   const code = error instanceof Error ? error.message : "";
+  if (code === "TRIP_MEMORY_LIMIT") return "This trip is too large for this browser’s 128 MiB download limit. Try a browser with temporary disk storage.";
+  if (code === "TRIP_ZIP_LIMIT") return "This trip is too large for one ZIP download. Download individual originals instead.";
+  if (code === "TRIP_CHANGED") return "New trip photos arrived while checking. Try Download trip again to include them.";
+  if (code === "TRIP_EMPTY") return "There are no trip photos to download yet.";
+  if (/TRIP_|INVALID_ORIGINAL_FILENAME|ORIGINAL_DIGEST_MISMATCH/.test(code)) return "The complete trip could not be verified for download. Try again.";
   if (/PIN_ACCOUNT_CARD/.test(code)) return "Accept the album owner's contact in Share in Fotoro before opening this invitation.";
   if (/ALBUM_(ACCESS_ENDED|NOT_FOUND|NOT_ACCEPTED)|FORBIDDEN/.test(code)) return "Album access has ended or is unavailable.";
   if (/CAPACITY|PHOTO_LIMIT/.test(code)) return "This album has reached its photo limit.";
@@ -78,9 +86,18 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   const [creating, setCreating] = useState(false), [unsupported, setUnsupported] = useState(false), [entryFailed, setEntryFailed] = useState(false);
   const preparedDownload = useRef<{access: AlbumAccess; photo: Photo; files: File[]; controller: AbortController} | null>(null);
   const [downloadReady, setDownloadReady] = useState(false);
+  const tripDownload = useRef<{controller: AbortController; access?: AlbumAccess; lease?: TripDownloadLease} | null>(null);
+  const [downloadStarted, setDownloadStarted] = useState(false);
+  const [tripProgress, setTripProgress] = useState<TripDownloadProgress | null>(null);
+  const clearTripDownload = () => {
+    const attempt = tripDownload.current; tripDownload.current = null;
+    attempt?.controller.abort(); attempt?.access?.dispose();
+    if (attempt?.lease) void attempt.lease.dispose();
+    setTripProgress(null); setDownloadStarted(false);
+  };
   const clearDownload = () => {preparedDownload.current?.controller.abort(); if (preparedDownload.current) preparedDownload.current.files.length = 0; preparedDownload.current = null; setDownloadReady(false);};
   const scope: ShareScope = {signal: controller.signal, current: () => alive.current && sameVault(session) && (!incoming || incoming.current(session))};
-  const closeAlbum = () => {clearDownload(); const previous = accessRef.current; accessRef.current = null; previous?.dispose(); setAccess(null); setPhotos([]); setPage({hasMore: false, photoCount: 0}); setPreview(null); setQuery(""); setConfirmEnd(false); setFacts(new Map()); setFactsState("loading"); setPeopleFilter(emptyPeopleFilter()); setFrom(""); setThrough(""); setDetailDraft(null);};
+  const closeAlbum = () => {clearTripDownload(); clearDownload(); const previous = accessRef.current; accessRef.current = null; previous?.dispose(); setAccess(null); setPhotos([]); setPage({hasMore: false, photoCount: 0}); setPreview(null); setQuery(""); setConfirmEnd(false); setFacts(new Map()); setFactsState("loading"); setPeopleFilter(emptyPeopleFilter()); setFrom(""); setThrough(""); setDetailDraft(null);};
   const close = () => {alive.current = false; controller.abort(); closeAlbum(); onClose();};
   useDialogFocus(panel, () => preview ? setPreview(null) : close());
   useEffect(() => {setDetailDraft(null); if (preview) previewPanel.current?.focus({preventScroll: true});}, [preview]);
@@ -91,7 +108,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     return () => {access?.signal.removeEventListener("abort", clear); clearDownload();};
   }, [access, preview]);
   useEffect(() => subscribeAlbumLifetime(window, document, () => {
-    alive.current = false; controller.abort(); accessRef.current?.dispose(); chosenSnapshot.dispose();
+    alive.current = false; controller.abort(); clearTripDownload(); accessRef.current?.dispose(); chosenSnapshot.dispose();
   }, close), []);
   async function action(task: () => Promise<void>, background = false) {
     if (working.current || !scope.current?.()) return;
@@ -99,6 +116,12 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     try {await task();} catch (failure) {if (scope.current?.()) {setError(readableError(failure)); if (accessRef.current && !accessRef.current.current()) closeAlbum();}}
     finally {working.current = false; if (scope.current?.()) setBusy(false);}
   }
+  useEffect(() => subscribeContacts(() => {
+    if (!scope.current?.()) return;
+    void Promise.all([contacts(scope), contactNames(scope)]).then(([accepted, labels]) => {
+      if (scope.current?.()) {setCards(accepted); setNames(labels);}
+    }).catch(() => {});
+  }), []);
   async function loadInbox() {
     const [list, accepted, labels] = await Promise.all([albumInbox(scope), contacts(scope), contactNames(scope)]);
     if (!scope.current?.()) return;
@@ -176,7 +199,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
       throw failure;
     }
   });
-  useEffect(() => {void initialize();}, []);
+  useEffect(() => {void cleanupTripDownloads(); void initialize();}, []);
   useEffect(() => {
     if (!access || access.overview.membership !== "accepted") return;
     const ended = () => {if (accessRef.current === access) {closeAlbum(); setError("Album access has ended or is unavailable.");}};
@@ -225,6 +248,34 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     if (preparedDownload.current !== prepared || !scope.current?.() || !access.current()) {files.length = 0; return;}
     prepared.files = files; setDownloadReady(true);
   });
+  const downloadTrip = () => action(async () => {
+    const opened = accessRef.current; if (!opened || opened.overview.membership !== "accepted") return;
+    clearTripDownload();
+    const attempt: NonNullable<typeof tripDownload.current> = {controller: new AbortController()}; tripDownload.current = attempt;
+    const current = () => tripDownload.current === attempt && !attempt.controller.signal.aborted && !!scope.current?.() && accessRef.current === opened && opened.current();
+    setTripProgress({phase: "checking", completed: 0, total: 0});
+    let published = false;
+    try {
+      const signal = AbortSignal.any([controller.signal, attempt.controller.signal]);
+      attempt.access = await AlbumAccess.open(opened.overview, {signal, current});
+      if (!current()) {attempt.access.dispose(); return;}
+      const result = await prepareTripDownload(attempt.access, signal, value => {if (current()) setTripProgress(value);});
+      attempt.lease = new TripDownloadLease(result);
+      await opened.assertAccess(); signal.throwIfAborted();
+      if (!current()) return;
+      attempt.lease.publish(current); published = true;
+      if (!current()) return;
+      setTripProgress(null); setDownloadStarted(true);
+      setNotice(`Download started. Keep this trip open until it finishes. ${result.photos} unique ${result.photos === 1 ? "photo" : "photos"}${result.duplicates ? ` · ${result.duplicates} exact ${result.duplicates === 1 ? "copy" : "copies"} skipped` : ""}.`);
+    } catch (failure) {
+      if (!attempt.controller.signal.aborted) throw failure;
+    } finally {
+      if (!published) {
+        if (tripDownload.current === attempt) clearTripDownload();
+        else if (attempt.lease) await attempt.lease.dispose();
+      }
+    }
+  });
   const download = () => {
     const prepared = preparedDownload.current;
     const current = () => !!prepared && preparedDownload.current === prepared && prepared.access === access && prepared.photo === preview && !prepared.controller.signal.aborted && !!scope.current?.() && prepared.access.current();
@@ -237,13 +288,13 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
       try {anchor.click();} finally {setTimeout(() => {revoke(); controller.signal.removeEventListener("abort", revoke); prepared.access.signal.removeEventListener("abort", revoke);}, 1000);}
     }}).catch(() => {if (scope.current?.()) setError("The original could not be downloaded. Try again.");});
   };
-  return <aside ref={panel} className="albums-sheet" role="dialog" aria-modal="true" aria-label="Live albums" tabIndex={-1}>
+  return <aside ref={panel} className="albums-sheet" role="dialog" aria-modal="true" aria-label="Trips" tabIndex={-1}>
     <header inert={preview ? true : undefined}>
-      {access && <button className="album-icon-button" disabled={busy} onClick={closeAlbum} aria-label="All albums"><Icon kind="previous" /></button>}
-      <div className="album-heading"><h2>{access ? access.title : creating ? "New album" : "Live albums"}</h2>
+      {access && <button className="album-icon-button" disabled={busy} onClick={closeAlbum} aria-label="All trips"><Icon kind="previous" /></button>}
+      <div className="album-heading"><h2>{access ? access.title : creating ? "New trip" : "Trips"}</h2>
         {access && <div className="album-chips" aria-label="Album summary"><span>{photoCount} {photoCount === 1 ? "photo" : "photos"}</span><span aria-label={`${memberIDs.length} invited roster members`}>{memberIDs.length} people</span></div>}
       </div>
-      {!access && !ownerReview && !creating && available && <button onClick={() => setCreating(true)}>New album</button>}
+      {!access && !ownerReview && !creating && available && <button onClick={() => setCreating(true)}>New trip</button>}
       {available && <details className="album-menu" onKeyDown={event => {if (event.key === "Escape") {event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();}}}>
         <summary>More</summary><div>
           <button disabled={busy} onClick={() => void refresh()}>Refresh</button>
@@ -251,11 +302,11 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
           {access && <details className="album-roster"><summary>Details</summary><p className="hint">Fixed invited roster</p><ul>{access.definition.members.map(member => <li key={member.card.accountId}><span>{contributor(member.card.accountId)}</span><small>{identityLabel(member.card)}</small></li>)}</ul><p className="hint">Search includes filenames, capture dates and explicitly shared details. Private labels stay in your account.</p></details>}
           {access?.definition.ownerAccountId === session.accountId && <>
             <button disabled={busy} onClick={() => void action(async () => {const link = createAlbumLink(access.albumId, session.card, location.origin); await navigator.clipboard.writeText(link); if (scope.current?.()) setNotice("Album link copied. Only invited accounts can accept it.");})}>Copy invitation link</button>
-            <details><summary>End access</summary><label><input type="checkbox" checked={confirmEnd} onChange={event => setConfirmEnd(event.target.checked)} />End album access for everyone</label><button disabled={busy || !confirmEnd} onClick={() => void action(async () => {await access.end(); closeAlbum(); await loadInbox(); setError(""); setNotice("Album access ended.");})}>End access</button></details>
+            <details><summary>End access</summary><label><input type="checkbox" checked={confirmEnd} onChange={event => setConfirmEnd(event.target.checked)} />End trip access for everyone</label><button disabled={busy || !confirmEnd} onClick={() => void action(async () => {await access.end(); closeAlbum(); await loadInbox(); setError(""); setNotice("Album access ended.");})}>End access</button></details>
           </>}
         </div>
       </details>}
-      <button className="album-icon-button" onClick={close} aria-label="Close albums"><Icon kind="close" /></button>
+      <button className="album-icon-button" onClick={close} aria-label="Close trips"><Icon kind="close" /></button>
     </header>
     <div className="albums-content" inert={preview ? true : undefined} aria-busy={busy || available === null}>
       {error && <p className="hint" role="alert">{available === false ? unsupported ? "Live albums are unavailable on this server. Existing photos and Share still work." : "Live albums could not be opened. Try again." : error}</p>}
@@ -267,16 +318,22 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
           <h3>{ownerReview.changed ? "The album owner's identity changed" : "Accept the album owner"}</h3>
           <p className="hint">Confirm this sender with the album owner through a trusted channel before continuing. {ownerReview.changed && "Their identity differs from the contact saved in this browser."}</p>
           <details className="album-roster"><summary>Verify sender</summary><p className="contact-identity">Fotoro {identityLabel(ownerReview.owner)}</p></details>
-          <button className="primary-action" disabled={busy} onClick={() => void action(async () => {const accepted = await joinAlbumInvitation(ownerReview.overview, scope, ownerReview.owner); if (!scope.current?.()) return; setOwnerReview(null); await open(accepted); await loadInbox();})}>{ownerReview.overview.membership === "accepted" ? "Verify sender and open album" : ownerReview.changed ? "Join album with new identity" : "Join album"}</button>
-          <button disabled={busy} onClick={() => setOwnerReview(null)}>All albums</button>
+          <button className="primary-action" disabled={busy} onClick={() => void action(async () => {const accepted = await joinAlbumInvitation(ownerReview.overview, scope, ownerReview.owner); if (!scope.current?.()) return; setOwnerReview(null); await open(accepted); await loadInbox();})}>{ownerReview.overview.membership === "accepted" ? "Verify sender and open trip" : ownerReview.changed ? "Join trip with new identity" : "Join trip"}</button>
+          <button disabled={busy} onClick={() => setOwnerReview(null)}>All trips</button>
         </section> : access ? <>
           {access.overview.membership === "invited" ? <>
             <p>Accept to view this album and add chosen Saved photos. Its invited members stay fixed.</p>
-            <button className="primary-action" disabled={busy} onClick={() => void action(async () => {const accepted = await joinAlbumInvitation(access.overview, scope); await open(accepted); await loadInbox();})}>Join album</button>
+            <button className="primary-action" disabled={busy} onClick={() => void action(async () => {const accepted = await joinAlbumInvitation(access.overview, scope); await open(accepted); await loadInbox();})}>Join trip</button>
           </> : <>
-            <div className="album-toolbar"><input type="search" aria-label="Search album people, places, filenames or capture dates" placeholder="Search album" value={query} onChange={event => setQuery(event.target.value)} />
+            <div className="album-toolbar"><input type="search" aria-label="Search trip people, places, filenames or capture dates" placeholder="Search trip" value={query} onChange={event => setQuery(event.target.value)} />
+              <button disabled={busy || !photoCount || downloadStarted} onClick={() => void downloadTrip()}>Download trip</button>
               <AlbumContributionActions albumId={access.albumId} chosen={chosen} busy={busy} onChoosePhotos={onChoosePhotos} onAdd={() => void action(async () => {const added = await access.add(chosenSnapshot.photos, currentPhotos); const list = await loadInbox(); const updated = list?.find(item => item.definition.body === access.overview.definition.body); if (updated) await refreshOpened(access, updated); setNotice(added ? `${added} ${added === 1 ? "photo added" : "photos added"}.` : "Already in this album.");})} />
             </div>
+            {downloadStarted && <button onClick={() => {clearTripDownload(); setNotice("");}}>Done downloading</button>}
+            {tripProgress && <div className="trip-download-progress"><p role="status">{tripProgress.phase === "checking" ? "Checking all trip photos" : "Preparing trip download"}{tripProgress.total > 0 ? ` · ${tripProgress.completed} of ${tripProgress.total}` : "…"}</p>
+              <progress aria-label="Trip download progress" max={tripProgress.total || 1} value={tripProgress.total ? tripProgress.completed : undefined} />
+              <button onClick={() => {clearTripDownload(); setNotice("Trip download cancelled.");}}>Cancel download</button>
+            </div>}
             <div className="album-filters"><PeopleFilter people={reviewed} value={peopleFilter} onChange={setPeopleFilter} disabled={busy} />
               <details><summary>Time and copies</summary><div className="album-range"><label>Captured from<input type="date" value={from} onChange={event => setFrom(event.target.value)} /></label><label>Captured through<input type="date" value={through} onChange={event => setThrough(event.target.value)} /></label>
                 {(from || through) && <button onClick={() => {setFrom(""); setThrough("");}}>Clear dates</button>}<label><input type="checkbox" checked={groupCopies} onChange={event => setGroupCopies(event.target.checked)} />Group exact copies</label></div></details></div>
@@ -294,15 +351,15 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
           </>}
         </> : <>
           {creating && <form onSubmit={event => {event.preventDefault(); void action(async () => {const created = await createAlbum(title, cards.filter(card => invitees.has(card.accountId)), scope, creationDraft.current); setTitle(""); setInvitees(new Set()); setCreating(false); await loadInbox(); await open(created);});}}>
-            <label>Album title<input value={title} onChange={event => {creationDraft.current = {}; setTitle(event.target.value);}} required disabled={busy} aria-describedby="album-title-limit" /></label>
+            <label>Trip title<input value={title} onChange={event => {creationDraft.current = {}; setTitle(event.target.value);}} required disabled={busy} aria-describedby="album-title-limit" /></label>
             <p className="hint" id="album-title-limit">Up to 80 characters. Choose 1 to 11 accepted contacts. Invitations require acceptance.</p>
             <fieldset disabled={busy}><legend>Invite contacts</legend>{cards.map(card => <label key={card.accountId}><input type="checkbox" checked={invitees.has(card.accountId)} disabled={!invitees.has(card.accountId) && invitees.size >= 11} onChange={event => {creationDraft.current = {}; setInvitees(previous => {const next = new Set(previous); if (event.target.checked) next.add(card.accountId); else next.delete(card.accountId); return next;});}} />{contributor(card.accountId)}</label>)}</fieldset>
             {!cards.length && <p className="hint">Accept contacts in Share in Fotoro first.</p>}
             <button type="submit" className="primary-action" disabled={busy || !title.trim() || [...title].length > 80 || !invitees.size}>Create and invite</button>
             <button type="button" disabled={busy} onClick={() => setCreating(false)}>Cancel</button>
           </form>}
-          {!creating && <div className="album-inbox">{items.map(item => {const definition = readAlbumSignedBody(item.definition, ALBUM_DEFINITION_KIND, validateAlbumDefinition), label = titles.get(definition.albumId) || (item.membership === "invited" ? "Album invitation" : "Album"); return <button className="album-inbox-card" key={definition.albumId} disabled={busy || !!item.endedAt} onClick={() => void action(() => enter(item))} aria-label={`${item.membership === "invited" ? "Review invitation to" : "Open"} ${label}`}><div><strong>{label}</strong><div className="album-chips"><span>{item.photoCount} {item.photoCount === 1 ? "photo" : "photos"}</span><span>{definition.members.length} people</span><span>{item.endedAt ? "Access ended" : item.membership === "invited" ? "Invitation" : contributor(definition.ownerAccountId, definition.members.map(member => member.card.accountId))}</span></div></div><Icon kind="next" /></button>;})}</div>}
-          {!creating && !items.length && !busy && <p>No albums or invitations yet.</p>}
+          {!creating && <div className="album-inbox">{items.map(item => {const definition = readAlbumSignedBody(item.definition, ALBUM_DEFINITION_KIND, validateAlbumDefinition), label = titles.get(definition.albumId) || (item.membership === "invited" ? "Trip invitation" : "Trip"); return <button className="album-inbox-card" key={definition.albumId} disabled={busy || !!item.endedAt} onClick={() => void action(() => enter(item))} aria-label={`${item.membership === "invited" ? "Review invitation to" : "Open"} ${label}`}><div><strong>{label}</strong><div className="album-chips"><span>{item.photoCount} {item.photoCount === 1 ? "photo" : "photos"}</span><span>{definition.members.length} people</span><span>{item.endedAt ? "Access ended" : item.membership === "invited" ? "Invitation" : contributor(definition.ownerAccountId, definition.members.map(member => member.card.accountId))}</span></div></div><Icon kind="next" /></button>;})}</div>}
+          {!creating && !items.length && !busy && <p>No trips or invitations yet.</p>}
         </>}
       </>}
     </div>

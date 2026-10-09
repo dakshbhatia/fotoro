@@ -1,3 +1,5 @@
+import {ContactSyncReview} from "./ContactSyncReview";
+import {subscribeContacts, syncContacts} from "./contacts";
 import {useEffect, useRef, useState} from "react";
 import type {AccountCardV1, GrantV1} from "@fotoro/contracts";
 import {createContactLink, createMomentLink, parseShareLink, type FotoroShareLink} from "@fotoro/contracts/share-links";
@@ -66,6 +68,7 @@ export function Exchange({selection, incoming, onClose, onReceived, onRefresh, o
   useDialogFocus(panel, onClose);
   const [session] = useState(requireVault), [snapshot] = useState(() => new ShareSelection(selection));
   const [linkInput, setLinkInput] = useState(""), [candidate, setCandidate] = useState<AccountCardV1 | undefined>(() => incoming?.pending ? incoming.link.kind === "contact" ? incoming.link.card : incoming.link.senderCard : undefined), [recipient, setRecipient] = useState<AccountCardV1>(), [candidateName, setCandidateName] = useState("");
+  const [editingContact, setEditingContact] = useState(false);
   const [candidateChecked, setCandidateChecked] = useState(false), [inboxFailed, setInboxFailed] = useState(false);
   const [names, setNames] = useState(new Map<string, string>());
   const [people, setPeople] = useState<AccountCardV1[]>([]), [access, setAccess] = useState<"ongoing" | "temporary">("ongoing");
@@ -102,7 +105,16 @@ export function Exchange({selection, incoming, onClose, onReceived, onRefresh, o
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => {mounted.current = false; controller.current.abort(); snapshot.dispose(); window.clearInterval(timer);};
   }, []);
+  useEffect(() => subscribeContacts(() => {
+    if (!current()) return;
+    void Promise.all([contacts(scope), contactNames(scope)]).then(([accepted, labels]) => {
+      if (!current()) return;
+      setPeople(accepted); setNames(labels);
+      setRecipient(previous => previous && accepted.find(card => sameIdentity(card, previous)));
+    }).catch(() => {});
+  }), []);
   const inspectLink = () => run(async () => {
+    setEditingContact(false);
     let link: FotoroShareLink;
     try {link = parseShareLink(linkInput.trim());} catch {throw new Error("SHARE_LINK_INVALID");}
     if (link.kind !== "contact") throw new Error("SHARE_LINK_INVALID");
@@ -112,8 +124,8 @@ export function Exchange({selection, incoming, onClose, onReceived, onRefresh, o
   const accept = () => run(async () => {
     if (!candidate || !candidateChecked) return;
     if (candidate.accountId === session.accountId && (!incoming || incoming.link.kind === "contact")) throw new Error("SHARE_OWN_ACCOUNT");
-    await pinCard(candidate, scope);
-    await saveContactName(candidate.accountId, candidateName, scope);
+    if (!editingContact) await pinCard(candidate, scope);
+    await saveContactName(candidate.accountId, candidateName, scope, editingContact ? candidate : undefined);
     if (!current()) return;
     setNames(previous => new Map(previous).set(candidate.accountId, candidateName));
     setRecipient(candidate); setPeople(previous => [...previous.filter(person => person.accountId !== candidate.accountId), candidate]);
@@ -121,7 +133,7 @@ export function Exchange({selection, incoming, onClose, onReceived, onRefresh, o
       const result = await receive(incoming.link.grantId, scope, candidate);
       if (!current()) {for (const photo of result.photos) photo.metadataKey.fill(0); return;}
       onReceived(result.photos, result.grant, candidateName.trim() || "Fotoro " + result.grant.ownerAccountId.slice(0, 8));
-    } else {setCandidate(undefined); setCandidateChecked(false); setLinkInput(""); await reload(); if (current()) setStatus("Contact accepted. You can share photos with this person.");}
+    } else {setCandidate(undefined); setCandidateChecked(false); setEditingContact(false); setLinkInput(""); await reload(); if (current()) setStatus(editingContact ? "Contact saved." : "Contact accepted. You can share photos with this person.");}
   }, incoming?.link.kind === "moment" ? "Opening shared photos…" : "Accepting contact…");
   const copyLink = (value: string) => run(async () => {
     setOutputLink(value);
@@ -149,17 +161,21 @@ export function Exchange({selection, incoming, onClose, onReceived, onRefresh, o
     <h2>{isMoment ? "Someone shared photos with you" : count ? `Share ${count} ${count === 1 ? "photo" : "photos"}` : "Shared photos"}</h2>
     {count > 0 && <div className="share-photo-strip" aria-label="Selected photos">{snapshot.photos.slice(0, 5).map(photo => <SharePreview key={photo.manifest.photoId} photo={photo} />)}{count > 5 && <span>+{count - 5}</span>}</div>}
     {isMoment && <p className="hint">Open with the Fotoro password this invitation was sent to. Photos stay here until you choose Save.</p>}
+    {!isMoment && <ContactSyncReview session={session} scope={scope} busy={busy} run={run} />}
     {candidate ? <div className="identity-confirmation">
-      <h3>{identityChanged ? "This person’s identity changed" : isMoment ? "Accept this sender" : "Accept this contact"}</h3>
-      <p className="hint">Only accept a contact link sent to you by this person. {identityChanged && "Confirm the new link with them before continuing."}</p>
+      <h3>{identityChanged ? "This person’s identity changed" : isMoment ? "Accept this sender" : editingContact ? "Edit contact" : "Accept this contact"}</h3>
+      {!editingContact && <p className="hint">Only accept a contact link sent to you by this person. {identityChanged && "Confirm the new link with them before continuing."}</p>}
       <p className="contact-identity">Fotoro {identityLabel(candidate)}</p>
       <label className="contact-name">Their name <input autoComplete="off" disabled={busy || !candidateChecked} value={candidateName} maxLength={80} onChange={event => setCandidateName(event.target.value)} placeholder="Optional" /></label>
-      <button className="primary-action" disabled={busy || !candidateChecked} onClick={() => void accept()}>{busy ? !candidateChecked ? "Checking identity…" : isMoment ? "Opening…" : "Accepting…" : isMoment ? "Accept sender and open photos" : identityChanged ? "Accept new identity" : "Accept contact"}</button>
+      <button className="primary-action" disabled={busy || !candidateChecked} onClick={() => void accept()}>{busy ? !candidateChecked ? "Checking identity…" : isMoment ? "Opening…" : "Accepting…" : isMoment ? "Accept sender and open photos" : identityChanged ? "Accept new identity" : editingContact ? "Save contact" : "Accept contact"}</button>
       {!candidateChecked && !busy && status && <button onClick={() => void run(() => loadExchangeContext(session, scope, applyContext, candidate), "Checking sender…")}>Try again</button>}
-      {!isMoment && <button disabled={busy} onClick={() => setCandidate(undefined)}>Cancel</button>}
+      {!isMoment && <button disabled={busy} onClick={() => {setCandidate(undefined); setEditingContact(false);}}>Cancel</button>}
     </div> : !isMoment && <>
+      {!invitation && people.length > 0 && <div className="share-recipients" role="group" aria-label={count ? "Choose a person" : "Your contacts"}><h3>{count ? "Choose a person" : "Your contacts"}</h3>{people.map(person => <button key={person.accountId} disabled={busy} aria-pressed={count ? recipient?.accountId === person.accountId : undefined} aria-label={count ? undefined : "Edit contact " + contactLabel(person.accountId)} onClick={() => {
+        if (count) setRecipient(person);
+        else void run(async () => {setEditingContact(true); await loadExchangeContext(session, scope, applyContext, person);}, "Opening contact…");
+      }}>{contactLabel(person.accountId)}{count > 0 && recipient?.accountId === person.accountId && <span aria-hidden="true"> ✓</span>}</button>)}</div>}
       {count > 0 && !invitation && <>
-        {people.length > 0 && <div className="share-recipients" role="group" aria-label="Choose a person"><h3>Choose a person</h3>{people.map(person => <button key={person.accountId} disabled={busy} aria-pressed={recipient?.accountId === person.accountId} onClick={() => setRecipient(person)}>{contactLabel(person.accountId)}{recipient?.accountId === person.accountId && <span aria-hidden="true"> ✓</span>}</button>)}</div>}
         <details open={people.length === 0}><summary>{people.length ? "Add a person" : "Connect with a person"}</summary><form onSubmit={event => {event.preventDefault(); void inspectLink();}}><p className="hint">Ask this person to open Shared and send you their contact link. After you connect, send them the photo invitation.</p><label>Recipient’s contact link<input type="url" autoComplete="off" value={linkInput} onChange={event => setLinkInput(event.target.value)} placeholder="https://fotoro.cloud/#contact=…" /></label><button disabled={busy || !linkInput.trim()}>Continue</button></form></details>
         <details><summary>Photo access</summary><label>Access<select value={access} disabled={busy} onChange={event => setAccess(event.target.value as "ongoing" | "temporary")}><option value="ongoing">Until I end access</option><option value="temporary">15 minutes</option></select></label></details>
         <button className="primary-action" disabled={busy || !recipient || count > 100} onClick={() => void run(async () => {
@@ -176,7 +192,7 @@ export function Exchange({selection, incoming, onClose, onReceived, onRefresh, o
     <p role="status" className="share-status">{busy ? working : status}</p>
     {isMoment && onRetryPassword && <button disabled={busy} onClick={onRetryPassword}>Use another Fotoro password</button>}
     {!isMoment && <details className="share-inbox" open={!count}><summary>{count ? "Shared moments" : "Received and sent"}</summary>
-      <div className="share-inbox-heading"><h3>Received photos</h3><button disabled={busy} onClick={() => void run(reload, "Refreshing shared photos…")}>{inboxFailed ? "Try again" : "Refresh"}</button></div>
+      <div className="share-inbox-heading"><h3>Received photos</h3><button disabled={busy} onClick={() => void run(async () => {await syncContacts(session, scope).catch(() => {}); if (current()) await reload();}, "Refreshing shared photos…")}>{inboxFailed ? "Try again" : "Refresh"}</button></div>
       {inboxFailed ? <p className="hint">Shared photos couldn’t load. Try again.</p> : !received.length && <p className="hint">Photos shared with you appear here.</p>}
       {received.map(grant => <div className="grant" key={grant.grantId}><p>Photos from {contactLabel(grant.ownerAccountId)}</p><p className="hint">{grantState(grant, now)}</p><button disabled={busy || !!grant.revokedAt || (!!grant.expiresAt && Date.parse(grant.expiresAt) <= now)} onClick={() => void run(async () => {const result = await receive(grant.grantId, scope); if (current()) onReceived(result.photos, result.grant, contactLabel(result.grant.ownerAccountId)); else for (const photo of result.photos) photo.metadataKey.fill(0);}, "Opening shared photos…")}>Open photos</button>{count > 0 && grant.role === "contributor" && <button disabled={busy || !!grant.revokedAt || (!!grant.expiresAt && Date.parse(grant.expiresAt) <= now)} onClick={() => void run(async () => {await contribute(grant, snapshot.photos, scope); if (current()) {setStatus("Photos added."); onRefresh();}}, "Adding selected photos…")}>Add selected photos</button>}</div>)}
       {!count && <form onSubmit={event => {event.preventDefault(); void inspectLink();}}><label>Add someone’s contact link<input type="url" autoComplete="off" value={linkInput} onChange={event => setLinkInput(event.target.value)} placeholder="https://fotoro.cloud/#contact=…" /></label><button disabled={busy || !linkInput.trim()}>Continue</button></form>}

@@ -112,6 +112,11 @@ struct NativeAlbumView: View {
   @State private var link: URL?
   @State private var invitationPrepared = false
   @State private var resumeState = NativeAlbumResumeState()
+  @State private var downloadToken = UUID()
+  @State private var downloadProgress: NativeTripDownloadProgress?
+  @State private var downloadedTrip: NativeTripDownloadResult?
+  @State private var showTripShare = false
+  @State private var downloadError: String?
   @Environment(\.scenePhase) private var scenePhase
   @Environment(\.dismiss) private var dismiss
   init(services: AppServices, selected: [LocalPhoto] = [], incoming: FotoroAlbumInvitation? = nil) {
@@ -146,10 +151,10 @@ struct NativeAlbumView: View {
           albumContent
         }
       }
-      .navigationTitle(model.opened?.title ?? "Albums")
+      .navigationTitle(model.opened?.title ?? "Trips")
       .toolbar {
         ToolbarItem(placement: .topBarLeading) {
-          Button(model.opened == nil ? "Done" : "Albums") {
+          Button(model.opened == nil ? "Done" : "Trips") {
             if model.opened != nil { resumeState.deliberateNavigation(in: model); stop(); model.clear(); run { try await model.refresh() } }
             else { dismiss() }
           }
@@ -198,11 +203,11 @@ struct NativeAlbumView: View {
       .onChange(of: scenePhase) { _, phase in
         if phase != .active { suspendAlbum() }
       }
-      .onChange(of: model.opened?.id) { _, id in if id == nil { viewer = nil; link = nil; showFamilyFilters = false } }
+      .onChange(of: model.opened?.id) { _, id in if id == nil { cleanupTripDownload(); viewer = nil; link = nil; showFamilyFilters = false } }
       .onDisappear { resumeState.intent = nil; stop(); authenticationTask?.cancel(); authenticationTask = nil; model.clear() }
       .sheet(isPresented: $showCreation) {
         NavigationStack {
-          ScrollView { create.padding() }.navigationTitle("New album").navigationBarTitleDisplayMode(.inline)
+          ScrollView { create.padding() }.navigationTitle("New trip").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { showCreation = false }.disabled(busy) } }
             .interactiveDismissDisabled(busy)
         }
@@ -210,7 +215,7 @@ struct NativeAlbumView: View {
       .sheet(isPresented: $showDetails) {
         NavigationStack {
           ScrollView { if let album = model.opened { albumDetails(album).padding() } }
-            .navigationTitle("Album details").navigationBarTitleDisplayMode(.inline)
+            .navigationTitle("Trip details").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showDetails = false } } }
         }
       }
@@ -227,13 +232,18 @@ struct NativeAlbumView: View {
       .sheet(isPresented: $showPicker) { NativeAlbumPhotoPicker(services: services, initial: selected) { photos in
         showPicker = false; run { try await model.append(photos); feedback = "Photos added." }
       } }
+      .sheet(isPresented: $showTripShare, onDismiss: cleanupTripDownload) {
+        if let downloadedTrip {
+          OriginalShareSheet(urls: [downloadedTrip.archive]) { _ in cleanupTripDownload() }
+        }
+      }
       .sheet(item: $viewer) { item in NativeAlbumPhotoView(model: model, item: item).presentationDetents([.large]) }
       .sheet(isPresented: $showFamilyFilters) {
         NativeAlbumFamilyFilters(filter: $familyFilter,
           choices: NativeAlbumSearch.choices(items: model.items, facts: model.sharedFacts),
           memberName: { account in model.opened.map { memberName(account, in: $0.definition) } ?? "Member" })
       }
-      .confirmationDialog("End album access for everyone?", isPresented: $ending, titleVisibility: .visible) {
+      .confirmationDialog("End trip access for everyone?", isPresented: $ending, titleVisibility: .visible) {
         Button("End access", role: .destructive) { if let id = model.opened?.id { run { try await model.end(id) } } }
       } message: { Text("Previously downloaded originals cannot be recalled.") }
     }
@@ -241,7 +251,7 @@ struct NativeAlbumView: View {
   private var albumContent: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
-        if busy { ProgressView("Working…") }
+        if busy && downloadProgress == nil { ProgressView("Working…") }
         if let feedback { Text(feedback).foregroundStyle(.secondary).accessibilityIdentifier("albums.feedback") }
         if let opened = model.opened { detail(opened) }
         else { inbox }
@@ -251,28 +261,28 @@ struct NativeAlbumView: View {
   private var inbox: some View {
     VStack(alignment: .leading, spacing: 16) {
       HStack {
-        Text("Your albums").font(.headline)
+        Text("Your trips").font(.headline)
         Spacer()
-        Button("New album", systemImage: "plus") { resumeState.deliberateNavigation(in: model); showCreation = true }.buttonStyle(.borderedProminent).disabled(busy)
+        Button("New trip", systemImage: "plus") { resumeState.deliberateNavigation(in: model); showCreation = true }.buttonStyle(.borderedProminent).disabled(busy)
       }
       if let error = model.inboxError {
         Text(error).foregroundStyle(.secondary)
-        Button("Refresh albums") { run { try await model.refresh() } }.disabled(busy)
-      } else if model.albums.isEmpty { Text("No albums yet.").foregroundStyle(.secondary) }
+        Button("Refresh trips") { run { try await model.refresh() } }.disabled(busy)
+      } else if model.albums.isEmpty { Text("No trips yet.").foregroundStyle(.secondary) }
       ForEach(model.albums) { album in
         VStack(alignment: .leading, spacing: 8) {
-          Text(album.title ?? "Album invitation").font(.headline)
+          Text(album.title ?? "Trip invitation").font(.headline)
           Text("\(album.definition.members.count) members · \(album.overview.photoCount) photos").font(.subheadline).foregroundStyle(.secondary)
           Text("Owner: " + memberName(album.definition.ownerAccountId, in: album.definition)).font(.caption)
           if album.overview.endedAt != nil { Text("Access ended").foregroundStyle(.secondary) }
           else if album.needsTrust { Button("Verify sender", systemImage: "checkmark.shield") { resumeState.deliberateNavigation(in: model); trustCandidate = album }.buttonStyle(.bordered).disabled(busy) }
           else if album.overview.membership == "invited" {
-            Button("Join album") { run(navigating: true) {
+            Button("Join trip") { run(navigating: true) {
               try await model.accept(album.id, expectedOwner: incoming?.albumId == album.id ? incoming?.ownerCard : nil)
               try await model.open(album.id)
             } }.buttonStyle(.borderedProminent).disabled(busy).accessibilityIdentifier("albums.accept")
           } else {
-            Button("Open album") { run(navigating: true) { try await model.open(album.id) } }.buttonStyle(.bordered).disabled(busy)
+            Button("Open trip") { run(navigating: true) { try await model.open(album.id) } }.buttonStyle(.bordered).disabled(busy)
           }
         }.padding().background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
       }
@@ -291,7 +301,7 @@ struct NativeAlbumView: View {
         Text("Encryption fingerprint").font(.caption)
         Text(card.boxPublicKey).font(.caption.monospaced()).textSelection(.enabled)
       }
-      Button(changed ? "Join album with new identity" : "Join album") { run(navigating: true) {
+      Button(changed ? "Join trip with new identity" : "Join trip") { run(navigating: true) {
         try await NativeAlbumReviewedJoin.join(album, incoming: incoming, services: services, model: model)
         trustCandidate = nil
       } }.buttonStyle(.borderedProminent).disabled(busy).accessibilityIdentifier("albums.joinReviewed")
@@ -300,7 +310,7 @@ struct NativeAlbumView: View {
   private var create: some View {
     VStack(alignment: .leading, spacing: 12) {
       if model.hasPendingCreation { Button("Retry pending creation") { run(navigating: true) { let id = try await model.retryCreation(); try await model.open(id) } }.disabled(busy) }
-      TextField("Album name", text: $title).textFieldStyle(.roundedBorder).accessibilityIdentifier("albums.name")
+      TextField("Trip name", text: $title).textFieldStyle(.roundedBorder).accessibilityIdentifier("albums.name")
       Text("Choose 1–11 confirmed contacts. Each person accepts before viewing or adding photos.").font(.footnote).foregroundStyle(.secondary)
       if contacts.isEmpty { Text("Add a contact in Shared photos first.").foregroundStyle(.secondary) }
       ForEach(contacts, id: \.accountId) { card in
@@ -308,7 +318,7 @@ struct NativeAlbumView: View {
           if enabled { memberIDs.insert(card.accountId) } else { memberIDs.remove(card.accountId) }
         }))
       }
-      Button("Create album") { run(navigating: true) {
+      Button("Create trip") { run(navigating: true) {
         let members = contacts.filter { memberIDs.contains($0.accountId) }
         let id = try await model.create(title: title, members: members)
         title = ""; memberIDs = []; try await model.open(id); showCreation = false
@@ -326,6 +336,7 @@ struct NativeAlbumView: View {
           else { run { try await model.append(selected); feedback = "Photos added." } }
         }.buttonStyle(.borderedProminent).disabled(busy).accessibilityIdentifier("albums.add")
       }
+      tripDownloadControls
       ScrollView(.horizontal) {
         HStack {
           ForEach(album.definition.members, id: \.card.accountId) { member in
@@ -373,6 +384,55 @@ struct NativeAlbumView: View {
         }
       }
       if model.nextCursor != nil { Button("Load more photos") { run { try await model.loadMore() } }.disabled(busy) }
+    }
+  }
+  @ViewBuilder private var tripDownloadControls: some View {
+    if let downloadProgress {
+      VStack(alignment: .leading, spacing: 8) {
+        Text(downloadProgress.message).font(.subheadline).accessibilityIdentifier("albums.download.progress")
+        if downloadProgress.phase == .packaging { ProgressView() }
+        else { ProgressView(value: Double(downloadProgress.completed), total: Double(max(1, downloadProgress.total))) }
+        Button("Cancel download", role: .cancel) {
+          cleanupTripDownload(); operation?.cancel(); operation = nil; operationID = nil
+          feedback = "Trip download cancelled."
+        }.accessibilityIdentifier("albums.download.cancel")
+      }
+    } else {
+      Button("Download trip", systemImage: "arrow.down.circle") { downloadTrip() }
+        .disabled(busy || model.opened?.overview.photoCount == 0)
+        .accessibilityHint("Prepare one ZIP of all trip originals, omitting identical copies. Current filters do not limit the download.")
+        .accessibilityIdentifier("albums.download")
+      if let downloadError {
+        DisclosureGroup("Download details") { Text(downloadError).font(.caption).textSelection(.enabled) }
+      }
+    }
+  }
+  private func cleanupTripDownload() {
+    downloadToken = UUID(); downloadProgress = nil; showTripShare = false
+    downloadedTrip?.remove(); downloadedTrip = nil
+  }
+  private func downloadTrip() {
+    cleanupTripDownload(); downloadError = nil
+    let token = downloadToken
+    run {
+      do {
+        let result = try await model.downloadTrip(progress: { value in
+          if downloadToken == token { downloadProgress = value }
+        })
+        guard downloadToken == token, scenePhase == .active, !Task.isCancelled else { result.remove(); throw CancellationError() }
+        downloadedTrip = result; downloadProgress = nil
+        feedback = "\(result.originals) originals ready · \(result.omittedCopies) identical copies omitted."
+        showTripShare = true
+      } catch {
+        if downloadToken == token {
+          downloadProgress = nil
+          if !(error is CancellationError), !Task.isCancelled {
+            downloadError = error.localizedDescription
+            feedback = "Trip download couldn't finish. Try again."
+          }
+        }
+        throw error is CancellationError || Task.isCancelled ? CancellationError() : FotoroError("Trip download couldn't finish. Try again.")
+      }
     }
   }
   private func memberName(_ account: String, in definition: AlbumDefinitionV1) -> String {
@@ -427,7 +487,7 @@ struct NativeAlbumView: View {
       try prepareInvitation()
     }
   }
-  private func stop() { operation?.cancel(); operation = nil; operationID = nil; viewer = nil; showPicker = false; link = nil; familyFilter = NativeAlbumSearchFilter(); showFamilyFilters = false; showCreation = false; showDetails = false; trustCandidate = nil }
+  private func stop() { cleanupTripDownload(); operation?.cancel(); operation = nil; operationID = nil; viewer = nil; showPicker = false; link = nil; familyFilter = NativeAlbumSearchFilter(); showFamilyFilters = false; showCreation = false; showDetails = false; trustCandidate = nil }
   private func run(navigating: Bool = false, _ action: @escaping @MainActor () async throws -> Void) {
     if navigating { resumeState.deliberateNavigation(in: model) }
     operation?.cancel(); let id = UUID(); operationID = id; feedback = nil
@@ -570,9 +630,23 @@ private struct NativeAlbumPhotoPicker: View {
         Text("Choose up to 100 of your Saved photos. Save device photos first.").font(.footnote).foregroundStyle(.secondary)
         if let message = feedback ?? picker.feedback { Text(message).foregroundStyle(.secondary) }
         ForEach(picker.isCurrent(services) ? picker.photos : []) { photo in
-          Toggle(photo.metadata.filename, isOn: Binding(get: { picker.selection.contains(photo.id) }, set: { enabled in
+          Toggle(isOn: Binding(get: { picker.selection.contains(photo.id) }, set: { enabled in
             if enabled != picker.selection.contains(photo.id) { feedback = nil; picker.toggle(photo, services: services) }
-          })).accessibilityLabel(NativeAlbumPhotoAccessibility.label(photo))
+          })) {
+            HStack(spacing: 12) {
+              LazyImage(url: photo.thumbnailURL) { state in
+                if let image = state.image { image.resizable().scaledToFill() }
+                else { Rectangle().fill(.quaternary) }
+              }.frame(width: 60, height: 60).clipped().accessibilityHidden(true)
+              VStack(alignment: .leading, spacing: 4) {
+                Text(photo.metadata.filename).lineLimit(2)
+                if let date = Wire.parseDate(photo.metadata.sourceDate) {
+                  Text((["photos", "exif"].contains(photo.metadata.dateSource) ? "Photo date · " : "Import date · ") + date.formatted(date: .abbreviated, time: .omitted))
+                    .font(.caption).foregroundStyle(.secondary)
+                }
+              }
+            }
+          }.accessibilityLabel(NativeAlbumPhotoAccessibility.label(photo))
         }
         if picker.busy { ProgressView("Loading Saved photos…") }
         else if picker.isCurrent(services) {

@@ -8,6 +8,7 @@ import limits from "../migrations/0006_storage_and_auth_limits.sql?raw";
 import inference from "../migrations/0007_cloud_inference_work.sql?raw";
 import albums from "../migrations/0008_shared_albums.sql?raw";
 import albumFacts from "../migrations/0009_album_photo_facts.sql?raw";
+import contacts from "../migrations/0010_account_contacts.sql?raw";
 import { beforeAll } from "vitest";
 beforeAll(async () => {
   await env.DB.exec(schema.replace(/\n/g, " "));
@@ -19,4 +20,5 @@ beforeAll(async () => {
   await env.DB.exec(inference.replace(/\n/g, " "));
   await env.DB.exec(albums.replace(/\n/g, " "));
   await env.DB.exec(albumFacts.replace(/\n/g, " "));
+  await env.DB.exec(contacts.replace(/\n/g, " "));
 });

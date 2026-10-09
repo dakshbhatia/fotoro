@@ -46,7 +46,7 @@ export function diagnosticReason(error: unknown): DiagnosticReason {
   if (["ALBUM_SELECTION_CHANGED", "SOURCE_MISMATCH", "PHOTO_SOURCE_CHANGED"].includes(code)) return "source_changed";
   if (["STORAGE_QUOTA_EXCEEDED", "PHOTO_LIMIT", "ALBUM_LIMIT", "AUTH_RATE_LIMITED"].includes(code)) return "quota";
   if (["PRF_UNAVAILABLE", "PRF_UNAVAILABLE_USE_RECOVERY", "NO_ACCOUNT_PASSKEY", "PREVIEW_UNAVAILABLE", "SOURCE_UNAVAILABLE", "STAGING_MISSING_RESELECT_ORIGINAL"].includes(code)) return "unavailable";
-  if (["CIPHERTEXT_MISMATCH", "ORIGINAL_DIGEST_MISMATCH", "CATALOG_BINDING_MISMATCH", "ALBUM_BINDING_MISMATCH"].includes(code)) return "verification";
+  if (["CIPHERTEXT_MISMATCH", "ORIGINAL_DIGEST_MISMATCH", "CATALOG_BINDING_MISMATCH", "ALBUM_BINDING_MISMATCH", "CONTACT_OWNER_MISMATCH", "CONTACT_BINDING_MISMATCH", "CONTACT_REVISION_MISMATCH", "CONTACT_RECEIPT_MISMATCH", "CONTACT_REVIEW_CHANGED"].includes(code)) return "verification";
   return "unknown";
 }
 export class DiagnosticContext {

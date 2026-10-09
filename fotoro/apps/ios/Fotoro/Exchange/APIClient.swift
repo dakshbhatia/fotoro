@@ -68,7 +68,7 @@ enum NativeDiagnosticEndpoint: String, Codable, Sendable {
     case "uploads", "staging": self = .upload
     case "background": self = parts.count > 2 && parts[2] == "uploads" ? .upload : .other
     case "annotations": self = .annotations
-    case "grants", "moments", "saves": self = .exchange
+    case "grants", "moments", "saves", "contacts": self = .exchange
     case "devices": self = .device
     default: self = .other
     }

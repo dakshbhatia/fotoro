@@ -5,22 +5,23 @@ import {validatePublicAccountCard} from "@fotoro/contracts/share-links";
 import {validateWire} from "@fotoro/contracts/validate";
 import {ready, sealShareKey, openShareKey, signPayload, verifyPayload, utf8, unb64, wrapKey, unwrapKey} from "@fotoro/crypto";
 import {api as rawApi, scopedApi} from "./api";
-import {get, db, all} from "./cache";
+import {get, db} from "./cache";
 import {requireVault, type UnlockedVault} from "../vault/vault";
 import {assertVault} from "../vault/scope";
 import {readPhoto, photoBytes, type Photo} from "../library/catalog";
 import {sameIdentity} from "./sharing";
+import {trustedCard, contactTrustVersion} from "./contacts";
 export interface ShareScope {diagnostic?: DiagnosticContext; signal?: AbortSignal; current?: () => boolean;}
 const check = (session: UnlockedVault, scope: ShareScope = {}) => {assertVault(session); scope.signal?.throwIfAborted(); if (scope.current && !scope.current()) throw new DOMException("Share cancelled", "AbortError");};
-const trustVersions = new Map<string, number>();
+export {pinCard, trustedCard, contacts, contactNames, saveContactName, syncContacts} from "./contacts";
 interface SharingAuthority {session: UnlockedVault; scope: ShareScope; trustVersion: number; cards: Map<string, AccountCardV1>;}
 const authority = (session: UnlockedVault, scope: ShareScope): SharingAuthority => {
   check(session, scope);
-  return {session, scope, trustVersion: trustVersions.get(session.accountId) ?? 0, cards: new Map()};
+  return {session, scope, trustVersion: contactTrustVersion(session.accountId), cards: new Map()};
 };
 const checkAuthority = (access: SharingAuthority) => {
   check(access.session, access.scope);
-  if ((trustVersions.get(access.session.accountId) ?? 0) !== access.trustVersion) throw new Error("ACCOUNT_KEYS_CHANGED_RENEW_TRUST");
+  if (contactTrustVersion(access.session.accountId) !== access.trustVersion) throw new Error("ACCOUNT_KEYS_CHANGED_RENEW_TRUST");
 };
 async function captureCard(id: string, access: SharingAuthority) {
   checkAuthority(access);
@@ -85,42 +86,6 @@ async function saveRequestOnce(key: string, request: SaveRequestV1, session: Unl
 }
 const encrypt = (value: unknown, session: UnlockedVault) => wrapKey(utf8(value), session.vaultKey);
 const decrypt = <T,>(value: WrappedKeyV1, session: UnlockedVault): T => {const plain = unwrapKey(value, session.vaultKey); try {return JSON.parse(new TextDecoder().decode(plain));} finally {plain.fill(0);}};
-export async function pinCard(value: string | AccountCardV1, scope: ShareScope = {}) {
-  const session = requireVault(); await ready; check(session, scope);
-  const card = validatePublicAccountCard(typeof value === "string" ? JSON.parse(value) : value);
-  if (card.accountId === session.accountId && !sameIdentity(card, session.card)) throw new Error("ACCOUNT_KEYS_CHANGED_RENEW_TRUST");
-  trustVersions.set(session.accountId, (trustVersions.get(session.accountId) ?? 0) + 1);
-  await scopedPut("settings", session.accountId + ":pin:" + card.accountId, encrypt(card, session), session, scope);
-  return card;
-}
-export async function trustedCard(id: string, session = requireVault(), scope: ShareScope = {}) {
-  check(session, scope); if (id === session.accountId) return session.card;
-  const cached = await get<WrappedKeyV1>("settings", session.accountId + ":pin:" + id); check(session, scope);
-  if (!cached) throw new Error("PIN_ACCOUNT_CARD_FROM_TRUSTED_CHANNEL");
-  return validatePublicAccountCard(decrypt(cached, session));
-}
-export async function contacts(scope: ShareScope = {}) {
-  const session = requireVault(); const rows = await all<WrappedKeyV1>("settings"); check(session, scope);
-  return rows.filter(([key]) => key.startsWith(session.accountId + ":pin:") && key !== session.accountId + ":pin:" + session.accountId).map(([, value]) => validatePublicAccountCard(decrypt(value, session)));
-}
-export async function contactNames(scope: ShareScope = {}) {
-  const session = requireVault(), prefix = session.accountId + ":contact-name:";
-  const rows = await all<WrappedKeyV1>("settings"); check(session, scope);
-  const names = new Map<string, string>();
-  for (const [key, encrypted] of rows) {
-    if (!key.startsWith(prefix)) continue;
-    const value = decrypt<{accountId: string; name: string}>(encrypted, session);
-    if (key !== prefix + value.accountId || typeof value.name !== "string" || value.name.length > 80) throw new Error("CONTACT_BINDING_MISMATCH");
-    if (value.name.trim()) names.set(value.accountId, value.name);
-  }
-  return names;
-}
-export async function saveContactName(accountId: string, name: string, scope: ShareScope = {}) {
-  const session = requireVault(); check(session, scope);
-  if (name.length > 80) throw new Error("CONTACT_NAME_TOO_LONG");
-  await trustedCard(accountId, session, scope);
-  await scopedPut("settings", session.accountId + ":contact-name:" + accountId, encrypt({accountId, name}, session), session, scope);
-}
 const owned = (photos: readonly Photo[], session: UnlockedVault) => {
   if (!photos.length || photos.length > 100) throw new Error("SELECT_1_TO_100_PHOTOS");
   if (photos.some(photo => photo.grantId || photo.manifest.ownerAccountId !== session.accountId)) throw new Error("PHOTO_NOT_OWNED");

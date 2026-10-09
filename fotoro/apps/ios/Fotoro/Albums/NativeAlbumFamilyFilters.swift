@@ -41,7 +41,7 @@ struct NativeAlbumFamilyFilters: View {
           Text("Only recorded Photos or original capture dates match. Import dates are excluded.").font(.footnote).foregroundStyle(.secondary)
         }
         Button("Clear filters") { filter = NativeAlbumSearchFilter() }
-      }.navigationTitle("Filter album").navigationBarTitleDisplayMode(.inline)
+      }.navigationTitle("Filter trip").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
     }
   }

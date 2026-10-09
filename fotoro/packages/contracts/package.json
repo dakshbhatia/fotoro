@@ -17,7 +17,8 @@
     "./albums": "./src/albums.ts",
     "./albums-links": "./src/albums-links.ts",
     "./capture-metadata": "./src/capture-metadata.ts",
-    "./album-photo-facts": "./src/album-photo-facts.ts"
+    "./album-photo-facts": "./src/album-photo-facts.ts",
+    "./contacts": "./src/contacts.ts"
   },
   "dependencies": {
     "ajv": "8.18.0",

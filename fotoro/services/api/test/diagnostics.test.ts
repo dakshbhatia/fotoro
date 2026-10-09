@@ -22,6 +22,7 @@ it("unexpected failures emit a support-correlated record without raw request or 
 
 it.each([
   ["/v1/albums/PRIVATE_ALBUM/photos", "albums", "request"],
+  ["/v1/contacts?name=PRIVATE_NAME", "sharing", "request"],
   ["/v1/changes?cursor=PRIVATE_CURSOR", "catalog", "request"],
   ["/v1/uploads/PRIVATE_UPLOAD/commit", "sync", "upload.commit"],
   ["/v1/background/uploads/PRIVATE_UPLOAD/staging?cap=PRIVATE_CAPABILITY", "sync", "upload.staging"],

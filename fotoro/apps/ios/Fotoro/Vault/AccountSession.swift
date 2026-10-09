@@ -53,6 +53,17 @@ import Observation
     defaults.set(bytes, forKey: key)
     pinnedCards = cards
   }
+  // A validated encrypted book is the projection; receiving it is not a local edit.
+  func applyContacts(_ contacts: [AccountCardV1], owner: String) throws {
+    guard accountId == owner, let key = Self.ownerKey(owner), let own = pinnedCards[owner],
+      contacts.allSatisfy({ $0.accountId != owner && Self.validCard($0) }),
+      Set(contacts.map(\.accountId)).count == contacts.count else { throw FotoroError("Contact account changed.") }
+    var cards = Dictionary(uniqueKeysWithValues: contacts.map { ($0.accountId, $0) })
+    cards[owner] = own
+    guard cards != pinnedCards else { return }
+    defaults.set(try Wire.encode(cards), forKey: key)
+    pinnedCards = cards
+  }
   private static func validCard(_ card: AccountCardV1) -> Bool {
     guard card.version == 1, UUID(uuidString: card.accountId) != nil,
       (try? Data(b64: card.boxPublicKey).count) == 32, (try? Data(b64: card.signingPublicKey).count) == 32
