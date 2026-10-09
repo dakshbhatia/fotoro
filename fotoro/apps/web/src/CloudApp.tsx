@@ -6,7 +6,7 @@ import {annotationLocation} from "@fotoro/contracts/location";
 import { ready } from "@fotoro/crypto";
 import { Library } from "./library/Library";
 import { Viewer } from "./library/Viewer";
-import { cacheOwnedPhotoDetails, photoBytes, type Photo, type CatalogCoverage } from "./library/catalog";
+import { cacheOwnedPhotoDetails, photoBytes, type Photo, type CatalogCoverage, type OwnedPhotoDetailsSource } from "./library/catalog";
 import {projectLocalAnnotations} from "./library/annotation-projection";
 import {
   lockVault,
@@ -67,7 +67,8 @@ import {useFindBestShots} from "./local/useFindBestShots";
 import {FindBestShots, selectionCandidates} from "./local/FindBestShots";
 import {useDialogFocus} from "./library/dialog-focus";
 import {AccountAccess} from "./vault/AccountAccess";
-import {ChosenSaveIntent, type ChosenSaveSnapshot} from "./exchange/chosen-save";
+import {resolveChosenTripSources, chosenTripPhotos} from "./exchange/chosen-trip";
+import {ChosenSaveIntent, continueChosenSave, type ChosenSaveSnapshot} from "./exchange/chosen-save";
 import type {UnlockedVault} from "./vault/vault";
 import {syncContacts, subscribeContacts} from "./exchange/contacts";
 import {subscribeSavedRefresh} from "./library/consumer-refresh";
@@ -90,6 +91,7 @@ import {AlbumPanel} from "./albums/AlbumPanel";
 import {AlbumEntryRevision, type AlbumEntrySelection} from "./albums/entry";
 import {AlbumContinuation, type AlbumDestination} from "./albums/AlbumContinuation";
 const People = lazy(() => import("./people/People").then(module => ({default: module.People})));
+export interface ChosenTripSelection {request: ChosenSaveIntent; savedSources: readonly OwnedPhotoDetailsSource[]}
 interface SelectedOriginalContext {snapshot: ShareSelection; session: UnlockedVault; controller: AbortController;}
 const noLocalPhotos: LocalPhoto[] = [];
 const SearchIcon = () => (
@@ -110,6 +112,7 @@ export default function CloudApp({
   onOwnedPhotos,
   onPhotoChanges,
   saveIntent = null,
+  chosenTrip = null,
   incoming = null,
   incomingError = "",
   onIncomingDone,
@@ -126,6 +129,7 @@ export default function CloudApp({
   onOwnedPhotos?: (snapshot: OwnedPhotoSnapshot | null) => void;
   onPhotoChanges?: (changes: ConsumerPhotoChanges | null) => void;
   saveIntent?: ChosenSaveIntent | null;
+  chosenTrip?: ChosenTripSelection | null;
   incoming?: IncomingShareIntent | null;
   incomingError?: string;
   onIncomingDone?: () => void;
@@ -207,6 +211,7 @@ export default function CloudApp({
     localSynced = useRef(new WeakMap<File, string>());
   const input = useRef<HTMLInputElement>(null), searchInput = useRef<HTMLInputElement>(null), scopeSelector = useRef<HTMLSelectElement>(null);
   const activeRef = useRef(active), saveIntentRef = useRef(saveIntent), incomingRef = useRef(incoming);
+  const chosenTripRef = useRef(chosenTrip); chosenTripRef.current = chosenTrip;
   activeRef.current = active; saveIntentRef.current = saveIntent; incomingRef.current = incoming;
   const backButton = useRef<HTMLButtonElement>(null), passwordPanel = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -404,7 +409,8 @@ export default function CloudApp({
     } catch (e) {
       if (!session || sameVault(session)) {
         const message = e instanceof ApiError && ["UNAUTHENTICATED", "HTTP_401"].includes(e.code)
-          ? "Enter your Fotoro password again to continue." : readableSyncError(e);
+          ? "Enter your Fotoro password again to continue." : e instanceof Error && e.message === "TRIP_SAVE_INCOMPLETE"
+            ? "The chosen originals could not open for this trip. Retry to continue." : readableSyncError(e);
         setStatus(accountAction && message.startsWith("Save could not finish.") ? "Sign-in could not finish. Check your connection and try again." : message);
         setNeedsAttention(true);
       }
@@ -621,9 +627,25 @@ export default function CloudApp({
       busy: running.current,
       session: saveReady,
       current: () => activeRef.current && saveIntentRef.current === request && sameVault(saveReady) && document.visibilityState !== "hidden",
-      save: (snapshot, signal, current) => {
+      save: async (snapshot, signal, current) => {
         setMenu(false);
-        return syncLocal(snapshot, signal, current);
+        const trip = chosenTripRef.current?.request === request ? chosenTripRef.current : null;
+        return continueChosenSave(snapshot, signal, current, syncLocal, trip ? () => run(async () => {
+          const session = requireVault();
+          const check = () => {signal.throwIfAborted(); if (!current() || chosenTripRef.current !== trip || !sameVault(session)) throw new DOMException("Trip selection changed", "AbortError");};
+          check();
+          const pending = await pendingImports(); check();
+          const sources = resolveChosenTripSources({local: snapshot.photos, saved: trip.savedSources, owned: currentCatalog.current, pending, ownerAccountId: session.accountId, current});
+          for (const source of sources) {check(); await cacheOwnedPhotoDetails(source, signal); check();}
+          const browse = browseFor(session), ids = sources.map(source => source.photoId);
+          const loaded = await cachedSync(session, undefined, {...browse, retainPhotoIds: [...new Set([...(browse.retainPhotoIds ?? []), ...ids])]});
+          check();
+          const selectedPhotos = chosenTripPhotos(sources, loaded.photos, session.accountId, current);
+          check(); currentCatalog.current = loaded.photos; setPhotos(loaded.photos); setCatalogCoverage(loaded.coverage);
+          currentSelection.current = new Set(ids); setSelected(new Set(ids));
+          setAlbumDestination(null); openAlbums(selectedPhotos, null);
+          return true;
+        }) : undefined);
       },
     });
   };
@@ -928,13 +950,14 @@ export default function CloudApp({
     const session = effectVault(); if (!session) return; incomingAlbum.bindInitialVault(session);
     if (incomingAlbum.current(session)) openAlbums();
   }, [active, account, incomingAlbum]);
-  const openAlbums = (selection: Photo[] = [], destination = albumDestination?.current() ? albumDestination.albumId : undefined) => {
+  const openAlbums = (selection: Photo[] = [], destination: string | null | undefined = albumDestination?.current() ? albumDestination.albumId : undefined) => {
+    if (selection.length > 100) {setStatus("Choose up to 100 photos to add to a trip."); return;}
     cancelOriginals(); setViewer(null); setExchange(false); setExchangePhotos([]); setPeopleOpen(false); setPlacesOpen(false); setMenu(false); menuRef.current = false;
     if (destination && albumDestination?.albumId !== destination) return;
     setAlbumSelection(albumEntryRevision.capture(selection)); setAlbumsOpen(true);
   };
   const closeAlbums = () => {setAlbumsOpen(false); setAlbumSelection(null); setAlbumDestination(null); onAlbumDone?.();};
-  useEffect(() => {if (active && account && albumPhotos?.length) openAlbums(albumPhotos);}, [active, account, albumPhotos]);
+  useEffect(() => {if (active && account && albumPhotos?.length) {setAlbumDestination(null); openAlbums(albumPhotos, null);}}, [active, account, albumPhotos]);
   useEffect(() => {
     if (!active || !account || !sharePhotos?.length) return;
     openSharing(sharePhotos);
@@ -1072,7 +1095,7 @@ export default function CloudApp({
               <div><p role="status">{status || syncStateLabel[consumerSummary.state]}</p>{consumerSummary.detail && <p className="hint">{consumerSummary.detail}</p>}</div>
               <div className="actions">
                 {busy && !paused && <button onClick={pause}>Pause</button>}
-                {!busy && (localCount > 0 || summary.pending > 0 || summary.failed > 0 || annotationPending.length > 0) && <button className="primary-action" disabled={publicDemo} onClick={() => {if (annotationPending.some(edit => edit.conflict)) setMenu(true); else if (saveIntent?.pending) void startChosenSave(); else if (localCount > 0) void syncLocal(); else void retry();}}>{annotationPending.some(edit => edit.conflict) ? "Review changes" : needsAttention || summary.failed ? "Retry" : localCount > 0 ? `Save ${localCount}` : summary.pending > 0 ? "Continue" : "Save changes"}</button>}
+                {!busy && (saveIntent?.pending || localCount > 0 || summary.pending > 0 || summary.failed > 0 || annotationPending.length > 0) && <button className="primary-action" disabled={publicDemo} onClick={() => {if (annotationPending.some(edit => edit.conflict)) setMenu(true); else if (saveIntent?.pending) void startChosenSave(); else if (localCount > 0) void syncLocal(); else void retry();}}>{annotationPending.some(edit => edit.conflict) ? "Review changes" : needsAttention || summary.failed ? "Retry" : localCount > 0 ? `Save ${localCount}` : summary.pending > 0 ? "Continue" : "Save changes"}</button>}
                 {!busy && needsAttention && <button onClick={() => setMenu(true)}>Details</button>}
               </div>
             </section>}
@@ -1130,9 +1153,10 @@ export default function CloudApp({
             {!received && selected.size > 0 && <div className="consumer-selection glass" aria-label="Selected photos">
               <span role="status">{selected.size} selected</span>
               <button disabled={busy || sharingOriginals} onClick={() => {if (!running.current) setSelected(new Set());}}>Clear</button>
-              <AlbumContinuation destination={albumDestination} photos={chosen} disabled={busy || preparingOriginals || sharingOriginals} onContinue={(items, albumId) => {if (!running.current) openAlbums(items, albumId);}} />
+              <AlbumContinuation destination={albumDestination} photos={chosen} disabled={busy || preparingOriginals || sharingOriginals || chosen.length > 100} onContinue={(items, albumId) => {if (!running.current) openAlbums(items, albumId);}} />
               <button ref={originalButton} className="primary-action" disabled={busy || preparingOriginals || sharingOriginals} onClick={() => void prepareSelectedOriginals()}>{preparingOriginals ? "Preparing…" : "Share"}</button>
-              {!publicDemo && !albumDestination?.current() && <button disabled={busy || preparingOriginals || sharingOriginals} onClick={() => {if (!running.current) openAlbums(chosen);}}>Add to trip</button>}
+              {!publicDemo && !albumDestination?.current() && <button disabled={busy || preparingOriginals || sharingOriginals || chosen.length > 100} onClick={() => {if (!running.current) openAlbums(chosen);}}>Add to trip</button>}
+              {chosen.length > 100 && <small>Choose up to 100 photos to add to a trip.</small>}
               <details className="selection-more" onKeyDown={event => {if (event.key === "Escape") {event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();}}}>
                 <summary>More</summary><div><button disabled={busy || preparingOriginals || sharingOriginals} onClick={() => {if (!running.current) openSharing(chosen);}}>Share in Fotoro</button></div>
               </details>
@@ -1196,8 +1220,8 @@ export default function CloudApp({
               {consumerSummary.detail}
             </p>
             <div className="actions">
-              {(localCount > 0 || summary.pending || summary.failed || annotationPending.length > 0) && <button className="primary-action" disabled={busy || publicDemo} onClick={() => {if (saveIntent?.pending) void startChosenSave(); else if (localCount > 0) void syncLocal(); else void retry();}}>
-                {localCount > 0 ? `Save ${localCount} selected ${localCount === 1 ? "photo" : "photos"}` : summary.pending || summary.failed ? "Continue" : "Save changes"}
+              {(saveIntent?.pending || localCount > 0 || summary.pending || summary.failed || annotationPending.length > 0) && <button className="primary-action" disabled={busy || publicDemo} onClick={() => {if (saveIntent?.pending) void startChosenSave(); else if (localCount > 0) void syncLocal(); else void retry();}}>
+                {needsAttention && saveIntent?.pending ? "Retry" : localCount > 0 ? `Save ${localCount} selected ${localCount === 1 ? "photo" : "photos"}` : summary.pending || summary.failed ? "Continue" : "Save changes"}
               </button>}
               {!paused && busy && <button onClick={pause}>Pause</button>}
               <button onClick={closeAccountPanel}>Saved photos</button>

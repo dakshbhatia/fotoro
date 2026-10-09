@@ -5,6 +5,20 @@ export interface ChosenSaveSnapshot {
   readonly files: readonly File[];
 }
 
+/** Keep an optional continuation inside the exact Save request's running lifetime. */
+export async function continueChosenSave(
+  snapshot: ChosenSaveSnapshot, signal: AbortSignal, current: () => boolean,
+  save: (snapshot: ChosenSaveSnapshot, signal: AbortSignal, current: () => boolean) => Promise<boolean>,
+  afterSave?: () => Promise<boolean>,
+) {
+  const valid = () => !signal.aborted && current();
+  if (!valid()) return false;
+  const accepted = await save(snapshot, signal, current);
+  if (!accepted || !valid()) return false;
+  if (afterSave && !await afterSave()) return false;
+  return valid();
+}
+
 /* A Save click authorizes this exact selection once, after the chosen account opens. */
 export class ChosenSaveIntent {
   readonly snapshot: ChosenSaveSnapshot;

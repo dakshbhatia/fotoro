@@ -248,11 +248,17 @@ struct NativeAlbumView: View {
       .sheet(isPresented: Binding(get: { link != nil }, set: { if !$0 { link = nil } })) {
         if let link { OriginalShareSheet(urls: [link]) { _ in self.link = nil } }
       }
-      .sheet(isPresented: $showPicker) { NativeAlbumPhotoPicker(services: services, initial: selected, addDevice: { sources in
-        showPicker = false; run { try await addDevicePhotos(sources); feedback = "Photos added." }
-      }) { photos in
-        showPicker = false; run { try await model.append(photos); feedback = "Photos added." }
-      } }
+      .sheet(isPresented: $showPicker) {
+        NativeAlbumPhotoPicker(services: services, initial: selected, adding: busy,
+          additionFeedback: feedback, pendingAddition: model.hasPendingAddition,
+          cancelAddition: { operation?.cancel(); feedback = "Adding cancelled." },
+          retryAddition: { run { try await finishPickerAddition { try await model.retryAddition() } } },
+          addDevice: { sources in
+            run { try await finishPickerAddition { try await addDevicePhotos(sources) } }
+          }, add: { photos in
+            run { try await finishPickerAddition { try await model.append(photos) } }
+          })
+      }
       .sheet(isPresented: $showTripShare, onDismiss: cleanupTripDownload) {
         if let downloadedTrip {
           OriginalShareSheet(urls: [downloadedTrip.archive]) { _ in cleanupTripDownload() }
@@ -357,7 +363,13 @@ struct NativeAlbumView: View {
   }
   private var create: some View {
     VStack(alignment: .leading, spacing: 12) {
-      if model.hasPendingCreation { Button("Retry pending creation") { run(navigating: true) { let id = try await model.retryCreation(); try await model.open(id) } }.disabled(busy) }
+      if model.hasPendingCreation {
+        Button("Retry pending creation") { run(navigating: true) {
+          let id = try await model.retryCreation(); try await model.open(id)
+          try Task.checkCancellation()
+          title = ""; memberIDs = []; showCreation = false
+        } }.disabled(busy)
+      }
       TextField("Trip name", text: $title).textFieldStyle(.roundedBorder).accessibilityIdentifier("albums.name")
       Text("Invite up to 11 contacts. Each person must join to see or add photos.").font(.footnote).foregroundStyle(.secondary)
       if contacts.isEmpty { Text("Add a contact in Shared photos first.").foregroundStyle(.secondary) }
@@ -414,7 +426,7 @@ struct NativeAlbumView: View {
   }
   private var tripAddButton: some View {
     Button(selected.isEmpty ? "Add photos" : "Add \(selected.count)", systemImage: "plus") {
-      if selected.isEmpty { showPicker = true }
+      if selected.isEmpty { feedback = nil; showPicker = true }
       else { run { try await model.append(selected); feedback = "Photos added." } }
     }.buttonStyle(.borderedProminent).disabled(busy).frame(minHeight: 44).accessibilityIdentifier("albums.add")
   }
@@ -556,6 +568,17 @@ struct NativeAlbumView: View {
     else if album.needsTrust { trustCandidate = album }
     else if album.overview.membership == "accepted" { try await model.open(album.id) }
     else { feedback = "Join the trip below." }
+  }
+  private func finishPickerAddition(_ action: @MainActor () async throws -> Void) async throws {
+    guard let context = NativeAlbumPickerContext.current(services), let album = model.opened,
+      showPicker else { throw CancellationError() }
+    try await action()
+    try Task.checkCancellation()
+    guard scenePhase == .active, showPicker, NativeAlbumPickerContext.current(services) == context,
+      model.opened?.id == album.id, model.opened?.overview.definition == album.overview.definition else {
+      throw CancellationError()
+    }
+    feedback = "Photos added."; showPicker = false
   }
   private func addDevicePhotos(_ sources: [RecentPhotoSource]) async throws {
     guard let context = NativeAlbumPickerContext.current(services), let album = model.opened,
@@ -764,12 +787,18 @@ enum NativeAlbumPhotoAccessibility {
 private struct NativeAlbumPhotoPicker: View {
   @Bindable var services: AppServices
   let initial: [LocalPhoto]
+  let adding: Bool
+  let additionFeedback: String?
+  let pendingAddition: Bool
+  let cancelAddition: () -> Void
+  let retryAddition: () -> Void
   let addDevice: ([RecentPhotoSource]) -> Void
   let add: ([LocalPhoto]) -> Void
   @State private var showDevicePicker = false
   @State private var permissionTask: Task<Void, Never>?
   @State private var picker = NativeAlbumPhotoPickerStore()
   @State private var feedback: String?
+  @State private var attemptedDeviceSources: [RecentPhotoSource] = []
   @Environment(\.dismiss) private var dismiss
   @Environment(\.scenePhase) private var scenePhase
   private var context: NativeAlbumPickerContext? {
@@ -787,9 +816,17 @@ private struct NativeAlbumPhotoPicker: View {
             if RecentPhotosPolicy.canRead(permission) { showDevicePicker = true }
             else { feedback = "Allow Photos access to choose device photos." }
           }
-        }.accessibilityIdentifier("albums.picker.device")
+        }.disabled(adding || pendingAddition).accessibilityIdentifier("albums.picker.device")
         Text("Choose up to 100 photos. Device photos are saved in Fotoro before adding.").font(.footnote).foregroundStyle(.secondary)
-        if let message = feedback ?? picker.feedback { Text(message).foregroundStyle(.secondary) }
+        if adding { ProgressView(attemptedDeviceSources.isEmpty ? "Adding photos…" : "Saving and adding photos…") }
+        if let message = feedback ?? additionFeedback ?? picker.feedback { Text(message).foregroundStyle(.secondary) }
+        if pendingAddition {
+          Button("Retry adding photos", action: retryAddition).disabled(adding)
+            .accessibilityIdentifier("albums.picker.retry")
+        } else if additionFeedback != nil, !attemptedDeviceSources.isEmpty {
+          Button("Retry chosen Photos") { addDevice(attemptedDeviceSources) }.disabled(adding)
+            .accessibilityIdentifier("albums.picker.device.retry")
+        }
         ForEach(picker.isCurrent(services) ? picker.photos : []) { photo in
           Toggle(isOn: Binding(get: { picker.selection.contains(photo.id) }, set: { enabled in
             if enabled != picker.selection.contains(photo.id) { feedback = nil; picker.toggle(photo, services: services) }
@@ -807,28 +844,36 @@ private struct NativeAlbumPhotoPicker: View {
                 }
               }
             }
-          }.accessibilityLabel(NativeAlbumPhotoAccessibility.label(photo))
+          }.disabled(adding || pendingAddition).accessibilityLabel(NativeAlbumPhotoAccessibility.label(photo))
         }
         if picker.busy { ProgressView("Loading Saved photos…") }
         else if picker.isCurrent(services) {
           if picker.hasMore {
             Button("Load more Saved photos") { feedback = nil; picker.loadMore(services) }
-              .accessibilityIdentifier("albums.picker.loadMore")
+              .disabled(adding).accessibilityIdentifier("albums.picker.loadMore")
           }
         }
       }.navigationTitle("Add photos")
+      .interactiveDismissDisabled(adding)
       .toolbar {
         ToolbarItem(placement: .topBarTrailing) {
           Menu("More", systemImage: "ellipsis") {
             Button("Refresh Saved photos") { feedback = nil; picker.refresh(services) }
-              .disabled(picker.busy).accessibilityIdentifier("albums.picker.refresh")
+              .disabled(picker.busy || adding).accessibilityIdentifier("albums.picker.refresh")
           }
         }
-        ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+        ToolbarItem(placement: .cancellationAction) {
+          Button(adding ? "Cancel adding" : "Cancel") {
+            if adding { cancelAddition() } else { dismiss() }
+          }.accessibilityIdentifier("albums.picker.cancel")
+        }
         ToolbarItem(placement: .confirmationAction) {
           Button("Add \(picker.selection.count)") {
-            do { add(try picker.chosen(services)) } catch is CancellationError {} catch { feedback = error.localizedDescription }
-          }.disabled(!picker.isCurrent(services) || picker.selection.count == 0)
+            do {
+              let photos = try picker.chosen(services)
+              feedback = nil; attemptedDeviceSources = []; add(photos)
+            } catch is CancellationError {} catch { feedback = error.localizedDescription }
+          }.disabled(adding || pendingAddition || !picker.isCurrent(services) || picker.selection.count == 0)
             .accessibilityIdentifier("albums.picker.add")
         }
       }
@@ -848,7 +893,7 @@ private struct NativeAlbumPhotoPicker: View {
               return RecentPhotoSource(RecentPhoto(asset: asset))
             }
             try NativeAlbumDeviceSelection.validate(sources)
-            addDevice(sources)
+            feedback = nil; attemptedDeviceSources = sources; addDevice(sources)
           } catch { feedback = error.localizedDescription }
         }
       }

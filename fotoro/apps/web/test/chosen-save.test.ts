@@ -5,7 +5,7 @@ import accounts from "../../../fixtures/accounts.json";
 import {ready, unb64, b64, sodium, wrapKey} from "@fotoro/crypto";
 import {configureVault, unlockVault, lockVault, requireVault, encryptPrivate, vaultGeneration} from "../src/vault/vault";
 import {sameVault} from "../src/vault/scope";
-import {ChosenSaveIntent} from "../src/exchange/chosen-save";
+import {ChosenSaveIntent, continueChosenSave} from "../src/exchange/chosen-save";
 import {atomic, clearAccount} from "../src/exchange/cache";
 import {pendingImports} from "../src/exchange/journal";
 import {refreshSync, saveSync} from "../src/exchange/sync";
@@ -192,3 +192,46 @@ test("expiration never carries a chosen Save into a different password account",
   assert.equal(await intent.start(saveOptions(intent,async()=>{writes++;return true;})),false);
   assert.equal(writes,0);assert.equal(intent.pending,false);
 }));
+
+
+test("Trip continuation stays inside the exact Save request until hydration finishes, and retries without losing files", async () => {
+  const session = {}, original = photo(), intent = new ChosenSaveIntent([original], session);
+  const events: string[] = []; let finishSave!: (value: boolean) => void, finishHydration!: (value: boolean) => void;
+  const options = {active: true, busy: false, session, current: () => true,
+    save: (snapshot: Parameters<typeof continueChosenSave>[0], signal: AbortSignal, current: () => boolean) => continueChosenSave(snapshot, signal, current,
+      async captured => {events.push("save"); assert.deepEqual(captured.files, [original.file]); return new Promise<boolean>(resolve => {finishSave = resolve;});},
+      async () => {events.push("hydrate"); assert.equal(current(), true); return new Promise<boolean>(resolve => {finishHydration = resolve;});})};
+  const first = intent.start(options);
+  assert.deepEqual(events, ["save"]); finishSave(true); await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events, ["save", "hydrate"]); assert.equal(intent.pending, false, "Concurrent save cannot restart during hydration");
+  assert.equal(await intent.start(options), false); finishHydration(false); assert.equal(await first, false);
+  assert.equal(intent.pending, true); assert.equal(intent.needsInitialSave, false, "Failed hydration waits for explicit Retry");
+  const retry = intent.start(options); finishSave(true); await new Promise(resolve => setImmediate(resolve)); finishHydration(true);
+  assert.equal(await retry, true); assert.deepEqual(events, ["save", "hydrate", "save", "hydrate"]);
+  assert.equal(await intent.start(options), false);
+});
+
+test("Trip continuation never opens after failed Save or a withdrawn request/account, including late hydration", async () => {
+  for (const withdrawal of ["save-failed", "back", "account", "hidden", "expiry"] as const) {
+    const session = {}, intent = new ChosenSaveIntent([photo()], session); let accountCurrent = true, continued = 0;
+    const options = {active: true, busy: false, session, current: () => accountCurrent,
+      save: (snapshot: Parameters<typeof continueChosenSave>[0], signal: AbortSignal, current: () => boolean) => continueChosenSave(snapshot, signal, current,
+        async () => {
+          if (withdrawal === "save-failed") return false;
+          if (withdrawal === "back" || withdrawal === "hidden") intent.cancel();
+          if (withdrawal === "account") accountCurrent = false;
+          if (withdrawal === "expiry") intent.vaultLocked("expired", "owner");
+          return true;
+        }, async () => {continued++; return true;})};
+    assert.equal(await intent.start(options), false); assert.equal(continued, 0, withdrawal);
+  }
+  const session = {}, intent = new ChosenSaveIntent([photo()], session); let settle!: () => void, published = false;
+  const attempt = intent.start({active: true, busy: false, session, current: () => true,
+    save: (snapshot, signal, current) => continueChosenSave(snapshot, signal, current, async () => true, async () => {
+      await new Promise<void>(resolve => {settle = resolve;});
+      if (!signal.aborted && current()) published = true;
+      return true;
+    })});
+  await new Promise(resolve => setImmediate(resolve)); intent.cancel(); settle();
+  assert.equal(await attempt, false); assert.equal(published, false);
+});

@@ -17,7 +17,7 @@ import {requireVault} from "../vault/vault";
 import {sameVault} from "../vault/scope";
 import {useDialogFocus} from "../library/dialog-focus";
 import type {Photo} from "../library/catalog";
-import {AlbumAccess, albumInbox, albumOwnedSelection, albumOriginalFiles, createAlbum, type AlbumCreationDraft} from "./service";
+import {AlbumAccess, albumInbox, albumOwnedSelection, downloadAlbumOriginal, createAlbum, type AlbumCreationDraft} from "./service";
 import type {IncomingAlbumIntent} from "./intent";
 import type {AlbumPhotoFactsContentV1} from "@fotoro/contracts/album-photo-facts";
 import type {OwnedPhotoSnapshot} from "../library/consumer-search";
@@ -28,7 +28,6 @@ import {albumReviewedPeople, sharedAlbumDetails, searchAlbumPhotos} from "./sear
 import {albumDateTag, albumMemberLabel} from "./presentation";
 import {Icon} from "../library/icons";
 import {joinAlbumInvitation, loadAlbumEntry, reviewAlbumOwner, unsupportedAlbumCapabilities, type AlbumOwnerEntry} from "./bootstrap";
-import {shareOriginals} from "../library/system-share";
 import {subscribeAlbumLifetime} from "./entry";
 
 function readableError(error: unknown) {
@@ -85,6 +84,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   const [titles, setTitles] = useState(new Map<string, string>()), previewPanel = useRef<HTMLElement>(null);
   const [ownerReview, setOwnerReview] = useState<Extract<AlbumOwnerEntry, {kind: "review"}> | null>(null);
   const [access, setAccess] = useState<AlbumAccess | null>(null), [photos, setPhotos] = useState<Photo[]>([]), [preview, setPreview] = useState<Photo | null>(null);
+  const currentPreview = useRef(preview); currentPreview.current = preview;
   const [page, setPage] = useState<{hasMore: boolean; nextCursor?: string; photoCount: number}>({hasMore: false, photoCount: 0});
   const pageRef = useRef(page);
   const publishPage = (next: typeof page) => {pageRef.current = next; setPage(next);};
@@ -96,8 +96,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   const [detailDraft, setDetailDraft] = useState<{photo: Photo; source: OwnedAlbumDetails; revision: number; people: string[]; location: boolean; existing: boolean; unavailable: number} | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState(""), [title, setTitle] = useState(""), [invitees, setInvitees] = useState(new Set<string>()), [confirmEnd, setConfirmEnd] = useState(false);
   const [creating, setCreating] = useState(false), [unsupported, setUnsupported] = useState(false), [entryFailed, setEntryFailed] = useState(false);
-  const preparedDownload = useRef<{access: AlbumAccess; photo: Photo; files: File[]; controller: AbortController} | null>(null);
-  const [downloadReady, setDownloadReady] = useState(false);
+  const preparedDownload = useRef<{access: AlbumAccess; photo: Photo; controller: AbortController} | null>(null);
   const tripDownload = useRef<{controller: AbortController; access?: AlbumAccess; lease?: TripDownloadLease} | null>(null);
   const [downloadStarted, setDownloadStarted] = useState(false);
   const [tripProgress, setTripProgress] = useState<TripDownloadProgress | null>(null);
@@ -107,7 +106,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     if (attempt?.lease) void attempt.lease.dispose();
     setTripProgress(null); setDownloadStarted(false);
   };
-  const clearDownload = () => {preparedDownload.current?.controller.abort(); if (preparedDownload.current) preparedDownload.current.files.length = 0; preparedDownload.current = null; setDownloadReady(false);};
+  const clearDownload = () => {preparedDownload.current?.controller.abort(); preparedDownload.current = null;};
   const scope: ShareScope = {signal: controller.signal, current: () => alive.current && sameVault(session) && (!incoming || incoming.current(session))};
   const closeAlbum = () => {clearTripDownload(); clearDownload(); const previous = accessRef.current; accessRef.current = null; previous?.dispose(); setAccess(null); setPhotos([]); publishPage({hasMore: false, photoCount: 0}); setPreview(null); setQuery(""); setFiltersOpen(false); setShowTripPicks(false); setSearchFailed(false); setConfirmEnd(false); setFacts(new Map()); setFactsState("loading"); setPeopleFilter(emptyPeopleFilter()); setFrom(""); setThrough(""); setDetailDraft(null);};
   const close = () => {alive.current = false; controller.abort(); closeAlbum(); onClose();};
@@ -115,9 +114,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   useEffect(() => {setDetailDraft(null); if (preview) previewPanel.current?.focus({preventScroll: true});}, [preview]);
   useEffect(() => {
     clearDownload();
-    const clear = () => clearDownload();
-    access?.signal.addEventListener("abort", clear, {once: true});
-    return () => {access?.signal.removeEventListener("abort", clear); clearDownload();};
+    return () => clearDownload();
   }, [access, preview]);
   useEffect(() => subscribeAlbumLifetime(window, document, () => {
     alive.current = false; controller.abort(); clearTripDownload(); accessRef.current?.dispose(); chosenSnapshot.dispose();
@@ -182,9 +179,9 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   async function refreshOpened(previous: AlbumAccess, overview: AlbumOverviewV1) {
     if (!scope.current?.() || accessRef.current !== previous) return;
     if (overview.membership !== "accepted") {await open(overview); return;}
-    const opened = await AlbumAccess.open(overview, scope);
-    let adopted = false;
+    let opened: AlbumAccess | undefined, adopted = false;
     try {
+      opened = await AlbumAccess.open(overview, scope);
       const target = Math.min(1000, Math.max(100, photos.length + (!page.hasMore && overview.photoCount > page.photoCount ? 100 : 0)));
       const loaded: Photo[] = [];
       let next = await opened.loadPhotoPage(); loaded.push(...next.photos);
@@ -197,7 +194,8 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
       setPreview(current => current ? retained.find(photo => photo.manifest.photoId === current.manifest.photoId) ?? null : null);
       await readFacts(previous, true);
     } catch (failure) {
-      opened.dispose(); if (!adopted) previous.dispose();
+      if (!adopted) previous.discardFailedRefresh(opened, failure);
+      else opened?.dispose();
       throw failure;
     }
   }
@@ -274,15 +272,6 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   const previewDate = preview && albumDateTag(preview.metadata), previewIndex = preview ? shown.indexOf(preview) : -1;
   const previewCopies = preview ? groups.find(group => group.copies.some(photo => photo.manifest.photoId === preview.manifest.photoId))?.copies ?? [] : [];
   const previewOwned = preview && ownedAlbumDetails(preview, currentOwnedPhotos?.() ?? null);
-  const prepareDownload = () => action(async () => {
-    if (!access || !preview) return;
-    clearDownload();
-    const prepared = {access, photo: preview, files: [] as File[], controller: new AbortController()};
-    preparedDownload.current = prepared;
-    const files = await albumOriginalFiles(access, preview, prepared.controller.signal);
-    if (preparedDownload.current !== prepared || !scope.current?.() || !access.current()) {files.length = 0; return;}
-    prepared.files = files; setDownloadReady(true);
-  });
   const downloadTrip = () => action(async () => {
     const opened = accessRef.current; if (!opened || opened.overview.membership !== "accepted") return;
     clearTripDownload();
@@ -311,18 +300,27 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
       }
     }
   });
-  const download = () => {
-    const prepared = preparedDownload.current;
-    const current = () => !!prepared && preparedDownload.current === prepared && prepared.access === access && prepared.photo === preview && !prepared.controller.signal.aborted && !!scope.current?.() && prepared.access.current();
-    if (!prepared || !current()) {clearDownload(); return;}
-    // Original bytes and access checks are prepared first; the download starts in this fresh click.
-    void shareOriginals(prepared.files, current, {canShare: () => false, download: file => {
-      const url = URL.createObjectURL(file), anchor = document.createElement("a"), revoke = () => {anchor.remove(); URL.revokeObjectURL(url);};
-      controller.signal.addEventListener("abort", revoke, {once: true}); prepared.access.signal.addEventListener("abort", revoke, {once: true});
-      anchor.href = url; anchor.download = file.name; anchor.hidden = true; document.body.append(anchor);
-      try {anchor.click();} finally {setTimeout(() => {revoke(); controller.signal.removeEventListener("abort", revoke); prepared.access.signal.removeEventListener("abort", revoke);}, 1000);}
-    }}).catch(() => {if (scope.current?.()) setError("The original could not be downloaded. Try again.");});
-  };
+  const download = () => action(async () => {
+    if (!access || !preview || currentPreview.current !== preview) return;
+    clearDownload();
+    const prepared = {access, photo: preview, controller: new AbortController()};
+    preparedDownload.current = prepared;
+    const current = () => preparedDownload.current === prepared && accessRef.current === prepared.access
+      && currentPreview.current === prepared.photo && !prepared.controller.signal.aborted && !!scope.current?.() && prepared.access.current();
+    const signal = AbortSignal.any([controller.signal, prepared.controller.signal, access.signal]);
+    try {
+      await downloadAlbumOriginal(access, preview, signal, current, file => {
+        const url = URL.createObjectURL(file), anchor = document.createElement("a"), revoke = () => {anchor.remove(); URL.revokeObjectURL(url);};
+        controller.signal.addEventListener("abort", revoke, {once: true}); prepared.access.signal.addEventListener("abort", revoke, {once: true});
+        anchor.href = url; anchor.download = file.name; anchor.hidden = true; document.body.append(anchor);
+        try {anchor.click();} finally {setTimeout(() => {revoke(); controller.signal.removeEventListener("abort", revoke); prepared.access.signal.removeEventListener("abort", revoke);}, 1000);}
+      });
+    } catch (failure) {
+      // Access denial aborts the reader too; only a withdrawn preview or panel cancels silently.
+      if (!controller.signal.aborted && !prepared.controller.signal.aborted && scope.current?.()) throw failure;
+    }
+    finally {if (preparedDownload.current === prepared) clearDownload();}
+  });
   return <aside ref={panel} className="albums-sheet" role="dialog" aria-modal="true" aria-label="Trips" tabIndex={-1}>
     <header inert={preview ? true : undefined}>
       {access && <button className="album-icon-button" disabled={busy} onClick={closeAlbum} aria-label="All trips"><Icon kind="previous" /></button>}
@@ -445,9 +443,11 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
       <AlbumImage access={access} photo={preview} preview />
       <div className="album-photo-tags" aria-label="Photo information"><span aria-label="Contributor">{contributor(preview.manifest.ownerAccountId)}</span>{previewDate && <span aria-label={previewDate.label}>{previewDate.text}</span>}</div>
       <div className="album-photo-tags" aria-label="Shared photo details">{sharedAlbumDetails(preview, facts)?.people.map(name => <span key={name} aria-label="Shared reviewed person">{name}</span>)}{sharedAlbumDetails(preview, facts)?.location && <span aria-label="Shared photo location">{sharedAlbumDetails(preview, facts)?.location?.name || "Photo location shared"}</span>}</div>
+      <div className="album-preview-actions"><button disabled={busy} onClick={() => void download()}>{busy ? "Preparing…" : "Download original"}</button>
+        {error && <p className="hint" role="alert">{error}</p>}{notice && <p className="hint" role="status">{notice}</p>}
+      </div>
       <details className="album-preview-details"><summary>Details</summary><p>{preview.metadata.filename}</p>
         {previewCopies.length > 1 && <div className="album-copies" aria-label="Identical copies"><p>{previewCopies.length} identical copies</p>{previewCopies.map(copy => <button key={copy.manifest.photoId} onClick={() => setPreview(copy)}>{contributor(copy.manifest.ownerAccountId)} · {copy.metadata.filename}</button>)}</div>}
-        {error && <p className="hint" role="alert">{error}</p>}{notice && <p className="hint" role="status">{notice}</p>}
         {preview.manifest.ownerAccountId === session.accountId && factsState !== "legacy" && <button disabled={busy || (!previewOwned && !onLoadOwnedPhoto)} onClick={() => void openDetails(preview)}>Share details</button>}
         {detailDraft && detailDraft.photo === preview && <section className="album-share-details" aria-label="Share photo details"><h3>Share photo details</h3><p className="hint">Choose details to share with album members. Unchecked details are removed on save.</p>
           {detailDraft.unavailable > 0 && <p className="hint" role="status">Previously shared details that no longer match Saved will be removed on save.</p>}
@@ -459,7 +459,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
             const draft = detailDraft; const content = await access.shareDetails(draft.photo, draft.source, draft, draft.revision);
             if (scope.current?.() && accessRef.current === access && draft.source.current()) {setFacts(current => new Map(current).set(draft.photo.manifest.photoId, content)); setDetailDraft(null); setNotice(content.people.length || content.location ? "Selected details shared." : "Shared details cleared.");}
           })}>{detailDraft.people.length || detailDraft.location ? "Share selected details" : "Clear shared details"}</button><button disabled={busy} onClick={() => void openDetails(preview)}>Refresh details</button><button disabled={busy} onClick={() => setDetailDraft(null)}>Cancel</button></div></section>}
-        <button disabled={busy} onClick={downloadReady ? download : () => void prepareDownload()}>{downloadReady ? "Download original" : busy ? "Preparing…" : "Prepare download"}</button></details>
+        </details>
     </section>}
   </aside>;
 }

@@ -10,7 +10,7 @@ import {configureVault, unlockVault, lockVault, requireVault} from "../src/vault
 import {clearAccount, all} from "../src/exchange/cache";
 import {pinCard} from "../src/exchange/share-service";
 import {collect, source, digest, type Photo} from "../src/library/catalog";
-import {AlbumAccess, createAlbum, albumOwnedSelection, albumCapabilities, albumOriginalFiles, type AlbumCreationDraft} from "../src/albums/service";
+import {AlbumAccess, createAlbum, albumOwnedSelection, albumCapabilities, albumOriginalFiles, downloadAlbumOriginal, type AlbumCreationDraft} from "../src/albums/service";
 import {searchAlbumPhotos} from "../src/albums/search";
 import {ShareSelection} from "../src/exchange/sharing";
 import {chosenAlbumPhotos} from "../src/local/selection";
@@ -580,3 +580,74 @@ test("direct shared details 401 and 403 immediately revoke access even when mark
     assert.ok(first.photos[0].metadataKey.every(byte => byte === 0));
   }
 }));
+
+test("a transient refresh keeps the displayed reader usable and retries, while denied, trust, or corrupt refreshes revoke it", () => scoped(async () => {
+  for (const failure of ["transient", "denied", "trust", "corrupt", "opening"] as const) {
+    const data = await fixture();
+    let failing = false;
+    globalThis.fetch = async path => {
+      const url = String(path);
+      if (url.endsWith("/access")) return failing && failure === "trust" ? response({code: "ACCOUNT_KEYS_CHANGED_RENEW_TRUST"}, 409) : response(overview(data));
+      if (url.startsWith("/v1/albums/")) {
+        if (failing && ["transient", "denied"].includes(failure)) return response({}, failure === "transient" ? 503 : 403);
+        return response({...overview(data), version: 1, entries: [failing && failure === "corrupt" ? {...data.entry, signature: "invalid"} : data.entry], manifests: [data.signed], nextCursor: null, hasMore: false});
+      }
+      return new Response(new Uint8Array(data.objects.get(url.split("/").at(-1)!)!));
+    };
+    const displayed = await AlbumAccess.open(overview(data), {}), [photo] = (await displayed.loadPhotoPage()).photos;
+    if (failure === "opening") {
+      const invalid = {...overview(data), definition: {...data.made.signed, signature: "invalid"}};
+      const error = await AlbumAccess.open(invalid, {}).then(() => assert.fail("Opening must fail"), error => error);
+      displayed.discardFailedRefresh(undefined, error);
+      assert.equal(displayed.current(), false); assert.ok(photo.metadataKey.every(byte => byte === 0));
+      continue;
+    }
+    const refreshed = await AlbumAccess.open(overview(data), {});
+    failing = true;
+    const error = await refreshed.loadPhotoPage().then(() => assert.fail("Refresh must fail"), error => error);
+    displayed.discardFailedRefresh(refreshed, error);
+    assert.equal(refreshed.signal.aborted, true, "The temporary reader always releases its keys");
+    assert.equal(displayed.current(), failure === "transient");
+    assert.equal(photo.metadataKey.some(byte => byte !== 0), failure === "transient");
+    if (failure === "transient") {
+      failing = false;
+      assert.deepEqual(await displayed.bytes(photo, "original", new AbortController().signal), data.original, "Verified displayed originals remain usable after recovery");
+      const retry = await AlbumAccess.open(overview(data), {}), page = await retry.loadPhotoPage();
+      assert.equal(displayed.adoptRefresh(retry, page.photos)[0], photo, "Successful retry keeps the displayed source identity");
+    }
+    displayed.dispose();
+  }
+}));
+
+test("one explicit original download waits for exact bytes and final membership, then publishes without a second gesture", async () => {
+  const original = utf8("byte-identical family original"), bytes = original.slice();
+  const photo = {metadata: {filename: "Family.png", mediaType: "image/png", originalBytes: bytes.length, originalSha256: digest(bytes)}} as Photo;
+  let release!: (bytes: Uint8Array) => void, checked = 0;
+  const access = {current: () => true, bytes: async () => new Promise<Uint8Array>(resolve => {release = resolve;}), assertAccess: async () => {checked++;}} as unknown as AlbumAccess;
+  const published: File[] = [];
+  const download = downloadAlbumOriginal(access, photo, new AbortController().signal, () => true, file => {published.push(file);});
+  assert.equal(published.length, 0, "Preparing bytes never reports or starts a download early");
+  release(bytes); await download;
+  assert.equal(checked, 1); assert.equal(published.length, 1);
+  assert.equal(published[0].name, "Family.png"); assert.equal(published[0].type, "image/png");
+  assert.deepEqual(new Uint8Array(await published[0].arrayBuffer()), original);
+  assert.ok(bytes.every(byte => byte === 0));
+});
+
+test("one-step original download publishes nothing after preview, account, or membership withdrawal", async () => {
+  for (const withdrawal of ["preview", "abort", "access", "membership"] as const) {
+    const bytes = utf8("exact original");
+    const photo = {metadata: {filename: "Family.png", mediaType: "image/png", originalBytes: bytes.length, originalSha256: digest(bytes)}} as Photo;
+    let release!: (bytes: Uint8Array) => void, current = true, allowed = true, published = 0;
+    const controller = new AbortController();
+    const access = {current: () => allowed, bytes: async () => new Promise<Uint8Array>(resolve => {release = resolve;}), assertAccess: async () => {if (withdrawal === "membership") throw new Error("ALBUM_ACCESS_ENDED");}} as unknown as AlbumAccess;
+    const pending = downloadAlbumOriginal(access, photo, controller.signal, () => current, () => {published++;});
+    if (withdrawal === "preview") current = false;
+    if (withdrawal === "abort") controller.abort();
+    if (withdrawal === "access") allowed = false;
+    release(bytes);
+    if (withdrawal === "membership" || withdrawal === "abort") await assert.rejects(pending);
+    else await pending;
+    assert.equal(published, 0); assert.ok(bytes.every(byte => byte === 0));
+  }
+});

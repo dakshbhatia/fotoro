@@ -1030,3 +1030,7 @@ main:has(.consumer-selection) .local-search { padding-bottom: calc(140px + env(s
 
 .photo-day-heading { display: flex; align-items: center; justify-content: space-between; min-height: 44px; }
 .photo-day-heading > button { min-height: 44px; padding: 8px 12px; border: 0; background: transparent; color: var(--photo-accent); font-size: 13px; }
+
+.album-preview-actions { flex-shrink: 0; width: 100%; box-sizing: border-box; padding: 8px 16px; text-align: center; }
+.album-preview-actions > button { min-height: 44px; }
+.album-preview-actions > p { margin-bottom: 0; }

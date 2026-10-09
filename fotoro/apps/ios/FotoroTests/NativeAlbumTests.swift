@@ -982,7 +982,12 @@ final class NativeAlbumTests: XCTestCase {
       server.included = false; server.loseAppendResponse = true
       try services.store.put(server.source); try services.reload()
       try await model.refresh(); try await model.open(server.definition.albumId)
-      do { try await model.append([server.source]); XCTFail("Lost response reported success") } catch {}
+      let picker = NativeAlbumPhotoPickerStore()
+      picker.open(services, initial: [server.source])
+      await picker.waitUntilSettled()
+      do { try await model.append(picker.chosen(services)); XCTFail("Lost response reported success") } catch {}
+      XCTAssertEqual(try picker.chosen(services).map(\.id), [server.source.id], "A failed add must keep the picker’s current chosen sources for recovery")
+      XCTAssertNotNil(try services.consumerSavedPhoto(server.source.id), "A failed contribution must keep its private Saved original")
       XCTAssertTrue(model.hasPendingAddition); XCTAssertEqual(server.appendBodies.count, 1)
       let first = server.appendBodies[0]
       let request = try NativeAlbumWire.decode(AlbumAppendV1.self, first)
@@ -995,7 +1000,8 @@ final class NativeAlbumTests: XCTestCase {
       try await reopened.retryAddition()
       XCTAssertEqual(server.appendBodies.count, 2); XCTAssertEqual(server.appendBodies[1], first)
       XCTAssertFalse(reopened.hasPendingAddition); XCTAssertEqual(reopened.items.count, 1)
-      reopened.clear()
+      XCTAssertEqual(try picker.chosen(services).map(\.id), reopened.items.map { $0.photo.id }, "Retry must contribute the same retained picker selection")
+      picker.clear(); reopened.clear()
     }
   }
   @MainActor func testLostCreationResponseRetriesTheSameSignedRosterAfterReopening() async throws {
