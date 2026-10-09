@@ -216,6 +216,14 @@ struct PhotoPreviewProgress {
   @ObservationIgnored private var analysisGeneration = UUID()
   @ObservationIgnored private var observing = false
   @ObservationIgnored private var analysisPermitted = true
+  @ObservationIgnored private(set) var thumbnailGeneration = UUID()
+  @ObservationIgnored private var thumbnailAuthorization: PHAuthorizationStatus?
+  @ObservationIgnored private let thumbnails: NSCache<NSString, UIImage> = {
+    let cache = NSCache<NSString, UIImage>()
+    cache.totalCostLimit = 32 * 1024 * 1024
+    cache.countLimit = 80
+    return cache
+  }()
   let images = PHCachingImageManager()
   @ObservationIgnored private let authorization: () -> PHAuthorizationStatus
   @ObservationIgnored private let requestAccess: () async -> PHAuthorizationStatus
@@ -309,7 +317,7 @@ struct PhotoPreviewProgress {
     analysisPermitted = true
     status = authorization()
     opened = status != .notDetermined
-    if opened { refresh(now: now) }
+    if opened { refresh(now: now) } else { clearThumbnails() }
   }
 
   func validatePresentation(viewer: [RecentPhotoSource], selection: [RecentPhotoSource],
@@ -345,6 +353,7 @@ struct PhotoPreviewProgress {
     if status == .notDetermined { status = await requestAccess() }
     opened = true
     guard RecentPhotosPolicy.canRead(status) else {
+      clearThumbnails()
       pauseAnalysis()
       picksSnapshot = nil
       photos = []; browseIndices = [:]
@@ -364,6 +373,7 @@ struct PhotoPreviewProgress {
   }
   func refresh(now: Date = Date()) { refresh(now: now, refreshPicks: true) }
   private func refresh(now: Date, refreshPicks: Bool) {
+    clearThumbnails()
     guard opened else { return }
     browseGeneration = UUID()
     browsePage = UUID()
@@ -473,6 +483,37 @@ struct PhotoPreviewProgress {
       images.stopCachingImages(
         for: assets, targetSize: targetSize, contentMode: .aspectFill, options: options)
     }
+  }
+  func cachedThumbnail(for source: RecentPhotoSource, targetSize: CGSize, networkAllowed: Bool) -> UIImage? {
+    guard thumbnailAccessAllowed(), let key = thumbnailKey(source, targetSize, networkAllowed) else { return nil }
+    return thumbnails.object(forKey: key)
+  }
+  // Call only for a completed, nondegraded thumbnail, using the generation captured before its request.
+  func cacheThumbnail(_ image: UIImage, for source: RecentPhotoSource, targetSize: CGSize,
+    networkAllowed: Bool, generation: UUID) {
+    guard thumbnailAccessAllowed(), generation == thumbnailGeneration,
+      let key = thumbnailKey(source, targetSize, networkAllowed) else { return }
+    let width = image.size.width * image.scale, height = image.size.height * image.scale
+    guard width.isFinite, height.isFinite, width > 0, height > 0, width <= 1024, height <= 1024 else { return }
+    let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? Int(ceil(width) * ceil(height) * 4)
+    thumbnails.setObject(image, forKey: key, cost: cost)
+  }
+  private func thumbnailKey(_ source: RecentPhotoSource, _ target: CGSize, _ networkAllowed: Bool) -> NSString? {
+    guard target.width.isFinite, target.height.isFinite,
+      target.width > 0, target.height > 0, target.width <= 1024, target.height <= 1024 else { return nil }
+    return "\(source.id.utf8.count):\(source.id)\(source.revision.utf8.count):\(source.revision)|\(target.width)|\(target.height)|\(networkAllowed)" as NSString
+  }
+  private func thumbnailAccessAllowed() -> Bool {
+    let permission = authorization()
+    guard RecentPhotosPolicy.canRead(permission) else { clearThumbnails(); return false }
+    if let previous = thumbnailAuthorization, previous != permission { clearThumbnails() }
+    thumbnailAuthorization = permission
+    return true
+  }
+  private func clearThumbnails() {
+    thumbnails.removeAllObjects()
+    thumbnailGeneration = UUID()
+    thumbnailAuthorization = nil
   }
   func shareOriginals(_ photos: [RecentPhoto]) async throws -> [URL] {
     func checkAccess(_ photo: RecentPhoto) throws -> PHAsset {

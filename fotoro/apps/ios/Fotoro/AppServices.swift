@@ -1263,8 +1263,11 @@ enum ReviewedPhotosBackupPolicy {
   }
   func loadMore() throws {
     guard let last = photos.last else { return }
-    let page = try store.photos(after: last.id, limit: 1000)
-    photos += page.filter { $0.manifest.ownerAccountId == session.accountId }
+    let page = try store.photos(after: last.id, limit: 1000).filter {
+      $0.manifest.ownerAccountId == session.accountId
+    }
+    guard !page.isEmpty else { return }
+    photos += page
     try reloadAnnotations()
   }
   func reload() throws {

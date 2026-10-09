@@ -30,7 +30,8 @@ struct PhotosImage: View {
   }
   var body: some View {
     Group {
-      if let image {
+      if let image = image ?? (!large ? store.cachedThumbnail(for: RecentPhotoSource(photo),
+        targetSize: targetSize, networkAllowed: networkAllowed) : nil) {
         Image(uiImage: image).resizable()
       } else {
         Rectangle().fill(.quaternary).overlay {
@@ -60,10 +61,17 @@ struct PhotosImage: View {
       let token = UUID()
       generation = token
       active = true
+      let target = targetSize
+      if !large, let cached = store.cachedThumbnail(for: source, targetSize: target, networkAllowed: networkAllowed) {
+        image = cached
+        _ = progress.receive(hasImage: true, degraded: false)
+        return
+      }
+      let thumbnailGeneration = store.thumbnailGeneration
       let options = PHImageRequestOptions()
       options.isNetworkAccessAllowed = networkAllowed
       options.deliveryMode = .opportunistic
-      let target = targetSize
+      if !large { options.resizeMode = .fast }
       if !large {
         cachedAsset = photo.asset; cachedTarget = target; cachedOptions = options
         store.cache([photo.asset], start: true, targetSize: target, options: options)
@@ -78,7 +86,13 @@ struct PhotosImage: View {
         Task { @MainActor in
           guard active, generation == token else { return }
           let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) == true
-          if progress.receive(hasImage: value != nil, degraded: degraded, cancelled: cancelled, failed: failed) { image = value }
+          if progress.receive(hasImage: value != nil, degraded: degraded, cancelled: cancelled, failed: failed) {
+            image = value
+            if !large, !degraded, let value {
+              store.cacheThumbnail(value, for: source, targetSize: target, networkAllowed: networkAllowed,
+                generation: thumbnailGeneration)
+            }
+          }
         }
       }
     }
@@ -314,12 +328,10 @@ struct RecentPhotosView: View {
   @State private var savedRefresh = SavedLibraryRefresh()
   @State private var savedHasMore = true
   @State private var savedFavoritesOnly = false
-  @State private var savedScrollID: String?
 #endif
   @State private var selectedPhotos: [String: SelectedRecentPhoto] = [:]
   @State private var selecting = false
   @State private var scope = PhotoHomeScope.photos
-  @State private var browseScrollIDs: [PhotoHomeScope: String] = [:]
   @State private var browseFilter = PhotoBrowseFilter.all
   @State private var browseDates = PhotoBrowseDateScope.recent
   @State private var groupMoments = false
@@ -515,13 +527,12 @@ struct RecentPhotosView: View {
               }
             }
           }
-          .scrollTargetLayout()
           if ownedPhotos.isEmpty && !savedRefresh.isRefreshing {
             ContentUnavailableView("No saved photos", systemImage: "photo.stack",
               description: Text(savedLibraryEmptyMessage(sync: services.automaticPhotoSync,
                 favoritesOnly: savedFavoritesOnly)))
           }
-        }.scrollPosition(id: $savedScrollID, anchor: .top).scrollDismissesKeyboard(.interactively)
+        }.id(savedFavoritesOnly).scrollDismissesKeyboard(.interactively)
           .defaultScrollAnchor(.top, for: .initialOffset).scrollBounceBehavior(.basedOnSize)
           .refreshable { await savedRefresh.refresh(services) }
           .task(id: SavedLibraryReadPresentation(services, isActive: scenePhase == .active)) {
@@ -592,7 +603,6 @@ struct RecentPhotosView: View {
         } catch { store.error = error.localizedDescription }
       }
       .task(id: ConsumerSearchRequestID(presentation: searchTaskID, attempt: searchAttempt)) { await updateSearch() }
-      .onChange(of: savedFavoritesOnly) { savedScrollID = nil }
       .onChange(of: services?.consumerCatalogGeneration) {
         savedHasMore = true
         cancelBestShots(); validateSavedPresentation()
@@ -691,12 +701,10 @@ struct RecentPhotosView: View {
         .onChange(of: store.status) { cancelBestShots() }
         .onChange(of: browseDates) {
           cancelBestShots()
-          browseScrollIDs = [:]
           store.setBrowseDates(browseDates)
         }
         .onChange(of: browseFilter) {
           cancelBestShots()
-          browseScrollIDs[scope] = nil
         }
         .onChange(of: scope) {
           cancelBestShots()
@@ -866,7 +874,7 @@ struct RecentPhotosView: View {
             .font(.footnote).padding().accessibilityHint("Choose more photos Fotoro may access")
         }
       }
-      .scrollPosition(id: browseScrollBinding, anchor: .top).scrollDismissesKeyboard(.interactively)
+      .id(browseViewportKey).scrollDismissesKeyboard(.interactively)
       .defaultScrollAnchor(.top, for: .initialOffset).scrollBounceBehavior(.basedOnSize)
       #if !FOTORO_LOCAL_PREVIEW
         .refreshable {
@@ -927,10 +935,10 @@ struct RecentPhotosView: View {
       if savedRefresh.isRefreshing, store.photos.isEmpty, allOwnedPhotos.isEmpty { ProgressView().padding() }
     }
   #endif
-  private var browseScrollBinding: Binding<String?> {
-    Binding(get: { !search.hasSearch ? browseScrollIDs[scope] : nil }, set: {
-      if !search.hasSearch { browseScrollIDs[scope] = $0 }
-    })
+  // Native scrolling owns its offset. Only a new browsing choice resets it;
+  // photo/page/progress updates must not become programmatic scroll commands.
+  private var browseViewportKey: String {
+    "\(scope.id)|\(browseFilter.id)|\(browseDates.id)|\(groupMoments)|\(search.hasSearch)"
   }
   private var bestShotsControls: some View {
     VStack(alignment: .leading, spacing: 8) {
@@ -1203,7 +1211,7 @@ struct RecentPhotosView: View {
             }
         }
       }
-    }.scrollTargetLayout()
+    }
   }
 #if !FOTORO_LOCAL_PREVIEW
   private var timelineGallery: some View {
@@ -1255,7 +1263,7 @@ struct RecentPhotosView: View {
             }
         }
       }
-    }.scrollTargetLayout()
+    }
   }
 #endif
   @ViewBuilder private var homeSearchContent: some View {
@@ -2087,7 +2095,7 @@ private struct RecentPhotoCell: View {
         .overlay(alignment: .bottomTrailing) {
           if selected { Image(systemName: "checkmark.circle.fill").padding(8) }
         }
-    }.buttonStyle(.plain).id(photo.id)
+    }.buttonStyle(.plain)
       .accessibilityValue(accessibilityStatus)
       .contextMenu { Button(selected ? "Deselect" : "Select", action: toggle) }
   }
