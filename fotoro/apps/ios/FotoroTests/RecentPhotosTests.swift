@@ -281,6 +281,45 @@ final class RecentPhotosTests: XCTestCase {
     XCTAssertNil(try SavedLibraryPageLoading.load(services, expected: unlocked, isActive: true))
     XCTAssertTrue(services.photos.isEmpty)
   }
+  @MainActor func testLoadedUnannotatedPhotosRenderWithoutLedgerReadsAndRefreshAfterEdits() async throws {
+    let services = try await previewServices()
+    let account = try XCTUnwrap(services.session.accountId)
+    defer { services.vault.lock(); Keychain.remove(account); try? FileManager.default.removeItem(at: services.storageRoot) }
+    let (photo, _, _) = try previewPhoto(owner: account)
+    try services.store.put(photo)
+    try services.reload()
+    let reads = AnnotationReadCounter()
+    let catalog = services.store
+    try await catalog.database.write { db in
+      db.trace { event in
+        if case .statement(let statement) = event,
+          statement.sql.contains("SELECT value FROM annotations WHERE id=") { reads.record() }
+      }
+    }
+    for _ in 0..<100 {
+      XCTAssertNil(services.annotation(photo).favorite)
+      XCTAssertNil(services.annotation(photo).labels)
+    }
+    XCTAssertEqual(reads.count, 0, "Warm favorite/grouping reads must not query the ledger for absent overlays")
+
+    try services.setLabels(["trip"], photo: photo)
+    reads.reset()
+    for _ in 0..<100 { XCTAssertEqual(services.annotation(photo).labels, ["trip"]) }
+    XCTAssertEqual(reads.count, 0, "An edited annotation must replace the empty snapshot without reintroducing render queries")
+
+    let (unloaded, _, _) = try previewPhoto(owner: account)
+    try catalog.put(unloaded)
+    var favorite = PhotoAnnotationsV1(photoId: unloaded.id, originalSha256: unloaded.metadata.originalSha256)
+    favorite.favorite = true
+    try services.annotations.ledger.edit(favorite, photo: unloaded, bundle: services.vault.requireBundle(),
+      card: services.session.requireCard(account))
+    reads.reset()
+    XCTAssertEqual(services.annotation(unloaded).favorite, true)
+    XCTAssertGreaterThan(reads.count, 0, "Search-only sources outside the loaded snapshot must still read their current overlay")
+    try await catalog.database.write { db in db.trace(options: []) }
+    services.vault.lock()
+    XCTAssertTrue(services.photoAnnotations.isEmpty, "A locked account must discard both present and absent overlay snapshots")
+  }
   @MainActor private func previewServices() async throws -> AppServices {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [PreviewDownloadProtocol.self]
@@ -1000,4 +1039,12 @@ private final class AccountCompletionProtocol: URLProtocol, @unchecked Sendable 
     client?.urlProtocolDidFinishLoading(self)
   }
   override func stopLoading() {}
+}
+
+private final class AnnotationReadCounter: @unchecked Sendable {
+  private let lock = NSLock()
+  private var value = 0
+  var count: Int { lock.withLock { value } }
+  func record() { lock.withLock { value += 1 } }
+  func reset() { lock.withLock { value = 0 } }
 }

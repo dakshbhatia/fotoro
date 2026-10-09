@@ -1,3 +1,4 @@
+import {albumDetailsSelection} from "./detail-selection";
 import {AlbumActionQueue, bindAlbumAction} from "./action-queue";
 import {VirtualAlbumGrid} from "./VirtualAlbumGrid";
 import {TripDownloadLease} from "./download-lease";
@@ -88,7 +89,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   const [query, setQuery] = useState("");
   const [facts, setFacts] = useState(new Map<string, AlbumPhotoFactsContentV1>()), [factsState, setFactsState] = useState<"loading" | "ready" | "legacy" | "error" | "partial">("loading");
   const [peopleFilter, setPeopleFilter] = useState(emptyPeopleFilter), [from, setFrom] = useState(""), [through, setThrough] = useState(""), [groupCopies, setGroupCopies] = useState(true);
-  const [detailDraft, setDetailDraft] = useState<{photo: Photo; source: OwnedAlbumDetails; revision: number; people: string[]; location: boolean; existing: boolean} | null>(null);
+  const [detailDraft, setDetailDraft] = useState<{photo: Photo; source: OwnedAlbumDetails; revision: number; people: string[]; location: boolean; existing: boolean; unavailable: number} | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState(""), [title, setTitle] = useState(""), [invitees, setInvitees] = useState(new Set<string>()), [confirmEnd, setConfirmEnd] = useState(false);
   const [creating, setCreating] = useState(false), [unsupported, setUnsupported] = useState(false), [entryFailed, setEntryFailed] = useState(false);
   const preparedDownload = useRef<{access: AlbumAccess; photo: Photo; files: File[]; controller: AbortController} | null>(null);
@@ -230,16 +231,17 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   const reviewed = useMemo(() => albumReviewedPeople(photos, facts, () => !!access?.current()).map(person => ({...person, names: [person.names[0] + " · " + contributor(JSON.parse(person.id)[0])]})), [photos, facts, access, names]);
   const openDetails = (photo: Photo) => action(async () => {
     if (!access || accessRef.current !== access || factsState === "legacy") return;
-    let source = ownedAlbumDetails(photo, currentOwnedPhotos?.() ?? null);
-    if (!source?.current() && onLoadOwnedPhoto) {
-      await onLoadOwnedPhoto(photo, controller.signal);
-      if (!scope.current?.() || accessRef.current !== access || !access.current()) throw new Error("ALBUM_SELECTION_CHANGED");
-      source = ownedAlbumDetails(photo, currentOwnedPhotos?.() ?? null);
-    }
+    setDetailDraft(null);
+    // A current local snapshot can still predate another device's private edit.
+    // Explicitly opening or refreshing the editor reloads this contributor's
+    // verified details before restoring previously shared choices.
+    if (onLoadOwnedPhoto) await onLoadOwnedPhoto(photo, controller.signal);
+    if (!scope.current?.() || accessRef.current !== access || !access.current()) throw new Error("ALBUM_SELECTION_CHANGED");
+    const source = ownedAlbumDetails(photo, currentOwnedPhotos?.() ?? null);
     if (!source?.current()) throw new Error("ALBUM_SELECTION_CHANGED");
     const latest = await access.readFactsFor(photo);
     if (!source.current() || !scope.current?.() || accessRef.current !== access) throw new Error("ALBUM_SELECTION_CHANGED");
-    setDetailDraft({photo, source, revision: (latest?.revision ?? 0) + 1, people: [], location: false, existing: !!latest && (!!latest.people.length || !!latest.location)});
+    setDetailDraft({photo, source, revision: (latest?.revision ?? 0) + 1, ...albumDetailsSelection(source, latest)});
   });
   let chosen = 0;
   try {chosen = chosenSnapshot.current ? albumOwnedSelection(chosenSnapshot.photos, session, currentPhotos()).length : 0;} catch {}
@@ -408,6 +410,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
         {error && <p className="hint" role="alert">{error}</p>}{notice && <p className="hint" role="status">{notice}</p>}
         {preview.manifest.ownerAccountId === session.accountId && factsState !== "legacy" && <button disabled={busy || (!previewOwned && !onLoadOwnedPhoto)} onClick={() => void openDetails(preview)}>Share details</button>}
         {detailDraft && detailDraft.photo === preview && <section className="album-share-details" aria-label="Share photo details"><h3>Share photo details</h3><p className="hint">Choose details to share with album members. Unchecked details are removed on save.</p>
+          {detailDraft.unavailable > 0 && <p className="hint" role="status">Previously shared details that no longer match Saved will be removed on save.</p>}
           <AlbumNameChoices names={detailDraft.source.people} selected={detailDraft.people} disabled={busy || !detailDraft.source.current()} onChange={people => setDetailDraft({...detailDraft, people})} />
           <label><input type="checkbox" checked={detailDraft.location} disabled={busy || !detailDraft.source.location || !detailDraft.source.current()} onChange={event => setDetailDraft({...detailDraft, location: event.target.checked})} />Photo location{detailDraft.source.location?.name ? ": " + detailDraft.source.location.name : ""}</label>
           {detailDraft.source.location && <p className="hint">Sharing location includes exact coordinates.</p>}

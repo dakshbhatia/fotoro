@@ -1528,7 +1528,10 @@ enum ReviewedPhotosBackupPolicy {
     let card = try session.requireCard(account)
     var values: [String: PhotoAnnotationsV1] = [:]
     for photo in photos {
-      if let value = try annotations.ledger.current(photo: photo, bundle: bundle, card: card) { values[photo.id] = value }
+      // Absence is part of this catalog snapshot too. Without it, ordinary
+      // photos issue a ledger query again on every favorite/grouping render read.
+      values[photo.id] = try annotations.ledger.current(photo: photo, bundle: bundle, card: card)
+        ?? PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
     }
     photoAnnotations = values
     consumerCatalogGeneration &+= 1
