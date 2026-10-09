@@ -977,12 +977,76 @@ final class NativeAlbumTests: XCTestCase {
       XCTAssertFalse(model.hasPendingAddition)
     }
   }
+  @MainActor func testFailedAppendMembershipKeepsPickerAndRevalidatesSameSelection() async throws {
+    try await withAlbum(owner: true) { services, server, model in
+      server.included = false
+      try services.store.put(server.source); try services.reload()
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let picker = NativeAlbumPhotoPickerStore()
+      picker.open(services, initial: [server.source]); await picker.waitUntilSettled()
+      let access = model.currentOpenedPhotoAccess
+      server.accessStatus = 503
+      do { try await model.append(picker.chosen(services)); XCTFail("Unavailable membership reported success") } catch {}
+      XCTAssertEqual(model.opened?.id, server.definition.albumId)
+      XCTAssertEqual(model.currentOpenedPhotoAccess, access)
+      XCTAssertEqual(try picker.chosen(services).map(\.id), [server.source.id])
+      XCTAssertTrue(server.appendBodies.isEmpty, "Failed membership cannot contribute a photo")
+      server.accessStatus = nil
+      let checks = server.accessReads
+      try await model.append(picker.chosen(services))
+      XCTAssertGreaterThan(server.accessReads, checks, "Retry must revalidate membership before contributing")
+      XCTAssertEqual(model.items.map { $0.photo.id }, try picker.chosen(services).map(\.id))
+      XCTAssertEqual(server.appendBodies.count, 1)
+      server.accessStatus = 403
+      do { try await model.append(picker.chosen(services)); XCTFail("Denied membership reported success") } catch {}
+      XCTAssertNil(model.opened); XCTAssertNil(model.currentOpenedPhotoAccess)
+      XCTAssertNotNil(try services.consumerSavedPhoto(server.source.id))
+      picker.clear()
+    }
+  }
+  @MainActor func testCancelledAppendMembershipKeepsTripForExplicitRetry() async throws {
+    try await withAlbum(owner: true) { services, server, model in
+      server.included = false
+      try services.store.put(server.source); try services.reload()
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let gate = AlbumFactsRequestGate(started: expectation(description: "Held append membership"))
+      defer { gate.release.signal() }
+      server.accessGate = gate
+      let adding = Task { try await model.append([server.source]) }
+      await fulfillment(of: [gate.started], timeout: 3)
+      adding.cancel(); gate.release.signal()
+      do { try await adding.value; XCTFail("Cancelled addition reported success") } catch is CancellationError {} catch { XCTFail("Unexpected error: \(error)") }
+      XCTAssertEqual(model.opened?.id, server.definition.albumId)
+      XCTAssertNotNil(model.currentOpenedPhotoAccess); XCTAssertTrue(server.appendBodies.isEmpty)
+      try await model.append([server.source])
+      XCTAssertEqual(model.items.map { $0.photo.id }, [server.source.id])
+      XCTAssertEqual(server.appendBodies.count, 1)
+    }
+  }
+  @MainActor func testTransientInboxRefreshKeepsVerifiedTripForNextChosenAction() async throws {
+    try await withAlbum(owner: true) { _, server, model in
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let items = model.items.map(\.id), access = model.currentOpenedPhotoAccess
+      server.failInbox = true
+      do { try await model.refresh(); XCTFail("Offline refresh reported success") } catch {}
+      XCTAssertEqual(model.opened?.id, server.definition.albumId)
+      XCTAssertEqual(model.items.map(\.id), items); XCTAssertEqual(model.currentOpenedPhotoAccess, access)
+      server.failInbox = false; server.accessStatus = 403
+      do { try await model.checkOpenedAccess(); XCTFail("Denied access reported success") } catch {}
+      XCTAssertNil(model.opened); XCTAssertNil(model.currentOpenedPhotoAccess)
+    }
+  }
   @MainActor func testLostAppendResponseRetriesDurableExactBodyAndOriginalBrowserSignature() async throws {
     try await withAlbum(owner: true) { services, server, model in
       server.included = false; server.loseAppendResponse = true
       try services.store.put(server.source); try services.reload()
       try await model.refresh(); try await model.open(server.definition.albumId)
-      do { try await model.append([server.source]); XCTFail("Lost response reported success") } catch {}
+      let picker = NativeAlbumPhotoPickerStore()
+      picker.open(services, initial: [server.source])
+      await picker.waitUntilSettled()
+      do { try await model.append(picker.chosen(services)); XCTFail("Lost response reported success") } catch {}
+      XCTAssertEqual(try picker.chosen(services).map(\.id), [server.source.id], "A failed add must keep the picker’s current chosen sources for recovery")
+      XCTAssertNotNil(try services.consumerSavedPhoto(server.source.id), "A failed contribution must keep its private Saved original")
       XCTAssertTrue(model.hasPendingAddition); XCTAssertEqual(server.appendBodies.count, 1)
       let first = server.appendBodies[0]
       let request = try NativeAlbumWire.decode(AlbumAppendV1.self, first)
@@ -995,7 +1059,8 @@ final class NativeAlbumTests: XCTestCase {
       try await reopened.retryAddition()
       XCTAssertEqual(server.appendBodies.count, 2); XCTAssertEqual(server.appendBodies[1], first)
       XCTAssertFalse(reopened.hasPendingAddition); XCTAssertEqual(reopened.items.count, 1)
-      reopened.clear()
+      XCTAssertEqual(try picker.chosen(services).map(\.id), reopened.items.map { $0.photo.id }, "Retry must contribute the same retained picker selection")
+      picker.clear(); reopened.clear()
     }
   }
   @MainActor func testLostCreationResponseRetriesTheSameSignedRosterAfterReopening() async throws {
@@ -1012,14 +1077,16 @@ final class NativeAlbumTests: XCTestCase {
       reopened.clear()
     }
   }
-  @MainActor func testRefreshFailureClearsOpenMediaAndKeys() async throws {
+  @MainActor func testDeniedInboxRefreshClearsOpenMediaAndKeys() async throws {
     try await withAlbum { _, server, model in
       try await model.refresh(); try await model.open(server.definition.albumId)
       let item = try XCTUnwrap(model.items.first), url = try await model.thumbnail(item)
       XCTAssertNotNil(url); let directory = try XCTUnwrap(model.directory)
-      server.failInbox = true
-      do { try await model.refresh(); XCTFail("Failed refresh reported success") } catch {}
+      server.inboxStatus = 403
+      do { try await model.refresh(); XCTFail("Denied refresh reported success") }
+      catch let error as FotoroError { XCTAssertEqual(error.statusCode, 403) }
       XCTAssertTrue(model.items.isEmpty); XCTAssertNil(model.opened); XCTAssertNil(model.directory)
+      XCTAssertNil(model.currentOpenedPhotoAccess)
       XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
     }
   }
@@ -1410,6 +1477,7 @@ private final class AlbumTestServer: @unchecked Sendable {
   private var extraObjects: [String: Data] = [:]
   private var owned: [String: SignedPayloadV1] = [:]
   var creationBodies: [Data] = []; var loseCreateResponse = false; var failInbox = false
+  var inboxStatus: Int?
   var extraInbox: [AlbumOverviewV1] = []
   var hideInboxAlbum = false
   var accessStatus: Int?
@@ -1543,7 +1611,11 @@ private final class AlbumTestServer: @unchecked Sendable {
       return (200, try Wire.encode(AlbumPhotoFactsReplyV1(version: 1, facts: sharedDetails[id])))
     }
     if path.hasSuffix("/capabilities") { return (200, try Wire.encode(AlbumCapabilitiesV1(version: 1, albumsVersion: 1, maxMembers: 12, maxPhotos: 1000, pageSize: 100))) }
-    if path == "/v1/albums" { if failInbox { throw URLError(.notConnectedToInternet) }; return (200, try Wire.encode(AlbumInboxV1(version: 1, albums: extraInbox + (hideInboxAlbum ? [] : [overview])))) }
+    if path == "/v1/albums" {
+      if let inboxStatus { return (inboxStatus, Data()) }
+      if failInbox { throw URLError(.notConnectedToInternet) }
+      return (200, try Wire.encode(AlbumInboxV1(version: 1, albums: extraInbox + (hideInboxAlbum ? [] : [overview]))))
+    }
     if path.hasSuffix("/accept") { accepted = true; var value = overview; value.membership = "accepted"; return (200, try Wire.encode(value)) }
     if path.hasPrefix("/v1/photos/"), path.hasSuffix("/manifest") {
       let id = String(path.split(separator: "/")[2])

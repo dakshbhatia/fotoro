@@ -16,7 +16,7 @@ import {requireVault, type UnlockedVault} from "../vault/vault";
 import {assertVault} from "../vault/scope";
 import {digest, photoBytes, readPhoto, type Photo} from "../library/catalog";
 import {db} from "../exchange/cache";
-import {savedOriginalSelectionCurrent} from "../library/system-share";
+import {savedOriginalSelectionCurrent, shareOriginals} from "../library/system-share";
 import {AlbumRasterCache} from "./raster-cache";
 import {savedRasterSource} from "../library/saved-raster";
 import {cameraOriginalFiles} from "../media/camera-original";
@@ -69,6 +69,17 @@ export async function albumOriginalFiles(access: AlbumAccess, photo: Photo, sign
   const bytes = await access.bytes(photo, "original", signal);
   try {const files = await cameraOriginalFiles(bytes, photo.metadata); await access.assertAccess(); signal.throwIfAborted(); return files;}
   finally {bytes.fill(0);}
+}
+// An explicit download gesture prepares and publishes only this current original.
+export async function downloadAlbumOriginal(access: AlbumAccess, photo: Photo, signal: AbortSignal,
+  current: () => boolean, publish: (file: File) => void) {
+  const valid = () => !signal.aborted && current() && access.current();
+  if (!valid()) return;
+  const files = await albumOriginalFiles(access, photo, signal);
+  try {
+    if (!valid()) return;
+    await shareOriginals(files, valid, {canShare: () => false, download: publish});
+  } finally {files.length = 0;}
 }
 export function createAlbum(title: string, cards: readonly AccountCardV1[], scope: ShareScope, draft?: AlbumCreationDraft) {return diagnose("album", diagnostic => createAlbumAction(title, cards, {...scope, diagnostic}, draft), "create");}
 async function createAlbumAction(title: string, cards: readonly AccountCardV1[], scope: ShareScope, draft?: AlbumCreationDraft) {
@@ -360,6 +371,10 @@ export class AlbumAccess {
     // Cache hits and shared loads require a fresh check after retrieval too.
     await this.assertAccess(); signal.throwIfAborted();
     return this.rasters.lease(key, blob, signal, current);
+  }
+  discardFailedRefresh(refreshed: AlbumAccess | undefined, failure: unknown) {
+    refreshed?.dispose();
+    if (!transientAlbumRead(failure)) this.dispose();
   }
   adoptRefresh(refreshed: AlbumAccess, loaded: readonly Photo[]): Photo[] {
     this.check(); refreshed.check();

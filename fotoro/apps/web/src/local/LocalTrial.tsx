@@ -18,7 +18,7 @@ import {useDialogFocus} from "../library/dialog-focus";
 import {canShareOriginals, downloadOriginal, OriginalShareAttempt, prepareSavedOriginals, savedOriginalSelectionCurrent} from "../library/system-share";
 import {ShareSelection} from "../exchange/sharing";
 import type {Photo} from "../library/catalog";
-import {ownedPhotoForLocal, selectedOwnedPhotos, reconcileSavedSelection, chosenAlbumPhotos} from "./selection";
+import {ownedPhotoForLocal, selectedOwnedPhotos, reconcileSavedSelection} from "./selection";
 import {findMatchPhotos, shortlistSearchResult} from "./find-best-shots";
 import {useSemanticFind} from "./useSemanticFind";
 import {useFindBestShots} from "./useFindBestShots";
@@ -81,7 +81,7 @@ export interface BestShotSelectionRequest {scope: string; source: unknown; selec
 export function bestShotSelectionRequestCurrent(request: BestShotSelectionRequest, scope: string, source: unknown, selectionRevision: number) {
   return request.scope === scope && request.source === source && request.selectionRevision === selectionRevision;
 }
-export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, ownedPhotos = null, onOpenSaved, onShareSaved, onAlbumSaved, active = true}: {onBackup: () => void; onSave?: (photos: LocalPhoto[]) => void; onCancelSave?: () => void; onPhotosChange?: (photos: LocalPhoto[]) => void; ownedPhotos?: OwnedPhotoSnapshot | null; onOpenSaved?: (id: string) => void; onShareSaved?: (photos: Photo[]) => void; onAlbumSaved?: (photos: Photo[]) => void; active?: boolean}) {
+export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, ownedPhotos = null, onOpenSaved, onShareSaved, onAlbumSelection, active = true}: {onBackup: () => void; onSave?: (photos: LocalPhoto[]) => void; onCancelSave?: () => void; onPhotosChange?: (photos: LocalPhoto[]) => void; ownedPhotos?: OwnedPhotoSnapshot | null; onOpenSaved?: (id: string) => void; onShareSaved?: (photos: Photo[]) => void; onAlbumSelection?: (local: LocalPhoto[], saved: Photo[]) => void; active?: boolean}) {
   const [photos, setPhotos] = useState<LocalOcrPhoto[]>([]), [query, setQuery] = useState(""),
     [viewer, setViewer] = useState<string | null>(null), [settings, setSettings] = useState(false),
     [last30, setLast30] = useState(true), [status, setStatus] = useState(""), [progress, setProgress] = useState(""),
@@ -315,11 +315,17 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
   };
   const readyOriginals = selectedOriginals(photos, picks.ids).length;
   const selectedCount = picks.ids.size + chosenSaved.length;
-  const albumChosen = chosenAlbumPhotos(ownedPhotos, reviewedPhotos, chosenSaved);
   const addToAlbum = () => {
     if (!alive.current || !activeRef.current || shareBusy || currentOwnedPhotos.current?.selectionReady === false) return;
-    const selection = chosenAlbumPhotos(currentOwnedPhotos.current, currentPhotos.current.filter(photo => localSelectionRef.current.has(photo.id)), selectedOwnedPhotos(currentOwnedPhotos.current, chosenSavedToken.current, chosenSavedRef.current));
-    if (!selection.needsSave && selection.photos.length) onAlbumSaved?.(selection.photos);
+    const local = currentPhotos.current.filter(photo => localSelectionRef.current.has(photo.id));
+    const saved = selectedOwnedPhotos(currentOwnedPhotos.current, chosenSavedToken.current, chosenSavedRef.current);
+    if (local.length !== localSelectionRef.current.size || selectedOriginals(local).length !== local.length || saved.length !== chosenSavedRef.current.size) {
+      setStatus("The chosen photos changed. Select them again."); return;
+    }
+    if (!local.length && !saved.length) return;
+    if (local.length + saved.length > 100) {setStatus("Choose up to 100 photos to add to a trip."); return;}
+    try {onAlbumSelection?.(local, saved);}
+    catch {setStatus("The chosen originals could not open for this trip. Open Saved and try again.");}
   };
   const shareBusy = sharing || preparingShare;
   const originalsCurrent = (context: ChosenOriginalContext) => {
@@ -519,7 +525,7 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
       </header>
       {hasPhotos && <div className="consumer-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><circle cx="10" cy="10" r="7" /><path d="m15 15 6 6" /></svg><input ref={searchInput} aria-label="Search photos" placeholder="Search photos" value={query} onChange={event => changeQuery(event.target.value)} />{query && <button aria-label="Clear search" onClick={() => {changeQuery(""); searchInput.current?.focus();}}><Icon kind="close" /></button>}</div>}
       {hasPhotos && <div className="people-find-controls"><PeopleFilter people={peopleFind.people} value={peopleFind.filter} onChange={peopleFind.change} disabled={shareBusy}
-        onReview={() => setPeopleOpen(true)} />{(familyFilter || normalizeSearch(query)) && <button disabled={shareBusy || savedSelectionBusy || result.searching || bestShots.busy || !displayedPhotos.length} onClick={selectResults}>Select these {displayedPhotos.length}</button>}</div>}
+        onReview={() => setPeopleOpen(true)} />{(familyFilter || normalizeSearch(query)) && <button disabled={shareBusy || savedSelectionBusy || result.searching || bestShots.busy || !displayedPhotos.length} onClick={selectResults}>Select {displayedPhotos.length} {displayedPhotos.length === 1 ? "photo" : "photos"}</button>}</div>}
       {savedIncomplete && <p className="hint" role="status">Search and People include loaded Saved photos. <button className="text-button" onClick={openBackup}>Open Saved to load more</button></p>}
       {normalizeSearch(query) && (findMatches.length > 0 || bestShots.active) && <section className="find-best-shots" aria-label="Find review">
         <button disabled={shareBusy || savedSelectionBusy || result.searching || bestShots.busy || !findMatches.length} onClick={chooseBestShots}>{bestShots.busy ? "Choosing best shots…" : "Select best shots"}</button>
@@ -536,11 +542,11 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
         <button disabled={shareBusy || savedSelectionBusy} onClick={() => {if (currentOwnedPhotos.current?.selectionReady === false) return; selectionIntent.current++; picks.clearSelection(); replaceSavedChoice(new Set());}}>Clear</button>
         {onSave && picks.ids.size > 0 && <button disabled={readyOriginals !== picks.ids.size || shareBusy} onClick={() => onSave(reviewedPhotos)}>Save</button>}
         <button className="primary-action" disabled={readyOriginals !== picks.ids.size || shareBusy || savedSelectionBusy} onClick={() => chosenSaved.length ? void prepareSelection() : shareSelection()}>{preparingShare ? "Preparing…" : sharing ? "Sharing…" : "Share"}</button>
-        {onAlbumSaved && <button disabled={shareBusy || savedSelectionBusy || !!albumChosen.needsSave || !albumChosen.photos.length} onClick={addToAlbum}>Add to trip</button>}
+        {onAlbumSelection && <button disabled={shareBusy || savedSelectionBusy || readyOriginals !== picks.ids.size || selectedCount > 100} onClick={addToAlbum}>Add to trip</button>}
         {chosenSaved.length > 0 && onShareSaved && <details className="selection-more" onKeyDown={event => {if (event.key === "Escape") {event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();}}}>
           <summary>More</summary><div><button disabled={shareBusy || savedSelectionBusy} onClick={shareSaved}>{picks.ids.size ? "Share saved photos in Fotoro" : "Share in Fotoro"}</button></div>
         </details>}
-        {onAlbumSaved && albumChosen.needsSave > 0 && <small>Save {albumChosen.needsSave} chosen {albumChosen.needsSave === 1 ? "photo" : "photos"} to add to a trip.</small>}
+        {onAlbumSelection && selectedCount > 100 && <small>Choose up to 100 photos to add to a trip.</small>}
         {readyOriginals < picks.ids.size && <small>Reselect {picks.ids.size - readyOriginals} {picks.ids.size - readyOriginals === 1 ? "original" : "originals"} to Save or Share.</small>}
       </section>}
       {hasPhotos && recentBrowseActive(true, query) && <button className="local-filter" aria-label={last30 ? "Show all photos" : "Browse the last 30 days"} onClick={() => setLast30(current => !current)}>{last30 ? "Last 30 days ×" : "All photos"}</button>}

@@ -5,13 +5,47 @@ work; [product](product.md) owns the intended experience. Earlier measurements a
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
 
-Current browser distribution is PR 59 in production, Worker
-`00b834ed-9187-4f03-9404-574f7505cd33`. Native PR 59 is TestFlight
-0.1.0 (53), verified `VALID` and `IN_BETA_TESTING` in the existing internal
+Current browser distribution is PR 66 in production, Worker
+`2ca350dc-3ccb-4bca-97a6-decd3054264f`. Native PR 66 is TestFlight
+0.1.0 (59), verified `VALID` and `IN_BETA_TESTING` in the existing internal
 group. All 23 hosted contexts passed on qualified head
-`b2bc3c64f91b48d9e5925e02d8cb9acb23881c2e`; merge
-`1a2bb71db731300ff4297d8a446bb21436edea09` has the same tree. Migration 0010
-is applied. Physical installation and family acceptance remain unverified.
+`a9e0cd351c9cf8acbf0c62d37c6e1bba8ae99cfa`; merge
+`755fb7ec7b7ccec74561b6caffb41edf1ba23529` has the same tree. Migration 0010
+is applied. The physical iPhone was observed with build 56 installed; current
+physical Trip and scrolling acceptance remain unverified.
+
+## October 9 chosen photos to Trip — locally qualified
+
+An explicit Add to trip action carries the exact local and Saved selection through
+account access, saving and metadata hydration, then opens the Trip chooser.
+Contribution still requires choosing a Trip and confirming Add. Interrupted saves
+or hydration preserve the request for explicit Retry; Back, account changes and
+hidden-page cancellation cannot publish a late chooser. Choices are bounded to
+100 originals and checked by owner, manifest and digest, including committed
+sources not yet present in the browse catalog. Local Photos startup stays separate
+from account crypto.
+
+Browser original download is one explicit action in the photo viewer. Current
+preview, access and original verification still gate publication. Temporary Trip
+refresh failures preserve the opened reader; confirmed access or integrity failures
+clear it. The native Add picker retains selection and source revisions after
+failure, supports explicit retry and cancellation, and closes only after a
+successful addition in the current account and Trip. A failed membership check or
+inbox refresh preserves that verified context only for temporary failures; every
+retry rechecks current membership. Confirmed access loss closes the picker, and
+early cancellation releases the busy state.
+
+The full core/API/browser check passes. Browser tests pass 679 with one emitted
+startup-budget check deferred until build; all three startup checks then pass
+against the production build. Native qualification covers 556 passing cases and
+two simulator skips after correcting the temporary-failure expectation and
+rerunning that case and a fixture-server interruption. Actual simulator QA proves
+failure and cancellation preserve selection and successful retry closes the picker.
+Actual local browser QA selected a public test original, signed in
+to a disposable account, saved it, opened the chooser, explicitly contributed it,
+and downloaded a byte-identical original in one click. The viewer fits a 390×844
+viewport; browser warning/error logs are empty. This evidence does not establish
+physical-device frame pacing, Safari downloads or family-wide acceptance.
 
 ## October 9 direct Trip contribution and scoped Picks — locally qualified
 

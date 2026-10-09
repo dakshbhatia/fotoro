@@ -2,6 +2,8 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import { LocalTrial } from "./local/LocalTrial";
 import type { LocalPhoto } from "./local/resources";
 import type { OwnedPhotoSnapshot } from "./library/consumer-search";
+import {snapshotChosenTripSources} from "./exchange/chosen-trip-snapshot";
+import type {ChosenTripSelection} from "./CloudApp";
 import { ChosenSaveIntent } from "./exchange/chosen-save";
 import {IncomingShareIntent} from "./exchange/sharing";
 import {parseShareLink} from "@fotoro/contracts/share-links";
@@ -40,6 +42,7 @@ export default function App() {
     [saveIntent, setSaveIntent] = useState<ChosenSaveIntent | null>(null),
     [sharePhotos, setSharePhotos] = useState<Photo[] | null>(null);
   const [albumPhotos, setAlbumPhotos] = useState<Photo[] | null>(null);
+  const [chosenTrip, setChosenTrip] = useState<ChosenTripSelection | null>(null);
   const [photoChanges, setPhotoChanges] = useState<ConsumerPhotoChanges | null>(null);
   const pendingShare = useRef(incoming);
   const pendingAlbum = useRef(incomingAlbum);
@@ -65,7 +68,7 @@ export default function App() {
     return () => {window.removeEventListener("hashchange", changed); pendingShare.current?.cancel(); pendingAlbum.current?.cancel();};
   }, []);
   const pendingSave = useRef<ChosenSaveIntent | null>(null);
-  const cancelSave = useCallback(() => {pendingSave.current?.cancel(); pendingSave.current = null; setSaveIntent(null);}, []);
+  const cancelSave = useCallback(() => {pendingSave.current?.cancel(); pendingSave.current = null; setSaveIntent(null); setChosenTrip(null);}, []);
   const syncOpener = useRef<HTMLElement | null>(null);
   const photoOpener = useRef<HTMLElement | null>(null);
   const closeSavedPhoto = () => {
@@ -127,11 +130,20 @@ export default function App() {
             syncOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
             setSharePhotos([...photos]); setOpened(true); setCloud(true);
           }}
-          onAlbumSaved={photos => {
-            if (!ownedPhotos?.current() || !photos.length || photos.some(photo => !ownedPhotos.photos.includes(photo) || photo.grantId || photo.manifest.ownerAccountId !== ownedPhotos.accountId)) return;
+          onAlbumSelection={(local, saved) => {
+            if (!local.length && !saved.length || local.length + saved.length > 100 || local.some(photo => !(photo.file instanceof File) || photo.current?.() === false)) return;
+            if (saved.length && (!ownedPhotos?.current() || ownedPhotos.selectionReady === false || saved.some(photo => !ownedPhotos.photos.includes(photo) || photo.grantId || photo.manifest.ownerAccountId !== ownedPhotos.accountId))) return;
+            const sources = local.length && saved.length ? snapshotChosenTripSources(saved, ownedPhotos!.accountId) : [];
+            const request = local.length ? new ChosenSaveIntent(local, ownedPhotos?.current() ? ownedPhotos.token : undefined) : null;
+            if (request && request.snapshot.photos.length !== local.length) throw new Error("TRIP_SAVE_INCOMPLETE");
             cancelSave(); cancelIncoming(); cancelAlbumIncoming();
             syncOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-            setAlbumPhotos([...photos]); setOpened(true); setCloud(true);
+            if (request) {
+              pendingSave.current = request; setSaveIntent(request);
+              setChosenTrip({request, savedSources: sources}); setLocalPhotos([...request.snapshot.photos]);
+              setAlbumPhotos(null);
+            } else setAlbumPhotos([...saved]);
+            setOpened(true); setCloud(true);
           }}
           onCancelSave={cancelSave}
           onSave={photos => {
@@ -158,6 +170,7 @@ export default function App() {
             <CloudApp
               active={cloud}
               saveIntent={saveIntent}
+              chosenTrip={chosenTrip}
               incoming={incoming}
               incomingAlbum={incomingAlbum}
               onAlbumIncomingDone={cancelAlbumIncoming}
@@ -165,7 +178,7 @@ export default function App() {
               onIncomingDone={cancelIncoming}
               sharePhotos={sharePhotos}
               albumPhotos={albumPhotos}
-              onAlbumDone={() => setAlbumPhotos(null)}
+              onAlbumDone={() => {setAlbumPhotos(null); cancelSave();}}
               onShareDone={() => setSharePhotos(null)}
               localPhotos={localPhotos}
               onOwnedPhotos={setOwnedPhotos}
