@@ -1077,14 +1077,16 @@ final class NativeAlbumTests: XCTestCase {
       reopened.clear()
     }
   }
-  @MainActor func testRefreshFailureClearsOpenMediaAndKeys() async throws {
+  @MainActor func testDeniedInboxRefreshClearsOpenMediaAndKeys() async throws {
     try await withAlbum { _, server, model in
       try await model.refresh(); try await model.open(server.definition.albumId)
       let item = try XCTUnwrap(model.items.first), url = try await model.thumbnail(item)
       XCTAssertNotNil(url); let directory = try XCTUnwrap(model.directory)
-      server.failInbox = true
-      do { try await model.refresh(); XCTFail("Failed refresh reported success") } catch {}
+      server.inboxStatus = 403
+      do { try await model.refresh(); XCTFail("Denied refresh reported success") }
+      catch let error as FotoroError { XCTAssertEqual(error.statusCode, 403) }
       XCTAssertTrue(model.items.isEmpty); XCTAssertNil(model.opened); XCTAssertNil(model.directory)
+      XCTAssertNil(model.currentOpenedPhotoAccess)
       XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
     }
   }
@@ -1475,6 +1477,7 @@ private final class AlbumTestServer: @unchecked Sendable {
   private var extraObjects: [String: Data] = [:]
   private var owned: [String: SignedPayloadV1] = [:]
   var creationBodies: [Data] = []; var loseCreateResponse = false; var failInbox = false
+  var inboxStatus: Int?
   var extraInbox: [AlbumOverviewV1] = []
   var hideInboxAlbum = false
   var accessStatus: Int?
@@ -1608,7 +1611,11 @@ private final class AlbumTestServer: @unchecked Sendable {
       return (200, try Wire.encode(AlbumPhotoFactsReplyV1(version: 1, facts: sharedDetails[id])))
     }
     if path.hasSuffix("/capabilities") { return (200, try Wire.encode(AlbumCapabilitiesV1(version: 1, albumsVersion: 1, maxMembers: 12, maxPhotos: 1000, pageSize: 100))) }
-    if path == "/v1/albums" { if failInbox { throw URLError(.notConnectedToInternet) }; return (200, try Wire.encode(AlbumInboxV1(version: 1, albums: extraInbox + (hideInboxAlbum ? [] : [overview])))) }
+    if path == "/v1/albums" {
+      if let inboxStatus { return (inboxStatus, Data()) }
+      if failInbox { throw URLError(.notConnectedToInternet) }
+      return (200, try Wire.encode(AlbumInboxV1(version: 1, albums: extraInbox + (hideInboxAlbum ? [] : [overview]))))
+    }
     if path.hasSuffix("/accept") { accepted = true; var value = overview; value.membership = "accepted"; return (200, try Wire.encode(value)) }
     if path.hasPrefix("/v1/photos/"), path.hasSuffix("/manifest") {
       let id = String(path.split(separator: "/")[2])

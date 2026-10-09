@@ -37,8 +37,11 @@ early cancellation releases the busy state.
 
 The full core/API/browser check passes. Browser tests pass 679 with one emitted
 startup-budget check deferred until build; all three startup checks then pass
-against the production build. Native tests pass 553 with two simulator skips and
-zero failures. Actual local browser QA selected a public test original, signed in
+against the production build. Native qualification covers 556 passing cases and
+two simulator skips after correcting the temporary-failure expectation and
+rerunning that case and a fixture-server interruption. Actual simulator QA proves
+failure and cancellation preserve selection and successful retry closes the picker.
+Actual local browser QA selected a public test original, signed in
 to a disposable account, saved it, opened the chooser, explicitly contributed it,
 and downloaded a byte-identical original in one click. The viewer fits a 390×844
 viewport; browser warning/error logs are empty. This evidence does not establish
