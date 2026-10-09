@@ -191,7 +191,10 @@ final class CameraMediaTests: XCTestCase {
         key: Data(b64: XCTUnwrap(photo.metadata.representationKeys[representation.binding.representationId])), representation: representation)
       XCTAssertEqual(decrypted, bytes)
       let directory = root.appendingPathComponent("exports")
-      let files = try CameraMedia.exportOriginals(decrypted, metadata: photo.metadata, directory: directory)
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      let original = directory.appendingPathComponent("verified-original")
+      try decrypted.write(to: original)
+      let files = try await CameraMedia.exportOriginalFile(original, metadata: photo.metadata)
       XCTAssertEqual(files.count, type == CameraMedia.liveType ? 2 : 1)
       if type == CameraMedia.liveType {
         XCTAssertEqual(try Data(contentsOf: files[0]), try resource("neutral-a", "png"))

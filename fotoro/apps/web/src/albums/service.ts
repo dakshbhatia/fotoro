@@ -124,6 +124,8 @@ export class AlbumAccess {
   private pageCursors = new Set<string>();
   private nextPhotoCursor?: string;
   private pageLoading = false;
+  private accessRunning?: Promise<AlbumOverviewV1>;
+  private accessQueued?: Promise<AlbumOverviewV1>;
   private pendingFacts = new Map<string, {signature: string; signed: SignedPayloadV1}>();
   private constructor(readonly overview: AlbumOverviewV1, opened: ReturnType<typeof openAlbumDefinition>, readonly scope: ShareScope, readonly owner: AccountCardV1) {
     this.key = opened.albumKey; this.title = opened.title; this.definition = opened.definition;
@@ -152,6 +154,32 @@ export class AlbumAccess {
     await this.trusted(); return result;
   }
   async assertAccess(diagnostic?: DiagnosticContext) {
+    this.check();
+    // Share only a check that has not started. A fence after a media read must
+    // never reuse an access request that began before that read completed.
+    if (!this.accessQueued) {
+      const preceding = this.accessRunning;
+      const queued = Promise.resolve().then(async () => {
+        if (preceding) await preceding;
+        this.check();
+        if (this.accessQueued === queued) this.accessQueued = undefined;
+        const running = this.assertAccessRequest(diagnostic);
+        this.accessRunning = running;
+        try {return await running;}
+        finally {if (this.accessRunning === running) this.accessRunning = undefined;}
+      });
+      this.accessQueued = queued;
+      void queued.then(() => {
+        if (this.accessQueued === queued) this.accessQueued = undefined;
+      }, () => {
+        if (this.accessQueued === queued) this.accessQueued = undefined;
+      });
+    }
+    const value = await this.accessQueued;
+    this.check();
+    return value;
+  }
+  private async assertAccessRequest(diagnostic?: DiagnosticContext) {
     const request = diagnostic ? scopedApi(diagnostic) : api;
     try {
       this.check(); await this.trusted();

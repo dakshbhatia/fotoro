@@ -733,7 +733,14 @@ export default function CloudApp({
   const bestShots = useFindBestShots(findMatches, normalizeSearch(query) && !received ? JSON.stringify([query, searchResult.scope, searchResult.meaning?.id, [...peopleFind.filter.ids].sort(), peopleFind.filter.mode]) : "", ownedSnapshot,
     () => activeRef.current && !!ownedSnapshot?.current(), active && unlocked && !received);
   const filteredSearchResult = bestShots.active ? shortlistSearchResult(searchResult, bestShots.recommendations) : searchResult;
-  const shown = normalizeSearch(query) ? filteredSearchResult.photoIds.flatMap(id => {const photo = searchable.find(photo => photo.manifest.photoId === id); return photo ? [photo] : [];}) : searchable.filter(photo => permitted.has(photo.manifest.photoId));
+  const searchableById = useMemo(() => {
+    const byId = new Map<string, Photo>();
+    for (const photo of searchable) if (!byId.has(photo.manifest.photoId)) byId.set(photo.manifest.photoId, photo);
+    return byId;
+  }, [searchable]);
+  const shown = useMemo(() => normalizeSearch(query)
+    ? filteredSearchResult.photoIds.flatMap(id => {const photo = searchableById.get(id); return photo ? [photo] : [];})
+    : searchable.filter(photo => permitted.has(photo.manifest.photoId)), [query, filteredSearchResult, searchableById, searchable, permitted]);
   const selectionInput = useMemo(() => ({shown, query, filter: peopleFind.filter, token: ownedSnapshot?.token, received}), [shown, query, peopleFind.filter, ownedSnapshot?.token, received]);
   const latestSelectionInput = useRef(selectionInput); latestSelectionInput.current = selectionInput;
   const applyPeople = async (updates: PeopleUpdate[]) => {

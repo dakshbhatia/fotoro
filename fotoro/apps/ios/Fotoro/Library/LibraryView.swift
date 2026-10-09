@@ -403,8 +403,7 @@ struct LibraryView: View {
           urls.append(original)
           try Task.checkCancellation()
           if photo.metadata.mediaType == CameraMedia.liveType {
-            let exported = try CameraMedia.exportOriginals(try Data(contentsOf: original), metadata: photo.metadata,
-              directory: original.deletingLastPathComponent())
+            let exported = try await CameraMedia.exportOriginalFile(original, metadata: photo.metadata)
             urls.removeLast()
             urls.append(contentsOf: exported)
           }

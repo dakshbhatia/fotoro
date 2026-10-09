@@ -1821,16 +1821,7 @@ struct RecentPhotosView: View {
             return try await services.consumerShareOriginal(photo)
           }, expandSaved: { url, photo in
             if photo.metadata.mediaType == CameraMedia.liveType {
-              let metadata = photo.metadata, directory = url.deletingLastPathComponent()
-              let work = Task.detached(priority: .userInitiated) {
-                try Task.checkCancellation()
-                let bytes = try Data(contentsOf: url)
-                try Task.checkCancellation()
-                let urls = try CameraMedia.exportOriginals(bytes, metadata: metadata, directory: directory)
-                try Task.checkCancellation()
-                return urls
-              }
-              return try await withTaskCancellationHandler { try await work.value } onCancel: { work.cancel() }
+              return try await CameraMedia.exportOriginalFile(url, metadata: photo.metadata)
             }
             return [url]
           }, removeDevice: removeShareFiles, removeSaved: ConsumerShareExports.remove)

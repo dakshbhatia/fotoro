@@ -7,8 +7,10 @@ import XCTest
 final class RecentPhotosTests: XCTestCase {
   @MainActor func testThumbnailCacheReusesOnlyMatchingPreviewAndRejectsWithdrawnAccessAndOldCallbacks() {
     var permission = PHAuthorizationStatus.authorized
-    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in [] })
     let source = RecentPhotoSource(id: "photo", revision: "current")
+    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in [] },
+      sourceRevisions: { _ in [source.id: source.revision] })
+    defer { store.pauseAnalysis() }
     let target = CGSize(width: 384, height: 384)
     let image = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).image { context in
       UIColor.red.setFill(); context.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
@@ -18,7 +20,7 @@ final class RecentPhotosTests: XCTestCase {
     XCTAssertTrue(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true) === image)
     XCTAssertNil(store.cachedThumbnail(for: source, targetSize: CGSize(width: 512, height: 512), networkAllowed: true))
     XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: false))
-    XCTAssertNil(store.cachedThumbnail(for: RecentPhotoSource(id: "photo", revision: "edited"), targetSize: target, networkAllowed: true))
+    XCTAssertNil(store.cachedThumbnail(for: RecentPhotoSource(id: source.id, revision: "edited"), targetSize: target, networkAllowed: true))
     permission = .denied
     XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true))
     permission = .authorized
@@ -32,9 +34,11 @@ final class RecentPhotosTests: XCTestCase {
     let limited = store.thumbnailGeneration
     store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: limited)
     store.restoreAccess()
-    defer { store.pauseAnalysis() }
-    store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: limited)
-    XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true), "A Photos refresh must clear thumbnails and reject its old callbacks")
+    XCTAssertNotEqual(store.thumbnailGeneration, limited)
+    let late = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).image { _ in }
+    store.cacheThumbnail(late, for: source, targetSize: target, networkAllowed: true, generation: limited)
+    XCTAssertTrue(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true) === image,
+      "An unchanged refresh must retain its warm thumbnail and reject old callbacks")
   }
   @MainActor func testThumbnailCacheDoesNotRetainViewerSizedImages() {
     let store = RecentPhotosStore(authorization: { .authorized }, readPhotos: { _ in [] })
@@ -43,6 +47,57 @@ final class RecentPhotosTests: XCTestCase {
     let target = CGSize(width: 1600, height: 1600)
     store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: store.thumbnailGeneration)
     XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true))
+  }
+  @MainActor func testThumbnailRefreshRetainsUnchangedButEvictsChangedAndRemovedSources() {
+    let source = RecentPhotoSource(id: "photo", revision: "current")
+    var revision: String? = source.revision
+    let store = RecentPhotosStore(authorization: { .authorized }, readPhotos: { _ in [] },
+      sourceRevisions: { ids in revision.map { value in Dictionary(uniqueKeysWithValues: ids.map { ($0, value) }) } ?? [:] })
+    store.restoreAccess()
+    defer { store.pauseAnalysis() }
+    let target = CGSize(width: 384, height: 384)
+    let image = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).image { _ in }
+    func warm() {
+      store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: store.thumbnailGeneration)
+      XCTAssertTrue(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true) === image)
+    }
+    warm()
+    store.refresh()
+    XCTAssertTrue(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true) === image)
+    for nextRevision in ["edited", nil] as [String?] {
+      let generation = store.thumbnailGeneration
+      revision = nextRevision
+      store.refresh()
+      XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true))
+      store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: generation)
+      XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true))
+      revision = source.revision
+      store.refresh()
+      XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true), "Withdrawn images must not return when their source becomes readable again")
+      warm()
+    }
+  }
+  @MainActor func testThumbnailRefreshRejectsAccessChangedDuringRevisionValidation() {
+    var permission = PHAuthorizationStatus.authorized
+    var withdrawDuringRead = false
+    let source = RecentPhotoSource(id: "photo", revision: "current")
+    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in [] },
+      sourceRevisions: { _ in
+        if withdrawDuringRead { permission = .limited }
+        return [source.id: source.revision]
+      })
+    defer { store.pauseAnalysis() }
+    let target = CGSize(width: 384, height: 384)
+    let image = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).image { _ in }
+    let generation = store.thumbnailGeneration
+    store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: generation)
+    withdrawDuringRead = true
+    store.restoreAccess()
+    XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true))
+    permission = .authorized
+    store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: generation)
+    XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true),
+      "A permission transition during refresh must evict retained images and fence old callbacks")
   }
   @MainActor func testUnavailableSavedPreviewCanRetryWithoutUploadingOrReplacingTheOriginal() async throws {
     let services = try await previewServices()

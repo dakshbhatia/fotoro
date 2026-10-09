@@ -301,3 +301,52 @@ test("overlapping album page requests cannot corrupt the active traversal", () =
   assert.equal(first.photos.length, 1); assert.equal(second.photos.length, 1); assert.equal(second.hasMore, false);
   assert.ok(first.photos[0].metadataKey.some(byte => byte !== 0)); access.dispose();
 }));
+
+test("concurrent access fences share a queued request, but later fences never join an older request", () => scoped(async () => {
+  const data = await fixture(), access = await AlbumAccess.open(overview(data), {});
+  let requests = 0, releaseFirst!: () => void, firstStarted!: () => void;
+  const started = new Promise<void>(resolve => {firstStarted = resolve;});
+  const released = new Promise<void>(resolve => {releaseFirst = resolve;});
+  globalThis.fetch = async path => {
+    assert.ok(String(path).endsWith("/access"));
+    if (++requests === 1) {firstStarted(); await released;}
+    return response(overview(data));
+  };
+  const first = Array.from({length: 12}, () => access.assertAccess());
+  await started;
+  const next = Array.from({length: 12}, () => access.assertAccess());
+  assert.equal(requests, 1, "only one access request may run at a time");
+  releaseFirst();
+  await Promise.all([...first, ...next]);
+  assert.equal(requests, 2, "the later cohort requires its own access request");
+  access.dispose();
+}));
+
+test("a fence queued behind an in-flight check detects revocation instead of reusing its success", () => scoped(async () => {
+  const data = await fixture(), access = await AlbumAccess.open(overview(data), {});
+  let requests = 0, releaseFirst!: () => void, firstStarted!: () => void;
+  const started = new Promise<void>(resolve => {firstStarted = resolve;});
+  const released = new Promise<void>(resolve => {releaseFirst = resolve;});
+  globalThis.fetch = async () => {
+    if (++requests === 1) {firstStarted(); await released; return response(overview(data));}
+    return response({code: "ALBUM_INACTIVE"}, 403);
+  };
+  const first = access.assertAccess(); await started;
+  const next = access.assertAccess(), rejected = assert.rejects(next, /ALBUM_INACTIVE/);
+  releaseFirst(); await first; await rejected;
+  assert.equal(requests, 2); assert.equal(access.signal.aborted, true);
+}));
+
+test("disposal while an access check runs prevents both cohorts from publishing and skips queued network work", () => scoped(async () => {
+  const data = await fixture(), access = await AlbumAccess.open(overview(data), {});
+  let requests = 0, release!: () => void, requestStarted!: () => void;
+  const started = new Promise<void>(resolve => {requestStarted = resolve;});
+  const released = new Promise<void>(resolve => {release = resolve;});
+  globalThis.fetch = async () => {requests++; requestStarted(); await released; return response(overview(data));};
+  const first = access.assertAccess(); await started;
+  const next = access.assertAccess();
+  const results = Promise.allSettled([first, next]);
+  access.dispose(); release();
+  assert.ok((await results).every(result => result.status === "rejected"));
+  assert.equal(requests, 1);
+}));
