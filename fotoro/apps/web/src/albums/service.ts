@@ -9,7 +9,7 @@ import {validateWire} from "@fotoro/contracts/validate";
 import {ALBUM_DEFINITION_KIND, ALBUM_PHOTO_KIND, readAlbumSignedBody, validateAlbumPhoto, validateAlbumDefinition, validateAlbumInbox, validateAlbumDetail, validateAlbumOverview, validateAlbumTitle, validateAlbumAppendResult, validateAlbumAppend, type AlbumAppendV1, type AlbumOverviewV1, type AlbumDetailV1} from "@fotoro/contracts/albums";
 import {makeAlbumDefinition, openAlbumDefinition, makeAlbumAction, makeAlbumPhoto, openAlbumPhoto, verifyAlbumPhoto} from "@fotoro/crypto/albums";
 import {ready, verifyPayload, unb64, utf8, wrapKey, unwrapKey} from "@fotoro/crypto";
-import {api, scopedApi} from "../exchange/api";
+import {ApiTransportError, api, scopedApi} from "../exchange/api";
 import {trustedCard, type ShareScope} from "../exchange/share-service";
 import {sameIdentity} from "../exchange/sharing";
 import {requireVault, type UnlockedVault} from "../vault/vault";
@@ -20,6 +20,10 @@ import {savedOriginalSelectionCurrent} from "../library/system-share";
 import {AlbumRasterCache} from "./raster-cache";
 import {savedRasterSource} from "../library/saved-raster";
 import {cameraOriginalFiles} from "../media/camera-original";
+function transientAlbumRead(error: unknown) {
+  return error instanceof ApiTransportError || error instanceof ApiError &&
+    (error.status === 408 || error.status === 429 || error.status !== undefined && error.status >= 500 && error.status <= 599);
+}
 const ordered = (value: unknown): unknown => Array.isArray(value) ? value.map(ordered)
   : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, child]) => [key, ordered(child)])) : value;
 
@@ -184,14 +188,14 @@ export class AlbumAccess {
     this.check();
     return value;
   }
-  private async assertAccessRequest(diagnostic?: DiagnosticContext) {
+  private async assertAccessRequest(diagnostic?: DiagnosticContext, preserveTransientFailure = false) {
     const request = diagnostic ? scopedApi(diagnostic) : api;
     try {
       this.check(); await this.trusted();
       const value = validateAlbumOverview(await request("/v1/albums/" + this.albumId + "/access", undefined, undefined, "GET", this.scope.signal)); this.check();
       if (!albumReadable(value, this.session.accountId, this.identity)) throw new Error("ALBUM_ACCESS_ENDED");
       await this.trusted(); return value;
-    } catch (error) {this.dispose(); throw error;}
+    } catch (error) {if (!preserveTransientFailure || !transientAlbumRead(error)) this.dispose(); else this.check(); throw error;}
   }
   accept() {return diagnose("album", diagnostic => this.acceptAction(diagnostic), "accept");}
   private async acceptAction(diagnostic: DiagnosticContext) {
@@ -211,20 +215,21 @@ export class AlbumAccess {
     if (albumDefinitionIdentity(result) !== this.identity || result.endedAt === null) throw new Error("ALBUM_BINDING_MISMATCH");
     this.dispose(); return result;
   }
-  loadPhotoPage(cursor?: string): Promise<AlbumPhotoPage> {return diagnose("album", diagnostic => this.loadPhotoPageAction(cursor, diagnostic), "refresh");}
-  private async loadPhotoPageAction(cursor: string | undefined, diagnostic: DiagnosticContext): Promise<AlbumPhotoPage> {
+  loadPhotoPage(cursor?: string, options: {preserveTransientFailure?: boolean} = {}): Promise<AlbumPhotoPage> {return diagnose("album", diagnostic => this.loadPhotoPageAction(cursor, diagnostic, options.preserveTransientFailure === true), "refresh");}
+  private async loadPhotoPageAction(cursor: string | undefined, diagnostic: DiagnosticContext, preserveTransientFailure: boolean): Promise<AlbumPhotoPage> {
     // One traversal at a time: callers publish each page before requesting its continuation.
     if (this.pageLoading) throw new Error("ALBUM_PAGE_LOADING");
     this.pageLoading = true;
     const loaded: Photo[] = [], keys: Uint8Array[] = [];
     try {
       this.check();
-      if (cursor === undefined) {this.pageIds.clear(); this.pageCursors.clear(); this.nextPhotoCursor = undefined;}
-      else if (cursor !== this.nextPhotoCursor || this.pageCursors.has(cursor)) throw new Error("ALBUM_PAGE_MISMATCH");
+      if (cursor !== undefined && (cursor !== this.nextPhotoCursor || this.pageCursors.has(cursor))) throw new Error("ALBUM_PAGE_MISMATCH");
       const page = await this.detail(cursor, diagnostic);
-      if (cursor !== undefined) this.pageCursors.add(cursor);
-      if ((page.hasMore && (!page.entries.length || !page.nextCursor || this.pageCursors.has(page.nextCursor))) || this.pageIds.size + page.entries.length > Math.min(page.photoCount, 1000)) throw new Error("ALBUM_PAGE_MISMATCH");
-      const ids = new Set(this.pageIds);
+      const pageCursors = cursor === undefined ? new Set<string>() : new Set(this.pageCursors);
+      const pageIds = cursor === undefined ? new Set<string>() : this.pageIds;
+      if (cursor !== undefined) pageCursors.add(cursor);
+      if ((page.hasMore && (!page.entries.length || !page.nextCursor || pageCursors.has(page.nextCursor))) || pageIds.size + page.entries.length > Math.min(page.photoCount, 1000)) throw new Error("ALBUM_PAGE_MISMATCH");
+      const ids = new Set(pageIds);
       // Verify the complete bounded page before starting any encrypted metadata reads.
       const verified = page.entries.map((entry, n) => {
         const signedManifest = page.manifests[n];
@@ -236,30 +241,30 @@ export class AlbumAccess {
       });
       // Metadata is one bounded publication unit. Membership/account/trust are fenced
       // around the page; original and derivative media retain their per-read fences.
-      await this.assertAccess(diagnostic);
+      await (preserveTransientFailure ? this.assertAccessRequest(diagnostic, true) : this.assertAccess(diagnostic));
       const signal = this.scope.signal ? AbortSignal.any([this.signal, this.scope.signal]) : this.signal;
-      let next = 0;
+      let next = 0, stopped = false;
       const workers = Array.from({length: Math.min(4, verified.length)}, async () => {
         try {
           for (;;) {
-            this.check(); const n = next++; if (n >= verified.length) return;
+            this.check(); if (stopped) return; const n = next++; if (n >= verified.length) return;
             const item = verified[n];
             const photo = await readPhoto(item.manifest, item.key, undefined, signal, diagnostic);
             loaded[n] = photo; this.check();
           }
-        } catch (error) {this.dispose(); throw error;}
+        } catch (error) {stopped = true; if (!preserveTransientFailure || !transientAlbumRead(error)) this.dispose(); throw error;}
       });
       const results = await Promise.allSettled(workers);
-      const failed = results.find(result => result.status === "rejected");
+      const failed = results.find(result => result.status === "rejected" && !transientAlbumRead(result.reason)) ?? results.find(result => result.status === "rejected");
       if (failed?.status === "rejected") throw failed.reason;
-      await this.assertAccess(diagnostic); this.check();
+      await (preserveTransientFailure ? this.assertAccessRequest(diagnostic, true) : this.assertAccess(diagnostic)); this.check();
       for (let n = 0; n < loaded.length; n++) {
         const photo = loaded[n], item = verified[n];
         this.photos.add(photo); this.photoSources.set(photo, {entry: item.entry, manifest: item.signedManifest});
       }
-      this.pageIds = ids; this.nextPhotoCursor = page.nextCursor ?? undefined;
+      this.pageIds = ids; this.pageCursors = pageCursors; this.nextPhotoCursor = page.nextCursor ?? undefined;
       return {photos: loaded, nextCursor: this.nextPhotoCursor, hasMore: page.hasMore, photoCount: page.photoCount};
-    } catch (error) {for (const key of keys) key.fill(0); for (const photo of loaded) photo?.metadataKey.fill(0); this.dispose(); throw error;}
+    } catch (error) {for (const key of keys) key.fill(0); for (const photo of loaded) photo?.metadataKey.fill(0); if (!preserveTransientFailure || !transientAlbumRead(error)) this.dispose(); else this.check(); throw error;}
     finally {for (const key of keys) this.loadingKeys.delete(key); this.pageLoading = false;}
   }
   private factsSource(photo: Photo) {
@@ -268,8 +273,9 @@ export class AlbumAccess {
     return {signedDefinition: this.overview.definition, trustedOwner: this.owner, ...source,
       originalSha256: photo.metadata.originalSha256, albumKey: this.key};
   }
-  async loadFacts(): Promise<{supported: boolean; facts: Map<string, AlbumPhotoFactsContentV1>; unmatched: number}> {
-    await this.assertAccess();
+  async loadFacts(options: {preserveTransientFailure?: boolean} = {}): Promise<{supported: boolean; facts: Map<string, AlbumPhotoFactsContentV1>; unmatched: number}> {
+    const assertAccess = () => options.preserveTransientFailure ? this.assertAccessRequest(undefined, true) : this.assertAccess();
+    await assertAccess();
     const facts = new Map<string, AlbumPhotoFactsContentV1>(), cursors = new Set<string>(), seen = new Set<string>(), photos = new Map([...this.photos].map(photo => [photo.manifest.photoId, photo]));
     let unmatched = 0;
     try {
@@ -291,10 +297,11 @@ export class AlbumAccess {
         if (!page.nextCursor || cursors.has(page.nextCursor) || cursors.size >= 9 || seen.size >= 1000) throw new Error("ALBUM_FACTS_PAGE_MISMATCH");
         cursor = page.nextCursor; cursors.add(cursor);
       } while (true);
-      await this.assertAccess(); return {supported: true, facts, unmatched};
+      await assertAccess(); return {supported: true, facts, unmatched};
     } catch (error) {
+      if (error instanceof ApiError && (error.status === 401 || error.status === 403)) this.dispose();
       this.check();
-      if (error instanceof ApiError && ["NOT_FOUND", "HTTP_404", "HTTP_501"].includes(error.code)) {await this.assertAccess(); return {supported: false, facts: new Map(), unmatched: 0};}
+      if (error instanceof ApiError && ["NOT_FOUND", "HTTP_404", "HTTP_501"].includes(error.code)) {await assertAccess(); return {supported: false, facts: new Map(), unmatched: 0};}
       throw error;
     }
   }

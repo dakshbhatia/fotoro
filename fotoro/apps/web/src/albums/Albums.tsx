@@ -1,5 +1,6 @@
 import {albumDetailsSelection} from "./detail-selection";
 import {AlbumActionQueue, bindAlbumAction} from "./action-queue";
+import {loadAlbumSearchPages} from "./search-loading";
 import {VirtualAlbumGrid} from "./VirtualAlbumGrid";
 import {TripDownloadLease} from "./download-lease";
 import {cleanupTripDownloads, prepareTripDownload, type TripDownloadProgress} from "./download";
@@ -86,7 +87,11 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   const [ownerReview, setOwnerReview] = useState<Extract<AlbumOwnerEntry, {kind: "review"}> | null>(null);
   const [access, setAccess] = useState<AlbumAccess | null>(null), [photos, setPhotos] = useState<Photo[]>([]), [preview, setPreview] = useState<Photo | null>(null);
   const [page, setPage] = useState<{hasMore: boolean; nextCursor?: string; photoCount: number}>({hasMore: false, photoCount: 0});
+  const pageRef = useRef(page);
+  const publishPage = (next: typeof page) => {pageRef.current = next; setPage(next);};
   const [query, setQuery] = useState("");
+  const [peopleOpen, setPeopleOpen] = useState(false), [datesOpen, setDatesOpen] = useState(false);
+  const [searchFailed, setSearchFailed] = useState(false), [searchRetry, setSearchRetry] = useState(0);
   const [facts, setFacts] = useState(new Map<string, AlbumPhotoFactsContentV1>()), [factsState, setFactsState] = useState<"loading" | "ready" | "legacy" | "error" | "partial">("loading");
   const [peopleFilter, setPeopleFilter] = useState(emptyPeopleFilter), [from, setFrom] = useState(""), [through, setThrough] = useState(""), [groupCopies, setGroupCopies] = useState(true);
   const [detailDraft, setDetailDraft] = useState<{photo: Photo; source: OwnedAlbumDetails; revision: number; people: string[]; location: boolean; existing: boolean; unavailable: number} | null>(null);
@@ -105,7 +110,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   };
   const clearDownload = () => {preparedDownload.current?.controller.abort(); if (preparedDownload.current) preparedDownload.current.files.length = 0; preparedDownload.current = null; setDownloadReady(false);};
   const scope: ShareScope = {signal: controller.signal, current: () => alive.current && sameVault(session) && (!incoming || incoming.current(session))};
-  const closeAlbum = () => {clearTripDownload(); clearDownload(); const previous = accessRef.current; accessRef.current = null; previous?.dispose(); setAccess(null); setPhotos([]); setPage({hasMore: false, photoCount: 0}); setPreview(null); setQuery(""); setConfirmEnd(false); setFacts(new Map()); setFactsState("loading"); setPeopleFilter(emptyPeopleFilter()); setFrom(""); setThrough(""); setDetailDraft(null);};
+  const closeAlbum = () => {clearTripDownload(); clearDownload(); const previous = accessRef.current; accessRef.current = null; previous?.dispose(); setAccess(null); setPhotos([]); publishPage({hasMore: false, photoCount: 0}); setPreview(null); setQuery(""); setPeopleOpen(false); setDatesOpen(false); setSearchFailed(false); setConfirmEnd(false); setFacts(new Map()); setFactsState("loading"); setPeopleFilter(emptyPeopleFilter()); setFrom(""); setThrough(""); setDetailDraft(null);};
   const close = () => {alive.current = false; controller.abort(); closeAlbum(); onClose();};
   useDialogFocus(panel, () => preview ? setPreview(null) : close());
   useEffect(() => {setDetailDraft(null); if (preview) previewPanel.current?.focus({preventScroll: true});}, [preview]);
@@ -146,22 +151,22 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     if (scope.current?.()) setTitles(decrypted);
     return list;
   }
-  async function readFacts(opened: AlbumAccess, background = false) {
+  async function readFacts(opened: AlbumAccess, background = false, searching = false) {
     if (!scope.current?.() || accessRef.current !== opened) return;
     if (!background) {setFacts(new Map()); setFactsState("loading");}
     try {
-      const result = await opened.loadFacts();
+      const result = await opened.loadFacts({preserveTransientFailure: searching});
       if (scope.current?.() && accessRef.current === opened && opened.current()) {setFacts(result.facts); setFactsState(!result.supported ? "legacy" : result.unmatched ? "partial" : "ready");}
     } catch {
       if (scope.current?.() && accessRef.current === opened) {setFacts(new Map()); setFactsState("error"); if (!opened.current()) closeAlbum();}
     }
   }
-  async function loadPage(opened: AlbumAccess, cursor?: string) {
-    const loaded = await opened.loadPhotoPage(cursor);
+  async function loadPage(opened: AlbumAccess, cursor?: string, searching = false) {
+    const loaded = await opened.loadPhotoPage(cursor, {preserveTransientFailure: searching});
     if (!scope.current?.() || accessRef.current !== opened || !opened.current()) return;
     setPhotos(previous => cursor ? [...previous, ...loaded.photos] : loaded.photos);
-    setPage({hasMore: loaded.hasMore, nextCursor: loaded.nextCursor, photoCount: loaded.photoCount});
-    await readFacts(opened, !!cursor);
+    publishPage({hasMore: loaded.hasMore, nextCursor: loaded.nextCursor, photoCount: loaded.photoCount});
+    await readFacts(opened, !!cursor, searching);
   }
   async function open(overview: AlbumOverviewV1) {
     closeAlbum(); const opened = await AlbumAccess.open(overview, scope);
@@ -189,7 +194,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
       clearDownload(); setDetailDraft(null);
       const retained = previous.adoptRefresh(opened, loaded); adopted = true;
       setPhotos(retained);
-      setPage({hasMore: next.hasMore, nextCursor: next.nextCursor, photoCount: next.photoCount});
+      publishPage({hasMore: next.hasMore, nextCursor: next.nextCursor, photoCount: next.photoCount});
       setPreview(current => current ? retained.find(photo => photo.manifest.photoId === current.manifest.photoId) ?? null : null);
       await readFacts(previous, true);
     } catch (failure) {
@@ -225,6 +230,20 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     const timer = setInterval(refresh, 15000); window.addEventListener("focus", refresh);
     return () => {clearInterval(timer); window.removeEventListener("focus", refresh); access.signal.removeEventListener("abort", ended);};
   }, [access, photos.length, page.photoCount, page.hasMore]);
+  const filtering = !!(query.trim() || peopleFilter.ids.size || from || through);
+  const searching = filtering || peopleOpen || datesOpen;
+  useEffect(() => {
+    if (!access || access.overview.membership !== "accepted" || !searching || !page.hasMore) return;
+    let cancelled = false;
+    const current = () => !cancelled && !!scope.current?.() && accessRef.current === access && access.current();
+    setSearchFailed(false);
+    // Coalesce typing/opening filters. Changing terms reuses the same metadata.
+    const timer = window.setTimeout(() => {
+      void loadAlbumSearchPages({queue: actions, current, page: () => pageRef.current, load: cursor => loadPage(access, cursor, true)})
+        .catch(() => {if (current()) setSearchFailed(true);});
+    }, 200);
+    return () => {cancelled = true; window.clearTimeout(timer);};
+  }, [access, searching, page.hasMore, searchRetry]);
   const contributor = (id: string, roster = access?.definition.members.map(member => member.card.accountId) ?? cards.map(card => card.accountId)) => albumMemberLabel(id, session.accountId, names, roster);
   const shown = useMemo(() => searchAlbumPhotos(photos, query, () => !!access?.current(), Date.now(), {facts, people: peopleFilter, from, through}), [photos, query, access, facts, peopleFilter, from, through]);
   const groups = useMemo(() => albumPhotoGroups(shown, groupCopies, () => !!access?.current()), [shown, groupCopies, access]);
@@ -370,22 +389,23 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
               <progress aria-label="Trip download progress" max={tripProgress.total || 1} value={tripProgress.total ? tripProgress.completed : undefined} />
               <button onClick={() => {clearTripDownload(); setNotice("Trip download cancelled.");}}>Cancel download</button>
             </div>}
-            <div className="album-filters"><PeopleFilter people={reviewed} value={peopleFilter} onChange={setPeopleFilter} disabled={busy} />
-              <details><summary>Time and copies</summary><div className="album-range"><label>Captured from<input type="date" value={from} onChange={event => setFrom(event.target.value)} /></label><label>Captured through<input type="date" value={through} onChange={event => setThrough(event.target.value)} /></label>
+            <div className="album-filters"><PeopleFilter people={reviewed} value={peopleFilter} onChange={setPeopleFilter} onOpenChange={setPeopleOpen} emptyMessage={page.hasMore || factsState === "loading" ? "Checking the trip for shared people…" : factsState === "error" ? "Shared people could not load. Retry details below." : factsState === "legacy" ? "Shared people are unavailable on this server." : "No reviewed people have been shared in this trip."} disabled={busy} />
+              <details onToggle={event => setDatesOpen(event.currentTarget.open)}><summary>Time and copies</summary><div className="album-range"><label>Captured from<input type="date" value={from} onChange={event => setFrom(event.target.value)} /></label><label>Captured through<input type="date" value={through} onChange={event => setThrough(event.target.value)} /></label>
                 {(from || through) && <button onClick={() => {setFrom(""); setThrough("");}}>Clear dates</button>}<label><input type="checkbox" checked={groupCopies} onChange={event => setGroupCopies(event.target.checked)} />Group exact copies</label></div></details></div>
             {factsState === "loading" && <p className="hint" role="status">Loading shared details…</p>}
             {factsState === "legacy" && <p className="hint" role="status">This server supports filenames and capture dates. Shared details are unavailable.</p>}
-            {factsState === "error" && <p className="hint" role="status">Shared details could not load. Filename and date search still work. <button disabled={busy} onClick={() => void action(() => readFacts(access))}>Retry details</button></p>}
+            {factsState === "error" && <p className="hint" role="status">Shared details could not load. Filename and date search still work. <button disabled={busy} onClick={() => void action(() => readFacts(access, false, searching))}>Retry details</button></p>}
             {factsState === "partial" && !page.hasMore && <p className="hint" role="status">New photo details are available. <button disabled={busy} onClick={() => void refresh()}>Refresh photos</button></p>}
             {busy && !photos.length && <p className="hint" role="status">Loading photos…</p>}
-            {(query || peopleFilter.ids.size > 0 || from || through) && <p role="status">{shown.length} matching {shown.length === 1 ? "photo" : "photos"}</p>}
+            {filtering && <p role="status">{shown.length} matching {shown.length === 1 ? "photo" : "photos"}{page.hasMore || ["loading", "error", "partial"].includes(factsState) ? " so far" : ""}</p>}
+            {searching && page.hasMore && <div className="hint" aria-label="Trip search coverage"><p role="status">{searchFailed ? "Search is incomplete. " : "Searching the whole trip… "}{photos.length} of {page.photoCount} photos checked.</p>{searchFailed && <button disabled={busy} onClick={() => setSearchRetry(value => value + 1)}>Retry search</button>}</div>}
             {groups.length < shown.length && <p className="hint">{groups.length} exact originals · {shown.length} contributed copies. All copies are kept.</p>}
             <TripPicks access={access} photos={shown} hasMore={page.hasMore} disabled={busy} renderPhoto={photo => <AlbumImage access={access} photo={photo} onOpen={() => setPreview(photo)} />} />
             <VirtualAlbumGrid groups={groups} resetKey={JSON.stringify([query, [...peopleFilter.ids].sort(), peopleFilter.mode, from, through, groupCopies])}>{group => {const photo = group.photo, shared = sharedAlbumDetails(photo, facts), date = albumDateTag(photo.metadata); return <div className="tile" key={photo.manifest.photoId}><AlbumImage access={access} photo={photo} onOpen={() => setPreview(photo)} /><div className="album-photo-tags" aria-label="Photo information"><span aria-label="Contributor">{contributor(photo.manifest.ownerAccountId)}</span>{date && <span aria-label={date.label}>{date.text}</span>}{shared?.people.map(name => <span key={name} aria-label="Shared reviewed person">{name}</span>)}{shared?.location?.name && <span aria-label="Shared place">{shared.location.name}</span>}</div>
               {group.copies.length > 1 && <details className="album-copies"><summary>{group.copies.length} copies</summary>{group.copies.map(copy => <button key={copy.manifest.photoId} onClick={() => setPreview(copy)}>{contributor(copy.manifest.ownerAccountId)} · {copy.metadata.filename}</button>)}</details>}</div>;}}</VirtualAlbumGrid>
-            {page.hasMore && <div className="hint" aria-label="Album coverage"><p role="status">{photos.length} of {page.photoCount} photos loaded. Search covers loaded photos.</p><button disabled={busy} onClick={() => void action(() => loadPage(access, page.nextCursor))}>Load more photos</button></div>}
+            {!searching && page.hasMore && <div className="hint" aria-label="Album coverage"><p role="status">{photos.length} of {page.photoCount} photos loaded.</p><button disabled={busy} onClick={() => void action(() => loadPage(access, pageRef.current.nextCursor))}>Load more photos</button></div>}
             {!photos.length && !busy && <p>No contributions yet.</p>}
-            {photos.length > 0 && !shown.length && <div className="album-empty"><p>No matching photos{page.hasMore ? " in the loaded photos" : ""}.</p><button onClick={() => {setQuery(""); setPeopleFilter(emptyPeopleFilter()); setFrom(""); setThrough(""); searchInput.current?.focus();}}>Clear filters</button></div>}
+            {photos.length > 0 && !shown.length && <div className="album-empty"><p>{page.hasMore || ["loading", "error", "partial"].includes(factsState) ? "No matches in the photos checked so far." : "No matching photos."}</p><button onClick={() => {setQuery(""); setPeopleFilter(emptyPeopleFilter()); setFrom(""); setThrough(""); searchInput.current?.focus();}}>Clear filters</button></div>}
           </>}
         </> : <>
           {creating && <form onSubmit={event => {event.preventDefault(); void action(async () => {const created = await createAlbum(title, cards.filter(card => invitees.has(card.accountId)), scope, creationDraft.current); setTitle(""); setInvitees(new Set()); setCreating(false); await loadInbox(); await open(created);});}}>

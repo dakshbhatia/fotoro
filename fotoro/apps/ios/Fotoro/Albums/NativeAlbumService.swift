@@ -64,6 +64,10 @@ struct NativeAlbumAccess {
   private var factsLoadedPages = 0
   private var refreshingFacts: UUID?
   private var epoch = UUID()
+  var searchCoverageID: UUID { epoch }
+  var searchMetadataComplete: Bool {
+    opened != nil && nextCursor == nil && (factsSupported == false || (factsPageLoaded && factsNextCursor == nil && factsError == nil))
+  }
   private let crypto = NativeAlbumCrypto()
   private static var cleanedStaleCaches = false
   init(services: AppServices) {
@@ -242,6 +246,9 @@ struct NativeAlbumAccess {
       try check(access.context)
       return value
     } catch {
+      if error is CancellationError || (error as? URLError)?.code == .cancelled {
+        throw CancellationError()
+      }
       let status = (error as? FotoroError)?.statusCode ?? 0
       let transient = (error as? URLError).map { $0.code != .cancelled } ?? (status == 408 || status == 429 || (500...599).contains(status))
       if preservingTransientFailure && transient { try check(access.context) }
@@ -309,7 +316,32 @@ struct NativeAlbumAccess {
     guard let reading = access, let cursor = nextCursor else { return }
     try await loadPage(reading, cursor: cursor)
   }
-  private func loadPage(_ reading: NativeAlbumAccess, cursor: String?) async throws {
+  // One metadata page per call lets the view yield to changed filters and user actions.
+  // The epoch also rejects a completion from a closed or reopened trip.
+  func loadNextSearchMetadataPage(expectedID: UUID) async throws {
+    try Task.checkCancellation()
+    guard epoch == expectedID, let reading = access else { throw CancellationError() }
+    try check(reading.context)
+    if let cursor = nextCursor {
+      guard cursors.count <= 10 else { throw FotoroError("Invalid album pagination.") }
+      try await loadPage(reading, cursor: cursor, preservingTransientFailure: true)
+    } else if !searchMetadataComplete {
+      guard refreshingFacts == nil else { throw CancellationError() }
+      if factsPageLoaded, factsNextCursor == nil, factsError != nil {
+        guard factsLoadedPages <= 10 else { throw FotoroError("Invalid shared details pagination.") }
+        // A failed refresh retains the completed window. Explicit search retry
+        // must revalidate that window rather than rethrow its stored error.
+        try await refreshSharedDetails()
+        try check(reading.context)
+        return
+      }
+      guard factsLoadedPages < 10 else { throw FotoroError("Invalid shared details pagination.") }
+      try await loadMoreSharedDetails(preservingTransientFailure: true)
+    }
+    try check(reading.context)
+    guard epoch == expectedID else { throw CancellationError() }
+  }
+  private func loadPage(_ reading: NativeAlbumAccess, cursor: String?, preservingTransientFailure: Bool = false) async throws {
     let captured = reading.context
     let path = "/v1/albums/\(reading.albumID)" + (cursor.map { "?cursor=" + $0 } ?? "")
     let detail = try await request(AlbumDetailV1.self, path: path, context: captured)
@@ -321,7 +353,7 @@ struct NativeAlbumAccess {
       let batch = try await withThrowingTaskGroup(of: (Int, NativeAlbumItem).self) { group in
         for i in offset..<end {
           let entry = detail.entries[i], manifest = detail.manifests[i]
-          group.addTask { @MainActor in (i, try await self.photo(entry, manifestSigned: manifest, access: reading)) }
+          group.addTask { @MainActor in (i, try await self.photo(entry, manifestSigned: manifest, access: reading, preservingTransientFailure: preservingTransientFailure)) }
         }
         var values: [(Int, NativeAlbumItem)] = []
         for try await item in group { values.append(item) }
@@ -333,7 +365,7 @@ struct NativeAlbumAccess {
         nextItems.append(item)
       }
     }
-    try await membership(reading); try check(captured)
+    try await membership(reading, preservingTransientFailure: preservingTransientFailure); try check(captured)
     var nextCursors = cursors
     if let cursor = detail.nextCursor { guard nextCursors.insert(cursor).inserted else { throw FotoroError("Invalid album pagination.") } }
     let nextFacts: [String: AlbumPhotoFactsContentV1]
@@ -373,7 +405,7 @@ struct NativeAlbumAccess {
     }
     return (next, ids, page.nextCursor)
   }
-  func loadMoreSharedDetails() async throws {
+  func loadMoreSharedDetails(preservingTransientFailure: Bool = false) async throws {
     guard refreshingFacts == nil else { return }
     guard let reading = access else { throw FotoroError("Open an accepted album first.") }
     do {
@@ -387,16 +419,16 @@ struct NativeAlbumAccess {
         }
       }
       guard factsSupported == true, !factsPageLoaded || factsNextCursor != nil else { return }
-      try await membership(reading)
+      try await membership(reading, preservingTransientFailure: preservingTransientFailure)
       let page = try await readFactsPage(reading, cursor: factsNextCursor, cursors: factsCursors,
         listed: factsListedIDs, values: pendingFacts)
-      try await membership(reading); try check(reading.context)
+      try await membership(reading, preservingTransientFailure: preservingTransientFailure); try check(reading.context)
       pendingFacts = page.values; factsPageLoaded = true; factsLoadedPages += 1; factsNextCursor = page.cursor
       factsListedIDs = page.listed
       if let cursor = page.cursor { factsCursors.insert(cursor) }
       try bindSharedDetails(); factsError = nil
     } catch {
-      if isCurrent(reading.context) { factsError = error.localizedDescription }
+      if !Task.isCancelled, !(error is CancellationError), isCurrent(reading.context) { factsError = error.localizedDescription }
       throw error
     }
   }
@@ -428,7 +460,7 @@ struct NativeAlbumAccess {
       factsListedIDs = listed; factsCursors = seenCursors; factsNextCursor = cursor
       factsLoadedPages = loaded; factsPageLoaded = true; factsError = nil
     } catch {
-      if isCurrent(reading.context) { factsError = error.localizedDescription }
+      if !Task.isCancelled, !(error is CancellationError), isCurrent(reading.context) { factsError = error.localizedDescription }
       throw error
     }
   }

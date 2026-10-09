@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {api, fetchCipher, ApiError, accountLimitMessage} from "../src/exchange/api";
+import {api, fetchCipher, ApiError, ApiTransportError, accountLimitMessage} from "../src/exchange/api";
 
 test("JSON and media failures retain a validated support request ID without changing error codes", async () => {
   const requestId = "12345678-1234-4234-8234-123456789abc";
@@ -12,11 +12,27 @@ test("JSON and media failures retain a validated support request ID without chan
         assert.ok(error instanceof ApiError);
         assert.equal(error.message, "FORBIDDEN");
         assert.equal(error.retryable, true);
+        assert.equal(error.status, 403, "A retryable hint must not hide an access denial");
         assert.equal((error as ApiError & {requestId?: string}).requestId, requestId);
         return true;
       });
     }
   } finally {globalThis.fetch = previous;}
+});
+
+test("media fetch and interrupted response bodies distinguish transport failure from HTTP denial and cancellation", async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => {throw new TypeError("network unavailable");};
+    await assert.rejects(fetchCipher("photo"), ApiTransportError);
+    globalThis.fetch = async () => new Response(new ReadableStream({start(controller) {controller.error(new TypeError("connection dropped"));}}));
+    await assert.rejects(fetchCipher("photo"), ApiTransportError);
+    const controller = new AbortController();
+    globalThis.fetch = async () => {controller.abort(); throw new TypeError("cancelled fetch");};
+    await assert.rejects(fetchCipher("photo", controller.signal), {name: "AbortError"});
+    globalThis.fetch = async () => new Response("bad JSON");
+    await assert.rejects(api("/v1/vault"), SyntaxError);
+  } finally {globalThis.fetch = original;}
 });
 
 test("non-JSON and malformed API failures report HTTP status instead of a parsing exception", async () => {

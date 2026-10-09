@@ -98,6 +98,10 @@ struct NativeAlbumView: View {
   @State private var model: NativeAlbumService
   @State private var title = ""
   @State private var familyFilter = NativeAlbumSearchFilter()
+  @State private var searchTask: Task<Void, Never>?
+  @State private var searchTaskID: UUID?
+  @State private var searchError: String?
+
   @State private var groupDuplicates = true
   @State private var showFamilyFilters = false
   @State private var memberIDs = Set<String>()
@@ -132,6 +136,7 @@ struct NativeAlbumView: View {
     return (access?.account ?? "") + (access?.vault.uuidString ?? "") + services.api.baseURL.absoluteString
       + String(describing: scenePhase)
   }
+  private var wantsWholeTripSearch: Bool { familyFilter.hasFilters || showFamilyFilters }
   private var filteredItems: [NativeAlbumItem] {
     model.items.filter { familyFilter.includes($0, facts: model.sharedFacts[$0.id]) }
   }
@@ -191,18 +196,21 @@ struct NativeAlbumView: View {
         catch { feedback = error.localizedDescription }
         while !Task.isCancelled {
           do { try await Task.sleep(for: .seconds(15)) } catch { return }
-          guard scenePhase == .active, !busy else { continue }
+          guard scenePhase == .active, !busy, searchTask == nil else { continue }
           let openedID = model.opened?.id, count = model.opened?.overview.photoCount
-          do {
+          run {
             try await refreshAlbums()
             if let openedID, model.opened?.id == openedID,
               let fresh = model.albums.first(where: { $0.id == openedID }), fresh.overview.photoCount != count {
               try await model.open(openedID)
             }
-          } catch is CancellationError { if Task.isCancelled { return } }
-          catch { feedback = error.localizedDescription }
+          }
         }
       }
+      .onChange(of: familyFilter) { _, _ in startTripSearch() }
+      .onChange(of: showFamilyFilters) { _, _ in startTripSearch() }
+      .onChange(of: operationID) { _, id in if id == nil { startTripSearch() } }
+      .onChange(of: model.searchCoverageID) { _, _ in searchError = nil; startTripSearch() }
       .onChange(of: scenePhase) { _, phase in
         if phase != .active { suspendAlbum() }
       }
@@ -246,6 +254,9 @@ struct NativeAlbumView: View {
       .sheet(isPresented: $showFamilyFilters) {
         NativeAlbumFamilyFilters(filter: $familyFilter,
           choices: NativeAlbumSearch.choices(items: model.items, facts: model.sharedFacts),
+          loadingChoices: wantsWholeTripSearch && !model.searchMetadataComplete,
+          searchError: searchError,
+          retrySearch: { searchError = nil; startTripSearch() },
           memberName: { account in model.opened.map { memberName(account, in: $0.definition) } ?? "Member" })
       }
       .confirmationDialog("End trip access for everyone?", isPresented: $ending, titleVisibility: .visible) {
@@ -367,14 +378,22 @@ struct NativeAlbumView: View {
       }
       Toggle("Group identical originals", isOn: $groupDuplicates).font(.subheadline)
       Text("\(filteredItems.count) matching contributions in \(model.items.count) loaded photos").font(.subheadline).foregroundStyle(.secondary)
-      if model.nextCursor != nil { Text("More album photos are available below. Filters apply to loaded photos.").font(.caption).foregroundStyle(.secondary) }
+      if wantsWholeTripSearch && !model.searchMetadataComplete {
+        Text(searchError == nil ? "Searching the whole trip… Results so far." : "Search is incomplete. Results so far.")
+          .font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("albums.search.coverage")
+        if let searchError {
+          Text(searchError).font(.caption).foregroundStyle(.secondary)
+          Button("Retry trip search") { self.searchError = nil; startTripSearch() }
+            .disabled(busy).accessibilityIdentifier("albums.search.retry")
+        }
+      }
       if model.factsSupported == false {
         Text("Shared photo details are unavailable on this server. Photo dates and filenames still work.").font(.caption).foregroundStyle(.secondary)
       } else {
         Text("Shared details loaded for \(model.sharedFacts.count) photos. Names are contributor-reviewed labels, not linked identities.")
           .font(.caption).foregroundStyle(.secondary)
         if let error = model.factsError { Text(error).font(.caption).foregroundStyle(.secondary) }
-        if model.factsNextCursor != nil || model.factsError != nil {
+        if !wantsWholeTripSearch && (model.factsNextCursor != nil || model.factsError != nil) {
           Button(model.factsError == nil ? "Load more shared details" : "Retry shared details") { run { try await model.loadMoreSharedDetails() } }
             .disabled(busy).accessibilityIdentifier("albums.details.loadMore")
         }
@@ -395,7 +414,7 @@ struct NativeAlbumView: View {
           }
         }
       }
-      if model.nextCursor != nil { Button("Load more photos") { run { try await model.loadMore() } }.disabled(busy) }
+      if !wantsWholeTripSearch && model.nextCursor != nil { Button("Load more photos") { run { try await model.loadMore() } }.disabled(busy) }
     }
   }
   @ViewBuilder private var tripDownloadControls: some View {
@@ -528,11 +547,40 @@ struct NativeAlbumView: View {
       try await prepareInvitation()
     }
   }
-  private func stop() { cleanupTripDownload(); operation?.cancel(); operation = nil; operationID = nil; viewer = nil; showPicker = false; link = nil; familyFilter = NativeAlbumSearchFilter(); showFamilyFilters = false; showCreation = false; showDetails = false; trustCandidate = nil }
+  private func startTripSearch() {
+    let previous = searchTask
+    previous?.cancel()
+    guard scenePhase == .active, !busy, model.opened != nil, wantsWholeTripSearch,
+      !model.searchMetadataComplete, searchError == nil else { return }
+    let id = UUID(), coverage = model.searchCoverageID
+    searchTaskID = id
+    searchTask = Task { @MainActor in
+      await previous?.value
+      defer { if searchTaskID == id { searchTask = nil; searchTaskID = nil } }
+      do {
+        try await Task.sleep(for: .milliseconds(250))
+        while searchTaskID == id, wantsWholeTripSearch, !busy, scenePhase == .active,
+          model.searchCoverageID == coverage, !model.searchMetadataComplete {
+          try Task.checkCancellation()
+          try await model.loadNextSearchMetadataPage(expectedID: coverage)
+          try await Task.sleep(for: .milliseconds(30))
+        }
+      } catch is CancellationError {} catch {
+        if !Task.isCancelled, searchTaskID == id, model.searchCoverageID == coverage {
+          searchError = error.localizedDescription
+        }
+      }
+    }
+  }
+  private func stop() { searchTask?.cancel(); searchTask = nil; searchTaskID = nil; searchError = nil; cleanupTripDownload(); operation?.cancel(); operation = nil; operationID = nil; viewer = nil; showPicker = false; link = nil; familyFilter = NativeAlbumSearchFilter(); showFamilyFilters = false; showCreation = false; showDetails = false; trustCandidate = nil }
   private func run(navigating: Bool = false, _ action: @escaping @MainActor () async throws -> Void) {
     if navigating { resumeState.deliberateNavigation(in: model) }
+    let pendingSearch = searchTask
+    pendingSearch?.cancel(); searchTask = nil; searchTaskID = nil
     operation?.cancel(); let id = UUID(); operationID = id; feedback = nil
     operation = Task {
+      await pendingSearch?.value
+      guard !Task.isCancelled, operationID == id else { return }
       defer { if operationID == id { operation = nil; operationID = nil } }
       do { try await services.withDiagnosticAction(.albums, action) }
       catch is CancellationError {} catch { if operationID == id { feedback = error.localizedDescription } }

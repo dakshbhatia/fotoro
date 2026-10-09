@@ -44,6 +44,11 @@ export {ApiError, accountLimitMessage} from "./api-errors";
 export class ApiTransportError extends Error {
   constructor(cause: TypeError) {super(cause.message, {cause}); this.name = "ApiTransportError";}
 }
+function transportFailure(error: unknown, signal?: AbortSignal): never {
+  signal?.throwIfAborted();
+  if (error instanceof TypeError) throw new ApiTransportError(error);
+  throw error;
+}
 interface RequestSession {vault: UnlockedVault; generation: number; origin?: string;}
 function requestSession(path: string): RequestSession | undefined {
   // Password verification runs after local unlock and must handle its own rejection.
@@ -62,6 +67,7 @@ async function responseError(response: Response, session?: RequestSession, signa
     error?.retryable === true,
     response.headers.get("X-Request-Id") ?? error?.requestId,
     response.headers.get("Retry-After"),
+    response.status,
   );
 }
 function requestOperation(path: string): DiagnosticOperation {
@@ -110,11 +116,7 @@ export async function api<T>(
       ...(fixtureMode && fixtureAccount ? { "x-fotoro-fixture-account": fixtureAccount } : {}),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
-  }).catch(error => {
-    signal?.throwIfAborted();
-    if (error instanceof TypeError) throw new ApiTransportError(error);
-    throw error;
-  }), async (response, phase) => {
+  }).catch(error => transportFailure(error, signal)), async (response, phase) => {
     if (!response.ok) throw await responseError(response, session, signal);
     phase("decode");
     const result = await response.json();
@@ -137,9 +139,9 @@ export async function fetchCipher(objectId: string, signal?: AbortSignal, diagno
       ...(session ? {"x-fotoro-account-id": session.vault.accountId} : {}),
       ...(fixtureMode && fixtureAccount ? {"x-fotoro-fixture-account": fixtureAccount} : {}),
     },
-  }), async response => {
+  }).catch(error => transportFailure(error, signal)), async response => {
     if (!response.ok) throw await responseError(response, session, signal);
-    return new Uint8Array(await response.arrayBuffer());
+    return new Uint8Array(await response.arrayBuffer().catch(error => transportFailure(error, signal)));
   }, signal);
 }
 export async function uploadCipher(url: URL, options: RequestInit, diagnostic?: DiagnosticContext) {

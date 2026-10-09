@@ -463,3 +463,120 @@ test("closing the album scope immediately revokes displayed cache leases without
     assert.ok(photo.metadataKey.every(value => value === 0));
   } finally {URL.revokeObjectURL = actualRevoke;}
 }));
+
+test("search continuation retries transient metadata and fresh membership failures without losing verified photos", () => scoped(async () => {
+  for (const failure of ["metadata-network", "metadata-http", "membership", "final-membership"] as const) {
+    const {data, items, active, page} = await albumPages(3); let fail = false, accessReads = 0, failingAccessReads = 0;
+    globalThis.fetch = async path => {
+      const url = String(path);
+      if (url.endsWith("/access")) {accessReads++; if (fail && (failure === "membership" || failure === "final-membership" && ++failingAccessReads === 2)) return response({}, 503); return response(active);}
+      if (url.startsWith("/v1/albums/")) return response(url.includes("?") ? page([1, 2], null) : page([0], "next_1"));
+      const id = url.split("/").at(-1)!;
+      assert.ok(items.some(item => item.photo.manifest.metadataRepresentation.objectId === id), "search fetches metadata only");
+      if (fail && id === items[2].photo.manifest.metadataRepresentation.objectId) {
+        if (failure === "metadata-network") throw new TypeError("network unavailable");
+        if (failure === "metadata-http") return response({}, 503);
+      }
+      return new Response(new Uint8Array(data.objects.get(id)!));
+    };
+    const access = await AlbumAccess.open(active, {}), first = await access.loadPhotoPage(); fail = true;
+    await assert.rejects(access.loadPhotoPage(first.nextCursor, {preserveTransientFailure: true}));
+    assert.equal(access.current(), true); assert.equal(access.signal.aborted, false);
+    assert.ok(first.photos[0].metadataKey.some(byte => byte !== 0));
+    const beforeRetry = accessReads; fail = false;
+    const retried = await access.loadPhotoPage(first.nextCursor, {preserveTransientFailure: true});
+    assert.equal(retried.hasMore, false); assert.equal(retried.photos.length, 2);
+    assert.ok(accessReads >= beforeRetry + 2, "retry freshly fences metadata reads with membership checks");
+    assert.deepEqual([...first.photos, ...retried.photos].map(photo => photo.manifest.photoId), items.map(item => item.photo.manifest.photoId)); access.dispose();
+  }
+}));
+
+test("search continuation still clears access and old keys on revocation and corrupt metadata", () => scoped(async () => {
+  for (const failure of ["revoked", "digest", "programmer"] as const) {
+    const {data, active, page} = await albumPages(2); let fail = false;
+    globalThis.fetch = async path => {
+      const url = String(path);
+      if (url.endsWith("/access")) return fail && failure === "revoked" ? response({code: "ALBUM_INACTIVE", retryable: true}, 403) : response(active);
+      if (url.startsWith("/v1/albums/")) return response(url.includes("?") ? page([1], null) : page([0], "next_1"));
+      if (fail && failure === "digest") return new Response(new Uint8Array([1, 2, 3]));
+      const result = new Response(new Uint8Array(data.objects.get(url.split("/").at(-1)!)!));
+      if (fail && failure === "programmer") Object.defineProperty(result, "arrayBuffer", {value: () => {throw new Error("unexpected decoder failure");}});
+      return result;
+    };
+    const access = await AlbumAccess.open(active, {}), first = await access.loadPhotoPage(); fail = true;
+    await assert.rejects(access.loadPhotoPage(first.nextCursor, {preserveTransientFailure: true}));
+    assert.equal(access.current(), false); assert.equal(access.signal.aborted, true);
+    assert.ok(first.photos[0].metadataKey.every(byte => byte === 0));
+  }
+}));
+
+test("ordinary paging retains strict disposal after transient metadata failure", () => scoped(async () => {
+  const {data, active, page} = await albumPages(2); let fail = false;
+  globalThis.fetch = async path => {
+    const url = String(path);
+    if (url.endsWith("/access")) return response(active);
+    if (url.startsWith("/v1/albums/")) return response(url.includes("?") ? page([1], null) : page([0], "next_1"));
+    return fail ? response({}, 503) : new Response(new Uint8Array(data.objects.get(url.split("/").at(-1)!)!));
+  };
+  const access = await AlbumAccess.open(active, {}), first = await access.loadPhotoPage(); fail = true;
+  await assert.rejects(access.loadPhotoPage(first.nextCursor));
+  assert.equal(access.current(), false); assert.ok(first.photos[0].metadataKey.every(byte => byte === 0));
+}));
+
+test("search shared details retries fresh initial and final access fences without erasing photo keys", () => scoped(async () => {
+  for (const phase of [1, 2]) {
+    const data = await fixture(); let failing = false, factsAccessReads = 0;
+    globalThis.fetch = async path => {
+      const url = String(path);
+      if (url.endsWith("/access")) return failing && ++factsAccessReads === phase ? response({}, 503) : response(overview(data));
+      if (url.endsWith("/capabilities")) return response({version: 1, albumFactsVersion: 1});
+      if (url.endsWith("/photo-facts")) return response({version: 1, facts: [], hasMore: false, nextCursor: null});
+      if (url.startsWith("/v1/albums/")) return response({...overview(data), version: 1, entries: [data.entry], manifests: [data.signed], hasMore: false, nextCursor: null});
+      return new Response(new Uint8Array(data.objects.get(url.split("/").at(-1)!)!));
+    };
+    const access = await AlbumAccess.open(overview(data), {}), first = await access.loadPhotoPage(); failing = true;
+    await assert.rejects(access.loadFacts({preserveTransientFailure: true}));
+    assert.equal(access.current(), true); assert.ok(first.photos[0].metadataKey.some(byte => byte !== 0));
+    failing = false; const facts = await access.loadFacts({preserveTransientFailure: true});
+    assert.equal(facts.supported, true); assert.equal(facts.facts.size, 0); access.dispose();
+  }
+}));
+
+test("a failed search metadata worker stops dispatching the rest of the page before retry", () => scoped(async () => {
+  const {data, items, active, page} = await albumPages(10); let failing = false, reads = 0;
+  globalThis.fetch = async path => {
+    const url = String(path);
+    if (url.endsWith("/access")) return response(active);
+    if (url.startsWith("/v1/albums/")) return response(url.includes("?") ? page([1, 2, 3, 4, 5, 6, 7, 8, 9], null) : page([0], "next_1"));
+    if (failing) {
+      reads++;
+      if (url.endsWith(items[1].photo.manifest.metadataRepresentation.objectId)) throw new TypeError("network unavailable");
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    return new Response(new Uint8Array(data.objects.get(url.split("/").at(-1)!)!));
+  };
+  const access = await AlbumAccess.open(active, {}), first = await access.loadPhotoPage(); failing = true;
+  await assert.rejects(access.loadPhotoPage(first.nextCursor, {preserveTransientFailure: true}));
+  assert.ok(reads <= 4, "only already dispatched metadata reads may finish after failure");
+  assert.equal(access.current(), true); assert.ok(first.photos[0].metadataKey.some(byte => byte !== 0));
+  failing = false; const retry = await access.loadPhotoPage(first.nextCursor, {preserveTransientFailure: true});
+  assert.equal(retry.photos.length, 9); access.dispose();
+}));
+
+test("direct shared details 401 and 403 immediately revoke access even when marked retryable", () => scoped(async () => {
+  for (const status of [401, 403]) {
+    const data = await fixture();
+    globalThis.fetch = async path => {
+      const url = String(path);
+      if (url.endsWith("/access")) return response(overview(data));
+      if (url.endsWith("/capabilities")) return response({version: 1, albumFactsVersion: 1});
+      if (url.endsWith("/photo-facts")) return response({code: "ALBUM_INACTIVE", retryable: true}, status);
+      if (url.startsWith("/v1/albums/")) return response({...overview(data), version: 1, entries: [data.entry], manifests: [data.signed], hasMore: false, nextCursor: null});
+      return new Response(new Uint8Array(data.objects.get(url.split("/").at(-1)!)!));
+    };
+    const access = await AlbumAccess.open(overview(data), {}), first = await access.loadPhotoPage();
+    await assert.rejects(access.loadFacts({preserveTransientFailure: true}));
+    assert.equal(access.current(), false); assert.equal(access.signal.aborted, true);
+    assert.ok(first.photos[0].metadataKey.every(byte => byte === 0));
+  }
+}));
