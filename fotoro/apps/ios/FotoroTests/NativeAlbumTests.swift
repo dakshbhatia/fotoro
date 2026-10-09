@@ -246,6 +246,125 @@ final class NativeAlbumTests: XCTestCase {
       XCTAssertEqual(server.factsIndividualReads, 0, "Browsing uses pages, not one request per photo")
     }
   }
+  @MainActor func testWholeTripSearchFindsLaterPhotoAndDetailsPagesWithoutOriginals() async throws {
+    try await withAlbum { _, server, model in
+      server.factsCapabilityStatus = 200
+      let early = try server.extraOwnedPhotos(count: 99)
+      let late = try server.extraOwnedPhotos(count: 2, filename: "later-match.jpg", sourceDate: "2026-01-15T12:00:00.000Z", dateSource: "exif")
+      try server.contribute(early + late)
+      for photo in early { try server.setFacts(photo, people: ["Earlier name"]) }
+      for photo in late { try server.setFacts(photo, people: ["Later name"]) }
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let id = model.searchCoverageID
+      var filter = NativeAlbumSearchFilter(query: "later-match from 2026-01-01 through 2026-01-31")
+      let person = NativeAlbumPersonChoice(contributor: late[0].manifest.ownerAccountId, name: "Later name")
+      filter.people = [person.id]
+      XCTAssertTrue(model.items.filter { filter.includes($0, facts: model.sharedFacts[$0.id]) }.isEmpty)
+      XCTAssertFalse(model.searchMetadataComplete)
+      try await model.loadNextSearchMetadataPage(expectedID: id)
+      XCTAssertFalse(model.searchMetadataComplete, "Photo completion alone cannot complete shared-name search")
+      try await model.loadNextSearchMetadataPage(expectedID: id)
+      XCTAssertTrue(model.searchMetadataComplete)
+      XCTAssertEqual(Set(model.items.filter { filter.includes($0, facts: model.sharedFacts[$0.id]) }.map(\.id)), Set(late.map(\.id)))
+      XCTAssertTrue(NativeAlbumSearch.choices(items: model.items, facts: model.sharedFacts).contains(person))
+      XCTAssertEqual(server.factsPageReads, 2); XCTAssertEqual(server.factsIndividualReads, 0)
+      XCTAssertEqual(server.originalReads, 0)
+    }
+  }
+  @MainActor func testWholeTripSearchFailurePreservesVerifiedPageAndRequiresExplicitRetry() async throws {
+    try await withAlbum { _, server, model in
+      let photos = try server.extraOwnedPhotos(count: 101)
+      try server.contribute(photos); try await model.refresh(); try await model.open(server.definition.albumId)
+      let id = model.searchCoverageID, loaded = model.items.map(\.id)
+      server.failObjectOnce = photos[100].manifest.metadataRepresentation.objectId
+      do { try await model.loadNextSearchMetadataPage(expectedID: id); XCTFail("Failed metadata page completed") } catch {}
+      XCTAssertEqual(model.searchCoverageID, id); XCTAssertEqual(model.items.map(\.id), loaded)
+      XCTAssertNotNil(model.nextCursor); XCTAssertFalse(model.searchMetadataComplete)
+      try await model.loadNextSearchMetadataPage(expectedID: id)
+      XCTAssertEqual(model.items.count, 102); XCTAssertTrue(model.searchMetadataComplete)
+      XCTAssertEqual(server.originalReads, 0)
+    }
+  }
+  @MainActor func testWholeTripSearchRetryRevalidatesPreviouslyCompletedFactsWindow() async throws {
+    try await withAlbum { _, server, model in
+      server.factsCapabilityStatus = 200
+      try server.setFacts(server.source, people: ["Before refresh"])
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      XCTAssertTrue(model.searchMetadataComplete)
+      let id = model.searchCoverageID
+      server.accessStatus = 503
+      do { try await model.refresh(); XCTFail("Transient refresh succeeded") } catch {}
+      XCTAssertNotNil(model.factsError); XCTAssertNil(model.factsNextCursor)
+      XCTAssertFalse(model.searchMetadataComplete)
+      XCTAssertEqual(model.sharedFacts[server.source.id]?.people, ["Before refresh"])
+      server.accessStatus = nil
+      try server.setFacts(server.source, people: ["After refresh"])
+      let reads = server.factsPageReads
+      try await model.loadNextSearchMetadataPage(expectedID: id)
+      XCTAssertGreaterThan(server.factsPageReads, reads, "Retry must read the completed facts window again")
+      XCTAssertEqual(model.sharedFacts[server.source.id]?.people, ["After refresh"])
+      XCTAssertNil(model.factsError); XCTAssertTrue(model.searchMetadataComplete)
+      XCTAssertEqual(model.searchCoverageID, id); XCTAssertEqual(server.originalReads, 0)
+    }
+  }
+  @MainActor func testCancelledHeldMembershipPreservesTripAndVerifiedPages() async throws {
+    for transportCancellation in [false, true] {
+      try await withAlbum { _, server, model in
+        server.factsCapabilityStatus = 200
+        try server.setFacts(server.source, people: ["Reviewed name"])
+        try await model.refresh(); try await model.open(server.definition.albumId)
+        let id = model.searchCoverageID, items = model.items.map(\.id), facts = model.sharedFacts
+        let gate = AlbumFactsRequestGate(started: expectation(description: "Held membership"))
+        defer { gate.release.signal() }
+        server.accessGate = gate
+        let checking = Task { try await model.checkOpenedAccess() }
+        await fulfillment(of: [gate.started], timeout: 3)
+        if transportCancellation { server.accessStatus = -999 }
+        else { checking.cancel() }
+        gate.release.signal()
+        do { try await checking.value; XCTFail("Cancelled membership succeeded") } catch is CancellationError {} catch { XCTFail("Unexpected cancellation error: \(error)") }
+        XCTAssertNotNil(model.opened); XCTAssertEqual(model.searchCoverageID, id)
+        XCTAssertEqual(model.items.map(\.id), items); XCTAssertEqual(model.sharedFacts, facts)
+        XCTAssertNil(model.factsError)
+        server.accessStatus = 403
+        do { try await model.checkOpenedAccess(); XCTFail("Denied membership succeeded") } catch {}
+        XCTAssertNil(model.opened); XCTAssertTrue(model.items.isEmpty); XCTAssertTrue(model.sharedFacts.isEmpty)
+      }
+    }
+  }
+  @MainActor func testWholeTripSearchRejectsLateFactsAfterCancellationOrScopeChange() async throws {
+    for change in ["cancel", "close", "reopen", "lock", "account"] {
+      let gate = AlbumFactsRequestGate(started: expectation(description: "Search facts " + change))
+      defer { gate.release.signal() }
+      try await withAlbum { services, server, model in
+        server.factsCapabilityStatus = 200
+        let photos = try server.extraOwnedPhotos(count: 101)
+        try server.contribute(photos)
+        for photo in photos { try server.setFacts(photo, people: ["Reviewed name"]) }
+        try await model.refresh(); try await model.open(server.definition.albumId)
+        let id = model.searchCoverageID
+        try await model.loadNextSearchMetadataPage(expectedID: id)
+        let prior = model.sharedFacts
+        server.factsGate = gate
+        let search = Task { try await model.loadNextSearchMetadataPage(expectedID: id) }
+        await fulfillment(of: [gate.started], timeout: 3)
+        if change == "cancel" { search.cancel() }
+        else if change == "close" || change == "reopen" { model.discardOpenedAlbum() }
+        else if change == "lock" { services.vault.lock() }
+        else { services.session.accountId = server.cards[0].accountId }
+        gate.release.signal()
+        do { try await search.value; XCTFail("Late search survived " + change) } catch {}
+        if change == "cancel" { XCTAssertEqual(model.sharedFacts, prior); XCTAssertNil(model.factsError) }
+        else { XCTAssertTrue(model.sharedFacts.isEmpty) }
+        if change == "reopen" {
+          try await model.open(server.definition.albumId)
+          let reopened = model.items.map(\.id)
+          do { try await model.loadNextSearchMetadataPage(expectedID: id); XCTFail("Old coverage reopened") } catch {}
+          XCTAssertEqual(model.items.map(\.id), reopened)
+        }
+      }
+    }
+  }
   @MainActor func testSameCountSharedDetailsRefreshHandlesEditsAndTransientAccessFailures() async throws {
     try await withAlbum { _, server, model in
       server.factsCapabilityStatus = 200
@@ -1294,6 +1413,7 @@ private final class AlbumTestServer: @unchecked Sendable {
   var extraInbox: [AlbumOverviewV1] = []
   var hideInboxAlbum = false
   var accessStatus: Int?
+  var accessGate: AlbumFactsRequestGate?
   var accountMismatchCount = 0; var authAccountHeader: String?
   var factsCapabilityStatus = 404
   var endOnFacts = false
@@ -1334,14 +1454,14 @@ private final class AlbumTestServer: @unchecked Sendable {
     let browserBody = try "{\"version\":1,\"photoId\":" + text(value.photoId) + ",\"ownerAccountId\":" + text(value.ownerAccountId) + ",\"representations\":" + text(value.representations) + ",\"metadataRepresentation\":" + text(value.metadataRepresentation) + ",\"ownerWrappedMetadataKey\":" + text(value.ownerWrappedMetadataKey) + "}"
     manifest = try crypto.signBytes(Data(browserBody.utf8), kind: "photo-manifest", accountId: cards[0].accountId, secret: Data(b64: bundles[0].signingSecretKey))
   }
-  func extraOwnedPhotos(count: Int, originalBytes: Data? = nil, filename: String = "public-batch.jpg", mediaType: String = "image/jpeg") throws -> [LocalPhoto] {
+  func extraOwnedPhotos(count: Int, originalBytes: Data? = nil, filename: String = "public-batch.jpg", mediaType: String = "image/jpeg", sourceDate: String? = nil, dateSource: String = "import") throws -> [LocalPhoto] {
     let crypto = CryptoAdapter(); var photos: [LocalPhoto] = []
     for _ in 0..<count {
       let photoID = Wire.id(), originalKey = crypto.randomKey(), key = crypto.randomKey()
       let bytes = originalBytes ?? Data("public batch fixture".utf8), originalBinding = MediaBinding(photoId: photoID, representationId: Wire.id(), kind: "original")
       let original = try crypto.encrypt(bytes, key: originalKey, binding: originalBinding), originalID = Wire.id()
       let rep = RepresentationV1(binding: originalBinding, objectId: originalID, header: original.prefix(24).b64, ciphertextBytes: original.count, ciphertextSha256: original.digest)
-      let metadata = PhotoMetadataV1(filename: filename, mediaType: mediaType, sourceDate: Wire.date(), dateSource: "import", originalBytes: bytes.count, originalSha256: bytes.digest, representationKeys: [originalBinding.representationId: originalKey.b64])
+      let metadata = PhotoMetadataV1(filename: filename, mediaType: mediaType, sourceDate: sourceDate ?? Wire.date(), dateSource: dateSource, originalBytes: bytes.count, originalSha256: bytes.digest, representationKeys: [originalBinding.representationId: originalKey.b64])
       let metaBinding = MediaBinding(photoId: photoID, representationId: Wire.id(), kind: "metadata"), meta = try crypto.encrypt(Wire.encode(metadata), key: key, binding: metaBinding), metaID = Wire.id()
       let metaRep = RepresentationV1(binding: metaBinding, objectId: metaID, header: meta.prefix(24).b64, ciphertextBytes: meta.count, ciphertextSha256: meta.digest)
       let value = PhotoManifestV1(photoId: photoID, ownerAccountId: cards[0].accountId, representations: [rep], metadataRepresentation: metaRep, ownerWrappedMetadataKey: try crypto.wrap(key, key: Data(b64: bundles[0].vaultKey)))
@@ -1448,7 +1568,17 @@ private final class AlbumTestServer: @unchecked Sendable {
       if loseAppendResponse { loseAppendResponse = false; throw URLError(.networkConnectionLost) }
       return (200, try Wire.encode(result))
     }
-    if path.hasSuffix("/access") { accessCount += 1; if let accessStatus { if accessStatus == 0 { throw URLError(.timedOut) }; return (accessStatus, Data()) }; return accepted && !ended ? (200, try Wire.encode(overview)) : (403, Data("{\"code\":\"ALBUM_INACTIVE\"}".utf8)) }
+    if path.hasSuffix("/access") {
+      accessCount += 1
+      if let gate = accessGate { accessGate = nil; lock.unlock(); gate.started.fulfill()
+        _ = gate.release.wait(timeout: .now() + 5); lock.lock() }
+      if let accessStatus {
+        if accessStatus == 0 { throw URLError(.timedOut) }
+        if accessStatus == -999 { throw URLError(.cancelled) }
+        return (accessStatus, Data())
+      }
+      return accepted && !ended ? (200, try Wire.encode(overview)) : (403, Data("{\"code\":\"ALBUM_INACTIVE\"}".utf8))
+    }
     if path.hasPrefix("/v1/objects/") {
       objectCount += 1; if endOnObject { ended = true }
       if originalIDs.contains(request.url!.lastPathComponent) { originalReads += 1; if endOnOriginal { ended = true } }

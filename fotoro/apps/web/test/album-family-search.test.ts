@@ -15,6 +15,8 @@ import {configureVault, unlockVault, lockVault, requireVault} from "../src/vault
 import {clearAccount} from "../src/exchange/cache";
 import {pinCard, trustedCard} from "../src/exchange/share-service";
 import {AlbumAccess} from "../src/albums/service";
+import {AlbumActionQueue} from "../src/albums/action-queue";
+import {loadAlbumSearchPages} from "../src/albums/search-loading";
 import {joinAlbumInvitation} from "../src/albums/bootstrap";
 import {collect, source, digest, type Photo} from "../src/library/catalog";
 import {ownedAlbumDetails} from "../src/albums/details";
@@ -156,6 +158,26 @@ test("shared facts paging is bounded100, defers unmatched sources and distinguis
   const first = data.facts.values().next().value!; data.facts.set(readAlbumPhotoFacts(first).photoId, {...first, signature: b64(new Uint8Array(64))});
   await assert.rejects(access.loadFacts()); assert.equal(access.current(), true);
   data.legacy(); assert.deepEqual(await access.loadFacts(), {supported: false, facts: new Map(), unmatched: 0}); access.dispose();
+}));
+
+test("whole-trip search finds a later-page person, place, date and filename using metadata alone", () => scoped(async () => {
+  const data = await fixture(101), session = await open(0), last = data.initial[100];
+  data.facts.set(last.photo.manifest.photoId, makeAlbumPhotoFacts({signedDefinition: data.made.signed, trustedOwner: session.card,
+    entry: last.entry, manifest: last.signed, originalSha256: last.photo.metadata.originalSha256, albumKey: data.made.albumKey,
+    revision: 1, people: ["Mum"], location: {latitude: 1.25, longitude: 103.8, source: "photos", name: "Public Grove"}, signingSecretKey: session.signingSecretKey}));
+  const access = await AlbumAccess.open(data.overview(), {});
+  let page = await access.loadPhotoPage(), photos = [...page.photos], facts = await access.loadFacts();
+  const find = (query: string) => searchAlbumPhotos(photos, query, () => access.current(), Date.now(), {facts: facts.facts});
+  assert.equal(find("Mum Grove October 2021").length, 0);
+  const before = data.counts().objectReads;
+  await loadAlbumSearchPages({queue: new AlbumActionQueue(() => access.current(), () => {}), current: () => access.current(), page: () => page, load: async cursor => {
+    page = await access.loadPhotoPage(cursor); photos.push(...page.photos); facts = await access.loadFacts();
+  }});
+  assert.equal(page.hasMore, false);
+  assert.deepEqual(find("Mum Grove October 2021").map(photo => photo.manifest.photoId), [last.photo.manifest.photoId]);
+  assert.deepEqual(find("public 100").map(photo => photo.manifest.photoId), [last.photo.manifest.photoId]);
+  assert.equal(data.counts().objectReads - before, 1, "Only the one remaining encrypted metadata object is fetched");
+  access.dispose();
 }));
 
 test("late shared facts and changed owned annotations cannot publish across close/account/source changes", () => scoped(async () => {

@@ -15,8 +15,8 @@ export function usePeopleFilter(photos: readonly SearchPhoto[], scope: unknown) 
   }, [scope]);
   return {people, filter, change};
 }
-export function PeopleFilter({people, value, onChange, onReview, disabled = false}: {
-  people: ReviewedPerson[]; value: Filter; onChange: (value: Filter) => void; onReview?: () => void; disabled?: boolean;
+export function PeopleFilter({people, value, onChange, onReview, onOpenChange, emptyMessage, disabled = false}: {
+  people: ReviewedPerson[]; value: Filter; onChange: (value: Filter) => void; onReview?: () => void; onOpenChange?: (open: boolean) => void; emptyMessage?: string; disabled?: boolean;
 }) {
   const labels = useMemo(() => {
     const counts = new Map<string, number>(), positions = new Map<string, number>();
@@ -26,8 +26,8 @@ export function PeopleFilter({people, value, onChange, onReview, disabled = fals
       return [person.id, counts.get(name)! > 1 ? `${name} · Group ${position}` : name];
     }));
   }, [people]);
-  if (!people.length && !value.ids.size && !onReview) return null;
-  return <div className="people-filter-bar"><details className="people-filter" onKeyDown={event => {
+  if (!people.length && !value.ids.size && !onReview && !onOpenChange) return null;
+  return <div className="people-filter-bar"><details className="people-filter" onToggle={event => onOpenChange?.(event.currentTarget.open)} onKeyDown={event => {
     if (event.key === "Escape") {event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();}
   }}><summary>People{value.ids.size ? ` (${value.ids.size})` : ""}</summary><div className="people-filter-options">
     <fieldset disabled={disabled}><legend>Reviewed people</legend>
@@ -36,7 +36,7 @@ export function PeopleFilter({people, value, onChange, onReview, disabled = fals
           const ids = new Set(value.ids); event.target.checked ? ids.add(person.id) : ids.delete(person.id); onChange({...value, ids});
         }} /><span>{labels.get(person.id)}</span><small>{person.photoCount} {person.photoCount === 1 ? "photo" : "photos"}</small></label>;
       })}
-      {!people.length && <p className="hint">Name reviewed groups in People to filter photos.</p>}
+      {!people.length && <p className="hint">{emptyMessage ?? "Name reviewed groups in People to filter photos."}</p>}
       {value.ids.size > 0 && [...value.ids].some(id => !people.some(person => person.id === id)) && <p className="hint" role="status">A selected person is no longer available. Clear people to reset this filter.</p>}
     </fieldset>
     <label className="people-match-mode">Match<select aria-label="Match selected people" value={value.mode} disabled={disabled} onChange={event => onChange({...value, mode: event.target.value as Filter["mode"]})}>

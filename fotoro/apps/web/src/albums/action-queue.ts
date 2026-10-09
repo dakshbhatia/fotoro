@@ -4,6 +4,18 @@ export class AlbumActionQueue {
   private pending = 0;
   private foreground = 0;
   constructor(private current: () => boolean, private foregroundChanged: (busy: boolean) => void) {}
+  // Search yields after each page, so queued user actions take precedence.
+  async runWhenIdle(task: () => Promise<void>, current: () => boolean): Promise<boolean> {
+    while (this.current() && current()) {
+      if (this.pending === 0) {
+        let ran = false;
+        await this.run(async () => {if (current()) {ran = true; await task();}}, true);
+        return ran;
+      }
+      await this.tail;
+    }
+    return false;
+  }
   run(task: () => Promise<void>, background = false): Promise<void> {
     if (!this.current() || background && this.pending > 0) return Promise.resolve();
     this.pending++;

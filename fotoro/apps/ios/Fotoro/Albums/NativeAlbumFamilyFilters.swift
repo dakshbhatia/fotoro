@@ -3,6 +3,9 @@ import SwiftUI
 struct NativeAlbumFamilyFilters: View {
   @Binding var filter: NativeAlbumSearchFilter
   let choices: [NativeAlbumPersonChoice]
+  var loadingChoices = false
+  var searchError: String?
+  var retrySearch: (() -> Void)?
   let memberName: (String) -> String
   @Environment(\.dismiss) private var dismiss
   private var dateRange: Binding<Bool> {
@@ -27,7 +30,11 @@ struct NativeAlbumFamilyFilters: View {
               if selected { filter.people.insert(choice.id) } else { filter.people.remove(choice.id) }
             }))
           }
-          if choices.isEmpty { Text("No shared names in the loaded details.").foregroundStyle(.secondary) }
+          if let searchError {
+            Text("Search is incomplete. " + searchError).foregroundStyle(.secondary)
+            if let retrySearch { Button("Retry trip search", action: retrySearch) }
+          } else if loadingChoices { Text("Loading shared names across the trip…").foregroundStyle(.secondary) }
+          else if choices.isEmpty { Text("No shared names in this trip.").foregroundStyle(.secondary) }
         }
         Section("Shared location") { TextField("Place name or coordinates", text: $filter.place) }
         Section("Capture dates") {

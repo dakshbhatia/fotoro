@@ -3,6 +3,28 @@ import assert from "node:assert/strict";
 import {AlbumActionQueue, bindAlbumAction} from "../src/albums/action-queue";
 const deferred = () => {let resolve!: () => void; const promise = new Promise<void>(done => {resolve = done;}); return {promise, resolve};};
 
+test("search waits for foreground work and yields between metadata pages without disabling actions", async () => {
+  const held = deferred(), started = deferred(), events: string[] = [], busy: boolean[] = [];
+  const queue = new AlbumActionQueue(() => true, value => busy.push(value));
+  const first = queue.runWhenIdle(async () => {events.push("page 2"); started.resolve(); await held.promise;}, () => true);
+  await started.promise;
+  const clicked = queue.run(async () => {events.push("add photos");});
+  const next = queue.runWhenIdle(async () => {events.push("page 3");}, () => true);
+  held.resolve(); await Promise.all([first, clicked, next]);
+  assert.deepEqual(events, ["page 2", "add photos", "page 3"]);
+  assert.deepEqual(busy, [true, false]);
+});
+
+test("clearing search while waiting for refresh prevents a stale metadata request", async () => {
+  const held = deferred(), started = deferred(); let active = true, loaded = false;
+  const queue = new AlbumActionQueue(() => true, () => {});
+  const refresh = queue.run(async () => {started.resolve(); await held.promise;});
+  await started.promise;
+  const search = queue.runWhenIdle(async () => {loaded = true;}, () => active);
+  active = false; held.resolve(); await Promise.all([refresh, search]);
+  assert.equal(loaded, false);
+});
+
 test("a foreground action queues behind a poll without being dropped or overlapped", async () => {
   const held = deferred(), started = deferred(), events: string[] = [], busy: boolean[] = [];
   const queue = new AlbumActionQueue(() => true, value => busy.push(value));
