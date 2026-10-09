@@ -17,7 +17,24 @@ Hono Worker with D1 and private R2. The upstream Ente application is a reference
   require separate preview consent and explicitly configured provider/work limits;
   that route remains disabled by default.
 
-### October 8 PR 55 checkpoint
+### October 8 PR 56 browser / PR 57 native checkpoint
+
+Worker `fadcbe53-2be1-4f19-99aa-0b8782b551d1` serves 100%, deployment
+`a23d4ef0-7819-4b96-a1f5-0d4bc45aa82c`. Browser source
+`27e958fcb03f99a2c27c2dc4f3a5efeb83464785` matches qualified PR 56.
+All 46 non-HTML assets and root/Photos/Saved HTML match the built output, with
+only Cloudflare's injected analytics beacon removed for HTML comparison. Service
+checks pass; all eight bindings, runtime and API script remain unchanged. No new
+migration or provider activation occurred. Rollback is PR 55's Worker below.
+
+PR 57 is native only. Merged source `c033c921ebda288cf04c5c6f470abdd446607227`
+matches the qualified tree and all 23 distinct hosted check contexts passed or
+intentionally skipped. The audited distribution IPA for 0.1.0 (51) was accepted
+by Apple and read back `VALID` / `IN_BETA_TESTING`, linked to the existing internal
+group and its unchanged one tester. Build 51 is available; physical installation
+and acceptance remain open.
+
+### Earlier October 8 PR 55 checkpoint
 
 Worker `2f070b78-0bd6-41d5-af78-0e8a0f7cea7c` serves 100%, deployment
 `711d2a82-ca1a-439c-82f4-f4fbf933d28a`. Merged source

@@ -1,12 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {type ReactElement} from "react";
+import {Children, isValidElement, type ReactElement} from "react";
 import cards from "../../../fixtures/accounts.json";
 import {createAlbumLink, parseAlbumLink} from "@fotoro/contracts/albums-links";
 import {IncomingAlbumIntent} from "../src/albums/intent";
 import {AlbumEntryRevision, subscribeAlbumLifetime} from "../src/albums/entry";
 import {AlbumContinuation} from "../src/albums/AlbumContinuation";
 import {AlbumNameChoices} from "../src/albums/AlbumNameChoices";
+import {AlbumContributionActions} from "../src/albums/Albums";
 import {AlbumPanel} from "../src/albums/AlbumPanel";
 import type {Photo} from "../src/library/catalog";
 
@@ -170,4 +171,26 @@ test("same-page invitation replacement remounts the entry and cannot inherit the
   b.incoming.cancel(); assert.equal(b.incoming.current(b.session), false);
   assert.notEqual(entry.key(replacement), keyB, "A fresh link to the same album also needs a new lifetime because the prior scope was cancelled");
   assert.deepEqual(entry.photos(continuationB), []);
+});
+
+
+test("a returned contribution keeps Choose photos available for a second selection of the same album", () => {
+  const flow = navigation(), id = flow.incoming.link.albumId;
+  const selected = {manifest: {photoId: crypto.randomUUID()}} as Photo;
+  flow.currentPhotos.push(selected);
+  const reopened = albums(flow.reopen([selected]));
+  let adds = 0;
+  const actions = AlbumContributionActions({albumId: id, chosen: 1, busy: false, onChoosePhotos: reopened.onChoosePhotos, onAdd() {adds++;}});
+  const children = actions.type === "button" ? [actions] : Children.toArray(actions.props.children).filter(isValidElement) as ReactElement<any>[];
+  const choose = children.find(child => child.props.children === "Choose photos");
+  assert.ok(choose, "Choose photos must remain available alongside Add");
+  const add = children.find(child => child.props.className === "primary-action");
+  assert.ok(add); add.props.onClick(); assert.equal(adds, 1);
+  choose.props.onClick();
+  assert.equal(flow.state().selecting, true); assert.equal(flow.state().open, false);
+  assert.equal(flow.incoming.current(flow.session), true); assert.equal(flow.state().completed, 0);
+  const second = {manifest: {photoId: crypto.randomUUID()}} as Photo;
+  flow.currentPhotos.push(second);
+  const returnedAgain = albums(flow.reopen([second]));
+  assert.equal(returnedAgain.incoming.link.albumId, id); assert.deepEqual(returnedAgain.selection, [second]);
 });

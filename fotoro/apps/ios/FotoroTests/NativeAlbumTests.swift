@@ -154,6 +154,239 @@ final class NativeAlbumTests: XCTestCase {
       XCTAssertTrue(model.sharedFacts.isEmpty); XCTAssertTrue(model.items.isEmpty); XCTAssertNil(model.opened)
     }
   }
+  @MainActor func testLateMetadataFailureKeepsAlbumPageAndFactsRetryable() async throws {
+    try await withAlbum { _, server, model in
+      server.factsCapabilityStatus = 200
+      let extras = try server.extraOwnedPhotos(count: 108)
+      try server.contribute(extras)
+      for photo in extras { try server.setFacts(photo, people: ["Reviewed name"]) }
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      try await model.loadMoreSharedDetails()
+      let firstPageIDs = model.items.map(\.id), firstPageFacts = model.sharedFacts
+      let cursor = try XCTUnwrap(model.nextCursor)
+      XCTAssertEqual(firstPageIDs.count, 100)
+      XCTAssertEqual(firstPageFacts.count, 99)
+
+      // The first four metadata reads in the continuation succeed before this failure.
+      server.failObjectOnce = extras[103].manifest.metadataRepresentation.objectId
+      do { try await model.loadMore(); XCTFail("An incomplete page reported success") }
+      catch let error as URLError { XCTAssertEqual(error.code, .networkConnectionLost) }
+      XCTAssertEqual(model.items.map(\.id), firstPageIDs, "A failed page cannot publish partial contributions")
+      XCTAssertEqual(model.sharedFacts, firstPageFacts)
+      XCTAssertEqual(model.nextCursor, cursor)
+      XCTAssertNotNil(model.opened)
+
+      try await model.loadMore()
+      XCTAssertEqual(model.items.count, 109)
+      XCTAssertEqual(Set(model.items.map(\.id)).count, 109)
+      XCTAssertEqual(model.sharedFacts.count, 108, "Deferred facts publish with their successfully loaded page")
+      XCTAssertNil(model.nextCursor)
+      XCTAssertNil(model.factsNextCursor)
+    }
+  }
+  @MainActor func testAlbumReturnReopensVerifiedAlbumAfterMediaCleanupAndOfflineRetry() async throws {
+    try await withAlbum { services, server, model in
+      server.factsCapabilityStatus = 200
+      try server.setFacts(server.source, people: ["Mom"])
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let item = try XCTUnwrap(model.items.first)
+      let thumbnail = try await model.thumbnail(item)
+      XCTAssertNotNil(thumbnail)
+      let directory = try XCTUnwrap(model.directory)
+      var filter = NativeAlbumSearchFilter()
+      filter.query = "public-album-fixture"
+      filter.people = [NativeAlbumPersonChoice(contributor: server.cards[0].accountId, name: "Mom").id]
+      filter.match = .everyone
+      XCTAssertTrue(filter.includes(item, facts: model.sharedFacts[item.id]))
+      let intent = try XCTUnwrap(NativeAlbumReturnIntent(album: model.opened,
+        context: NativeAlbumPickerContext.current(services), filter: filter))
+
+      model.clear()
+      XCTAssertNil(model.opened); XCTAssertTrue(model.items.isEmpty); XCTAssertNil(model.directory)
+      XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+      let staleThumbnail = try await model.thumbnail(item)
+      XCTAssertNil(staleThumbnail, "Suspension clears access as well as exported media")
+      server.failInbox = true
+      do { try await model.refresh(); XCTFail("Offline refresh reported success") }
+      catch let error as URLError { XCTAssertEqual(error.code, .notConnectedToInternet) }
+      XCTAssertNil(model.opened)
+
+      server.failInbox = false
+      try await model.refresh()
+      let resumed = try await intent.reopen(in: model, services: services)
+      let restoredFilter = try XCTUnwrap(resumed)
+      XCTAssertEqual(restoredFilter, filter)
+      XCTAssertEqual(model.opened?.id, server.definition.albumId)
+      XCTAssertEqual(model.opened?.overview.definition, intent.definition)
+      let restoredItem = try XCTUnwrap(model.items.first)
+      XCTAssertTrue(restoredFilter.includes(restoredItem, facts: model.sharedFacts[restoredItem.id]))
+    }
+  }
+  @MainActor func testAlbumSuspensionCapturesOnlyActualOpenedScopeWithoutTaskCancellationDependency() async throws {
+    for change in ["account", "vault", "catalog", "origin", "cards"] {
+      try await withAlbum { services, server, model in
+        try await model.refresh(); try await model.open(server.definition.albumId)
+        let capturing = Task { NativeAlbumReturnIntent.capture(from: model, filter: NativeAlbumSearchFilter()) }
+        capturing.cancel()
+        let captured = await capturing.value
+        XCTAssertNotNil(captured, "A cancelled scene task can still preserve the unchanged opened scope")
+        switch change {
+        case "account":
+          services.session.accountId = server.cards[0].accountId
+          services.session.pinnedCards = Dictionary(uniqueKeysWithValues: server.cards.map { ($0.accountId, $0) })
+          try services.activateAccount()
+        case "vault": services.vault.lock()
+        case "catalog": try services.activateAccount()
+        case "origin": services.api.baseURL = try XCTUnwrap(URL(string: "http://localhost:8798"))
+        default: services.session.pinnedCards.removeValue(forKey: server.cards[0].accountId)
+        }
+        XCTAssertNotNil(model.opened, "The stale summary exists until suspension clears it")
+        XCTAssertNil(NativeAlbumReturnIntent.capture(from: model, filter: NativeAlbumSearchFilter()),
+          "An old opened album cannot be rebound to current changed " + change)
+      }
+    }
+  }
+  @MainActor func testExplicitAlbumChoiceDiscardsFailedReturnBeforeNextPoll() async throws {
+    try await withAlbum { services, server, model in
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let albumA = try XCTUnwrap(model.opened)
+      var resume = NativeAlbumResumeState(intent: try XCTUnwrap(
+        NativeAlbumReturnIntent.capture(from: model, filter: NativeAlbumSearchFilter())))
+      model.clear(); try await model.refresh()
+      server.failObjectOnce = server.source.manifest.metadataRepresentation.objectId
+      do { _ = try await resume.reopen(in: model, services: services); XCTFail("Failed return reported success") }
+      catch let error as URLError { XCTAssertEqual(error.code, .networkConnectionLost) }
+      XCTAssertNotNil(resume.intent, "A transient failure remains retryable until the user chooses another action")
+
+      resume.deliberateNavigation(in: model)
+      server.included = false
+      server.extraInbox = [albumA.overview]
+      let albumB = try await model.create(title: "Explicitly chosen album", members: [server.cards[0]])
+      try await model.open(albumB)
+      XCTAssertEqual(model.opened?.id, albumB)
+      try await model.refresh()
+      XCTAssertTrue(model.albums.contains { $0.id == albumA.id }, "The old destination remains available in the inbox")
+      let polled = try await resume.reopen(in: model, services: services)
+      XCTAssertNil(polled)
+      XCTAssertEqual(model.opened?.id, albumB, "A subsequent poll must preserve the explicit choice")
+      XCTAssertNil(resume.intent)
+    }
+  }
+  @MainActor func testLateAutomaticReturnCannotClearExplicitlyOpenedAlbum() async throws {
+    let gate = AlbumFactsRequestGate(started: expectation(description: "Automatic return facts request"))
+    defer { gate.release.signal() }
+    try await withAlbum { services, server, model in
+      server.factsCapabilityStatus = 200
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let albumA = try XCTUnwrap(model.opened)
+      var oldFilter = NativeAlbumSearchFilter(); oldFilter.query = "Old album filter"
+      var resume = NativeAlbumResumeState(intent: try XCTUnwrap(
+        NativeAlbumReturnIntent.capture(from: model, filter: oldFilter)))
+      model.clear(); try await model.refresh()
+      server.factsGate = gate
+      var publishedFilter = NativeAlbumSearchFilter()
+      let returning = Task {
+        if let filter = try await resume.reopen(in: model, services: services) { publishedFilter = filter }
+      }
+      await fulfillment(of: [gate.started], timeout: 3)
+
+      resume.deliberateNavigation(in: model)
+      server.included = false; server.extraInbox = [albumA.overview]
+      let albumB = try await model.create(title: "Chosen while return is in flight", members: [server.cards[0]])
+      try await model.open(albumB)
+      XCTAssertEqual(model.opened?.id, albumB, "B opens before the old A response is released")
+      gate.release.signal()
+      do { try await returning.value; XCTFail("Superseded return reported success") }
+      catch is CancellationError {}
+      XCTAssertFalse(returning.isCancelled, "Supersession must not require cancelling the scene polling task")
+      XCTAssertEqual(model.opened?.id, albumB, "The obsolete epoch cannot clear the newer album")
+      XCTAssertEqual(publishedFilter, NativeAlbumSearchFilter())
+      XCTAssertNil(resume.intent)
+      try await model.refresh()
+      let polled = try await resume.reopen(in: model, services: services)
+      XCTAssertNil(polled); XCTAssertEqual(model.opened?.id, albumB)
+    }
+  }
+  @MainActor func testAlbumReturnRejectsMissingRevokedUnreviewedOrChangedDefinition() async throws {
+    for change in ["missing", "ended", "unaccepted", "needsTrust", "definition"] {
+      try await withAlbum { services, server, model in
+        try await model.refresh(); try await model.open(server.definition.albumId)
+        let intent = try XCTUnwrap(NativeAlbumReturnIntent(album: model.opened,
+          context: NativeAlbumPickerContext.current(services), filter: NativeAlbumSearchFilter()))
+        model.clear()
+        switch change {
+        case "missing": server.hideInboxAlbum = true
+        case "ended": server.ended = true
+        case "unaccepted": server.accepted = false
+        case "needsTrust": services.session.pinnedCards.removeValue(forKey: server.cards[0].accountId)
+        default:
+          server.definition.createdAt = "2026-01-01T00:00:00.000Z"
+          server.signed = try CryptoAdapter().sign(server.definition, kind: "album-v1",
+            accountId: server.cards[0].accountId, secret: Data(b64: server.bundles[0].signingSecretKey))
+        }
+        try await model.refresh()
+        let objectReads = server.objectReads
+        let resumed = try await intent.reopen(in: model, services: services)
+        XCTAssertNil(resumed, change)
+        XCTAssertNil(model.opened, change); XCTAssertTrue(model.items.isEmpty, change)
+        XCTAssertEqual(server.objectReads, objectReads, "Rejected return must not read photo metadata: " + change)
+        XCTAssertNil(NativeAlbumReturnIntent(album: nil, context: NativeAlbumPickerContext.current(services), filter: intent.filter))
+        if let album = model.albums.first {
+          XCTAssertNil(NativeAlbumReturnIntent(album: album, context: nil, filter: intent.filter))
+          if change != "definition" {
+            XCTAssertNil(NativeAlbumReturnIntent(album: album, context: NativeAlbumPickerContext.current(services), filter: intent.filter), change)
+          }
+        }
+      }
+    }
+  }
+  @MainActor func testAlbumReturnRejectsChangedAccountVaultCatalogOrOriginBeforeOpening() async throws {
+    for change in ["account", "vault", "catalog", "origin"] {
+      try await withAlbum { services, server, model in
+        try await model.refresh(); try await model.open(server.definition.albumId)
+        let intent = try XCTUnwrap(NativeAlbumReturnIntent(album: model.opened,
+          context: NativeAlbumPickerContext.current(services), filter: NativeAlbumSearchFilter()))
+        model.clear(); try await model.refresh()
+        switch change {
+        case "account": services.session.accountId = server.cards[0].accountId
+        case "vault": services.vault.lock()
+        case "catalog": try services.activateAccount()
+        default: services.api.baseURL = try XCTUnwrap(URL(string: "http://localhost:8798"))
+        }
+        let objectReads = server.objectReads
+        let resumed = try await intent.reopen(in: model, services: services)
+        XCTAssertNil(resumed, change); XCTAssertNil(model.opened, change)
+        XCTAssertEqual(server.objectReads, objectReads, change)
+      }
+    }
+  }
+  @MainActor func testLateAlbumReturnCannotReopenAfterCancellationOrContextChange() async throws {
+    for change in ["cancel", "account", "vault", "catalog", "origin"] {
+      let gate = AlbumFactsRequestGate(started: expectation(description: "Returning album " + change))
+      defer { gate.release.signal() }
+      try await withAlbum { services, server, model in
+        server.factsCapabilityStatus = 200
+        try await model.refresh(); try await model.open(server.definition.albumId)
+        let intent = try XCTUnwrap(NativeAlbumReturnIntent(album: model.opened,
+          context: NativeAlbumPickerContext.current(services), filter: NativeAlbumSearchFilter()))
+        model.clear(); try await model.refresh()
+        server.factsGate = gate
+        let reopening = Task { try await intent.reopen(in: model, services: services) }
+        await fulfillment(of: [gate.started], timeout: 3)
+        switch change {
+        case "cancel": reopening.cancel()
+        case "account": services.session.accountId = server.cards[0].accountId
+        case "vault": services.vault.lock()
+        case "catalog": try services.activateAccount()
+        default: services.api.baseURL = try XCTUnwrap(URL(string: "http://localhost:8798"))
+        }
+        gate.release.signal()
+        do { _ = try await reopening.value; XCTFail("Late return survived " + change) } catch {}
+        XCTAssertNil(model.opened, change); XCTAssertTrue(model.items.isEmpty, change)
+        XCTAssertNil(model.directory, change)
+      }
+    }
+  }
   @MainActor func testSharedDetailsWrongDigestAndEndedReadCannotPublishFacts() async throws {
     for interruption in ["digest", "ended"] {
       try await withAlbum { _, server, model in
@@ -732,6 +965,7 @@ private final class AlbumTestServer: @unchecked Sendable {
   let source: LocalPhoto; let metadataKey: Data; let entry: SignedPayloadV1; let manifest: SignedPayloadV1
   private let objects: [String: Data]
   var accepted = true; var endOnObject = false; var ended = false
+  var failObjectOnce: String?
   var included = true; var loseAppendResponse = false; var appendBodies: [Data] = []
   private var receipts: [String: (Data, AlbumAppendResultV1)] = [:]
   private var contributions: [(SignedPayloadV1, SignedPayloadV1)] = []
@@ -739,6 +973,7 @@ private final class AlbumTestServer: @unchecked Sendable {
   private var owned: [String: SignedPayloadV1] = [:]
   var creationBodies: [Data] = []; var loseCreateResponse = false; var failInbox = false
   var extraInbox: [AlbumOverviewV1] = []
+  var hideInboxAlbum = false
   var accessStatus: Int?
   var accountMismatchCount = 0; var authAccountHeader: String?
   var factsCapabilityStatus = 404
@@ -838,7 +1073,8 @@ private final class AlbumTestServer: @unchecked Sendable {
       return factsCapabilityStatus == 200 ? (200, try Wire.encode(AlbumFactsCapabilitiesV1(version: 1, albumFactsVersion: 1))) : (factsCapabilityStatus, Data())
     }
     if path.contains("/photo-facts") {
-      if let gate = factsGate { factsGate = nil; gate.started.fulfill(); _ = gate.release.wait(timeout: .now() + 5) }
+      if let gate = factsGate { factsGate = nil; lock.unlock(); gate.started.fulfill()
+        _ = gate.release.wait(timeout: .now() + 5); lock.lock() }
       if endOnFacts { ended = true }
       guard accepted && !ended else { return (403, Data("{\"code\":\"ALBUM_INACTIVE\"}".utf8)) }
       if path.hasSuffix("/photo-facts") {
@@ -865,7 +1101,7 @@ private final class AlbumTestServer: @unchecked Sendable {
       return (200, try Wire.encode(AlbumPhotoFactsReplyV1(version: 1, facts: sharedDetails[id])))
     }
     if path.hasSuffix("/capabilities") { return (200, try Wire.encode(AlbumCapabilitiesV1(version: 1, albumsVersion: 1, maxMembers: 12, maxPhotos: 1000, pageSize: 100))) }
-    if path == "/v1/albums" { if failInbox { throw URLError(.notConnectedToInternet) }; return (200, try Wire.encode(AlbumInboxV1(version: 1, albums: extraInbox + [overview]))) }
+    if path == "/v1/albums" { if failInbox { throw URLError(.notConnectedToInternet) }; return (200, try Wire.encode(AlbumInboxV1(version: 1, albums: extraInbox + (hideInboxAlbum ? [] : [overview])))) }
     if path.hasSuffix("/accept") { accepted = true; var value = overview; value.membership = "accepted"; return (200, try Wire.encode(value)) }
     if path.hasPrefix("/v1/photos/"), path.hasSuffix("/manifest") {
       let id = String(path.split(separator: "/")[2])
@@ -893,6 +1129,9 @@ private final class AlbumTestServer: @unchecked Sendable {
     if path.hasSuffix("/access") { accessCount += 1; if let accessStatus { if accessStatus == 0 { throw URLError(.timedOut) }; return (accessStatus, Data()) }; return accepted && !ended ? (200, try Wire.encode(overview)) : (403, Data("{\"code\":\"ALBUM_INACTIVE\"}".utf8)) }
     if path.hasPrefix("/v1/objects/") {
       objectCount += 1; if endOnObject { ended = true }
+      if request.url!.lastPathComponent == failObjectOnce {
+        failObjectOnce = nil; throw URLError(.networkConnectionLost)
+      }
       return (extraObjects[request.url!.lastPathComponent] ?? objects[request.url!.lastPathComponent]).map { (200, $0) } ?? (404, Data())
     }
     if path == "/v1/albums/" + definition.albumId {

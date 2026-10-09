@@ -20,7 +20,7 @@ import {ownedAlbumDetails, type OwnedAlbumDetails} from "./details";
 import {albumReviewedPeople, sharedAlbumDetails, searchAlbumPhotos} from "./search";
 import {albumDateTag, albumMemberLabel} from "./presentation";
 import {Icon} from "../library/icons";
-import {joinAlbumInvitation, loadAlbumEntry, unsupportedAlbumCapabilities} from "./bootstrap";
+import {joinAlbumInvitation, loadAlbumEntry, reviewAlbumOwner, unsupportedAlbumCapabilities, type AlbumOwnerEntry} from "./bootstrap";
 import {shareOriginals} from "../library/system-share";
 import {subscribeAlbumLifetime} from "./entry";
 
@@ -57,6 +57,9 @@ function AlbumImage({access, photo, preview = false, onOpen}: {access: AlbumAcce
   const image = url ? <img src={url} alt={preview ? photo.metadata.filename : ""} onError={() => setError("Preview unavailable.")} /> : <span>{error || "Loading photo…"}</span>;
   return <div ref={element} className={preview ? "album-preview-image" : "album-thumbnail"}>{preview ? error || image : <button className="photo" onClick={onOpen} aria-label={"Open " + photo.metadata.filename}>{error || image}</button>}</div>;
 }
+export function AlbumContributionActions({albumId, chosen, busy, onChoosePhotos, onAdd}: {albumId: string; chosen: number; busy: boolean; onChoosePhotos: (albumId: string) => void; onAdd: () => void}) {
+  return <><button disabled={busy} onClick={() => onChoosePhotos(albumId)}>Choose photos</button>{chosen > 0 && <button className="primary-action" disabled={busy} onClick={onAdd}>Add {chosen} {chosen === 1 ? "photo" : "photos"}</button>}</>;
+}
 export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incoming, onRetryAccount, currentOwnedPhotos, onLoadOwnedPhoto, initialAlbumId}: {selection: readonly Photo[]; initialAlbumId?: string; currentPhotos: () => readonly Photo[]; onClose: () => void; onChoosePhotos: (albumId: string) => void; incoming?: IncomingAlbumIntent; onRetryAccount?: () => void; currentOwnedPhotos?: () => OwnedPhotoSnapshot | null; onLoadOwnedPhoto?: (photo: Photo, signal: AbortSignal) => Promise<void>}) {
   const [session] = useState(requireVault), [controller] = useState(() => new AbortController());
   const [chosenSnapshot] = useState(() => new ShareSelection([...selection]));
@@ -64,7 +67,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   const panel = useRef<HTMLElement>(null), alive = useRef(true), accessRef = useRef<AlbumAccess | null>(null), working = useRef(false);
   const [available, setAvailable] = useState<boolean | null>(null), [items, setItems] = useState<AlbumOverviewV1[]>([]), [cards, setCards] = useState<AccountCardV1[]>([]), [names, setNames] = useState(new Map<string, string>());
   const [titles, setTitles] = useState(new Map<string, string>()), previewPanel = useRef<HTMLElement>(null);
-  const [ownerReview, setOwnerReview] = useState<AlbumOverviewV1 | null>(null), [ownerChanged, setOwnerChanged] = useState(false);
+  const [ownerReview, setOwnerReview] = useState<Extract<AlbumOwnerEntry, {kind: "review"}> | null>(null);
   const [access, setAccess] = useState<AlbumAccess | null>(null), [photos, setPhotos] = useState<Photo[]>([]), [preview, setPreview] = useState<Photo | null>(null);
   const [page, setPage] = useState<{hasMore: boolean; nextCursor?: string; photoCount: number}>({hasMore: false, photoCount: 0});
   const [query, setQuery] = useState("");
@@ -132,6 +135,11 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     accessRef.current = opened; setAccess(opened);
     if (overview.membership === "accepted") await loadPage(opened);
   }
+  async function enter(overview: AlbumOverviewV1) {
+    const entry = await reviewAlbumOwner(overview, session, scope);
+    if (entry.kind === "review") setOwnerReview(entry);
+    else await open(entry.overview);
+  }
   // Keep the visible window, filters and current photo while checking for new contributions.
   async function refreshOpened(previous: AlbumAccess, overview: AlbumOverviewV1) {
     if (!scope.current?.() || accessRef.current !== previous) return;
@@ -160,7 +168,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     try {
       const entry = await loadAlbumEntry({session, scope, incoming, albumId: initialAlbumId, loadInbox, onAvailable: () => {checked = true; setAvailable(true);}});
       if (entry.kind === "missing") setError("This account has no invitation to that album.");
-      else if (entry.kind === "review") {setOwnerChanged(entry.changed); setOwnerReview(entry.overview);}
+      else if (entry.kind === "review") setOwnerReview(entry);
       else if (entry.kind === "open") await open(entry.overview);
     } catch (failure) {
       if (scope.current?.()) setEntryFailed(true);
@@ -255,18 +263,19 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
       {notice && <p className="hint" role="status">{notice}</p>}
       {available === null && <p role="status">Checking album availability…</p>}
       {available && <>
-        {ownerReview && incoming ? <section className="identity-confirmation">
-          <h3>{ownerChanged ? "The album owner's identity changed" : "Accept the album owner"}</h3>
-          <p className="hint">Only accept an album link sent to you by its owner. {ownerChanged && "Confirm the new link with them before continuing."}</p>
-          <details className="album-roster"><summary>Verify sender</summary><p className="contact-identity">Fotoro {identityLabel(incoming.link.ownerCard)}</p></details>
-          <button className="primary-action" disabled={busy} onClick={() => void action(async () => {const accepted = await joinAlbumInvitation(ownerReview, scope, incoming.link.ownerCard); if (!scope.current?.()) return; setOwnerReview(null); await open(accepted); await loadInbox();})}>{ownerChanged ? "Join album with new identity" : "Join album"}</button>
+        {ownerReview ? <section className="identity-confirmation">
+          <h3>{ownerReview.changed ? "The album owner's identity changed" : "Accept the album owner"}</h3>
+          <p className="hint">Confirm this sender with the album owner through a trusted channel before continuing. {ownerReview.changed && "Their identity differs from the contact saved in this browser."}</p>
+          <details className="album-roster"><summary>Verify sender</summary><p className="contact-identity">Fotoro {identityLabel(ownerReview.owner)}</p></details>
+          <button className="primary-action" disabled={busy} onClick={() => void action(async () => {const accepted = await joinAlbumInvitation(ownerReview.overview, scope, ownerReview.owner); if (!scope.current?.()) return; setOwnerReview(null); await open(accepted); await loadInbox();})}>{ownerReview.overview.membership === "accepted" ? "Verify sender and open album" : ownerReview.changed ? "Join album with new identity" : "Join album"}</button>
+          <button disabled={busy} onClick={() => setOwnerReview(null)}>All albums</button>
         </section> : access ? <>
           {access.overview.membership === "invited" ? <>
             <p>Accept to view this album and add chosen Saved photos. Its invited members stay fixed.</p>
             <button className="primary-action" disabled={busy} onClick={() => void action(async () => {const accepted = await joinAlbumInvitation(access.overview, scope); await open(accepted); await loadInbox();})}>Join album</button>
           </> : <>
             <div className="album-toolbar"><input type="search" aria-label="Search album people, places, filenames or capture dates" placeholder="Search album" value={query} onChange={event => setQuery(event.target.value)} />
-              {chosen ? <button className="primary-action" disabled={busy} onClick={() => void action(async () => {const added = await access.add(chosenSnapshot.photos, currentPhotos); const list = await loadInbox(); const updated = list?.find(item => item.definition.body === access.overview.definition.body); if (updated) await refreshOpened(access, updated); setNotice(added ? `${added} ${added === 1 ? "photo added" : "photos added"}.` : "Already in this album.");})}>Add {chosen} {chosen === 1 ? "photo" : "photos"}</button> : <button disabled={busy} onClick={() => onChoosePhotos(access.albumId)}>Choose photos</button>}
+              <AlbumContributionActions albumId={access.albumId} chosen={chosen} busy={busy} onChoosePhotos={onChoosePhotos} onAdd={() => void action(async () => {const added = await access.add(chosenSnapshot.photos, currentPhotos); const list = await loadInbox(); const updated = list?.find(item => item.definition.body === access.overview.definition.body); if (updated) await refreshOpened(access, updated); setNotice(added ? `${added} ${added === 1 ? "photo added" : "photos added"}.` : "Already in this album.");})} />
             </div>
             <div className="album-filters"><PeopleFilter people={reviewed} value={peopleFilter} onChange={setPeopleFilter} disabled={busy} />
               <details><summary>Time and copies</summary><div className="album-range"><label>Captured from<input type="date" value={from} onChange={event => setFrom(event.target.value)} /></label><label>Captured through<input type="date" value={through} onChange={event => setThrough(event.target.value)} /></label>
@@ -292,7 +301,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
             <button type="submit" className="primary-action" disabled={busy || !title.trim() || [...title].length > 80 || !invitees.size}>Create and invite</button>
             <button type="button" disabled={busy} onClick={() => setCreating(false)}>Cancel</button>
           </form>}
-          {!creating && <div className="album-inbox">{items.map(item => {const definition = readAlbumSignedBody(item.definition, ALBUM_DEFINITION_KIND, validateAlbumDefinition), label = titles.get(definition.albumId) || (item.membership === "invited" ? "Album invitation" : "Album"); return <button className="album-inbox-card" key={definition.albumId} disabled={busy || !!item.endedAt} onClick={() => void action(() => open(item))} aria-label={`${item.membership === "invited" ? "Review invitation to" : "Open"} ${label}`}><div><strong>{label}</strong><div className="album-chips"><span>{item.photoCount} {item.photoCount === 1 ? "photo" : "photos"}</span><span>{definition.members.length} people</span><span>{item.endedAt ? "Access ended" : item.membership === "invited" ? "Invitation" : contributor(definition.ownerAccountId, definition.members.map(member => member.card.accountId))}</span></div></div><Icon kind="next" /></button>;})}</div>}
+          {!creating && <div className="album-inbox">{items.map(item => {const definition = readAlbumSignedBody(item.definition, ALBUM_DEFINITION_KIND, validateAlbumDefinition), label = titles.get(definition.albumId) || (item.membership === "invited" ? "Album invitation" : "Album"); return <button className="album-inbox-card" key={definition.albumId} disabled={busy || !!item.endedAt} onClick={() => void action(() => enter(item))} aria-label={`${item.membership === "invited" ? "Review invitation to" : "Open"} ${label}`}><div><strong>{label}</strong><div className="album-chips"><span>{item.photoCount} {item.photoCount === 1 ? "photo" : "photos"}</span><span>{definition.members.length} people</span><span>{item.endedAt ? "Access ended" : item.membership === "invited" ? "Invitation" : contributor(definition.ownerAccountId, definition.members.map(member => member.card.accountId))}</span></div></div><Icon kind="next" /></button>;})}</div>}
           {!creating && !items.length && !busy && <p>No albums or invitations yet.</p>}
         </>}
       </>}

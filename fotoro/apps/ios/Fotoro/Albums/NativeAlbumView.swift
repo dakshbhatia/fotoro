@@ -12,6 +12,51 @@ struct NativeAlbumPresentation: Identifiable {
   }
 }
 
+// Keep navigation intent, never decrypted media or album keys, across inactivity.
+struct NativeAlbumReturnIntent {
+  let id = UUID()
+  let context: NativeAlbumPickerContext
+  let albumID: String
+  let definition: SignedPayloadV1
+  let filter: NativeAlbumSearchFilter
+  @MainActor static func capture(from model: NativeAlbumService, filter: NativeAlbumSearchFilter) -> Self? {
+    guard let access = model.currentOpenedPhotoAccess else { return nil }
+    return Self(album: model.opened,
+      context: NativeAlbumPickerContext(access: access, origin: model.services.api.baseURL.absoluteString), filter: filter)
+  }
+  init?(album: NativeAlbumSummary?, context: NativeAlbumPickerContext?, filter: NativeAlbumSearchFilter) {
+    guard let album, let context, !album.needsTrust,
+      album.overview.membership == "accepted", album.overview.endedAt == nil else { return nil }
+    self.context = context; albumID = album.id; definition = album.overview.definition; self.filter = filter
+  }
+  func destination(in albums: [NativeAlbumSummary], context: NativeAlbumPickerContext?) -> String? {
+    guard self.context == context,
+      albums.contains(where: { $0.id == albumID && $0.overview.definition == definition
+        && $0.overview.membership == "accepted" && $0.overview.endedAt == nil && !$0.needsTrust }) else { return nil }
+    return albumID
+  }
+  @MainActor func reopen(in model: NativeAlbumService, services: AppServices) async throws -> NativeAlbumSearchFilter? {
+    try Task.checkCancellation()
+    guard let id = destination(in: model.albums, context: NativeAlbumPickerContext.current(services)) else { return nil }
+    try await model.open(id)
+    try Task.checkCancellation()
+    guard let opened = model.opened,
+      destination(in: [opened], context: NativeAlbumPickerContext.current(services)) == id else { throw CancellationError() }
+    return filter
+  }
+}
+
+struct NativeAlbumResumeState {
+  var intent: NativeAlbumReturnIntent?
+  @MainActor mutating func deliberateNavigation(in model: NativeAlbumService) {
+    intent = nil; model.discardOpenedAlbum()
+  }
+  @MainActor func reopen(in model: NativeAlbumService, services: AppServices) async throws -> NativeAlbumSearchFilter? {
+    guard let intent else { return nil }
+    return try await intent.reopen(in: model, services: services)
+  }
+}
+
 // Called only after the owner identity shown in the review sheet was confirmed.
 @MainActor enum NativeAlbumReviewedJoin {
   static func join(_ reviewed: NativeAlbumSummary, incoming: FotoroAlbumInvitation?, services: AppServices, model: NativeAlbumService) async throws {
@@ -66,6 +111,7 @@ struct NativeAlbumView: View {
   @State private var ending = false
   @State private var link: URL?
   @State private var invitationPrepared = false
+  @State private var resumeState = NativeAlbumResumeState()
   @Environment(\.scenePhase) private var scenePhase
   @Environment(\.dismiss) private var dismiss
   init(services: AppServices, selected: [LocalPhoto] = [], incoming: FotoroAlbumInvitation? = nil) {
@@ -104,7 +150,7 @@ struct NativeAlbumView: View {
       .toolbar {
         ToolbarItem(placement: .topBarLeading) {
           Button(model.opened == nil ? "Done" : "Albums") {
-            if model.opened != nil { stop(); model.clear(); run { try await model.refresh() } }
+            if model.opened != nil { resumeState.deliberateNavigation(in: model); stop(); model.clear(); run { try await model.refresh() } }
             else { dismiss() }
           }
         }
@@ -121,37 +167,39 @@ struct NativeAlbumView: View {
               }
             }
             Button("Refresh", systemImage: "arrow.clockwise") {
-              let id = model.opened?.id
-              run { try await model.refresh(); if let id { try await model.open(id) } }
+              run { try await refreshAlbums(reopenCurrent: true) }
             }
           }.disabled(busy || services.photoAccountAccess == nil)
         }
       }
       .task(id: binding) {
+        guard scenePhase == .active else { suspendAlbum(); return }
         stop(); model.clear(); invitationPrepared = false; title = ""; memberIDs = []; feedback = nil; familyFilter = NativeAlbumSearchFilter()
-        guard services.photoAccountAccess != nil, scenePhase == .active else { return }
-        do { try await model.refresh(); try prepareInvitation() }
-        catch is CancellationError { return }
+        guard services.photoAccountAccess != nil else { resumeState.intent = nil; return }
+        do {
+          try await refreshAlbums()
+        }
+        catch is CancellationError { if Task.isCancelled { return } }
         catch { feedback = error.localizedDescription }
         while !Task.isCancelled {
           do { try await Task.sleep(for: .seconds(15)) } catch { return }
           guard scenePhase == .active, !busy else { continue }
           let openedID = model.opened?.id, count = model.opened?.overview.photoCount
           do {
-            try await model.refresh()
-            if let openedID, model.opened != nil,
+            try await refreshAlbums()
+            if let openedID, model.opened?.id == openedID,
               let fresh = model.albums.first(where: { $0.id == openedID }), fresh.overview.photoCount != count {
               try await model.open(openedID)
             }
-          } catch is CancellationError { return }
+          } catch is CancellationError { if Task.isCancelled { return } }
           catch { feedback = error.localizedDescription }
         }
       }
       .onChange(of: scenePhase) { _, phase in
-        if phase != .active { stop(); authenticationTask?.cancel(); authenticationTask = nil; model.clear() }
+        if phase != .active { suspendAlbum() }
       }
       .onChange(of: model.opened?.id) { _, id in if id == nil { viewer = nil; link = nil; showFamilyFilters = false } }
-      .onDisappear { stop(); authenticationTask?.cancel(); authenticationTask = nil; model.clear() }
+      .onDisappear { resumeState.intent = nil; stop(); authenticationTask?.cancel(); authenticationTask = nil; model.clear() }
       .sheet(isPresented: $showCreation) {
         NavigationStack {
           ScrollView { create.padding() }.navigationTitle("New album").navigationBarTitleDisplayMode(.inline)
@@ -205,7 +253,7 @@ struct NativeAlbumView: View {
       HStack {
         Text("Your albums").font(.headline)
         Spacer()
-        Button("New album", systemImage: "plus") { showCreation = true }.buttonStyle(.borderedProminent).disabled(busy)
+        Button("New album", systemImage: "plus") { resumeState.deliberateNavigation(in: model); showCreation = true }.buttonStyle(.borderedProminent).disabled(busy)
       }
       if let error = model.inboxError {
         Text(error).foregroundStyle(.secondary)
@@ -217,14 +265,14 @@ struct NativeAlbumView: View {
           Text("\(album.definition.members.count) members · \(album.overview.photoCount) photos").font(.subheadline).foregroundStyle(.secondary)
           Text("Owner: " + memberName(album.definition.ownerAccountId, in: album.definition)).font(.caption)
           if album.overview.endedAt != nil { Text("Access ended").foregroundStyle(.secondary) }
-          else if album.needsTrust { Button("Verify sender", systemImage: "checkmark.shield") { trustCandidate = album }.buttonStyle(.bordered).disabled(busy) }
+          else if album.needsTrust { Button("Verify sender", systemImage: "checkmark.shield") { resumeState.deliberateNavigation(in: model); trustCandidate = album }.buttonStyle(.bordered).disabled(busy) }
           else if album.overview.membership == "invited" {
-            Button("Join album") { run {
+            Button("Join album") { run(navigating: true) {
               try await model.accept(album.id, expectedOwner: incoming?.albumId == album.id ? incoming?.ownerCard : nil)
               try await model.open(album.id)
             } }.buttonStyle(.borderedProminent).disabled(busy).accessibilityIdentifier("albums.accept")
           } else {
-            Button("Open album") { run { try await model.open(album.id) } }.buttonStyle(.bordered).disabled(busy)
+            Button("Open album") { run(navigating: true) { try await model.open(album.id) } }.buttonStyle(.bordered).disabled(busy)
           }
         }.padding().background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
       }
@@ -243,7 +291,7 @@ struct NativeAlbumView: View {
         Text("Encryption fingerprint").font(.caption)
         Text(card.boxPublicKey).font(.caption.monospaced()).textSelection(.enabled)
       }
-      Button(changed ? "Join album with new identity" : "Join album") { run {
+      Button(changed ? "Join album with new identity" : "Join album") { run(navigating: true) {
         try await NativeAlbumReviewedJoin.join(album, incoming: incoming, services: services, model: model)
         trustCandidate = nil
       } }.buttonStyle(.borderedProminent).disabled(busy).accessibilityIdentifier("albums.joinReviewed")
@@ -251,7 +299,7 @@ struct NativeAlbumView: View {
   }
   private var create: some View {
     VStack(alignment: .leading, spacing: 12) {
-      if model.hasPendingCreation { Button("Retry pending creation") { run { let id = try await model.retryCreation(); try await model.open(id) } }.disabled(busy) }
+      if model.hasPendingCreation { Button("Retry pending creation") { run(navigating: true) { let id = try await model.retryCreation(); try await model.open(id) } }.disabled(busy) }
       TextField("Album name", text: $title).textFieldStyle(.roundedBorder).accessibilityIdentifier("albums.name")
       Text("Choose 1–11 confirmed contacts. Each person accepts before viewing or adding photos.").font(.footnote).foregroundStyle(.secondary)
       if contacts.isEmpty { Text("Add a contact in Shared photos first.").foregroundStyle(.secondary) }
@@ -260,7 +308,7 @@ struct NativeAlbumView: View {
           if enabled { memberIDs.insert(card.accountId) } else { memberIDs.remove(card.accountId) }
         }))
       }
-      Button("Create album") { run {
+      Button("Create album") { run(navigating: true) {
         let members = contacts.filter { memberIDs.contains($0.accountId) }
         let id = try await model.create(title: title, members: members)
         title = ""; memberIDs = []; try await model.open(id); showCreation = false
@@ -357,8 +405,31 @@ struct NativeAlbumView: View {
     if album.overview.endedAt != nil { feedback = "Album access has ended." }
     else { feedback = album.overview.membership == "invited" ? "Join the album below." : "Open the album below." }
   }
+  private func suspendAlbum() {
+    if let intent = NativeAlbumReturnIntent.capture(from: model, filter: familyFilter) {
+      resumeState.intent = intent
+    }
+    stop(); authenticationTask?.cancel(); authenticationTask = nil; model.clear()
+  }
+  private func refreshAlbums(reopenCurrent: Bool = false) async throws {
+    let openedID = reopenCurrent ? model.opened?.id : nil
+    try await model.refresh()
+    try Task.checkCancellation()
+    if let returning = resumeState.intent {
+      let filter = try await resumeState.reopen(in: model, services: services)
+      try Task.checkCancellation()
+      guard resumeState.intent?.id == returning.id else { throw CancellationError() }
+      if let filter { familyFilter = filter; feedback = nil }
+      else { resumeState.intent = nil; try prepareInvitation() }
+      resumeState.intent = nil
+    } else {
+      if let openedID { try await model.open(openedID) }
+      try prepareInvitation()
+    }
+  }
   private func stop() { operation?.cancel(); operation = nil; operationID = nil; viewer = nil; showPicker = false; link = nil; familyFilter = NativeAlbumSearchFilter(); showFamilyFilters = false; showCreation = false; showDetails = false; trustCandidate = nil }
-  private func run(_ action: @escaping @MainActor () async throws -> Void) {
+  private func run(navigating: Bool = false, _ action: @escaping @MainActor () async throws -> Void) {
+    if navigating { resumeState.deliberateNavigation(in: model) }
     operation?.cancel(); let id = UUID(); operationID = id; feedback = nil
     operation = Task {
       defer { if operationID == id { operation = nil; operationID = nil } }

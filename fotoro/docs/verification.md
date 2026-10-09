@@ -5,9 +5,28 @@ work; [product](product.md) owns the intended experience. Earlier measurements a
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
 
-Current distribution is PR 55 in production and TestFlight 49, independently
-verified `VALID` and `IN_BETA_TESTING`; see [Deployment](deployment.md). The dated
+Current browser distribution is PR 56 in production. Native PR 57 is TestFlight
+0.1.0 (51), independently verified `VALID` and `IN_BETA_TESTING` in the existing
+internal group; see [Deployment](deployment.md). The dated
 follow-ups below preserve their qualification state at the time of testing.
+
+## October 8 native photo delivery — released as build 51
+
+Grid thumbnails reuse a bounded 32 MiB/80-entry cache keyed by source revision,
+requested size and network policy. Photos permission changes and library refresh
+invalidate cached access and late callbacks. Native scrolling owns its offset;
+filter/date transitions explicitly reset it. Timeline grouping and photo lookup
+reuse metadata, and an empty Saved continuation no longer republishes the catalog.
+Sync shows actual transfer phases, distinguishes cancellation from completion,
+and treats an expected incomplete-commit recovery probe separately from failures.
+
+Local native tests pass 507 with two skips; isolated preview tests pass 140 with
+two skips. Hosted checks pass, and the archive and actual distribution IPA pass
+release audits. Simulator forward/reverse scrolling and date/filter transitions
+were checked. This is not a physical frame-pacing or battery measurement. The
+paired phone now reports build 50; its bounded diagnostic window contains builds
+49/50 and no album/search events. Build 51 installation and real family acceptance
+remain unverified.
 
 ## October 8 first-use and invitation recovery — locally qualified
 

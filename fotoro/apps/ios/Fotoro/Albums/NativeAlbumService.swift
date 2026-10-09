@@ -91,10 +91,23 @@ struct NativeAlbumAccess {
   func isCurrent(_ expected: NativeAlbumContext) -> Bool {
     (try? context()) == expected
   }
+  var currentOpenedPhotoAccess: PhotoAccountAccess? {
+    guard let captured = access?.context, opened != nil,
+      captured.photo == services.photoAccountAccess,
+      captured.origin == BackgroundUploadPolicy.origin(services.api.baseURL),
+      captured.apiOrigin == services.api.origin, captured.cards == services.session.pinnedCards,
+      captured.token == services.session.bearerToken, captured.fixture == services.session.fixture,
+      captured.epoch == epoch else { return nil }
+    return captured.photo
+  }
   private func check(_ expected: NativeAlbumContext) throws {
     try Task.checkCancellation()
-    guard isCurrent(expected) else { clear(); throw CancellationError() }
+    guard isCurrent(expected) else {
+      if expected.epoch == epoch { clear() }
+      throw CancellationError()
+    }
   }
+  func discardOpenedAlbum() { clearOpen() }
   private func request<T: Codable>(_ type: T.Type, path: String, context: NativeAlbumContext, body: Data? = nil, method: String? = nil) async throws -> T {
     try check(context)
     let bytes: Data
@@ -120,8 +133,9 @@ struct NativeAlbumAccess {
     return NativeAlbumSummary(overview: overview, definition: definition, title: title, needsTrust: false)
   }
   func refresh() async throws {
+    let refreshEpoch = epoch
     do { try await refreshInbox() }
-    catch { clearOpen(); throw error }
+    catch { if refreshEpoch == epoch { clearOpen() }; throw error }
     try await refreshSharedDetails()
   }
   private func refreshInbox() async throws {
@@ -274,11 +288,17 @@ struct NativeAlbumAccess {
     let reading = NativeAlbumAccess(context: captured, albumID: id, signedDefinition: value.overview.definition, definition: definition, key: key)
     access = reading; opened = value
     do { try await loadPage(reading, cursor: nil) }
-    catch { if isCurrent(captured) { clearOpen() }; throw error }
+    catch { if access?.context == captured { clearOpen() }; throw error }
     do { try await loadMoreSharedDetails() }
-    catch is CancellationError { throw CancellationError() }
+    catch is CancellationError {
+      if access?.context == captured { clearOpen() }
+      throw CancellationError()
+    }
     catch {
-      if NativeDiagnosticOutcome.failure(for: error, taskCancelled: Task.isCancelled) == .cancelled { throw CancellationError() }
+      if NativeDiagnosticOutcome.failure(for: error, taskCancelled: Task.isCancelled) == .cancelled {
+        if access?.context == captured { clearOpen() }
+        throw CancellationError()
+      }
       try check(captured)
       factsError = error.localizedDescription
     }
@@ -292,7 +312,7 @@ struct NativeAlbumAccess {
     let path = "/v1/albums/\(reading.albumID)" + (cursor.map { "?cursor=" + $0 } ?? "")
     let detail = try await request(AlbumDetailV1.self, path: path, context: captured)
     try validate(detail, access: reading)
-    var seen = Set(items.map(\.id))
+    var nextItems = items, seen = Set(items.map(\.id))
     // Four metadata reads at a time keeps the first page responsive and memory bounded.
     for offset in stride(from: 0, to: detail.entries.count, by: 4) {
       let end = min(offset + 4, detail.entries.count)
@@ -307,22 +327,27 @@ struct NativeAlbumAccess {
       }
       try check(captured)
       for item in batch {
-        guard seen.insert(item.id).inserted, items.count < 1000 else { throw FotoroError("Duplicate or oversized album.") }
-        items.append(item)
+        guard seen.insert(item.id).inserted, nextItems.count < 1000 else { throw FotoroError("Duplicate or oversized album.") }
+        nextItems.append(item)
       }
     }
     try await membership(reading); try check(captured)
-    if let cursor = detail.nextCursor { guard cursors.insert(cursor).inserted else { throw FotoroError("Invalid album pagination.") } }
-    nextCursor = detail.nextCursor
-    do { try bindSharedDetails() }
-    catch { sharedFacts = [:]; pendingFacts = [:]; factsError = error.localizedDescription }
+    var nextCursors = cursors
+    if let cursor = detail.nextCursor { guard nextCursors.insert(cursor).inserted else { throw FotoroError("Invalid album pagination.") } }
+    let nextFacts: [String: AlbumPhotoFactsContentV1]
+    var invalidFacts: String?
+    do { nextFacts = try boundSharedDetails(pendingFacts, for: nextItems) }
+    catch { nextFacts = [:]; invalidFacts = error.localizedDescription }
+    // A failed continuation must leave its cursor and verified page intact for retry.
+    items = nextItems; cursors = nextCursors; nextCursor = detail.nextCursor; sharedFacts = nextFacts
+    if let invalidFacts { pendingFacts = [:]; factsError = invalidFacts }
   }
   private func bindSharedDetails() throws {
     sharedFacts = try boundSharedDetails(pendingFacts)
   }
-  private func boundSharedDetails(_ facts: [String: AlbumPhotoFactsContentV1]) throws -> [String: AlbumPhotoFactsContentV1] {
+  private func boundSharedDetails(_ facts: [String: AlbumPhotoFactsContentV1], for candidateItems: [NativeAlbumItem]? = nil) throws -> [String: AlbumPhotoFactsContentV1] {
     var values: [String: AlbumPhotoFactsContentV1] = [:]
-    for item in items {
+    for item in candidateItems ?? items {
       if let value = facts[item.id] { try NativeAlbumFacts.bind(value, to: item); values[item.id] = value }
     }
     return values
