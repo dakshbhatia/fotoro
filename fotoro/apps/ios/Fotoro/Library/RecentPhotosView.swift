@@ -1464,8 +1464,10 @@ struct RecentPhotosView: View {
         HStack(spacing: 12) {
           selectionSummary
           Spacer(minLength: 0)
-          Menu("Actions") { selectionActions }
-            .frame(minWidth: 44, minHeight: 44)
+          Menu { selectionActions } label: {
+            Label("Actions", systemImage: "ellipsis").labelStyle(.iconOnly)
+              .frame(width: 44, height: 44)
+          }
             .accessibilityLabel("Selected photo actions")
             .accessibilityIdentifier("selection.actions")
         }

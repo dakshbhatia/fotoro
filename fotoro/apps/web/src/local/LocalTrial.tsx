@@ -77,9 +77,9 @@ export function displaySearchResult(predicted: SearchResult, navigation?: Search
     return {...predicted, photoId: navigation.photoID};
   return predicted;
 }
-export interface BestShotSelectionRequest {scope: string; source: unknown; selection: ReadonlySet<string>}
-export function bestShotSelectionRequestCurrent(request: BestShotSelectionRequest, scope: string, source: unknown, selection: ReadonlySet<string>) {
-  return request.scope === scope && request.source === source && request.selection === selection;
+export interface BestShotSelectionRequest {scope: string; source: unknown; selectionRevision: number}
+export function bestShotSelectionRequestCurrent(request: BestShotSelectionRequest, scope: string, source: unknown, selectionRevision: number) {
+  return request.scope === scope && request.source === source && request.selectionRevision === selectionRevision;
 }
 export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, ownedPhotos = null, onOpenSaved, onShareSaved, onAlbumSaved, active = true}: {onBackup: () => void; onSave?: (photos: LocalPhoto[]) => void; onCancelSave?: () => void; onPhotosChange?: (photos: LocalPhoto[]) => void; ownedPhotos?: OwnedPhotoSnapshot | null; onOpenSaved?: (id: string) => void; onShareSaved?: (photos: Photo[]) => void; onAlbumSaved?: (photos: Photo[]) => void; active?: boolean}) {
   const [photos, setPhotos] = useState<LocalOcrPhoto[]>([]), [query, setQuery] = useState(""),
@@ -89,6 +89,7 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
     [readText, setReadText] = useState(() => loadLocalChoices()?.readText ?? false), [feedback, setFeedback] = useState(emptyFeedback),
     [committed, setCommitted] = useState<string>(), [navigation, setNavigation] = useState<SearchNavigation>(), [sourceGeneration, setSourceGeneration] = useState(0);
   const [reviewingPicks, setReviewingPicks] = useState(false);
+  const selectionIntent = useRef(0);
   const [settledQuery, setSettledQuery] = useState(query);
   useEffect(() => {
     const timer = setTimeout(() => setSettledQuery(query), 250);
@@ -159,7 +160,8 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
     const token = ownedPhotos?.token;
     return () => {if (token && currentOwnedPhotos.current?.token === token) currentOwnedPhotos.current.retainSelection?.(new Set());};
   }, [ownedPhotos?.token]);
-  const chooseSearchPhoto = (id: string, checked: boolean) => {
+  const chooseSearchPhoto = (id: string, checked: boolean, manual = true) => {
+    if (manual) selectionIntent.current++;
     if (!id.startsWith("saved:")) {picks.choose(id, checked); return;}
     const photoId = id.slice(6);
     if (!ownedPhotos?.current() || ownedPhotos.selectionReady === false || !ownedPhotos.photos.some(photo => !photo.grantId && photo.manifest.ownerAccountId === ownedPhotos.accountId && photo.manifest.photoId === photoId)) return;
@@ -373,31 +375,34 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
   };
   const selectBestShots = () => {
     if (!bestShots.active || bestShots.busy || !bestShots.recommendations || !alive.current || !activeRef.current || generation.current !== sourceGeneration || shareBusy || currentOwnedPhotos.current?.selectionReady === false) return;
-    for (const photo of selectionCandidates(findMatches, bestShots.recommendations)) chooseSearchPhoto(photo.id, true);
+    for (const photo of selectionCandidates(findMatches, bestShots.recommendations)) chooseSearchPhoto(photo.id, true, false);
     setReviewingPicks(true);
   };
+  const selectionRevision = selectionIntent.current;
   useEffect(() => {
     if (!requestedBestShots) return;
-    if (!active || !bestShots.active || !bestShotSelectionRequestCurrent(requestedBestShots, bestScope, findSource, searchSelectionIDs) || shareBusy || savedSelectionBusy) {
+    if (!active || !bestShots.active || !bestShotSelectionRequestCurrent(requestedBestShots, bestScope, findSource, selectionIntent.current) || shareBusy || savedSelectionBusy) {
       setRequestedBestShots(undefined); return;
     }
     if (bestShots.active && !bestShots.busy && bestShots.recommendations) {
       selectBestShots(); setRequestedBestShots(undefined);
     }
-  }, [requestedBestShots, bestScope, findSource, searchSelectionIDs, active, shareBusy, savedSelectionBusy, bestShots.active, bestShots.busy, bestShots.recommendations]);
+  }, [requestedBestShots, bestScope, findSource, selectionRevision, active, shareBusy, savedSelectionBusy, bestShots.active, bestShots.busy, bestShots.recommendations]);
   const chooseBestShots = () => {
     if (shareBusy || savedSelectionBusy || result.searching || !findMatches.length || bestShots.busy) return;
     if (bestShots.active && bestShots.recommendations) selectBestShots();
-    else {setRequestedBestShots({scope: bestScope, source: findSource, selection: searchSelectionIDs}); bestShots.toggle();}
+    else {setRequestedBestShots({scope: bestScope, source: findSource, selectionRevision: selectionIntent.current}); bestShots.toggle();}
   };
   const chooseHighlights = () => {
     if (shareBusy || savedSelectionBusy || picks.busy || !picks.recommendations) return;
+    selectionIntent.current++;
     for (const photo of scoped) if (picks.recommendations.ids.has(photo.id)) picks.choose(photo.id, true);
     setReviewingPicks(true);
   };
   const selectResults = () => {
     if (!alive.current || !activeRef.current || latestSelectionInput.current !== selectionInput || generation.current !== sourceGeneration || shareBusy || currentOwnedPhotos.current?.selectionReady === false || result.searching || bestShots.busy) return;
     const selection = peopleResultSelection(currentSearchPhotos.current, displayedPhotos, new Set(currentPhotos.current.map(photo => photo.id)));
+    selectionIntent.current++;
     picks.replaceSelection(selection.local);
     chosenSavedToken.current = currentOwnedPhotos.current?.current() ? currentOwnedPhotos.current.token : null;
     replaceSavedChoice(chosenSavedToken.current ? selection.saved : new Set());
@@ -506,7 +511,7 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
         }}><option value="photos">Photos</option><option value="picks">Picks</option><option value="saved">Saved</option></select></nav> : <h1>Fotoro</h1>}
         <div className="header-actions">
           {hasPhotos && <>
-            {displayedPhotos.length > 0 && <button disabled={shareBusy || savedSelectionBusy} aria-pressed={reviewingPicks} onClick={() => {if (currentOwnedPhotos.current?.selectionReady !== false) setReviewingPicks(!reviewingPicks);}}>{reviewingPicks ? "Done" : "Select"}</button>}
+            {displayedPhotos.length > 0 && <button disabled={shareBusy || savedSelectionBusy} aria-pressed={reviewingPicks} onClick={() => {if (currentOwnedPhotos.current?.selectionReady !== false) {selectionIntent.current++; setReviewingPicks(!reviewingPicks);}}}>{reviewingPicks ? "Done" : "Select"}</button>}
             <button className="menu-button" aria-label="Add photos" disabled={!!progress || !ready} onClick={() => input.current?.click()}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="M12 4v16M4 12h16" /></svg></button>
           </>}
           <button className="menu-button" aria-label="Settings" onClick={() => setSettings(true)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m10 3-1 3-3 1-2-1-2 4 2 2v3l-2 2 2 4 3-1 3 1 1 3h4l1-3 3-1 3 1 2-4-2-2v-3l2-2-2-4-3 1-3-1-1-3z" transform="translate(0 -1) scale(.9)"/><circle cx="12" cy="12" r="3" /></svg></button>
@@ -528,7 +533,7 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
         : <section className="empty"><p>{familyFilter ? "No matching photos" : browseScope === "picks" ? picks.busy ? "Choosing your picks…" : "No picks yet" : "No photos in this date range"}</p><button onClick={() => {setBrowseScope("photos"); setLast30(false); peopleFind.change({...peopleFind.filter, ids: new Set()});}}>Show all photos</button></section>}
       {selectedCount > 0 && <section className="consumer-selection" aria-label="Chosen photos">
         <p role="status">{selectedCount} selected</p>
-        <button disabled={shareBusy || savedSelectionBusy} onClick={() => {if (currentOwnedPhotos.current?.selectionReady === false) return; picks.clearSelection(); replaceSavedChoice(new Set());}}>Clear</button>
+        <button disabled={shareBusy || savedSelectionBusy} onClick={() => {if (currentOwnedPhotos.current?.selectionReady === false) return; selectionIntent.current++; picks.clearSelection(); replaceSavedChoice(new Set());}}>Clear</button>
         {onSave && picks.ids.size > 0 && <button disabled={readyOriginals !== picks.ids.size || shareBusy} onClick={() => onSave(reviewedPhotos)}>Save</button>}
         <button className="primary-action" disabled={readyOriginals !== picks.ids.size || shareBusy || savedSelectionBusy} onClick={() => chosenSaved.length ? void prepareSelection() : shareSelection()}>{preparingShare ? "Preparing…" : sharing ? "Sharing…" : "Share"}</button>
         {onAlbumSaved && <button disabled={shareBusy || savedSelectionBusy || !!albumChosen.needsSave || !albumChosen.photos.length} onClick={addToAlbum}>Add to trip</button>}
@@ -551,8 +556,8 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
       <h3>Selection</h3>
       <p className="hint">{picks.ids.size} of {photos.length} selected.</p>
       <div className="photo-pick-actions">
-        <button disabled={!photos.length || picks.busy} onClick={picks.suggested}>Highlights</button>
-        <button disabled={!photos.length} onClick={picks.chooseAll}>Select all</button>
+        <button disabled={!photos.length || picks.busy} onClick={() => {selectionIntent.current++; picks.suggested();}}>Highlights</button>
+        <button disabled={!photos.length} onClick={() => {selectionIntent.current++; picks.chooseAll();}}>Select all</button>
       </div>
       {(picks.recommendations?.unassessed ?? 0) > 0 && <p className="hint">{picks.recommendations!.unassessed} could not be assessed. You can still select them.</p>}
       <h3>Search and storage</h3>

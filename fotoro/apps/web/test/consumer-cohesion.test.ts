@@ -70,22 +70,33 @@ test("loaded Saved photos enter the browse grid, and a stale account returns to 
   assert.doesNotMatch(stale, /aria-label="Photo grid"|aria-label="Search photos"/);
 });
 
-test("a delayed best-shot selection cannot undo Clear or a newer manual choice", async () => {
-  const source = {}, baseline = new Set(["manual"]);
-  const request = {scope: "trip", source, selection: baseline};
+
+test("a delayed best-shot selection follows user intent across metadata refreshes and manual edits", async () => {
+  const source = {};
+  let selectionRevision = 0;
+  const request = {scope: "trip", source, selectionRevision};
+  let selected = new Set(["manual"]);
   let complete!: (recommendations: string[]) => void;
   const recommendations = new Promise<string[]>(resolve => {complete = resolve;});
-  let selected = baseline;
   const apply = recommendations.then(ids => {
-    if (bestShotSelectionRequestCurrent(request, "trip", source, selected)) selected = new Set([...selected, ...ids]);
+    if (bestShotSelectionRequestCurrent(request, "trip", source, selectionRevision)) selected = new Set([...selected, ...ids]);
   });
-  selected = new Set(); // User clears while the preview analysis is still pending.
+  selected = new Set(selected); // OCR refreshed derived records without user selection changes.
+  assert.equal(bestShotSelectionRequestCurrent(request, "trip", source, selectionRevision), true);
   complete(["recommended"]);
   await apply;
-  assert.deepEqual([...selected], []);
-  assert.equal(bestShotSelectionRequestCurrent(request, "trip", source, new Set(["different-manual"])), false);
-  assert.equal(bestShotSelectionRequestCurrent(request, "trip", source, new Set(["manual"])), false, "Editing away and back is newer intent");
-  assert.equal(bestShotSelectionRequestCurrent(request, "different filter", source, baseline), false);
-  assert.equal(bestShotSelectionRequestCurrent(request, "trip", {}, baseline), false);
-  assert.equal(bestShotSelectionRequestCurrent(request, "trip", source, baseline), true, "Unchanged manual choices permit additive recommendations");
+  assert.deepEqual([...selected], ["manual", "recommended"], "Metadata updates preserve additive completion");
+
+  for (const edits of [[[]], [["different-manual"]], [["different-manual"], ["manual"]]]) {
+    selected = new Set(["manual"]);
+    const pendingRequest = {scope: "trip", source, selectionRevision};
+    const pending = Promise.resolve(["recommended"]).then(ids => {
+      if (bestShotSelectionRequestCurrent(pendingRequest, "trip", source, selectionRevision)) selected = new Set([...selected, ...ids]);
+    });
+    for (const ids of edits) {selected = new Set(ids); selectionRevision++;}
+    await pending;
+    assert.deepEqual([...selected], edits.at(-1), "Pending completion cannot undo Clear or edit-away-and-back intent");
+  }
+  assert.equal(bestShotSelectionRequestCurrent(request, "different filter", source, request.selectionRevision), false);
+  assert.equal(bestShotSelectionRequestCurrent(request, "trip", {}, request.selectionRevision), false);
 });
