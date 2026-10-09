@@ -20,6 +20,7 @@ export function TripPicks({access, photos, hasMore, onClose, renderPhoto}: {
   return <section id="album-trip-picks" aria-label="Trip best shots" className="trip-picks">
     <div className="trip-picks-heading"><h3>Best shots</h3><button aria-label="Close best shots" onClick={onClose}>{review.busy ? "Cancel" : "Close"}</button></div>
     {!candidates.length && <p className="hint" role="status">No photos to review.</p>}
+    {candidates.length > 0 && !review.active && <button onClick={review.toggle}>Resume review</button>}
     {review.active && <>
       <p className="hint" role="status">{review.busy ? `Reviewing ${review.done} of ${candidates.length} photos…` : `${suggested?.ids.size ?? 0} suggested photos`}
         {suggested?.unassessed ? ` · ${suggested.unassessed} previews unavailable` : ""}
