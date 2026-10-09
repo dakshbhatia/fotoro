@@ -567,23 +567,47 @@ final class AnnotationTests: XCTestCase {
   }
 
   @MainActor func testExplicitAccountLockSurvivesForegroundAndProcessRestoration() async throws {
-    let account = try fixture(FixtureAccounts.self, "accounts").testSecrets[0]
-    defer { UserDefaults.standard.removeObject(forKey: "fotoro.manualLock." + account.accountId) }
+    let accounts = try fixture(FixtureAccounts.self, "accounts")
+    let account = accounts.testSecrets[0]
+    let previousSession = try? Keychain.read("session")
+    let previousAccount = UserDefaults.standard.object(forKey: "fotoro.account")
+    defer {
+      UserDefaults.standard.removeObject(forKey: "fotoro.manualLock." + account.accountId)
+      if let previousSession { try? Keychain.write(previousSession, id: "session") }
+      else { Keychain.remove("session") }
+      if let previousAccount { UserDefaults.standard.set(previousAccount, forKey: "fotoro.account") }
+      else { UserDefaults.standard.removeObject(forKey: "fotoro.account") }
+    }
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
     let service = try AppServices(root: root)
-    try service.configureAPI("http://127.0.0.1:8787")
-    try await service.auth.recover("fotoro1.\(account.accountId).\(account.recoverySecret)")
+    // This exercises persisted access and real Keychain restoration, not the HTTP
+    // recovery ceremony (covered by the authenticated second-device test above).
+    try service.session.accept(SessionV1(version: 1, accountId: account.accountId,
+      deviceId: Wire.id(), expiresAt: Wire.date(Date().addingTimeInterval(3600)), token: "public-controlled-session"))
+    try service.session.pin(accounts.accounts[0])
+    try await service.vault.unlock(.recoveryEnvelope(secret: Data(b64: account.recoverySecret), wrapper: account.encryptedBundle))
     try service.activateAccount()
+    XCTAssertTrue(service.session.isSignedIn)
+    XCTAssertFalse(service.session.fixture, "Fixture mode bypasses restoration and must not satisfy this regression")
     service.lockAccount()
     await service.resumeSavedAccount()
     XCTAssertFalse(service.vault.isUnlocked)
     let restarted = try AppServices(root: root)
+    XCTAssertTrue(restarted.session.isSignedIn)
+    XCTAssertFalse(restarted.session.fixture)
+    XCTAssertEqual(restarted.session.accountId, account.accountId)
     await restarted.resumeSavedAccount(initialRestoration: true)
     XCTAssertFalse(restarted.vault.isUnlocked)
     try await restarted.vault.unlock(.localKeychain)
     try restarted.activateAccount()
     XCTAssertTrue(restarted.vault.isUnlocked)
     XCTAssertFalse(UserDefaults.standard.bool(forKey: "fotoro.manualLock." + account.accountId))
+    // A remembered account without an explicit lock still restores successfully.
+    restarted.vault.lock()
+    await restarted.resumeSavedAccount(initialRestoration: true)
+    XCTAssertTrue(restarted.vault.isUnlocked)
+    restarted.vault.lock()
   }
 
   func testDisjointLabelAndRemoteOCRChangesMergeWithoutConflict() throws {

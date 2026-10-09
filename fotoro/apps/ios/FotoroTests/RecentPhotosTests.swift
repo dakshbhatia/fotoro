@@ -1,3 +1,4 @@
+import GRDB
 import Photos
 import UIKit
 import XCTest
@@ -201,6 +202,84 @@ final class RecentPhotosTests: XCTestCase {
         XCTAssertEqual(try services.store.backupPhoto(photo.id)?.transferState, "received")
       }
     }
+  }
+  @MainActor func testSavedPaginationFindsFavoriteBeyondEmptyFilteredPagesAndStopsAtRawEnd() async throws {
+    let services = try await previewServices()
+    let account = try XCTUnwrap(services.session.accountId)
+    defer { services.vault.lock(); Keychain.remove(account); try? FileManager.default.removeItem(at: services.storageRoot) }
+    let (template, _, _) = try previewPhoto(owner: account)
+    let photos = (0...2000).map { index in
+      var photo = template
+      photo.photoId = String(format: "00000000-0000-4000-8000-%012d", index)
+      photo.manifest.photoId = photo.id
+      photo.manifest.metadataRepresentation.binding.photoId = photo.id
+      for representation in photo.manifest.representations.indices {
+        photo.manifest.representations[representation].binding.photoId = photo.id
+      }
+      let original = Data(photo.id.utf8)
+      photo.metadata.originalSha256 = original.digest
+      photo.metadata.originalBytes = original.count
+      if index == 0 { photo.transferState = "pending" }
+      return photo
+    }
+    let peerAccount = Wire.id()
+    let peers = (0...1000).map { index in
+      var photo = template
+      photo.photoId = String(format: "10000000-0000-4000-8000-%012d", index)
+      photo.manifest.photoId = photo.id
+      photo.manifest.ownerAccountId = peerAccount
+      photo.metadata.sourceDate = "2099-01-01T00:00:00.000Z"
+      return photo
+    }
+    let oldest = try XCTUnwrap(photos.last)
+    let catalog = services.store
+    try await catalog.database.write { db in
+      for photo in photos + peers { try catalog.put(photo, db: db) }
+    }
+    XCTAssertTrue(try catalog.photos(limit: 1000).allSatisfy { $0.manifest.ownerAccountId == peerAccount },
+      "The raw first page contains only peer photos; filtering after its limit would hide every owned photo")
+    let plan = try await catalog.database.read { db in
+      try Row.fetchAll(db, sql: """
+        EXPLAIN QUERY PLAN SELECT value FROM photos
+        WHERE json_extract(CAST(value AS TEXT),'$.manifest.ownerAccountId')=?
+        ORDER BY sourceDate DESC,id LIMIT 1000
+        """, arguments: [account]).map { row -> String in row["detail"] }
+    }
+    XCTAssertTrue(plan.contains { $0.contains("photos_owned_browse") }, plan.joined(separator: "; "))
+    XCTAssertFalse(plan.contains { $0.contains("TEMP B-TREE") }, plan.joined(separator: "; "))
+    var favorite = PhotoAnnotationsV1(photoId: oldest.id, originalSha256: oldest.metadata.originalSha256)
+    favorite.favorite = true
+    try AnnotationCrypto.validate(favorite, photo: oldest, accountId: account)
+    try services.annotations.ledger.edit(favorite, photo: oldest, bundle: services.vault.requireBundle(),
+      card: services.session.requireCard(account))
+    try services.reload()
+    XCTAssertEqual(services.photos.count, 1000)
+    XCTAssertTrue(services.photos.allSatisfy { $0.manifest.ownerAccountId == account })
+    XCTAssertEqual(services.photos.first?.transferState, "pending", "Ownership paging must preserve existing transfer-state visibility")
+    XCTAssertTrue(services.photos.filter { services.annotation($0).favorite == true }.isEmpty)
+    XCTAssertEqual(try SavedLibraryPageLoading.load(services, expected: SavedLibraryPageID(services), isActive: true), true)
+    XCTAssertEqual(services.photos.count, 2000, "Each footer task must load at most one bounded page")
+    XCTAssertTrue(services.photos.filter { services.annotation($0).favorite == true }.isEmpty)
+    XCTAssertEqual(try SavedLibraryPageLoading.load(services, expected: SavedLibraryPageID(services), isActive: true), true)
+    XCTAssertEqual(services.photos.filter { services.annotation($0).favorite == true }.map(\.id), [oldest.id])
+    XCTAssertEqual(try SavedLibraryPageLoading.load(services, expected: SavedLibraryPageID(services), isActive: true), false)
+    XCTAssertEqual(Set(services.photos.map(\.id)).count, 2001)
+    XCTAssertEqual(try catalog.consumerCommittedCount(accountId: peerAccount), peers.count,
+      "Filtering the owned projection must preserve shared catalog rows")
+  }
+  @MainActor func testSavedPaginationRejectsInactiveOrReplacedCatalogAndLockedAccount() async throws {
+    let services = try await previewServices()
+    let account = try XCTUnwrap(services.session.accountId)
+    defer { services.vault.lock(); Keychain.remove(account); try? FileManager.default.removeItem(at: services.storageRoot) }
+    let request = SavedLibraryPageID(services)
+    XCTAssertNil(try SavedLibraryPageLoading.load(services, expected: request, isActive: false))
+    try services.reload()
+    XCTAssertNil(try SavedLibraryPageLoading.load(services, expected: request, isActive: true),
+      "An older catalog task must not consume the replacement cursor")
+    let unlocked = SavedLibraryPageID(services)
+    services.vault.lock()
+    XCTAssertNil(try SavedLibraryPageLoading.load(services, expected: unlocked, isActive: true))
+    XCTAssertTrue(services.photos.isEmpty)
   }
   @MainActor private func previewServices() async throws -> AppServices {
     let configuration = URLSessionConfiguration.ephemeral

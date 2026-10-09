@@ -17,6 +17,8 @@ import {assertVault} from "../vault/scope";
 import {digest, photoBytes, readPhoto, type Photo} from "../library/catalog";
 import {db} from "../exchange/cache";
 import {savedOriginalSelectionCurrent} from "../library/system-share";
+import {AlbumRasterCache} from "./raster-cache";
+import {savedRasterSource} from "../library/saved-raster";
 import {cameraOriginalFiles} from "../media/camera-original";
 const ordered = (value: unknown): unknown => Array.isArray(value) ? value.map(ordered)
   : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, child]) => [key, ordered(child)])) : value;
@@ -117,7 +119,9 @@ export class AlbumAccess {
   private cancellation = new AbortController();
   get signal() {return this.cancellation.signal;}
   private disposed = false;
+  private scopeAborted = () => this.dispose();
   private photos = new Set<Photo>();
+  private rasters = new AlbumRasterCache();
   private photoSources = new Map<Photo, {entry: SignedPayloadV1; manifest: SignedPayloadV1}>();
   private loadingKeys = new Set<Uint8Array>();
   private pageIds = new Set<string>();
@@ -130,6 +134,7 @@ export class AlbumAccess {
   private constructor(readonly overview: AlbumOverviewV1, opened: ReturnType<typeof openAlbumDefinition>, readonly scope: ShareScope, readonly owner: AccountCardV1) {
     this.key = opened.albumKey; this.title = opened.title; this.definition = opened.definition;
     this.albumId = opened.definition.albumId; this.identity = albumDefinitionIdentity(overview);
+    scope.signal?.addEventListener("abort", this.scopeAborted, {once: true});
   }
   static async open(overview: AlbumOverviewV1, scope: ShareScope) {
     const session = requireVault(); await ready; check(session, scope);
@@ -141,7 +146,7 @@ export class AlbumAccess {
   }
   current() {try {this.check(); return true;} catch {return false;}}
   private check() {try {check(this.session, this.scope); if (this.disposed) throw new DOMException("Album closed", "AbortError");} catch (error) {this.dispose(); throw error;}}
-  dispose() {if (this.disposed) return; this.disposed = true; this.key.fill(0); for (const key of this.loadingKeys) key.fill(0); this.loadingKeys.clear(); for (const photo of this.photos) photo.metadataKey.fill(0); this.photos.clear(); this.photoSources.clear(); this.pendingFacts.clear(); this.cancellation.abort();}
+  dispose() {if (this.disposed) return; this.disposed = true; this.scope.signal?.removeEventListener("abort", this.scopeAborted); this.key.fill(0); for (const key of this.loadingKeys) key.fill(0); this.loadingKeys.clear(); for (const photo of this.photos) photo.metadataKey.fill(0); this.photos.clear(); this.photoSources.clear(); this.pendingFacts.clear(); this.rasters.clear(); this.cancellation.abort();}
   private async trusted() {
     this.check(); const card = await trustedCard(this.owner.accountId, this.session, this.scope); this.check();
     if (!sameIdentity(card, this.owner)) {this.dispose(); throw new Error("ACCOUNT_KEYS_CHANGED_RENEW_TRUST");}
@@ -326,6 +331,58 @@ export class AlbumAccess {
     await this.assertAccess(); signal.throwIfAborted();
     const bytes = await photoBytes(photo, kind === "original" ? kind : derivative!.binding.kind as "thumbnail" | "preview", signal);
     try {await this.assertAccess(); signal.throwIfAborted(); this.check(); return bytes;} catch (error) {bytes.fill(0); throw error;}
+  }
+  private rasterKey(photo: Photo, kind: "thumbnail" | "preview") {
+    const source = this.photoSources.get(photo);
+    if (!source) throw new Error("ALBUM_PHOTO_CHANGED");
+    return JSON.stringify([kind, savedRasterSource(photo, kind), source.entry.body, source.entry.signature,
+      source.manifest.body, source.manifest.signature]);
+  }
+  async leaseRaster(photo: Photo, kind: "thumbnail" | "preview", signal: AbortSignal) {
+    signal.throwIfAborted(); this.check();
+    if (!this.photos.has(photo)) throw new Error("ALBUM_PHOTO_CHANGED");
+    const derivative = photo.manifest.representations.find(rep => rep.binding.kind === kind)
+      ?? (kind === "thumbnail" ? photo.manifest.representations.find(rep => rep.binding.kind === "preview") : undefined);
+    if (!derivative) throw new Error("PREVIEW_UNAVAILABLE");
+    const key = this.rasterKey(photo, kind);
+    const current = () => this.current() && this.photos.has(photo) && this.rasterKey(photo, kind) === key;
+    await this.assertAccess(); signal.throwIfAborted();
+    const scoped = this.scope.signal ? AbortSignal.any([this.signal, this.scope.signal]) : this.signal;
+    const blob = await this.rasters.load(key, derivative.binding.kind === "preview" ? 1600 * 1600 * 4 : 256 * 256 * 4,
+      current, () => photoBytes(photo, derivative.binding.kind as "thumbnail" | "preview", scoped));
+    // Cache hits and shared loads require a fresh check after retrieval too.
+    await this.assertAccess(); signal.throwIfAborted();
+    return this.rasters.lease(key, blob, signal, current);
+  }
+  adoptRefresh(refreshed: AlbumAccess, loaded: readonly Photo[]): Photo[] {
+    this.check(); refreshed.check();
+    if (refreshed === this || refreshed.session !== this.session || refreshed.identity !== this.identity
+      || !sameIdentity(refreshed.owner, this.owner)) throw new Error("ALBUM_BINDING_MISMATCH");
+    const previous = new Map([...this.photos].map(photo => [photo.manifest.photoId, photo]));
+    const sources = new Map<Photo, {entry: SignedPayloadV1; manifest: SignedPayloadV1}>();
+    const photos = loaded.map(photo => {
+      const source = refreshed.photoSources.get(photo);
+      if (!source || !refreshed.photos.has(photo)) throw new Error("ALBUM_PHOTO_CHANGED");
+      const old = previous.get(photo.manifest.photoId), oldSource = old && this.photoSources.get(old);
+      const unchanged = old && oldSource && JSON.stringify(ordered(oldSource)) === JSON.stringify(ordered(source));
+      const retained = unchanged ? old : photo;
+      sources.set(retained, source);
+      return retained;
+    });
+    const retained = new Set(photos);
+    for (const photo of this.photos) if (!retained.has(photo)) photo.metadataKey.fill(0);
+    for (const photo of refreshed.photos) if (!retained.has(photo)) photo.metadataKey.fill(0);
+    this.photos = retained; this.photoSources = sources;
+    this.pageIds = new Set(refreshed.pageIds); this.pageCursors = new Set(refreshed.pageCursors);
+    this.nextPhotoCursor = refreshed.nextPhotoCursor;
+    this.pendingFacts.clear();
+    const rasterKeys = new Set(photos.flatMap(photo => ["thumbnail", "preview"].map(kind =>
+      this.rasterKey(photo, kind as "thumbnail" | "preview"))));
+    this.rasters.retain(rasterKeys);
+    // Transferred keys now belong to this access; disposing the temporary reader
+    // must not wipe them or abort the unchanged visible reader's leases.
+    refreshed.photos.clear(); refreshed.photoSources.clear(); refreshed.dispose();
+    return photos;
   }
   add(chosen: readonly Photo[], latest: () => readonly Photo[]) {return diagnose("album", diagnostic => this.addAction(diagnostic, chosen, latest), "add");}
   private async addAction(diagnostic: DiagnosticContext, chosen: readonly Photo[], latest: () => readonly Photo[]) {

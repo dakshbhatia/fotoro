@@ -1,3 +1,5 @@
+import {AlbumActionQueue, bindAlbumAction} from "./action-queue";
+import {VirtualAlbumGrid} from "./VirtualAlbumGrid";
 import {TripDownloadLease} from "./download-lease";
 import {cleanupTripDownloads, prepareTripDownload, type TripDownloadProgress} from "./download";
 import {TripPicks} from "./TripPicks";
@@ -56,18 +58,18 @@ function AlbumImage({access, photo, preview = false, onOpen}: {access: AlbumAcce
     observer.observe(element.current); return () => observer.disconnect();
   }, [preview]);
   useEffect(() => {
-    const controller = new AbortController(); let ownedURL = "";
+    const controller = new AbortController();
     setURL(""); setError("");
     if (!visible) return;
-    const clear = () => {controller.abort(); if (ownedURL) URL.revokeObjectURL(ownedURL); ownedURL = ""; setURL("");};
+    const clear = () => {controller.abort(); setURL("");};
     access.signal.addEventListener("abort", clear, {once: true});
-    void access.bytes(photo, preview ? "preview" : "thumbnail", controller.signal).then(bytes => {
-      try {if (!controller.signal.aborted && access.current()) {ownedURL = URL.createObjectURL(new Blob([new Uint8Array(bytes)], {type: "image/jpeg"})); setURL(ownedURL);}} finally {bytes.fill(0);}
+    void access.leaseRaster(photo, preview ? "preview" : "thumbnail", controller.signal).then(url => {
+      if (!controller.signal.aborted && access.current()) {setURL(url);}
     }).catch(() => {if (!controller.signal.aborted) setError("Preview unavailable.");});
-    return () => {access.signal.removeEventListener("abort", clear); controller.abort(); if (ownedURL) URL.revokeObjectURL(ownedURL);};
+    return () => {access.signal.removeEventListener("abort", clear); controller.abort();};
   }, [access, photo, preview, visible]);
   const image = url ? <img src={url} alt={preview ? photo.metadata.filename : ""} onError={() => setError("Preview unavailable.")} /> : <span>{error || "Loading photo…"}</span>;
-  return <div ref={element} className={preview ? "album-preview-image" : "album-thumbnail"}>{preview ? error || image : <button className="photo" onClick={onOpen} aria-label={"Open " + photo.metadata.filename}>{error || image}</button>}</div>;
+  return <div ref={element} className={preview ? "album-preview-image" : "album-thumbnail"}>{preview ? error || image : <button className="photo" data-photo-navigation-id={photo.manifest.photoId} onClick={onOpen} aria-label={"Open " + photo.metadata.filename}>{error || image}</button>}</div>;
 }
 export function AlbumContributionActions({albumId, chosen, busy, onChoosePhotos, onAdd}: {albumId: string; chosen: number; busy: boolean; onChoosePhotos: (albumId: string) => void; onAdd: () => void}) {
   return <><button disabled={busy} title="Choose photos already in Saved" onClick={() => onChoosePhotos(albumId)}>From Saved</button>{chosen > 0 && <button className="primary-action" disabled={busy} onClick={onAdd}>Add {chosen} {chosen === 1 ? "photo" : "photos"}</button>}</>;
@@ -77,7 +79,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   const [chosenSnapshot] = useState(() => new ShareSelection([...selection]));
   const creationDraft = useRef<AlbumCreationDraft>({});
   const deviceInput = useRef<HTMLInputElement>(null), searchInput = useRef<HTMLInputElement>(null);
-  const panel = useRef<HTMLElement>(null), alive = useRef(true), accessRef = useRef<AlbumAccess | null>(null), working = useRef(false);
+  const panel = useRef<HTMLElement>(null), alive = useRef(true), accessRef = useRef<AlbumAccess | null>(null);
   const [available, setAvailable] = useState<boolean | null>(null), [items, setItems] = useState<AlbumOverviewV1[]>([]), [cards, setCards] = useState<AccountCardV1[]>([]), [names, setNames] = useState(new Map<string, string>());
   const [titles, setTitles] = useState(new Map<string, string>()), previewPanel = useRef<HTMLElement>(null);
   const [ownerReview, setOwnerReview] = useState<Extract<AlbumOwnerEntry, {kind: "review"}> | null>(null);
@@ -115,11 +117,14 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   useEffect(() => subscribeAlbumLifetime(window, document, () => {
     alive.current = false; controller.abort(); clearTripDownload(); accessRef.current?.dispose(); chosenSnapshot.dispose();
   }, close), []);
+  const [actions] = useState(() => new AlbumActionQueue(() => alive.current && sameVault(session)
+    && (!incoming || incoming.current(session)), value => {if (alive.current && sameVault(session)) setBusy(value);}));
   async function action(task: () => Promise<void>, background = false) {
-    if (working.current || !scope.current?.()) return;
-    working.current = true; setBusy(true); if (!background) {setError(""); setNotice("");}
-    try {await task();} catch (failure) {if (scope.current?.()) {setError(readableError(failure)); if (accessRef.current && !accessRef.current.current()) closeAlbum();}}
-    finally {working.current = false; if (scope.current?.()) setBusy(false);}
+    const intent = bindAlbumAction(() => accessRef.current, async () => {
+      if (!background) {setError(""); setNotice("");}
+      try {await task();} catch (failure) {if (scope.current?.()) {setError(readableError(failure)); if (accessRef.current && !accessRef.current.current()) closeAlbum();}}
+    }, () => {if (!background) setNotice("Trip changed. Try that action again.");});
+    await actions.run(intent, background);
   }
   useEffect(() => subscribeContacts(() => {
     if (!scope.current?.()) return;
@@ -173,6 +178,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     if (!scope.current?.() || accessRef.current !== previous) return;
     if (overview.membership !== "accepted") {await open(overview); return;}
     const opened = await AlbumAccess.open(overview, scope);
+    let adopted = false;
     try {
       const target = Math.min(1000, Math.max(100, photos.length + (!page.hasMore && overview.photoCount > page.photoCount ? 100 : 0)));
       const loaded: Photo[] = [];
@@ -180,13 +186,13 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
       while (next.hasMore && loaded.length < target) {next = await opened.loadPhotoPage(next.nextCursor); loaded.push(...next.photos);}
       if (!scope.current?.() || accessRef.current !== previous || !opened.current()) {opened.dispose(); return;}
       clearDownload(); setDetailDraft(null);
-      accessRef.current = opened; setAccess(opened); setPhotos(loaded);
+      const retained = previous.adoptRefresh(opened, loaded); adopted = true;
+      setPhotos(retained);
       setPage({hasMore: next.hasMore, nextCursor: next.nextCursor, photoCount: next.photoCount});
-      setPreview(current => current ? loaded.find(photo => photo.manifest.photoId === current.manifest.photoId) ?? null : null);
-      previous.dispose();
-      await readFacts(opened, true);
+      setPreview(current => current ? retained.find(photo => photo.manifest.photoId === current.manifest.photoId) ?? null : null);
+      await readFacts(previous, true);
     } catch (failure) {
-      if (accessRef.current !== opened) {opened.dispose(); previous.dispose();}
+      opened.dispose(); if (!adopted) previous.dispose();
       throw failure;
     }
   }
@@ -209,7 +215,8 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     if (!access || access.overview.membership !== "accepted") return;
     const ended = () => {if (accessRef.current === access) {closeAlbum(); setError("Album access has ended or is unavailable.");}};
     access.signal.addEventListener("abort", ended, {once: true});
-    const refresh = () => {if (!working.current) void action(async () => {
+    const refresh = () => {void action(async () => {
+      if (accessRef.current !== access) return;
       const current = await access.assertAccess();
       if (current.photoCount !== page.photoCount) await refreshOpened(access, current);
       else await readFacts(access, true);
@@ -372,8 +379,8 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
             {(query || peopleFilter.ids.size > 0 || from || through) && <p role="status">{shown.length} matching {shown.length === 1 ? "photo" : "photos"}</p>}
             {groups.length < shown.length && <p className="hint">{groups.length} exact originals · {shown.length} contributed copies. All copies are kept.</p>}
             <TripPicks access={access} photos={shown} hasMore={page.hasMore} disabled={busy} renderPhoto={photo => <AlbumImage access={access} photo={photo} onOpen={() => setPreview(photo)} />} />
-            <div className="album-grid">{groups.map(group => {const photo = group.photo, shared = sharedAlbumDetails(photo, facts), date = albumDateTag(photo.metadata); return <div className="tile" key={photo.manifest.photoId}><AlbumImage access={access} photo={photo} onOpen={() => setPreview(photo)} /><div className="album-photo-tags" aria-label="Photo information"><span aria-label="Contributor">{contributor(photo.manifest.ownerAccountId)}</span>{date && <span aria-label={date.label}>{date.text}</span>}{shared?.people.map(name => <span key={name} aria-label="Shared reviewed person">{name}</span>)}{shared?.location?.name && <span aria-label="Shared place">{shared.location.name}</span>}</div>
-              {group.copies.length > 1 && <details className="album-copies"><summary>{group.copies.length} copies</summary>{group.copies.map(copy => <button key={copy.manifest.photoId} onClick={() => setPreview(copy)}>{contributor(copy.manifest.ownerAccountId)} · {copy.metadata.filename}</button>)}</details>}</div>;})}</div>
+            <VirtualAlbumGrid groups={groups} resetKey={JSON.stringify([query, [...peopleFilter.ids].sort(), peopleFilter.mode, from, through, groupCopies])}>{group => {const photo = group.photo, shared = sharedAlbumDetails(photo, facts), date = albumDateTag(photo.metadata); return <div className="tile" key={photo.manifest.photoId}><AlbumImage access={access} photo={photo} onOpen={() => setPreview(photo)} /><div className="album-photo-tags" aria-label="Photo information"><span aria-label="Contributor">{contributor(photo.manifest.ownerAccountId)}</span>{date && <span aria-label={date.label}>{date.text}</span>}{shared?.people.map(name => <span key={name} aria-label="Shared reviewed person">{name}</span>)}{shared?.location?.name && <span aria-label="Shared place">{shared.location.name}</span>}</div>
+              {group.copies.length > 1 && <details className="album-copies"><summary>{group.copies.length} copies</summary>{group.copies.map(copy => <button key={copy.manifest.photoId} onClick={() => setPreview(copy)}>{contributor(copy.manifest.ownerAccountId)} · {copy.metadata.filename}</button>)}</details>}</div>;}}</VirtualAlbumGrid>
             {page.hasMore && <div className="hint" aria-label="Album coverage"><p role="status">{photos.length} of {page.photoCount} photos loaded. Search covers loaded photos.</p><button disabled={busy} onClick={() => void action(() => loadPage(access, page.nextCursor))}>Load more photos</button></div>}
             {!photos.length && !busy && <p>No contributions yet.</p>}
             {photos.length > 0 && !shown.length && <div className="album-empty"><p>No matching photos{page.hasMore ? " in the loaded photos" : ""}.</p><button onClick={() => {setQuery(""); setPeopleFilter(emptyPeopleFilter()); setFrom(""); setThrough(""); searchInput.current?.focus();}}>Clear filters</button></div>}

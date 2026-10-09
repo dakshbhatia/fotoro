@@ -38,6 +38,7 @@ struct LibraryView: View {
   @State private var authenticationTask: Task<Void, Never>?
   @State private var query = ""
   @State private var favoritesOnly = false
+  @State private var savedHasMore = true
   @State private var catalogSearch = SavedCatalogSearch()
   @State private var searchAttempt: UInt64 = 0
   @State private var selection = SavedPhotoSelection()
@@ -113,8 +114,7 @@ struct LibraryView: View {
                     LibraryPhotoCell(
                       photo: photo, isSelected: selection.contains(photo.id),
                       open: { viewer = SavedPhotoViewerPresentation(initial: photo, photos: filtered) },
-                      toggleSelection: { selection.toggle(photo) },
-                      appeared: { loadMoreIfNeeded(photoID: photo.id) }
+                      toggleSelection: { selection.toggle(photo) }
                     ).id(photo.id)
                   }
                 } header: {
@@ -122,8 +122,16 @@ struct LibraryView: View {
                     .padding(.vertical, 12)
                 }
               }
+              if !hasQuery, savedHasMore, !services.photos.isEmpty {
+                Section {} footer: {
+                  SavedLibraryPaginationFooter(services: services, hasMore: $savedHasMore,
+                    isActive: scenePhase == .active && !catalogRefresh.isRefreshing,
+                    failed: { services.error = $0 })
+                }
+              }
             }.scrollTargetLayout()
             if filtered.isEmpty && !catalogRefresh.isRefreshing,
+              hasQuery || !savedHasMore || services.photos.isEmpty,
               !hasQuery || (catalogSearch.hasCompleted(searchID) && catalogSearch.failure(for: searchID) == nil) {
               ContentUnavailableView(
                 hasQuery ? "No photos found" : "No photos", systemImage: "photo",
@@ -256,7 +264,8 @@ struct LibraryView: View {
           }
         }
         .onChange(of: services.api.origin) { pendingIncoming = nil; sharedPhotos = nil; cancelAuthentication() }
-        .onChange(of: services.consumerCatalogGeneration) { validateSelection() }
+        .onChange(of: services.consumerCatalogGeneration) { savedHasMore = true; validateSelection() }
+        .onChange(of: SavedLibraryOpenBinding(services)) { savedHasMore = true }
         .onDisappear {
           cancelAuthentication(); shareTask?.cancel(); cleanupShare(); catalogRefresh.cancel()
           catalogSearch.cancel(clearResults: true)
@@ -343,9 +352,6 @@ struct LibraryView: View {
         openedAccount()
       }.disabled(services.busy).padding()
     }
-  }
-  private func loadMoreIfNeeded(photoID: String) {
-    if photoID == services.photos.last?.id { try? services.loadMore() }
   }
   @ViewBuilder private var catalogFeedback: some View {
     if catalogRefresh.isRefreshing {
@@ -697,7 +703,6 @@ struct LibraryPhotoCell: View {
   let isSelected: Bool
   let open: () -> Void
   let toggleSelection: () -> Void
-  let appeared: () -> Void
   var services: AppServices? = nil
   private var syncStatus: PhotoSyncItemStatus? { services?.photoSyncItem(photoID: photo.id) }
 
@@ -723,9 +728,57 @@ struct LibraryPhotoCell: View {
         }
     }.buttonStyle(.plain).accessibilityLabel(photo.metadata.filename)
       .accessibilityValue([isSelected ? "Selected" : nil, syncStatus?.accessibilityText].compactMap { $0 }.joined(separator: ", "))
-      .onAppear(perform: appeared)
       .contextMenu {
         Button(isSelected ? "Deselect" : "Select", action: toggleSelection)
+      }
+  }
+}
+
+// Catalog pagination follows the raw cursor, independent of visible filters.
+struct SavedLibraryPageID: Equatable {
+  let count: Int
+  let catalog: UInt64
+  let binding: SavedLibraryOpenBinding
+  @MainActor init(_ services: AppServices) {
+    count = services.photos.count
+    catalog = services.consumerCatalogGeneration
+    binding = SavedLibraryOpenBinding(services)
+  }
+}
+
+enum SavedLibraryPageLoading {
+  @MainActor static func load(_ services: AppServices, expected: SavedLibraryPageID, isActive: Bool) throws -> Bool? {
+    guard isActive, !Task.isCancelled, services.photoAccountAccess != nil,
+      SavedLibraryPageID(services) == expected else { return nil }
+    try services.loadMore()
+    return services.photos.count > expected.count
+  }
+}
+
+private struct SavedLibraryPageRequest: Equatable {
+  let page: SavedLibraryPageID
+  let isActive: Bool
+}
+
+struct SavedLibraryPaginationFooter: View {
+  let services: AppServices
+  @Binding var hasMore: Bool
+  let isActive: Bool
+  let failed: (String) -> Void
+  var body: some View {
+    let request = SavedLibraryPageRequest(page: SavedLibraryPageID(services), isActive: isActive)
+    ProgressView("Loading photos…").font(.footnote).padding().frame(maxWidth: .infinity)
+      .task(id: request) {
+        // A sparse filter can expose several consecutive empty metadata pages.
+        // One bounded page per task lets scrolling away or leaving cancel work.
+        await Task.yield()
+        guard !Task.isCancelled, isActive, SavedLibraryPageID(services) == request.page else { return }
+        do {
+          if let more = try SavedLibraryPageLoading.load(services, expected: request.page, isActive: isActive) { hasMore = more }
+        } catch {
+          hasMore = false
+          failed(error.localizedDescription)
+        }
       }
   }
 }
