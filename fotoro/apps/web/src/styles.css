@@ -972,7 +972,7 @@ main:has(.consumer-selection) .local-search { padding-bottom: calc(140px + env(s
 .album-photo-tags > span[aria-label="Shared reviewed person"], .album-photo-tags > span[aria-label="Shared place"] { border-radius: 12px; padding: 4px 7px; background: var(--photo-surface); }
 .album-photo-tags > span[aria-label="Contributor"] { color: var(--photo-text); }
 .album-photo-tags > span[aria-label$="date"] { flex-basis: 100%; }
-.album-preview { position: absolute; inset: 0; background: var(--photo-background); display: flex; flex-direction: column; overflow-y: auto; align-items: center; }
+.album-preview { position: absolute; inset: 0; z-index: 6; background: var(--photo-background); display: flex; flex-direction: column; overflow-y: auto; align-items: center; }
 .album-preview > header { align-self: stretch; justify-content: space-between; }
 .album-preview > header > p { flex: 1; margin: 0; color: var(--photo-muted); text-align: center; font-size: 13px; }
 .album-preview-image { min-height: 180px; flex: 1; width: 100%; display: grid; place-items: center; overflow: hidden; }
