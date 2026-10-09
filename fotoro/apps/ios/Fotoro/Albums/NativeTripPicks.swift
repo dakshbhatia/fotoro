@@ -116,27 +116,26 @@ struct NativeTripPicks: View {
   private let candidates: [NativeAlbumItem]
   private let source: [SignedPayloadV1]
   let hasMore: Bool
-  let disabled: Bool
   let open: (NativeAlbumItem) -> Void
-  @State private var reviewing = false
+  @Binding var reviewing: Bool
   @State private var review = NativeTripPickReview()
   @State private var retry = UUID()
   @Environment(\.scenePhase) private var scenePhase
-  init(model: NativeAlbumService, items: [NativeAlbumItem], hasMore: Bool, disabled: Bool, open: @escaping (NativeAlbumItem) -> Void) {
-    self.model = model; self.hasMore = hasMore; self.disabled = disabled; self.open = open
+  init(model: NativeAlbumService, items: [NativeAlbumItem], hasMore: Bool, reviewing: Binding<Bool>, open: @escaping (NativeAlbumItem) -> Void) {
+    self.model = model; self.hasMore = hasMore; self._reviewing = reviewing; self.open = open
     candidates = NativeTripPickScope.items(items); source = candidates.map(\.signedManifest)
   }
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
-      Button(reviewing ? "Close best shots" : "Find best shots", systemImage: "sparkles") {
-        reviewing.toggle()
-        if !reviewing { review.clear() }
-      }.disabled(!reviewing && (disabled || candidates.isEmpty))
-        .accessibilityIdentifier("albums.picks")
       if reviewing, scenePhase == .active, model.currentOpenedPhotoAccess != nil {
-        Text("Reviews up to \(NativeTripPickScope.limit) matching unique photos using small previews. All originals stay in your trip.")
+        HStack {
+          Text("Best shots").font(.headline)
+          Spacer()
+          Button("Close") { reviewing = false; review.clear() }
+            .frame(minHeight: 44).accessibilityLabel("Close best shots").accessibilityIdentifier("albums.picks.close")
+        }
+        Text(hasMore ? "Up to \(NativeTripPickScope.limit) loaded photos; more available." : "Up to \(NativeTripPickScope.limit) photos.")
           .font(.caption).foregroundStyle(.secondary)
-        if hasMore { Text("Load more trip photos to expand coverage.").font(.caption).foregroundStyle(.secondary) }
         if review.source == source, review.matches(access: model.currentOpenedPhotoAccess, definition: model.opened?.overview.definition) {
           if review.running { ProgressView("Reviewing \(review.completed) of \(candidates.count) photos…") }
           if let error = review.error { Text(error).font(.caption); Button("Try again") { retry = UUID() } }

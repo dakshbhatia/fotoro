@@ -103,6 +103,7 @@ struct NativeAlbumView: View {
   @State private var searchError: String?
 
   @State private var groupDuplicates = true
+  @State private var showTripPicks = false
   @State private var showFamilyFilters = false
   @State private var memberIDs = Set<String>()
   @State private var operation: Task<Void, Never>?
@@ -125,6 +126,7 @@ struct NativeAlbumView: View {
   @State private var showTripShare = false
   @State private var downloadError: String?
   @Environment(\.scenePhase) private var scenePhase
+  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
   @Environment(\.dismiss) private var dismiss
   init(services: AppServices, selected: [LocalPhoto] = [], incoming: FotoroAlbumInvitation? = nil) {
     self.services = services; self.selected = selected; self.incoming = incoming
@@ -152,7 +154,7 @@ struct NativeAlbumView: View {
       Group {
         if services.photoAccountAccess == nil {
           VStack(alignment: .leading) {
-            if incoming != nil { Text("Open the Fotoro this album was invited to.").font(.headline).padding() }
+            if incoming != nil { Text("Open the Fotoro invited to this trip.").font(.headline).padding() }
             AccountView(services: services, onAuthenticationTask: { authenticationTask = $0 })
           }
         } else {
@@ -171,6 +173,12 @@ struct NativeAlbumView: View {
           Menu("More", systemImage: "ellipsis") {
             if model.opened != nil {
               Button("Details", systemImage: "info.circle") { showDetails = true }
+              Toggle("Best shots", isOn: $showTripPicks).disabled(filteredItems.isEmpty)
+                .accessibilityIdentifier("albums.picks")
+              if !wantsWholeTripSearch, model.factsNextCursor != nil, model.factsError == nil {
+                Button("Load shared details") { run { try await model.loadMoreSharedDetails() } }
+                  .accessibilityIdentifier("albums.details.loadMore")
+              }
               Button("Share link", systemImage: "link") {
                 do { if let id = model.opened?.id { link = try model.invitation(id) } }
                 catch { feedback = error.localizedDescription }
@@ -252,7 +260,7 @@ struct NativeAlbumView: View {
       }
       .sheet(item: $viewer) { item in NativeAlbumPhotoView(model: model, item: item).presentationDetents([.large]) }
       .sheet(isPresented: $showFamilyFilters) {
-        NativeAlbumFamilyFilters(filter: $familyFilter,
+        NativeAlbumFamilyFilters(filter: $familyFilter, groupDuplicates: $groupDuplicates,
           choices: NativeAlbumSearch.choices(items: model.items, facts: model.sharedFacts),
           loadingChoices: wantsWholeTripSearch && !model.searchMetadataComplete,
           searchError: searchError,
@@ -268,7 +276,7 @@ struct NativeAlbumView: View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
         if busy && downloadProgress == nil {
-          ProgressView(savingDevicePhotos ? "Saving chosen photos before adding…" : "Working…")
+          ProgressView(savingDevicePhotos ? "Saving photos…" : "Working…")
           if savingDevicePhotos {
             Button("Cancel adding photos", role: .cancel) { operation?.cancel() }
               .accessibilityIdentifier("albums.device.cancel")
@@ -292,36 +300,54 @@ struct NativeAlbumView: View {
         Button("Refresh trips") { run { try await model.refresh() } }.disabled(busy)
       } else if model.albums.isEmpty { Text("No trips yet.").foregroundStyle(.secondary) }
       ForEach(model.albums.sorted { ($0.id == incoming?.albumId ? 0 : 1) < ($1.id == incoming?.albumId ? 0 : 1) }) { album in
-        VStack(alignment: .leading, spacing: 8) {
-          Text(album.title ?? "Trip invitation").font(.headline)
-          Text("\(album.definition.members.count) members · \(album.overview.photoCount) photos").font(.subheadline).foregroundStyle(.secondary)
-          Text("Owner: " + memberName(album.definition.ownerAccountId, in: album.definition)).font(.caption)
-          if album.overview.endedAt != nil { Text("Access ended").foregroundStyle(.secondary) }
-          else if album.needsTrust { Button("Verify sender", systemImage: "checkmark.shield") { resumeState.deliberateNavigation(in: model); trustCandidate = album }.buttonStyle(.bordered).disabled(busy) }
-          else if album.overview.membership == "invited" {
-            Button("Join trip") { run(navigating: true) {
-              try await model.accept(album.id, expectedOwner: incoming?.albumId == album.id ? incoming?.ownerCard : nil)
-              try await model.open(album.id)
-            } }.buttonStyle(.borderedProminent).disabled(busy).accessibilityIdentifier("albums.accept")
-          } else {
-            Button("Open trip") { run(navigating: true) { try await model.open(album.id) } }.buttonStyle(.bordered).disabled(busy)
-          }
-        }.padding().background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+        if album.overview.endedAt == nil, !album.needsTrust, album.overview.membership == "accepted" {
+          Button { run(navigating: true) { try await model.open(album.id) } } label: {
+            HStack {
+              tripSummary(album)
+              Spacer()
+              Image(systemName: "chevron.right").foregroundStyle(.secondary).accessibilityHidden(true)
+            }.padding().frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+              .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+          }.buttonStyle(.plain).disabled(busy)
+            .accessibilityHint("Open trip")
+        } else {
+          VStack(alignment: .leading, spacing: 8) {
+            tripSummary(album)
+            Text("From " + memberName(album.definition.ownerAccountId, in: album.definition)).font(.caption)
+            if album.overview.endedAt != nil { Text("Access ended").foregroundStyle(.secondary) }
+            else if album.needsTrust { Button("Verify sender", systemImage: "checkmark.shield") { resumeState.deliberateNavigation(in: model); trustCandidate = album }.buttonStyle(.bordered).disabled(busy) }
+            else if album.overview.membership == "invited" {
+              Button("Join trip") { run(navigating: true) {
+                try await model.accept(album.id, expectedOwner: incoming?.albumId == album.id ? incoming?.ownerCard : nil)
+                try await model.open(album.id)
+              } }.buttonStyle(.borderedProminent).disabled(busy).accessibilityIdentifier("albums.accept")
+            }
+          }.padding().background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+        }
       }
+    }
+  }
+  private func tripSummary(_ album: NativeAlbumSummary) -> some View {
+    VStack(alignment: .leading, spacing: 4) {
+      Text(album.title ?? "Trip invitation").font(.headline)
+      Text("\(album.overview.photoCount) photos").font(.subheadline).foregroundStyle(.secondary)
     }
   }
   private func trustOwner(_ album: NativeAlbumSummary) -> some View {
     let owner = album.definition.members.first(where: { $0.card.accountId == album.definition.ownerAccountId })?.card
     let changed = services.session.pinnedCards[album.definition.ownerAccountId].map { $0 != owner } ?? false
     return VStack(alignment: .leading, spacing: 8) {
-      Text(changed ? "This person's Fotoro keys have changed. Confirm the new album link with them before continuing." : "Confirm this album invitation came from its owner before accepting their contact.").font(.footnote)
+      Text(changed ? "Their Fotoro keys changed. Confirm this trip link with them before joining." : "Confirm this trip invitation came from its owner.").font(.footnote)
       if let feedback { Text(feedback).foregroundStyle(.secondary) }
-      Text(album.definition.ownerAccountId).font(.caption.monospaced()).textSelection(.enabled)
-      if let card = album.definition.members.first(where: { $0.card.accountId == album.definition.ownerAccountId })?.card {
-        Text("Signing fingerprint").font(.caption)
-        Text(card.signingPublicKey).font(.caption.monospaced()).textSelection(.enabled)
-        Text("Encryption fingerprint").font(.caption)
-        Text(card.boxPublicKey).font(.caption.monospaced()).textSelection(.enabled)
+      Text(memberName(album.definition.ownerAccountId, in: album.definition)).font(.headline)
+      DisclosureGroup("Identity details") {
+        Text(album.definition.ownerAccountId).font(.caption.monospaced()).textSelection(.enabled)
+        if let card = owner {
+          Text("Signing fingerprint").font(.caption)
+          Text(card.signingPublicKey).font(.caption.monospaced()).textSelection(.enabled)
+          Text("Encryption fingerprint").font(.caption)
+          Text(card.boxPublicKey).font(.caption.monospaced()).textSelection(.enabled)
+        }
       }
       Button(changed ? "Join trip with new identity" : "Join trip") { run(navigating: true) {
         try await NativeAlbumReviewedJoin.join(album, incoming: incoming, services: services, model: model)
@@ -333,7 +359,7 @@ struct NativeAlbumView: View {
     VStack(alignment: .leading, spacing: 12) {
       if model.hasPendingCreation { Button("Retry pending creation") { run(navigating: true) { let id = try await model.retryCreation(); try await model.open(id) } }.disabled(busy) }
       TextField("Trip name", text: $title).textFieldStyle(.roundedBorder).accessibilityIdentifier("albums.name")
-      Text("Choose 1–11 confirmed contacts. Each person accepts before viewing or adding photos.").font(.footnote).foregroundStyle(.secondary)
+      Text("Invite up to 11 contacts. Each person must join to see or add photos.").font(.footnote).foregroundStyle(.secondary)
       if contacts.isEmpty { Text("Add a contact in Shared photos first.").foregroundStyle(.secondary) }
       ForEach(contacts, id: \.accountId) { card in
         Toggle(services.contactName(card.accountId), isOn: Binding(get: { memberIDs.contains(card.accountId) }, set: { enabled in
@@ -350,55 +376,16 @@ struct NativeAlbumView: View {
   }
   private func detail(_ album: NativeAlbumSummary) -> some View {
     VStack(alignment: .leading, spacing: 16) {
-      HStack {
-        Text("\(album.overview.photoCount) photos · \(album.definition.members.count) members").font(.subheadline).foregroundStyle(.secondary)
-        Spacer()
-        Button(selected.isEmpty ? "Add photos" : "Add \(selected.count)", systemImage: "plus") {
-          if selected.isEmpty { showPicker = true }
-          else { run { try await model.append(selected); feedback = "Photos added." } }
-        }.buttonStyle(.borderedProminent).disabled(busy).accessibilityIdentifier("albums.add")
-      }
+      tripActions
       tripDownloadControls
-      ScrollView(.horizontal) {
-        HStack {
-          ForEach(album.definition.members, id: \.card.accountId) { member in
-            Label(memberName(member.card.accountId, in: album.definition), systemImage: "person.fill")
-              .font(.caption).padding(.horizontal, 10).padding(.vertical, 6)
-              .background(.secondary.opacity(0.08), in: Capsule())
-          }
-        }
-      }.scrollIndicators(.hidden)
-      if model.hasPendingAddition { Button("Retry pending addition") { run { try await model.retryAddition(); feedback = "Photos added." } }.disabled(busy) }
-      TextField("Search shared details, filenames or dates", text: $familyFilter.query).textFieldStyle(.roundedBorder)
-        .accessibilityIdentifier("albums.filter")
-      HStack {
-        Button("People, place and dates", systemImage: "line.3.horizontal.decrease") { showFamilyFilters = true }
-          .accessibilityIdentifier("albums.family.filters")
-        if familyFilter.hasFilters { Button("Clear filters") { familyFilter = NativeAlbumSearchFilter() } }
-      }
-      Toggle("Group identical originals", isOn: $groupDuplicates).font(.subheadline)
-      Text("\(filteredItems.count) matching contributions in \(model.items.count) loaded photos").font(.subheadline).foregroundStyle(.secondary)
-      if wantsWholeTripSearch && !model.searchMetadataComplete {
-        Text(searchError == nil ? "Searching the whole trip… Results so far." : "Search is incomplete. Results so far.")
-          .font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("albums.search.coverage")
-        if let searchError {
-          Text(searchError).font(.caption).foregroundStyle(.secondary)
-          Button("Retry trip search") { self.searchError = nil; startTripSearch() }
-            .disabled(busy).accessibilityIdentifier("albums.search.retry")
-        }
-      }
-      if model.factsSupported == false {
-        Text("Shared photo details are unavailable on this server. Photo dates and filenames still work.").font(.caption).foregroundStyle(.secondary)
+      if model.hasPendingAddition { Button("Retry adding photos") { run { try await model.retryAddition(); feedback = "Photos added." } }.disabled(busy) }
+      if dynamicTypeSize.isAccessibilitySize {
+        VStack(alignment: .leading, spacing: 8) { tripSearchField; tripFiltersButton }
       } else {
-        Text("Shared details loaded for \(model.sharedFacts.count) photos. Names are contributor-reviewed labels, not linked identities.")
-          .font(.caption).foregroundStyle(.secondary)
-        if let error = model.factsError { Text(error).font(.caption).foregroundStyle(.secondary) }
-        if !wantsWholeTripSearch && (model.factsNextCursor != nil || model.factsError != nil) {
-          Button(model.factsError == nil ? "Load more shared details" : "Retry shared details") { run { try await model.loadMoreSharedDetails() } }
-            .disabled(busy).accessibilityIdentifier("albums.details.loadMore")
-        }
+        HStack { tripSearchField; tripFiltersButton }
       }
-      NativeTripPicks(model: model, items: filteredItems, hasMore: model.nextCursor != nil, disabled: busy) { viewer = $0 }
+      tripSearchStatus
+      NativeTripPicks(model: model, items: filteredItems, hasMore: model.nextCursor != nil, reviewing: $showTripPicks) { viewer = $0 }
       LazyVGrid(columns: [GridItem(.adaptive(minimum: 96))], spacing: 4) {
         ForEach(photoGroups) { group in
           VStack {
@@ -414,7 +401,82 @@ struct NativeAlbumView: View {
           }
         }
       }
+      if familyFilter.hasFilters && filteredItems.isEmpty {
+        VStack(alignment: .leading, spacing: 8) {
+          Text(model.searchMetadataComplete ? "No matches." : "No matches in the photos checked so far.")
+            .foregroundStyle(.secondary).accessibilityIdentifier("albums.search.empty")
+          Button("Clear filters") { familyFilter = NativeAlbumSearchFilter(); groupDuplicates = true }
+            .frame(minHeight: 44).accessibilityIdentifier("albums.filter.clear")
+        }
+      }
       if !wantsWholeTripSearch && model.nextCursor != nil { Button("Load more photos") { run { try await model.loadMore() } }.disabled(busy) }
+    }
+  }
+  private var tripAddButton: some View {
+    Button(selected.isEmpty ? "Add photos" : "Add \(selected.count)", systemImage: "plus") {
+      if selected.isEmpty { showPicker = true }
+      else { run { try await model.append(selected); feedback = "Photos added." } }
+    }.buttonStyle(.borderedProminent).disabled(busy).frame(minHeight: 44).accessibilityIdentifier("albums.add")
+  }
+  private var tripDownloadButton: some View {
+    Button("Download trip", systemImage: "arrow.down.circle") { downloadTrip() }
+      .disabled(busy || model.opened?.overview.photoCount == 0).frame(minHeight: 44)
+      .accessibilityHint("Download all trip originals as a ZIP, including photos outside current filters.")
+      .accessibilityIdentifier("albums.download")
+  }
+  @ViewBuilder private var tripActions: some View {
+    if dynamicTypeSize.isAccessibilitySize {
+      VStack(alignment: .leading, spacing: 8) {
+        tripAddButton
+        if downloadProgress == nil { tripDownloadButton }
+      }
+    } else {
+      ViewThatFits(in: .horizontal) {
+        HStack {
+          tripAddButton.fixedSize()
+          Spacer(minLength: 8)
+          if downloadProgress == nil { tripDownloadButton.fixedSize() }
+        }
+        VStack(alignment: .leading, spacing: 8) {
+          tripAddButton
+          if downloadProgress == nil { tripDownloadButton }
+        }
+      }
+    }
+  }
+  private var tripSearchField: some View {
+    TextField("Search trip", text: $familyFilter.query).textFieldStyle(.roundedBorder)
+      .accessibilityLabel("Search shared details, filenames or dates").accessibilityIdentifier("albums.filter")
+  }
+  private var tripFiltersButton: some View {
+    Button("Filters", systemImage: familyFilter.hasFilters || !groupDuplicates ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease") { showFamilyFilters = true }
+      .frame(minHeight: 44).fixedSize(horizontal: true, vertical: false)
+      .accessibilityLabel(familyFilter.hasFilters || !groupDuplicates ? "Filters, active" : "Filter people, place and dates")
+      .accessibilityIdentifier("albums.family.filters")
+  }
+  @ViewBuilder private var tripSearchStatus: some View {
+    if wantsWholeTripSearch && !model.searchMetadataComplete {
+      VStack(alignment: .leading, spacing: 4) {
+        HStack {
+          Text(searchError == nil ? "Searching trip…" : "Search incomplete")
+            .font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("albums.search.coverage")
+          if searchError != nil {
+            Button("Retry") { searchError = nil; startTripSearch() }
+              .disabled(busy).accessibilityLabel("Retry trip search").accessibilityIdentifier("albums.search.retry")
+          }
+        }
+        if let searchError { DisclosureGroup("Details") { Text(searchError).font(.caption).textSelection(.enabled) } }
+      }
+    } else if !wantsWholeTripSearch, let error = model.factsError {
+      HStack {
+        DisclosureGroup("Shared details unavailable") { Text(error).font(.caption).textSelection(.enabled) }
+        Button("Retry") {
+          let coverage = model.searchCoverageID
+          run { try await model.loadNextSearchMetadataPage(expectedID: coverage) }
+        }.disabled(busy).frame(minHeight: 44).accessibilityLabel("Retry shared details").accessibilityIdentifier("albums.details.loadMore")
+      }
+    } else if wantsWholeTripSearch, model.factsSupported == false {
+      Text("Shared names and places unavailable.").font(.caption).foregroundStyle(.secondary)
     }
   }
   @ViewBuilder private var tripDownloadControls: some View {
@@ -427,15 +489,10 @@ struct NativeAlbumView: View {
           cleanupTripDownload(); operation?.cancel(); operation = nil; operationID = nil
           feedback = "Trip download cancelled."
         }.accessibilityIdentifier("albums.download.cancel")
-      }
-    } else {
-      Button("Download trip", systemImage: "arrow.down.circle") { downloadTrip() }
-        .disabled(busy || model.opened?.overview.photoCount == 0)
-        .accessibilityHint("Prepare one ZIP of all trip originals, omitting identical copies. Current filters do not limit the download.")
-        .accessibilityIdentifier("albums.download")
-      if let downloadError {
-        DisclosureGroup("Download details") { Text(downloadError).font(.caption).textSelection(.enabled) }
-      }
+      }.frame(maxWidth: .infinity, alignment: .leading)
+    } else if let downloadError {
+      DisclosureGroup("Download details") { Text(downloadError).font(.caption).textSelection(.enabled) }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
   }
   private func cleanupTripDownload() {
@@ -474,13 +531,15 @@ struct NativeAlbumView: View {
   }
   private func albumDetails(_ album: NativeAlbumSummary) -> some View {
     VStack(alignment: .leading, spacing: 16) {
-      Text("Each accepted member can add chosen Saved photos. People names and photo annotations stay private.").font(.footnote).foregroundStyle(.secondary)
+      Text("Members can add photos. Details stay private until shared.").font(.footnote).foregroundStyle(.secondary)
       ForEach(album.definition.members, id: \.card.accountId) { member in
         VStack(alignment: .leading, spacing: 6) {
           Text(memberName(member.card.accountId, in: album.definition)).font(.headline)
-          Text(member.card.accountId).font(.caption.monospaced()).textSelection(.enabled)
-          Text(member.card.signingPublicKey).font(.caption.monospaced()).textSelection(.enabled)
-          Text(member.card.boxPublicKey).font(.caption.monospaced()).textSelection(.enabled)
+          DisclosureGroup("Identity details") {
+            Text(member.card.accountId).font(.caption.monospaced()).textSelection(.enabled)
+            Text(member.card.signingPublicKey).font(.caption.monospaced()).textSelection(.enabled)
+            Text(member.card.boxPublicKey).font(.caption.monospaced()).textSelection(.enabled)
+          }
         }
       }
     }
@@ -490,13 +549,13 @@ struct NativeAlbumView: View {
     guard let album = model.albums.first(where: { $0.id == incoming.albumId }),
       album.definition.ownerAccountId == incoming.ownerCard.accountId,
       album.definition.members.first(where: { $0.card.accountId == incoming.ownerCard.accountId })?.card == incoming.ownerCard else {
-      throw FotoroError("This album invitation is unavailable for this account.")
+      throw FotoroError("This trip invitation is unavailable for this account.")
     }
     invitationPrepared = true
-    if album.overview.endedAt != nil { feedback = "Album access has ended." }
+    if album.overview.endedAt != nil { feedback = "Trip access has ended." }
     else if album.needsTrust { trustCandidate = album }
     else if album.overview.membership == "accepted" { try await model.open(album.id) }
-    else { feedback = "Join the album below." }
+    else { feedback = "Join the trip below." }
   }
   private func addDevicePhotos(_ sources: [RecentPhotoSource]) async throws {
     guard let context = NativeAlbumPickerContext.current(services), let album = model.opened,
@@ -572,7 +631,7 @@ struct NativeAlbumView: View {
       }
     }
   }
-  private func stop() { searchTask?.cancel(); searchTask = nil; searchTaskID = nil; searchError = nil; cleanupTripDownload(); operation?.cancel(); operation = nil; operationID = nil; viewer = nil; showPicker = false; link = nil; familyFilter = NativeAlbumSearchFilter(); showFamilyFilters = false; showCreation = false; showDetails = false; trustCandidate = nil }
+  private func stop() { searchTask?.cancel(); searchTask = nil; searchTaskID = nil; searchError = nil; cleanupTripDownload(); operation?.cancel(); operation = nil; operationID = nil; viewer = nil; showPicker = false; link = nil; familyFilter = NativeAlbumSearchFilter(); showFamilyFilters = false; showTripPicks = false; showCreation = false; showDetails = false; trustCandidate = nil }
   private func run(navigating: Bool = false, _ action: @escaping @MainActor () async throws -> Void) {
     if navigating { resumeState.deliberateNavigation(in: model) }
     let pendingSearch = searchTask
@@ -729,7 +788,7 @@ private struct NativeAlbumPhotoPicker: View {
             else { feedback = "Allow Photos access to choose device photos." }
           }
         }.accessibilityIdentifier("albums.picker.device")
-        Text("Choose up to 100 photos. Device originals are saved in Fotoro before they are added to this trip.").font(.footnote).foregroundStyle(.secondary)
+        Text("Choose up to 100 photos. Device photos are saved in Fotoro before adding.").font(.footnote).foregroundStyle(.secondary)
         if let message = feedback ?? picker.feedback { Text(message).foregroundStyle(.secondary) }
         ForEach(picker.isCurrent(services) ? picker.photos : []) { photo in
           Toggle(isOn: Binding(get: { picker.selection.contains(photo.id) }, set: { enabled in
@@ -756,11 +815,15 @@ private struct NativeAlbumPhotoPicker: View {
             Button("Load more Saved photos") { feedback = nil; picker.loadMore(services) }
               .accessibilityIdentifier("albums.picker.loadMore")
           }
-          Button("Refresh Saved photos") { feedback = nil; picker.refresh(services) }
-            .accessibilityIdentifier("albums.picker.refresh")
         }
       }.navigationTitle("Add photos")
       .toolbar {
+        ToolbarItem(placement: .topBarTrailing) {
+          Menu("More", systemImage: "ellipsis") {
+            Button("Refresh Saved photos") { feedback = nil; picker.refresh(services) }
+              .disabled(picker.busy).accessibilityIdentifier("albums.picker.refresh")
+          }
+        }
         ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
         ToolbarItem(placement: .confirmationAction) {
           Button("Add \(picker.selection.count)") {
@@ -877,7 +940,9 @@ private struct NativeAlbumPhotoView: View {
             else { ProgressView() }
           }.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        Text(item.photo.metadata.sourceDate).font(.caption).foregroundStyle(.secondary)
+        if let date = Wire.parseDate(item.photo.metadata.sourceDate) {
+          Text(date.formatted(date: .abbreviated, time: .omitted)).font(.caption).foregroundStyle(.secondary)
+        }
         if let facts = model.sharedFacts[item.id] {
           if !facts.people.isEmpty { Text(facts.people.joined(separator: ", ")).font(.caption) }
           if let location = facts.location { Text(location.displayName + " · " + location.provenance).font(.caption) }
