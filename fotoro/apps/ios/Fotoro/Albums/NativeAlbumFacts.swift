@@ -119,3 +119,21 @@ struct NativeAlbumFactsReview: Identifiable {
   let location: PhotoLocationV1?
   let shared: AlbumPhotoFactsContentV1?
 }
+
+struct NativeAlbumFactsSelection {
+  let people: [String]
+  let includeLocation: Bool
+  let unavailableSharedDetails: Bool
+
+  init(people available: [String], location: PhotoLocationV1?, shared: AlbumPhotoFactsContentV1?) {
+    let currentNames = Set(available.map { Data($0.utf8) })
+    people = (shared?.people ?? []).filter { currentNames.contains(Data($0.utf8)) }
+    if let previous = shared?.location, let location {
+      includeLocation = previous.latitude == location.latitude && previous.longitude == location.longitude
+        && previous.source == location.source && previous.accuracyMeters == location.accuracyMeters
+        && previous.name.map { Data($0.utf8) } == location.name.map { Data($0.utf8) }
+    } else { includeLocation = false }
+    unavailableSharedDetails = people.count != (shared?.people.count ?? 0)
+      || (shared?.location != nil && !includeLocation)
+  }
+}

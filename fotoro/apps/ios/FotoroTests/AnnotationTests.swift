@@ -522,9 +522,44 @@ final class AnnotationTests: XCTestCase {
   @MainActor func testRealAuthenticatedSecondDeviceHydratesCloudLabelsAndOCRForSearch() async throws {
     let accounts = try fixture(FixtureAccounts.self, "accounts")
     let secret = accounts.testSecrets[0]
-    let first = try AppServices(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
+    let keychainIDs = ["session", secret.accountId, "password-" + secret.accountId]
+    let previousKeys = Dictionary(uniqueKeysWithValues: keychainIDs.map { ($0, try? Keychain.read($0)) })
+    let defaultKeys = ["fotoro.account", "fotoro.api", "fotoro.fixtureAccount",
+      "fotoro.manualLock." + secret.accountId, "fotoro.pinnedCards.v2." + secret.accountId]
+    let previousDefaults = Dictionary(uniqueKeysWithValues: defaultKeys.map { ($0, UserDefaults.standard.object(forKey: $0)) })
+    let firstRoot = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    let secondRoot = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer {
+      for (id, value) in previousKeys {
+        if let value { XCTAssertNoThrow(try Keychain.write(value, id: id)) }
+        else { Keychain.remove(id) }
+      }
+      for (key, value) in previousDefaults {
+        if let value { UserDefaults.standard.set(value, forKey: key) }
+        else { UserDefaults.standard.removeObject(forKey: key) }
+      }
+      try? FileManager.default.removeItem(at: firstRoot)
+      try? FileManager.default.removeItem(at: secondRoot)
+    }
+    let first = try AppServices(root: firstRoot)
+    defer { first.vault.lock() }
     try first.configureAPI("http://127.0.0.1:8787")
-    try await first.auth.recover("fotoro1.\(secret.accountId).\(secret.recoverySecret)")
+    // Hosted timeouts have occurred on initial loopback recovery after the build's
+    // readiness probe. Restart only this public-fixture setup on one timeout;
+    // recover obtains a fresh challenge rather than replaying a consumed proof.
+    for attempt in 0..<2 {
+      do {
+        try await first.auth.recover("fotoro1.\(secret.accountId).\(secret.recoverySecret)")
+        break
+      } catch let error as URLError where error.code == .timedOut && attempt == 0 {
+        try Task.checkCancellation()
+        XCTAssertEqual(first.api.baseURL.absoluteString, "http://127.0.0.1:8787")
+        print("Public fixture recovery setup timed out; starting the final fresh ceremony.")
+      }
+    }
+    XCTAssertTrue(first.session.isSignedIn)
+    XCTAssertFalse(first.session.fixture)
+    XCTAssertEqual(first.session.accountId, secret.accountId)
     try first.activateAccount()
     let bytes = try Data(contentsOf: Bundle.main.url(forResource: "singapore", withExtension: "jpg")!)
     var photo = try await first.importer.build(bytes: bytes, filename: "public-annotation-fixture.jpg", accountId: secret.accountId, bundle: first.vault.requireBundle())
@@ -549,7 +584,8 @@ final class AnnotationTests: XCTestCase {
     XCTAssertTrue(try first.annotations.ledger.pendingIDs().isEmpty)
     let readerFixture = try visualFixture(value, revision: 2, photo: photo, bundle: first.vault.requireBundle(), card: accounts.accounts[0])
     _ = try await first.api.request("/v1/photos/\(photo.id)/annotations", method: "PUT", body: Wire.encode(readerFixture))
-    let second = try AppServices(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
+    let second = try AppServices(root: secondRoot)
+    defer { second.vault.lock() }
     try second.configureAPI("http://127.0.0.1:8787")
     try await second.auth.recover("fotoro1.\(secret.accountId).\(secret.recoverySecret)")
     try second.activateAccount()

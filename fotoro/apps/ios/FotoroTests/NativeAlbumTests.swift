@@ -2,6 +2,37 @@ import XCTest
 @testable import Fotoro
 
 final class NativeAlbumTests: XCTestCase {
+  func testSharedDetailsSelectionPreservesOnlyExistingCurrentDetails() {
+    let location = PhotoLocationV1(latitude: 1.3, longitude: 103.8, source: "photos", name: "Singapore", accuracyMeters: 5)
+    let newShare = NativeAlbumFactsSelection(people: ["Mom", "Dad"], location: location, shared: nil)
+    XCTAssertTrue(newShare.people.isEmpty); XCTAssertFalse(newShare.includeLocation)
+    XCTAssertFalse(newShare.unavailableSharedDetails)
+    let shared = AlbumPhotoFactsContentV1(albumId: Wire.id(), photoId: Wire.id(), ownerAccountId: Wire.id(),
+      definitionSignature: "test", revision: 1, originalSha256: "test", people: ["Mom"], location: location)
+    let reopened = NativeAlbumFactsSelection(people: ["Mom", "Dad"], location: location, shared: shared)
+    XCTAssertEqual(reopened.people, ["Mom"], "Unshared names must never gain consent when reopening")
+    XCTAssertTrue(reopened.includeLocation); XCTAssertFalse(reopened.unavailableSharedDetails)
+    let corrected = NativeAlbumFactsSelection(people: ["Mum", "Dad"], location: nil, shared: shared)
+    XCTAssertTrue(corrected.people.isEmpty); XCTAssertFalse(corrected.includeLocation)
+    XCTAssertTrue(corrected.unavailableSharedDetails)
+    for field in ["latitude", "longitude", "source", "name", "accuracy"] {
+      var changed = location
+      switch field {
+      case "latitude": changed.latitude = 1.4
+      case "longitude": changed.longitude = 103.9
+      case "source": changed.source = "exif"
+      case "name": changed.name = "Another place"
+      default: changed.accuracyMeters = 6
+      }
+      let selection = NativeAlbumFactsSelection(people: ["Mom"], location: changed, shared: shared)
+      XCTAssertFalse(selection.includeLocation, field + " must require a new explicit choice")
+      XCTAssertTrue(selection.unavailableSharedDetails, field)
+    }
+    var composed = shared; composed.people = ["\u{00e9}"]
+    let renamed = NativeAlbumFactsSelection(people: ["e\u{0301}"], location: location, shared: composed)
+    XCTAssertTrue(renamed.people.isEmpty, "Shared labels retain their exact UTF-8 identity")
+    XCTAssertTrue(renamed.unavailableSharedDetails)
+  }
   @MainActor func testTripPreviewsReuseVerifiedFilesAndRecheckMembershipWithoutReadingOriginals() async throws {
     try await withAlbum { _, server, model in
       try await model.refresh(); try await model.open(server.definition.albumId)
@@ -508,6 +539,9 @@ final class NativeAlbumTests: XCTestCase {
       let json = String(decoding: try Wire.encode(shared), as: UTF8.self)
       for privateText in ["Private caption", "Private label", "Private user fact", "Dad", "ocr", "facts"] { XCTAssertFalse(json.contains(privateText)) }
       let updated = try await model.prepareSharedDetails(item)
+      let selection = NativeAlbumFactsSelection(people: updated.people, location: updated.location, shared: updated.shared)
+      XCTAssertEqual(selection.people, ["Mom"]); XCTAssertFalse(selection.includeLocation)
+      XCTAssertFalse(selection.unavailableSharedDetails)
       try await model.shareDetails(updated, names: [], includeLocation: false)
       XCTAssertEqual(model.sharedFacts[item.id]?.people, []); XCTAssertNil(model.sharedFacts[item.id]?.location)
       XCTAssertEqual(services.annotation(server.source), value, "Shared edits do not rewrite private annotations")

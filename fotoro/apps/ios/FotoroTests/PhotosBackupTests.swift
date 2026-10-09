@@ -567,11 +567,31 @@ final class PhotosBackupTests: XCTestCase {
     XCTAssertTrue(NativeBackupPolicy.allowsPrivatePhotos(accountId: Wire.id(), fixture: false))
   }
   @MainActor func testLegacyPublicQueueRemainsBlockedAndPreservedAfterRecoveryMode() async throws {
-    let services = try AppServices(
-      root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
-    services.session.accountId = "00000000-0000-4000-8000-000000000001"
-    services.session.fixture = false
     let account = try fixture(FixtureAccounts.self, "accounts").testSecrets[0]
+    let context = try PausedUploadContext()
+    let priorAccount = UserDefaults.standard.object(forKey: "fotoro.account")
+    let pinnedKey = "fotoro.pinnedCards.v2." + account.accountId.lowercased()
+    let priorPinned = UserDefaults.standard.object(forKey: pinnedKey)
+    let priorBundle = try? Keychain.read(account.accountId)
+    defer {
+      context.restore()
+      if let priorBundle { try? Keychain.write(priorBundle, id: account.accountId) }
+      if let priorPinned { UserDefaults.standard.set(priorPinned, forKey: pinnedKey) }
+      else { UserDefaults.standard.removeObject(forKey: pinnedKey) }
+      if let priorAccount { UserDefaults.standard.set(priorAccount, forKey: "fotoro.account") }
+      else { UserDefaults.standard.removeObject(forKey: "fotoro.account") }
+      try? FileManager.default.removeItem(at: context.root)
+    }
+    let services = try await context.enroll(accountId: account.accountId)
+    defer { services.vault.lock() }
+    // Recovery mode must be signed in independently of a preceding test's
+    // Keychain session; setting accountId alone does not authenticate it.
+    try services.session.accept(SessionV1(version: 1, accountId: account.accountId,
+      deviceId: Wire.id(), expiresAt: Wire.date(Date().addingTimeInterval(3600)),
+      token: "controlled-public-recovery-session"))
+    XCTAssertTrue(services.session.isSignedIn)
+    XCTAssertFalse(services.session.fixture)
+    XCTAssertFalse(NativeBackupPolicy.allowsPrivatePhotos(accountId: services.session.accountId, fixture: false))
     let bytes =
       try Data(contentsOf: Bundle.main.url(forResource: "singapore", withExtension: "jpg")!)
     let photo = try await services.importer.build(
@@ -583,8 +603,12 @@ final class PhotosBackupTests: XCTestCase {
     do {
       try await services.resumeTransfers()
       XCTFail("Public queue must be blocked")
-    } catch { XCTAssertTrue(error.localizedDescription.contains("paused")) }
-    XCTAssertEqual(try services.journal.entries().count, 1)
+    } catch { XCTAssertTrue(error.localizedDescription.contains("paused"), error.localizedDescription) }
+    let retained = try services.journal.entries()
+    XCTAssertEqual(retained.map { $0.photo.id }, [photo.id])
+    XCTAssertEqual(retained.first?.publicSample, false, "Legacy imports must not gain public-sample authorization")
+    XCTAssertEqual(try Data(contentsOf: XCTUnwrap(retained.first?.photo.originalURL)), bytes)
+    XCTAssertTrue(PausedUploadProtocol.server.requests.isEmpty, "Recovery mode must not send the private queue to any API")
     XCTAssertThrowsError(try services.startPhotosBackup())
   }
   @MainActor func testLegacyImportFencesStaleOriginalReadBeforeStaging() async throws {

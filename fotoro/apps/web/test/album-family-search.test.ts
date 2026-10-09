@@ -1,3 +1,4 @@
+import {albumDetailsSelection} from "../src/albums/detail-selection";
 import "fake-indexeddb/auto";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -107,6 +108,10 @@ test("A explicitly shares reviewed details; B accepts, finds People/place/time, 
   const empty = await aAccess.loadFacts(); assert.equal(searchAlbumPhotos([aPhoto], "Mum", () => true, Date.now(), {facts: empty.facts}).length, 0);
   const shared = await aAccess.shareDetails(aPhoto, sourceA, {people: true, location: true}, 2);
   assert.deepEqual(shared.people, ["Mum"]); assert.equal(shared.location?.name, "Public Grove");
+  const selected = albumDetailsSelection(sourceA, await aAccess.readFactsFor(aPhoto));
+  assert.deepEqual(selected.people, ["Mum"]); assert.equal(selected.location, true);
+  const retained = await aAccess.shareDetails(aPhoto, sourceA, selected, shared.revision + 1);
+  assert.deepEqual(retained.people, shared.people); assert.deepEqual(retained.location, shared.location);
   assert.equal(JSON.stringify(shared).includes("private caption"), false); assert.equal(JSON.stringify(shared).includes("private OCR"), false);
   aAccess.dispose();
   const b = await open(1); await assert.rejects(trustedCard(accounts.accounts[0].accountId), /PIN_ACCOUNT_CARD/);

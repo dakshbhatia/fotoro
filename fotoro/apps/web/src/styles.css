@@ -1000,5 +1000,8 @@ main:has(.consumer-selection) .local-search { padding-bottom: calc(140px + env(s
 .album-copies { border-top:1px solid var(--photo-selected); }
 .album-copies button { display:block; width:100%; text-align:left; padding:10px; overflow-wrap:anywhere; }
 .album-share-details { border-top:1px solid var(--photo-selected); margin-top:12px; padding:8px 0; }
+.album-share-details label { display:flex; flex-direction:row; align-items:center; gap:8px; min-height:44px; margin:6px 0; overflow-wrap:anywhere; }
+.album-share-details input[type=checkbox] { width:20px; height:20px; min-height:20px; flex:0 0 20px; margin:0; padding:0; accent-color:var(--photo-accent); }
+.album-share-details fieldset { min-width:0; max-width:100%; max-height:260px; box-sizing:border-box; overflow-y:auto; border:1px solid var(--photo-selected); border-radius:12px; margin:12px 0; padding:8px 12px; }
 .album-share-details .actions { display:flex; flex-wrap:wrap; gap:8px; }
 .album-preview .album-photo-tags { width:100%; box-sizing:border-box; padding:8px 16px; }
