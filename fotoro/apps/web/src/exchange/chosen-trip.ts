@@ -7,7 +7,7 @@ import {tripSavedSources} from "../albums/import";
 import {fail, validDigest, sameManifest, ownedSource} from "./chosen-trip-snapshot";
 export {snapshotChosenTripSources} from "./chosen-trip-snapshot";
 
-/** Select exact hydrated originals after cacheOwnedPhotoDetails and cachedSync. */
+// Select exact hydrated originals after cacheOwnedPhotoDetails and cachedSync.
 export function chosenTripPhotos(sources: readonly OwnedPhotoDetailsSource[], owned: readonly Photo[], ownerAccountId: string, current: () => boolean): Photo[] {
   const check = () => {if (!current()) throw new DOMException("Trip choice changed", "AbortError");};
   check();
@@ -26,7 +26,7 @@ export function chosenTripPhotos(sources: readonly OwnedPhotoDetailsSource[], ow
   return [...selected.values()];
 }
 
-/** Resolve the entire explicit choice, including commits not yet in the browse catalog. */
+// Resolve the entire explicit choice, including commits not yet in the browse catalog.
 export function resolveChosenTripSources(options: {
   local: readonly LocalPhoto[]; saved: readonly OwnedPhotoDetailsSource[];
   owned: readonly Photo[]; pending: readonly PendingImport[];

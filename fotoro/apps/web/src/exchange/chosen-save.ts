@@ -5,7 +5,7 @@ export interface ChosenSaveSnapshot {
   readonly files: readonly File[];
 }
 
-/** Keep an optional continuation inside the exact Save request's running lifetime. */
+// Keep an optional continuation inside the exact Save request's running lifetime.
 export async function continueChosenSave(
   snapshot: ChosenSaveSnapshot, signal: AbortSignal, current: () => boolean,
   save: (snapshot: ChosenSaveSnapshot, signal: AbortSignal, current: () => boolean) => Promise<boolean>,

@@ -11,7 +11,7 @@ export function ownedSource(photo: Photo, ownerAccountId: string): OwnedPhotoDet
   return {ownerAccountId, photoId: photo.manifest.photoId, originalSha256: photo.metadata.originalSha256, manifest: structuredClone(photo.manifest)};
 }
 
-/** Capture identities before authentication or saving can replace the browse snapshot. */
+// Capture identities before authentication or saving can replace the browse snapshot.
 export function snapshotChosenTripSources(photos: readonly Photo[], ownerAccountId: string): OwnedPhotoDetailsSource[] {
   const sources = new Map<string, OwnedPhotoDetailsSource>();
   for (const photo of photos) {
