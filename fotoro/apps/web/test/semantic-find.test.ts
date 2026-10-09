@@ -364,3 +364,24 @@ test("public model cache verifies reads as well as writes and removes corrupted 
   await assert.rejects(cache.put(url, new Response("poisoned")), /invalid/); assert.equal(values.has(url), false);
   assert.equal(await cache.match("private-photo"), undefined);
 });
+
+test("filename retrieval stays exact despite high visual scores and needs no inference or preview feedback", () => {
+  const photos = [{...photo("qa"), filename: "Public-QA-104.jpg", previewAvailable: false}, photo("singapore")];
+  const base = new PhotoSearchIndex(photos).search("Public-QA-104");
+  assert.equal(base.meaning?.kind, "filename");
+  assert.deepEqual(base.photoIds, ["qa"]);
+  const scores = new Map([["singapore", .99]]), permitted = new Set(photos.map(value => value.id));
+  assert.equal(addSemanticMatches(base, scores, permitted), base, "late visual scores cannot broaden a filename meaning");
+  let result!: SearchResult;
+  function FilenameSearch() {
+    result = useSemanticFind(photos, base, true, "account:one");
+    return createElement("output", null, result.photoIds.join(","));
+  }
+  assert.equal(renderToStaticMarkup(createElement(FilenameSearch)), "<output>qa</output>");
+  assert.equal(result.searching, undefined);
+  assert.equal(result.visualStatus, undefined, "a filename match does not need missing-preview/model feedback");
+  const natural = new PhotoSearchIndex(photos).search("city at night");
+  assert.deepEqual(addSemanticMatches(natural, scores, permitted).photoIds, ["singapore"]);
+  const dated = new PhotoSearchIndex(photos).search("city 2026-10-03");
+  assert.deepEqual(addSemanticMatches(dated, scores, new Set(eligibleSemanticPhotos(photos, dated.query).map(value => value.id))).photoIds, ["singapore"]);
+});

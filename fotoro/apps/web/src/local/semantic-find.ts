@@ -33,8 +33,12 @@ export function semanticPreviewStatus(photos: LocalPhoto[], query: string, now?:
   const scoped = scopedSemanticPhotos(photos, query, now), available = scoped.filter(hasSemanticPreview).length;
   return available < scoped.length ? available ? "incomplete" : "missing-preview" : undefined;
 }
+// A filename meaning names specific files; visual similarity cannot add others.
+export function permitsSemanticMatches(base: SearchResult, committedMeaning?: string) {
+  return !committedMeaning && base.meaning?.kind !== "filename";
+}
 export function addSemanticMatches(base: SearchResult, scores: ReadonlyMap<string, number>, permitted: ReadonlySet<string>, committedMeaning?: string): SearchResult {
-  if (committedMeaning) return base;
+  if (!permitsSemanticMatches(base, committedMeaning)) return base;
   const ranked = [...scores].filter(([id, score]) => permitted.has(id) && Number.isFinite(score) && score >= SEMANTIC_THRESHOLD)
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 100).map(([id]) => id);
   if (!ranked.length) return base;
