@@ -699,6 +699,8 @@ struct LibraryPhotoCell: View {
   let open: () -> Void
   let toggleSelection: () -> Void
   let appeared: () -> Void
+  var services: AppServices? = nil
+  private var syncStatus: PhotoSyncItemStatus? { services?.photoSyncItem(photoID: photo.id) }
 
   var body: some View {
     Button(action: open) {
@@ -717,7 +719,11 @@ struct LibraryPhotoCell: View {
           Image(systemName: "checkmark.circle.fill").padding(8)
         }
       }.aspectRatio(1, contentMode: .fit)
+        .overlay(alignment: .topTrailing) {
+          if let status = syncStatus { PhotoSyncTileIndicator(status: status) }
+        }
     }.buttonStyle(.plain).accessibilityLabel(photo.metadata.filename)
+      .accessibilityValue([isSelected ? "Selected" : nil, syncStatus?.accessibilityText].compactMap { $0 }.joined(separator: ", "))
       .onAppear(perform: appeared)
       .contextMenu {
         Button(isSelected ? "Deselect" : "Select", action: toggleSelection)

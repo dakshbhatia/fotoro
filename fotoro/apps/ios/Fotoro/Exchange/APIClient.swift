@@ -7,7 +7,7 @@ enum NativeDiagnosticOutcome: String, Codable, Sendable { case started, complete
 enum NativeDiagnosticOperation: String, Codable, Sendable { case app, api, auth, sync, share, albums, search, metadata, people, consent, picks }
 enum NativeDiagnosticStep: String, Codable, Sendable { case action, request, response, decode, credential, unlock, catalog, verify, persist, transfer, annotation, scan, analysis, export }
 enum NativeDiagnosticReason: String, Codable, Sendable {
-  case cancelled, contextChanged, network, http, decode, validation, unknown
+  case cancelled, contextChanged, background, recoveryProbe, network, http, decode, validation, unknown
   case signedOut, locked, permissionRequired, paused, offline, retryRequired, waiting, pendingTransfers, pendingAnnotations, sourceUnavailable, current
   static func failure(_ error: Error) -> Self {
     if error is CancellationError || (error as? URLError)?.code == .cancelled { return .cancelled }
@@ -294,14 +294,15 @@ enum APIURLPolicy {
     return uuid.uuidString.lowercased()
   }
   private func perform<T>(_ url: URL, method: String, body: Data?, step: NativeDiagnosticStep,
-    transform: (Data) throws -> T) async throws -> T {
+    expectedUploadIncomplete: Bool = false, transform: (Data) throws -> T) async throws -> T {
     let trace = NativeDiagnosticTrace.current ?? NativeDiagnosticTrace(.api)
     return try await NativeDiagnosticTrace.$current.withValue(trace) {
-      try await performTraced(url, method: method, body: body, step: step, transform: transform)
+      try await performTraced(url, method: method, body: body, step: step,
+        expectedUploadIncomplete: expectedUploadIncomplete, transform: transform)
     }
   }
   private func performTraced<T>(_ url: URL, method: String, body: Data?, step: NativeDiagnosticStep,
-    transform: (Data) throws -> T) async throws -> T {
+    expectedUploadIncomplete: Bool, transform: (Data) throws -> T) async throws -> T {
     let started = ProcessInfo.processInfo.systemUptime
     let endpoint = NativeDiagnosticEndpoint(path: url.path)
     diagnostics.record(NativeDiagnosticEvent(phase: .api, outcome: .started, endpoint: endpoint, method: method, step: .request))
@@ -358,11 +359,14 @@ enum APIURLPolicy {
     guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
       let failure = try? JSONDecoder().decode(APIFailure.self, from: data)
       let failureRequestId = requestId ?? Self.supportReference(failure?.requestId)
-      diagnostics.record(NativeDiagnosticEvent(phase: .api, outcome: .failed,
+      let recoveryPending = expectedUploadIncomplete && method == "POST" && endpoint == .upload
+        && url.path.hasSuffix("/commit") && (response as? HTTPURLResponse)?.statusCode == 409
+        && failure?.code == "UPLOAD_INCOMPLETE"
+      diagnostics.record(NativeDiagnosticEvent(phase: .api, outcome: recoveryPending ? .changed : .failed,
         endpoint: endpoint, method: method, elapsed: ProcessInfo.processInfo.systemUptime - started,
         status: (response as? HTTPURLResponse)?.statusCode,
         requestId: failureRequestId,
-        step: .response, reason: .http))
+        step: .response, reason: recoveryPending ? .recoveryProbe : .http))
       throw FotoroError(
         failure?.code ?? "Network request failed (\((response as? HTTPURLResponse)?.statusCode ?? 0))",
         requestId: failureRequestId,
@@ -390,11 +394,13 @@ enum APIURLPolicy {
       requestId: (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "x-request-id"), step: step))
     return value
   }
-  private func decoded<T: Decodable>(_ path: String, method: String = "GET", body: Data? = nil) async throws -> T {
+  private func decoded<T: Decodable>(_ path: String, method: String = "GET", body: Data? = nil,
+    expectedUploadIncomplete: Bool = false) async throws -> T {
     guard let url = URL(string: path, relativeTo: baseURL) else {
       recordInvalidURL(method: method); throw FotoroError("Invalid API URL")
     }
-    return try await perform(url, method: method, body: body, step: .decode) { try Wire.decode(T.self, $0) }
+    return try await perform(url, method: method, body: body, step: .decode,
+      expectedUploadIncomplete: expectedUploadIncomplete) { try Wire.decode(T.self, $0) }
   }
   func get<T: Decodable>(_ path: String) async throws -> T {
     try await decoded(path)
@@ -402,8 +408,8 @@ enum APIURLPolicy {
   func post<T: Decodable, U: Encodable>(_ path: String, _ body: U) async throws -> T {
     try await decoded(path, method: "POST", body: Wire.encode(body))
   }
-  func commit(_ id: String) async throws -> UploadCommitV1 {
-    try await decoded("/v1/uploads/\(id)/commit", method: "POST")
+  func commit(_ id: String, recoveryProbe: Bool = false) async throws -> UploadCommitV1 {
+    try await decoded("/v1/uploads/\(id)/commit", method: "POST", expectedUploadIncomplete: recoveryProbe)
   }
   func upload(_ bytes: Data, to location: String) async throws {
     guard let url = URL(string: location, relativeTo: baseURL) else {

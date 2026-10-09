@@ -14,6 +14,7 @@ enum TransferResumeOutcome: Equatable { case idle, finished, cancelled }
   let api: APIClient
   let vault: VaultStore
   private(set) var running = false
+  private(set) var activeTransfer: PhotoSyncItemStatus?
   var errors: [String: String] = [:]
   private var foregroundGeneration = UUID()
   private var settlementWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
@@ -126,6 +127,8 @@ enum TransferResumeOutcome: Equatable { case idle, finished, cancelled }
         if let allowedPhotoIDs, !allowedPhotoIDs.contains(e.photo.photoId) { continue }
         do {
           try fence()
+          activeTransfer = PhotoSyncItemStatus(photoID: e.photo.photoId, phase: .uploading)
+          defer { activeTransfer = nil }
           guard e.photo.manifest.ownerAccountId == account else { throw CancellationError() }
           if CameraMedia.isMotion(e.photo.metadata.mediaType) {
             let page: ChangePageV1 = try await api.get("/v1/changes?limit=1&media=1")
@@ -136,6 +139,7 @@ enum TransferResumeOutcome: Equatable { case idle, finished, cancelled }
             try fence()
             let id = rep.binding.representationId
             if e.commits[id] != nil { continue }
+            activeTransfer = PhotoSyncItemStatus(photoID: e.photo.photoId, phase: .uploading)
             if e.reservations[id] == nil {
               let reservation: UploadReservationV1 = try await api.post(
                 "/v1/uploads/reserve",
@@ -149,7 +153,7 @@ enum TransferResumeOutcome: Equatable { case idle, finished, cancelled }
             let reservation = e.reservations[id]!
             // Retry commit first: an earlier response may have been lost after promotion.
             let commit: UploadCommitV1
-            do { commit = try await api.commit(reservation.uploadId) } catch {
+            do { commit = try await api.commit(reservation.uploadId, recoveryProbe: true) } catch {
               try fence()
               guard (error as? FotoroError)?.message == "UPLOAD_INCOMPLETE" else { throw error }
               guard let path = e.photo.staged[id] else {
@@ -190,6 +194,7 @@ enum TransferResumeOutcome: Equatable { case idle, finished, cancelled }
                 try await upload(renewed)
               }
               try fence()
+              activeTransfer = PhotoSyncItemStatus(photoID: e.photo.photoId, phase: .finishing)
               commit = try await api.commit(reservation.uploadId)
             }
             try fence()
@@ -200,6 +205,7 @@ enum TransferResumeOutcome: Equatable { case idle, finished, cancelled }
             e.commits[id] = commit
             try persist(e)
           }
+          activeTransfer = PhotoSyncItemStatus(photoID: e.photo.photoId, phase: .finishing)
           for i in e.photo.manifest.representations.indices {
             let id = e.photo.manifest.representations[i].binding.representationId
             e.photo.manifest.representations[i].objectId = e.commits[id]!.objectId

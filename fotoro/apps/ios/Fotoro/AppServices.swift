@@ -97,6 +97,12 @@ enum ReviewedPhotosBackupPolicy {
     @ObservationIgnored var automaticPhotosAuthorization: (() -> PHAuthorizationStatus)?
   #endif
   private(set) var consumerSyncSummary = ConsumerSyncSummary()
+  private(set) var consumerBackupSources: [BackupSource] = []
+  private(set) var consumerBackupSourcesGeneration: UInt64 = 0
+  private(set) var photoSyncProgress = PhotoSyncProgress()
+  @ObservationIgnored private var consumerTransferProjection: [TransferEntry] = []
+  @ObservationIgnored private var consumerProjectionAccess: PhotoAccountAccess?
+  @ObservationIgnored private var consumerProjectionOrigin: String?
   private(set) var consumerCatalogGeneration: UInt64 = 0
   private var activatedPhotoAccount: PhotoAccountAccess?
   @ObservationIgnored private var diagnosticAccountState: NativeDiagnosticAccountState?
@@ -110,6 +116,7 @@ enum ReviewedPhotosBackupPolicy {
   private var automaticSyncTask: Task<Void, Never>?
   @ObservationIgnored private var automaticSyncSettling: Task<Void, Never>?
   @ObservationIgnored private var automaticSyncGeneration = UUID()
+  @ObservationIgnored private var automaticSyncCancellationReasons: [UUID: NativeDiagnosticReason] = [:]
   @ObservationIgnored private var automaticSyncNeedsScan = false
   @ObservationIgnored private var automaticSyncObserver: AutomaticPhotoSyncObserver?
   private var consumerChecking = false
@@ -364,6 +371,56 @@ enum ReviewedPhotosBackupPolicy {
       return urls[0]
     } catch { try? FileManager.default.removeItem(at: directory); throw error }
   }
+  func photoSyncItem(sourceID: String, revision: String) -> PhotoSyncItemStatus? {
+    guard photoAccountAccess == consumerProjectionAccess, photoAccountAccess != nil,
+      BackgroundUploadPolicy.origin(api.baseURL) == consumerProjectionOrigin else { return nil }
+    return photoSyncProgress.status(for: RecentPhotoSource(id: sourceID, revision: revision))
+  }
+  func photoSyncItem(photoID: String) -> PhotoSyncItemStatus? {
+    guard photoAccountAccess == consumerProjectionAccess, photoAccountAccess != nil,
+      BackgroundUploadPolicy.origin(api.baseURL) == consumerProjectionOrigin else { return nil }
+    return photoSyncProgress.itemsByPhotoID[photoID]
+  }
+  private func clearConsumerPhotoSyncProjection() {
+    if !consumerBackupSources.isEmpty || consumerProjectionAccess != nil {
+      consumerBackupSources = []
+      consumerBackupSourcesGeneration &+= 1
+    }
+    consumerProjectionAccess = nil
+    consumerProjectionOrigin = nil
+    consumerTransferProjection = []
+    if photoSyncProgress != PhotoSyncProgress() { photoSyncProgress = PhotoSyncProgress() }
+  }
+  private func refreshPhotoSyncProgress() {
+    guard session.isSignedIn, vault.isUnlocked, let account = session.accountId,
+      store.root.lastPathComponent == account,
+      consumerProjectionAccess == PhotoAccountAccess(account: account, vault: vault.generation, catalog: ObjectIdentifier(store)),
+      consumerProjectionOrigin == BackgroundUploadPolicy.origin(api.baseURL) else {
+      clearConsumerPhotoSyncProjection()
+      return
+    }
+    let value = PhotoSyncProgress.derive(sources: consumerBackupSources,
+      batchSources: backup.countedSources(from: consumerBackupSources),
+      totalKnown: backup.status.sourceTotal != nil,
+      preparingSourceID: backup.activeSource.flatMap { $0.phase == .queued ? nil : $0.id },
+      activeTransfer: journal.activeTransfer,
+      pendingPhotoIDs: Set(consumerTransferProjection.map { $0.photo.id }),
+      failedPhotoIDs: Set(journal.errors.keys))
+    if photoSyncProgress != value { photoSyncProgress = value }
+  }
+  private func observePhotoSyncActivity() {
+    let token = consumerObservation
+    withObservationTracking {
+      _ = backup.activeSource
+      _ = journal.activeTransfer
+    } onChange: { [weak self] in
+      Task { @MainActor [weak self] in
+        guard let self, self.consumerObservation == token else { return }
+        self.refreshPhotoSyncProgress()
+        self.observePhotoSyncActivity()
+      }
+    }
+  }
   func refreshConsumerSyncSummary() {
     let accountState: NativeDiagnosticAccountState
     if !session.isSignedIn { accountState = .signedOut }
@@ -390,23 +447,36 @@ enum ReviewedPhotosBackupPolicy {
     guard session.isSignedIn, vault.isUnlocked, let account = session.accountId, store.root.lastPathComponent == account else {
       reason = session.isSignedIn ? .locked : .signedOut
       consumerSyncSummary = ConsumerSyncSummary()
+      clearConsumerPhotoSyncProjection()
       return
     }
     do {
       let automatic = automaticSyncPreference.enabled && automaticSyncPreference.origin == BackgroundUploadPolicy.origin(api.baseURL)
       let allSources = try store.backupSources()
+      let access = PhotoAccountAccess(account: account, vault: vault.generation, catalog: ObjectIdentifier(store))
+      let origin = BackgroundUploadPolicy.origin(api.baseURL)
+      if consumerProjectionAccess != access || consumerProjectionOrigin != origin || consumerBackupSources != allSources {
+        consumerBackupSources = allSources
+        consumerBackupSourcesGeneration &+= 1
+      }
+      consumerProjectionAccess = access
+      consumerProjectionOrigin = origin
       let retainedIDs = Set(allSources.filter(\.isRetainedOriginal).map(\.photoId))
       let sources = allSources.filter { !automatic || !$0.isRetainedOriginal }
       let entries = try journal.entries().filter {
         $0.photo.manifest.ownerAccountId == account && (!automatic || !retainedIDs.contains($0.photo.id))
       }
+      consumerTransferProjection = entries
+      refreshPhotoSyncProgress()
       var pendingIDs = Set<String>()
       for id in entries.map({ $0.photo.id }) {
         if let photo = try store.backupPhoto(id), photo.manifest.ownerAccountId == account,
           ["committed", "saved"].contains(photo.transferState) { continue }
         pendingIDs.insert(id)
       }
-      let unpreparedIDs = Set(try backup.unpreparedSources().map(\.photoId)).subtracting(pendingIDs)
+      let unpreparedIDs = Set(backup.countedSources(from: allSources).filter {
+        $0.phase == .pending || $0.phase == .failed
+      }.map(\.photoId)).subtracting(pendingIDs)
       let completed = try store.consumerCommittedCount(accountId: account)
       let skipped = sources.filter { $0.phase == .skipped }.count
       var facts = ConsumerSyncFacts()
@@ -444,6 +514,7 @@ enum ReviewedPhotosBackupPolicy {
     } catch {
       reason = .unknown
       consumerSyncSummary = ConsumerSyncSummary(state: .needsAttention, detail: "Sync status could not be read. Your originals are unchanged.", action: .retry)
+      clearConsumerPhotoSyncProjection()
     }
   }
   private func observeConsumerSync() {
@@ -474,6 +545,7 @@ enum ReviewedPhotosBackupPolicy {
     consumerFailure = nil
     refreshConsumerSyncSummary()
     observeConsumerSync()
+    observePhotoSyncActivity()
   }
   private func recordConsumerSyncFailure(_ error: Error) {
     guard NativeDiagnosticOutcome.failure(for: error, taskCancelled: Task.isCancelled) != .cancelled,
@@ -518,10 +590,11 @@ enum ReviewedPhotosBackupPolicy {
     vault.onLock = { [weak self] in
       self?.invalidateSavedVisualSearch()
       self?.cancelSharedMomentRefresh()
-      self?.suspendAutomaticPhotoSync()
+      self?.suspendAutomaticPhotoSync(reason: .locked)
       self?.activatedPhotoAccount = nil
       self?.consumerObservation = UUID()
       self?.consumerSyncSummary = ConsumerSyncSummary()
+      self?.clearConsumerPhotoSyncProjection()
       self?.backup.pause()
       self?.journal.pause()
       self?.photoAnnotations = [:]
@@ -608,6 +681,9 @@ enum ReviewedPhotosBackupPolicy {
     if backup.status.phase == .failed {
       return status(.needsAttention, backup.status.message ?? "Some originals could not sync. Originals larger than 50 MiB stay in Photos.")
     }
+    if backup.status.phase == .paused && backup.status.pending > 0 {
+      return status(.needsAttention, "Sync stopped before this batch finished. Try again while Fotoro is open.")
+    }
     if !annotations.errors.isEmpty {
       return status(.needsAttention, "Some photo changes could not sync. Use Sync changes to try again.")
     }
@@ -679,7 +755,7 @@ enum ReviewedPhotosBackupPolicy {
     kickAutomaticPhotoSync()
   }
   func disableAutomaticPhotoSync() throws {
-    suspendAutomaticPhotoSync(cancelBackground: true)
+    suspendAutomaticPhotoSync(cancelBackground: true, reason: .paused)
     let preference = AutomaticPhotoSyncPreference()
     try store.setAutomaticPhotoSyncPreference(preference, uploadsPaused: true)
     automaticSyncPreference = preference
@@ -687,16 +763,29 @@ enum ReviewedPhotosBackupPolicy {
     refreshConsumerSyncSummary()
   }
   func setPhotoSyncForeground(_ active: Bool) {
+    guard photoSyncForeground != active else {
+      if active { kickAutomaticPhotoSync() }
+      return
+    }
     photoSyncForeground = active
     if active { kickAutomaticPhotoSync() }
     else {
       invalidateSavedVisualSearch()
-      suspendAutomaticPhotoSync()
+      suspendAutomaticPhotoSync(reason: .background)
       backup.pause()
       journal.pause()
     }
   }
-  private func suspendAutomaticPhotoSync(cancelBackground: Bool = false) {
+  private var automaticSyncStopReason: NativeDiagnosticReason {
+    if automaticSyncPreference.paused || !automaticSyncPreference.enabled { return .paused }
+    if !photoSyncForeground { return .background }
+    if !session.isSignedIn { return .signedOut }
+    if !vault.isUnlocked { return .locked }
+    if !RecentPhotosPolicy.canRead(automaticPhotosPermission) { return .permissionRequired }
+    return .contextChanged
+  }
+  private func suspendAutomaticPhotoSync(cancelBackground: Bool = false, reason: NativeDiagnosticReason = .contextChanged) {
+    if automaticSyncTask != nil { automaticSyncCancellationReasons[automaticSyncGeneration] = reason }
     automaticSyncGeneration = UUID()
     automaticSyncNeedsScan = false
     automaticSyncObserver = nil
@@ -711,8 +800,15 @@ enum ReviewedPhotosBackupPolicy {
     }
   }
   func kickAutomaticPhotoSync(sourcesChanged: Bool = false) {
-    if sourcesChanged { suspendAutomaticPhotoSync() }
-    guard automaticPhotoSyncAdmitted else { suspendAutomaticPhotoSync(); return }
+    // Unrelated PhotoKit notifications request another metadata scan, without
+    // discarding a download/encryption already in progress for a current source.
+    if sourcesChanged, let active = backup.activeSource, !automaticLocationSourceCurrent(active) {
+      suspendAutomaticPhotoSync(reason: .sourceUnavailable)
+    }
+    guard automaticPhotoSyncAdmitted else {
+      suspendAutomaticPhotoSync(reason: automaticSyncStopReason)
+      return
+    }
     if automaticSyncObserver == nil {
       #if DEBUG
         let observesLibrary = photosBackupSnapshot == nil
@@ -741,15 +837,20 @@ enum ReviewedPhotosBackupPolicy {
       let trace = NativeDiagnosticTrace.current ?? NativeDiagnosticTrace(.sync)
       await NativeDiagnosticTrace.$current.withValue(trace) {
       let started = ProcessInfo.processInfo.systemUptime
+      var runCancelled = false
       self.diagnostics.record(NativeDiagnosticEvent(phase: .sync, outcome: .started, step: .action))
       defer {
-        let cancelled = Task.isCancelled || self.automaticSyncGeneration != token
+        let cancelled = runCancelled || Task.isCancelled || self.automaticSyncGeneration != token
+        let cancellationReason = self.automaticSyncCancellationReasons.removeValue(forKey: token)
         let failed = self.automaticSyncFailure != nil || self.backup.status.phase == .failed || !self.annotations.errors.isEmpty
         self.diagnostics.record(NativeDiagnosticEvent(phase: .sync,
           outcome: cancelled ? .cancelled : (failed ? .failed : .completed),
           elapsed: ProcessInfo.processInfo.systemUptime - started,
           completed: self.consumerSyncSummary.completedPhotos,
-          step: .action, reason: cancelled ? .contextChanged : (failed ? .retryRequired : nil)))
+          step: .action, reason: cancelled
+            ? (cancellationReason ?? (runCancelled && !Task.isCancelled && self.automaticSyncGeneration == token
+              ? .cancelled : self.automaticSyncStopReason))
+            : (failed ? .retryRequired : nil)))
       }
       defer {
         if self.automaticSyncGeneration == token {
@@ -779,6 +880,7 @@ enum ReviewedPhotosBackupPolicy {
           try self.startPhotosBackup(selection: nil, automatic: true)
           await self.backup.waitUntilSettled()
           try check()
+          if self.backup.status.phase == .paused { throw CancellationError() }
           try self.captureLocalAnnotations(derivedOnly: true)
           await self.syncAnnotations(derivedOnly: true)
           try check()
@@ -789,6 +891,7 @@ enum ReviewedPhotosBackupPolicy {
           self.automaticSyncFailure = nil
         }
       } catch is CancellationError {
+        runCancelled = true
       } catch {
         if self.automaticSyncGeneration == token { self.automaticSyncFailure = error.localizedDescription }
       }
@@ -1100,7 +1203,7 @@ enum ReviewedPhotosBackupPolicy {
       do { try store.setAutomaticPhotoSyncPreference(automaticSyncPreference, uploadsPaused: true) }
       catch { self.error = error.localizedDescription }
     }
-    suspendAutomaticPhotoSync(cancelBackground: true)
+    suspendAutomaticPhotoSync(cancelBackground: true, reason: .paused)
     syncIntent = UUID()
     do { try store.setSyncIntent(enabled: false, uploadsPaused: true) }
     catch { self.error = error.localizedDescription }

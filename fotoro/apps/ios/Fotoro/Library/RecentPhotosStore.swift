@@ -204,7 +204,8 @@ struct PhotoPreviewProgress {
   var error: String?
   var loading = false
   let picks: PhotoPickAnalyzer
-  private(set) var picksSnapshot: PhotoPicksSnapshot?
+  private(set) var picksGeneration: UInt64 = 0
+  private(set) var picksSnapshot: PhotoPicksSnapshot? { didSet { picksGeneration &+= 1 } }
   var pickedPhotos: [RecentPhoto] { recentPhotos.filter { picksSnapshot?.recommendations.ids.contains($0.id) == true } }
   var pickCandidates: [AutomaticPhotoPickCandidate] {
     recentPhotos.map { AutomaticPhotoPickCandidate(id: $0.id, sourceRevision: $0.sourceRevision, capturedAt: $0.capturedAt,
@@ -223,6 +224,7 @@ struct PhotoPreviewProgress {
   @ObservationIgnored private let readRecentPhotos: @MainActor (Date) -> [RecentPhoto]
   @ObservationIgnored private var browseSource: PhotoBrowseSource<RecentPhoto>?
   @ObservationIgnored private var browseOffset = 0
+  @ObservationIgnored private var browseIndices: [String: Int] = [:]
   @ObservationIgnored private var browseGeneration = UUID()
   @ObservationIgnored private let validatesBrowsingSources: Bool
   @ObservationIgnored private let sourceRevisions: @MainActor ([String]) -> [String: String]
@@ -345,7 +347,7 @@ struct PhotoPreviewProgress {
     guard RecentPhotosPolicy.canRead(status) else {
       pauseAnalysis()
       picksSnapshot = nil
-      photos = []
+      photos = []; browseIndices = [:]
       recentPhotos = []
       browseSource = nil
       browseOffset = 0
@@ -358,9 +360,10 @@ struct PhotoPreviewProgress {
     guard dates != browseDates else { return }
     browseDates = dates
     browseOffset = 0
-    refresh(now: now)
+    refresh(now: now, refreshPicks: false)
   }
-  func refresh(now: Date = Date()) {
+  func refresh(now: Date = Date()) { refresh(now: now, refreshPicks: true) }
+  private func refresh(now: Date, refreshPicks: Bool) {
     guard opened else { return }
     browseGeneration = UUID()
     browsePage = UUID()
@@ -369,7 +372,7 @@ struct PhotoPreviewProgress {
     guard RecentPhotosPolicy.canRead(status) else {
       pauseAnalysis()
       picksSnapshot = nil
-      photos = []
+      photos = []; browseIndices = [:]
       recentPhotos = []
       browseSource = nil
       browseOffset = 0
@@ -380,22 +383,26 @@ struct PhotoPreviewProgress {
     let loaded = max(RecentPhotosPolicy.browsePageSize, browseOffset)
     let supplied = readPhotos?(now)
     let source = supplied.map(PhotoBrowseSource.init) ?? readBrowseSource?(now) ?? Self.fetchBrowseSource(now: now, dates: browseDates)
-    let recent = supplied ?? readRecentPhotos(now)
+    let recent = supplied ?? (refreshPicks ? readRecentPhotos(now) : recentPhotos)
     let nextOffset = min(source.count, loaded)
     let first = source.photos(in: 0..<nextOffset)
-    let candidates = Array(recent.filter { RecentPhotosPolicy.includes($0.capturedAt, now: now) }
-      .prefix(RecentPhotosPolicy.maximumPickCandidates))
+    let cutoff = RecentPhotosPolicy.cutoff(now: now)
+    let candidates = Array(recent.lazy.filter {
+      guard let date = $0.capturedAt else { return false }
+      return date >= cutoff && date <= now
+    }.prefix(RecentPhotosPolicy.maximumPickCandidates))
     let ids = Array(Set((first + candidates).map(\.id)))
     let revisions = !validatesBrowsingSources || ids.isEmpty ? [:] : sourceRevisions(ids)
     guard authorization() == status, RecentPhotosPolicy.canRead(status) else {
       status = authorization()
       pauseAnalysis(); picksSnapshot = nil
-      photos = []; recentPhotos = []; browseSource = nil; browseOffset = 0; hasMorePhotos = false
+      photos = []; browseIndices = [:]; recentPhotos = []; browseSource = nil; browseOffset = 0; hasMorePhotos = false
       return
     }
     browseSource = source
     browseOffset = nextOffset
     photos = first.filter { !validatesBrowsingSources || revisions[$0.id] == $0.sourceRevision }
+    browseIndices = Dictionary(photos.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { _, current in current })
     hasMorePhotos = browseOffset < source.count
     recentPhotos = candidates.filter { !validatesBrowsingSources || revisions[$0.id] == $0.sourceRevision }
     if let snapshot = picksSnapshot, snapshot.recommendations.unassessed == 0,
@@ -412,13 +419,20 @@ struct PhotoPreviewProgress {
     guard authorization() == status, RecentPhotosPolicy.canRead(status) else { refresh(); return }
     let revisions = !validatesBrowsingSources || next.isEmpty ? [:] : sourceRevisions(next.map(\.id))
     guard authorization() == status, RecentPhotosPolicy.canRead(status) else { refresh(); return }
-    let existing = Set(photos.map(\.id))
-    photos.append(contentsOf: next.filter {
-      !existing.contains($0.id) && (!validatesBrowsingSources || revisions[$0.id] == $0.sourceRevision)
-    })
+    var accepted: [RecentPhoto] = []
+    for photo in next where browseIndices[photo.id] == nil {
+      guard !validatesBrowsingSources || revisions[photo.id] == photo.sourceRevision else { continue }
+      browseIndices[photo.id] = photos.count + accepted.count
+      accepted.append(photo)
+    }
+    photos.append(contentsOf: accepted)
     browseOffset = range.upperBound
     hasMorePhotos = browseOffset < source.count
     browsePage = UUID()
+  }
+  func isNearBrowseEnd(_ id: String, distance: Int = 20) -> Bool {
+    guard hasMorePhotos, let index = browseIndices[id] else { return false }
+    return index >= max(0, photos.count - max(1, distance))
   }
   func loadMorePhotos(matching filter: PhotoBrowseFilter, whileActive: @MainActor () -> Bool = { true }) async {
     let generation = browseGeneration
@@ -451,14 +465,13 @@ struct PhotoPreviewProgress {
     result.enumerateObjects { asset, _, _ in values.append(RecentPhoto(asset: asset)) }
     return values
   }
-  func cache(_ assets: [PHAsset], start: Bool) {
-    let target = CGSize(width: 360, height: 360)
+  func cache(_ assets: [PHAsset], start: Bool, targetSize: CGSize = CGSize(width: 360, height: 360), options: PHImageRequestOptions? = nil) {
     if start {
       images.startCachingImages(
-        for: assets, targetSize: target, contentMode: .aspectFill, options: nil)
+        for: assets, targetSize: targetSize, contentMode: .aspectFill, options: options)
     } else {
       images.stopCachingImages(
-        for: assets, targetSize: target, contentMode: .aspectFill, options: nil)
+        for: assets, targetSize: targetSize, contentMode: .aspectFill, options: options)
     }
   }
   func shareOriginals(_ photos: [RecentPhoto]) async throws -> [URL] {

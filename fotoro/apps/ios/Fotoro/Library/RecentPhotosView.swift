@@ -11,13 +11,23 @@ struct PhotosImage: View {
   let store: RecentPhotosStore
   var large = false
   var networkAllowed = true
+  var thumbnailSide: CGFloat = 180
   @State private var image: UIImage?
   @State private var request: PHImageRequestID?
   @State private var generation = UUID()
   @State private var active = false
   @State private var progress = PhotoPreviewProgress()
   @State private var retry = 0
+  @State private var cachedAsset: PHAsset?
+  @State private var cachedTarget: CGSize?
+  @State private var cachedOptions: PHImageRequestOptions?
+  @State private var displayedSource: RecentPhotoSource?
   @Environment(\.displayScale) private var displayScale
+  private var targetSize: CGSize {
+    if large { return CGSize(width: 1600, height: 1600) }
+    let pixels = min(1024, max(64, ceil(thumbnailSide * displayScale / 64) * 64))
+    return CGSize(width: pixels, height: pixels)
+  }
   var body: some View {
     Group {
       if let image {
@@ -41,9 +51,11 @@ struct PhotosImage: View {
         }.padding(8).background(.regularMaterial, in: .rect(cornerRadius: 12)).padding(large ? 16 : 4)
       }
     }
-    .task(id: photo.id + "|" + photo.sourceRevision + "|\(retry)") {
+    .task(id: photo.id + "|" + photo.sourceRevision + "|\(retry)|\(targetSize.width)|\(networkAllowed)") {
       if let request { store.images.cancelImageRequest(request) }
-      image = nil
+      stopCaching()
+      let source = RecentPhotoSource(photo)
+      if displayedSource != source { image = nil; displayedSource = source }
       progress = PhotoPreviewProgress()
       let token = UUID()
       generation = token
@@ -51,10 +63,14 @@ struct PhotosImage: View {
       let options = PHImageRequestOptions()
       options.isNetworkAccessAllowed = networkAllowed
       options.deliveryMode = .opportunistic
+      let target = targetSize
+      if !large {
+        cachedAsset = photo.asset; cachedTarget = target; cachedOptions = options
+        store.cache([photo.asset], start: true, targetSize: target, options: options)
+      }
       request = store.images.requestImage(
         for: photo.asset,
-        targetSize: large ? CGSize(width: 1600, height: 1600)
-          : CGSize(width: 360 * displayScale, height: 360 * displayScale),
+        targetSize: target,
         contentMode: large ? .aspectFit : .aspectFill, options: options
       ) { value, info in
         let cancelled = (info?[PHImageCancelledKey] as? Bool) == true
@@ -70,9 +86,14 @@ struct PhotosImage: View {
       active = false
       generation = UUID()
       if let request { store.images.cancelImageRequest(request) }
+      stopCaching()
       image = nil
     }
     .accessibilityLabel(photo.capturedAt?.formatted(date: .complete, time: .shortened) ?? "Photo")
+  }
+  private func stopCaching() {
+    if let cachedAsset, let cachedTarget { store.cache([cachedAsset], start: false, targetSize: cachedTarget, options: cachedOptions) }
+    cachedAsset = nil; cachedTarget = nil; cachedOptions = nil
   }
 }
 
@@ -115,6 +136,7 @@ struct RecentPhotoViewer: View {
   let store: RecentPhotosStore
   let photos: [RecentPhoto]
   let initialID: String
+  private let photoIndices: [String: Int]
   var search: LocalSearchStore? = nil
   var save: ((RecentPhoto) -> Void)? = nil
   var share: (RecentPhoto) -> Void
@@ -129,14 +151,15 @@ struct RecentPhotoViewer: View {
     self.store = store
     self.photos = photos
     self.initialID = initialID
+    self.photoIndices = Dictionary(photos.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
     self.search = search
     self.save = save
     self.share = share
     _selected = State(initialValue: initialID)
   }
   func shouldLoad(_ photo: RecentPhoto) -> Bool {
-    guard let index = photos.firstIndex(where: { $0.id == photo.id }),
-      let current = photos.firstIndex(where: { $0.id == (selected.isEmpty ? initialID : selected) })
+    guard let index = photoIndices[photo.id],
+      let current = photoIndices[selected.isEmpty ? initialID : selected]
     else { return false }
     return RecentPhotosPolicy.shouldLoadPage(index, current: current)
   }
@@ -300,6 +323,11 @@ struct RecentPhotosView: View {
   @State private var browseFilter = PhotoBrowseFilter.all
   @State private var browseDates = PhotoBrowseDateScope.recent
   @State private var groupMoments = false
+  @State private var homeProjection = PhotoBrowseProjection()
+  @State private var deviceLookup = RecentPhotoLookup()
+  #if !FOTORO_LOCAL_PREVIEW
+  @State private var timelineProjection = PhotoBrowseProjection()
+  #endif
   @State private var viewer: RecentPhotoViewerPresentation?
   @State private var pendingShare: RecentPhoto?
   @State private var shareTask: Task<Void, Never>?
@@ -316,7 +344,9 @@ struct RecentPhotosView: View {
   #endif
   @State private var pendingPlace: PhotoPlaceItem?
   @Environment(\.scenePhase) private var scenePhase
+  @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
+  private var photoColumns: [GridItem] { [GridItem(.adaptive(minimum: 160, maximum: 260), spacing: 3)] }
   private var allPhotos: Bool { scope == .photos }
   private var hasBrowseAccess: Bool {
     #if FOTORO_LOCAL_PREVIEW
@@ -347,15 +377,31 @@ struct RecentPhotosView: View {
     if allPhotos { return store.photos }
     return store.picksSnapshot == nil ? store.recentPhotos : store.pickedPhotos
   }
+  private var browseProjectionID: PhotoBrowseProjectionID {
+    #if !FOTORO_LOCAL_PREVIEW
+      PhotoBrowseProjectionID(storePage: store.browsePage, picks: store.picksGeneration,
+        catalog: services?.consumerCatalogGeneration ?? 0, sources: services?.consumerBackupSourcesGeneration ?? 0,
+        account: services?.photoAccountAccess?.account, vault: services?.vault.generation,
+        filter: browseFilter, dates: browseDates, moments: groupMoments, scope: scope.rawValue, day: Calendar.current.startOfDay(for: Date()))
+    #else
+      PhotoBrowseProjectionID(storePage: store.browsePage, picks: store.picksGeneration,
+        filter: browseFilter, dates: browseDates, moments: groupMoments, scope: scope.rawValue, day: Calendar.current.startOfDay(for: Date()))
+    #endif
+  }
+  private var homePhotoLookup: [String: RecentPhoto] {
+    deviceLookup.photos(page: store.browsePage, picks: store.picksGeneration, scope: scope.rawValue) { baseHomePhotos }
+  }
   private var homeGroups: [PhotoBrowseGroup] {
-    PhotoBrowsing.groups(baseHomePhotos.map { photo in
-      PhotoBrowseItem(source: RecentPhotoSource(photo), facts: RecentPhotoFacts(
-        capturedAt: photo.capturedAt, favorite: photo.isFavorite, screenshot: photo.isScreenshot,
-        livePhoto: photo.isLivePhoto, location: photo.location))
-    }, filter: browseFilter, grouping: groupMoments ? .moments : .days, dates: browseDates)
+    homeProjection.groups(for: browseProjectionID) {
+      PhotoBrowsing.groups(homePhotoLookup.values.map { photo in
+        PhotoBrowseItem(source: RecentPhotoSource(photo), facts: RecentPhotoFacts(
+          capturedAt: photo.capturedAt, favorite: photo.isFavorite, screenshot: photo.isScreenshot,
+          livePhoto: photo.isLivePhoto, location: photo.location))
+      }, filter: browseFilter, grouping: groupMoments ? .moments : .days, dates: browseDates)
+    }
   }
   private var homePhotos: [RecentPhoto] {
-    let current = Dictionary(baseHomePhotos.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+    let current = homePhotoLookup
     return homeGroups.flatMap(\.sources).compactMap { source in
       guard let photo = current[source.id], photo.sourceRevision == source.revision else { return nil }
       return photo
@@ -415,22 +461,24 @@ struct RecentPhotosView: View {
     }
   }
   private var timelineGroups: [PhotoBrowseGroup] {
-    let device = baseHomePhotos.map { photo in
-      PhotoBrowseItem(source: RecentPhotoSource(photo), facts: RecentPhotoFacts(
-        capturedAt: photo.capturedAt, favorite: photo.isFavorite, screenshot: photo.isScreenshot,
-        livePhoto: photo.isLivePhoto, location: photo.location))
+    timelineProjection.groups(for: browseProjectionID) {
+      let device = homePhotoLookup.values.map { photo in
+        PhotoBrowseItem(source: RecentPhotoSource(photo), facts: RecentPhotoFacts(
+          capturedAt: photo.capturedAt, favorite: photo.isFavorite, screenshot: photo.isScreenshot,
+          livePhoto: photo.isLivePhoto, location: photo.location))
+      }
+      let saved = allOwnedPhotos.map { photo in
+        let annotation = services?.annotation(photo)
+        return PhotoTimelineSavedItem(photo: photo, facts: RecentPhotoFacts(
+          capturedAt: Wire.parseDate(photo.metadata.sourceDate), favorite: annotation?.favorite == true,
+          screenshot: annotation?.facts?.contains("screenshot") == true,
+          livePhoto: photo.metadata.mediaType == CameraMedia.liveType, location: annotation?.location?.displayName))
+      }
+      return PhotoTimelinePolicy.groups(device: device, saved: saved,
+        sources: services?.consumerBackupSources ?? [],
+        account: services?.photoAccountAccess?.account, filter: browseFilter,
+        grouping: groupMoments ? .moments : .days, dates: browseDates)
     }
-    let saved = allOwnedPhotos.map { photo in
-      let annotation = services?.annotation(photo)
-      return PhotoTimelineSavedItem(photo: photo, facts: RecentPhotoFacts(
-        capturedAt: Wire.parseDate(photo.metadata.sourceDate), favorite: annotation?.favorite == true,
-        screenshot: annotation?.facts?.contains("screenshot") == true,
-        livePhoto: photo.metadata.mediaType == CameraMedia.liveType, location: annotation?.location?.displayName))
-    }
-    return PhotoTimelinePolicy.groups(device: device, saved: saved,
-      sources: (try? services?.store.backupSources()) ?? [],
-      account: services?.photoAccountAccess?.account, filter: browseFilter,
-      grouping: groupMoments ? .moments : .days, dates: browseDates)
   }
   private var savedDays: [(String, [LocalPhoto])] {
     let groups = Dictionary(grouping: ownedPhotos) { photo in
@@ -450,7 +498,7 @@ struct RecentPhotosView: View {
       } else {
         ScrollView {
           if savedRefresh.isRefreshing, ownedPhotos.isEmpty { ProgressView().padding(.bottom, 12) }
-          LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 2), spacing: 3) {
+          LazyVGrid(columns: photoColumns, spacing: 3, pinnedViews: [.sectionHeaders]) {
             ForEach(savedDays, id: \.0) { day in
               Section {
                 ForEach(day.1) { photo in
@@ -460,14 +508,10 @@ struct RecentPhotosView: View {
                       else { savedViewer = SavedPhotoViewerPresentation(initial: photo, photos: ownedPhotos) }
                     }, toggleSelection: { toggleSavedSelection(photo) }, appeared: {
                       if photo.id == ownedPhotos.last?.id { try? services.loadMore() }
-                    }).id(photo.id)
+                    }, services: services).id(photo.id)
                 }
               } header: {
-                HStack {
-                  Text(Double(day.0).map { Date(timeIntervalSince1970: $0).formatted(date: .abbreviated, time: .omitted) }
-                    ?? "Date unavailable")
-                  Spacer()
-                }.font(.subheadline).foregroundStyle(.secondary).padding(.horizontal, 16).padding(.vertical, 12)
+                dayHeader(start: Double(day.0).map { Date(timeIntervalSince1970: $0) }, count: day.1.count)
               }
             }
           }
@@ -478,6 +522,7 @@ struct RecentPhotosView: View {
                 favoritesOnly: savedFavoritesOnly)))
           }
         }.scrollPosition(id: $savedScrollID, anchor: .top).scrollDismissesKeyboard(.interactively)
+          .defaultScrollAnchor(.top, for: .initialOffset).scrollBounceBehavior(.basedOnSize)
           .refreshable { await savedRefresh.refresh(services) }
           .task(id: SavedLibraryReadPresentation(services, isActive: scenePhase == .active)) {
             guard !Task.isCancelled else { return }
@@ -547,6 +592,7 @@ struct RecentPhotosView: View {
         } catch { store.error = error.localizedDescription }
       }
       .task(id: ConsumerSearchRequestID(presentation: searchTaskID, attempt: searchAttempt)) { await updateSearch() }
+      .onChange(of: savedFavoritesOnly) { savedScrollID = nil }
       .onChange(of: services?.consumerCatalogGeneration) {
         savedHasMore = true
         cancelBestShots(); validateSavedPresentation()
@@ -584,6 +630,11 @@ struct RecentPhotosView: View {
             DefaultToolbarItem(kind: .search, placement: .bottomBar)
           }
         }
+        #if !FOTORO_LOCAL_PREVIEW
+        .safeAreaInset(edge: .top, spacing: 0) {
+          if let services { PhotoHomeSyncProgress(services: services) }
+        }
+        #endif
         .safeAreaInset(edge: .bottom) { if selectedCount > 0 { selectionTray } }
         .overlay {
           if preparingShare { ProgressView("Preparing original…").padding().glassEffect() }
@@ -642,6 +693,10 @@ struct RecentPhotosView: View {
           cancelBestShots()
           browseScrollIDs = [:]
           store.setBrowseDates(browseDates)
+        }
+        .onChange(of: browseFilter) {
+          cancelBestShots()
+          browseScrollIDs[scope] = nil
         }
         .onChange(of: scope) {
           cancelBestShots()
@@ -786,6 +841,7 @@ struct RecentPhotosView: View {
           #if !FOTORO_LOCAL_PREVIEW
             if allPhotos { timelineFeedback }
           #endif
+          if allPhotos { browseContext }
           gallery
           if allPhotos, browseDates == .recent, browseGalleryIsEmpty, !hasMoreBrowsePhotos {
             ContentUnavailableView {
@@ -811,6 +867,7 @@ struct RecentPhotosView: View {
         }
       }
       .scrollPosition(id: browseScrollBinding, anchor: .top).scrollDismissesKeyboard(.interactively)
+      .defaultScrollAnchor(.top, for: .initialOffset).scrollBounceBehavior(.basedOnSize)
       #if !FOTORO_LOCAL_PREVIEW
         .refreshable {
           if allPhotos, let services { await savedRefresh.refresh(services) }
@@ -1085,26 +1142,54 @@ struct RecentPhotosView: View {
       deviceGallery
     #endif
   }
+  private func dayHeader(_ group: PhotoBrowseGroup) -> some View {
+    dayHeader(start: group.start, count: group.sources.count, moment: groupMoments)
+  }
+  private func dayHeader(start: Date?, count: Int, moment: Bool = false) -> some View {
+    HStack(spacing: 8) {
+      Text(dayTitle(start)).font(.headline)
+      if moment, let start {
+        Text(start, format: .dateTime.hour().minute()).font(.subheadline).foregroundStyle(.secondary)
+      }
+      Spacer(minLength: 8)
+      Text(count, format: .number).font(.caption).monospacedDigit().foregroundStyle(.secondary)
+        .accessibilityLabel("\(count) photos")
+    }.padding(.horizontal, 16).padding(.vertical, 12)
+      .background {
+        if reduceTransparency { Color.black }
+        else { Rectangle().fill(.ultraThinMaterial) }
+      }
+      .accessibilityElement(children: .combine).accessibilityAddTraits(.isHeader)
+  }
+  private func dayTitle(_ date: Date?) -> String {
+    guard let date else { return "Date unavailable" }
+    if Calendar.current.isDateInToday(date) { return String(localized: "Today") }
+    if Calendar.current.isDateInYesterday(date) { return String(localized: "Yesterday") }
+    return date.formatted(date: .abbreviated, time: .omitted)
+  }
+  private func deviceCell(_ photo: RecentPhoto) -> RecentPhotoCell {
+    var cell = RecentPhotoCell(photo: photo, store: store, selected: selected.contains(photo.id), open: {
+      if selecting { toggleSelection(photo) } else { openViewer(photo) }
+    }, toggle: { toggleSelection(photo) })
+    #if !FOTORO_LOCAL_PREVIEW
+    cell.services = services
+    #endif
+    return cell
+  }
   private var deviceGallery: some View {
-    let current = Dictionary(baseHomePhotos.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
-    return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 2), spacing: 3) {
+    let current = homePhotoLookup
+    return LazyVGrid(columns: photoColumns, spacing: 3, pinnedViews: [.sectionHeaders]) {
       ForEach(homeGroups) { group in
         Section {
           ForEach(group.sources, id: \.id) { source in
             if let photo = current[source.id], photo.sourceRevision == source.revision {
-        RecentPhotoCell(photo: photo, store: store, selected: selected.contains(photo.id), open: {
-          if selecting { toggleSelection(photo) } else { openViewer(photo) }
-        }, toggle: { toggleSelection(photo) })
+        deviceCell(photo)
           .onAppear { loadMoreDevicePhotos(after: photo.id) }
             }
           }
         } header: {
           if allPhotos {
-            HStack {
-              Text(group.start?.formatted(date: .abbreviated, time: .omitted) ?? "Date unavailable")
-              if groupMoments, let start = group.start { Text(start.formatted(date: .omitted, time: .shortened)).foregroundStyle(.secondary) }
-              Spacer()
-            }.font(.subheadline).padding(.horizontal).padding(.vertical, 12)
+            dayHeader(group)
           }
         }
       }
@@ -1122,33 +1207,28 @@ struct RecentPhotosView: View {
   }
 #if !FOTORO_LOCAL_PREVIEW
   private var timelineGallery: some View {
-    let device = Dictionary(baseHomePhotos.map { (ConsumerPhotoReference.device($0.id).id, $0) }, uniquingKeysWith: { _, last in last })
+    let device = homePhotoLookup
     let saved = Dictionary(allOwnedPhotos.map { (ConsumerPhotoReference.saved($0.id).id, $0) }, uniquingKeysWith: { _, last in last })
-    return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 2), spacing: 3) {
+    return LazyVGrid(columns: photoColumns, spacing: 3, pinnedViews: [.sectionHeaders]) {
       ForEach(timelineGroups) { group in
         Section {
           ForEach(group.sources, id: \.id) { source in
-            if let photo = device[source.id], photo.sourceRevision == source.revision {
+            if source.id.hasPrefix("device:"), let photo = device[String(source.id.dropFirst("device:".count))],
+              photo.sourceRevision == source.revision {
               RecentPhotoCell(photo: photo, store: store, selected: selected.contains(photo.id), open: {
                 if selecting { toggleSelection(photo) } else { openViewer(photo) }
-              }, toggle: { toggleSelection(photo) })
+              }, toggle: { toggleSelection(photo) }, services: services)
                 .id(source.id).onAppear { loadMoreDevicePhotos(after: photo.id) }
             } else if let photo = saved[source.id] {
               LibraryPhotoCell(photo: photo, isSelected: selectedSavedPhotos.contains(photo.id), open: {
                 if selecting { toggleSavedSelection(photo) }
                 else { savedViewer = SavedPhotoViewerPresentation(initial: photo, photos: allOwnedPhotos) }
-              }, toggleSelection: { toggleSavedSelection(photo) }, appeared: {})
+              }, toggleSelection: { toggleSavedSelection(photo) }, appeared: {}, services: services)
                 .id(source.id)
             }
           }
         } header: {
-          HStack {
-            Text(group.start?.formatted(date: .abbreviated, time: .omitted) ?? "Date unavailable")
-            if groupMoments, let start = group.start {
-              Text(start.formatted(date: .omitted, time: .shortened)).foregroundStyle(.secondary)
-            }
-            Spacer()
-          }.font(.subheadline).padding(.horizontal).padding(.vertical, 12)
+          dayHeader(group)
         }
       }
       if store.hasMorePhotos {
@@ -1221,8 +1301,6 @@ struct RecentPhotosView: View {
         if !search.hasSearch, scope == .saved, let services, services.photoAccountAccess != nil {
           Toggle("Favorites", isOn: $savedFavoritesOnly)
           Button("Shared photos", systemImage: "person.2") { sharedSavedPhotos = SharedPhotosPresentation() }
-          Button("Refresh", systemImage: "arrow.clockwise") { Task { await savedRefresh.refresh(services) } }
-            .accessibilityIdentifier("saved.refresh")
         }
       #endif
       if !search.hasSearch, hasSelectablePhotos { selectionToggle }
@@ -1239,20 +1317,54 @@ struct RecentPhotosView: View {
     }.accessibilityLabel("Photo library").accessibilityValue(scope.rawValue)
       .accessibilityIdentifier("home.scope")
   }
-  private var deviceBrowseOptions: some View {
-    Group {
-      if allPhotos {
+  private var browseContext: some View {
+    HStack(spacing: 12) {
+      Menu {
         Picker("Dates", selection: $browseDates) {
           Text("Last 30 days").tag(PhotoBrowseDateScope.recent)
           Text("All dates").tag(PhotoBrowseDateScope.all)
-        }.accessibilityIdentifier("gallery.dates")
+        }
+      } label: {
+        Label(browseDates == .recent ? "Last 30 days" : "All dates", systemImage: "calendar")
+          .font(.caption).foregroundStyle(Color.secondary).frame(minHeight: 44)
+      }.accessibilityIdentifier("gallery.dateScope")
+      Spacer(minLength: 0)
+      if browseFilter != .all {
+        Button { browseFilter = .all } label: {
+          Label(browseFilterTitle, systemImage: "xmark.circle.fill").font(.caption.weight(.medium))
+            .frame(minHeight: 44)
+        }.buttonStyle(.plain).accessibilityLabel("Clear \(browseFilterTitle) filter")
+          .accessibilityIdentifier("gallery.filter.clear")
       }
-      Picker("Show", selection: $browseFilter) {
-        Text("All").tag(PhotoBrowseFilter.all)
-        Text("Favorites").tag(PhotoBrowseFilter.favorites)
-        Text("Screenshots").tag(PhotoBrowseFilter.screenshots)
-        Text("With a location").tag(PhotoBrowseFilter.withLocation)
-      }.accessibilityIdentifier("gallery.filter")
+      Menu { browseFilterPicker } label: {
+        Image(systemName: browseFilter == .all ? "line.3.horizontal.decrease" : "line.3.horizontal.decrease.circle.fill")
+          .font(.subheadline).foregroundStyle(browseFilter == .all ? Color.secondary : Color.accentColor)
+          .frame(width: 44, height: 44)
+      }.accessibilityLabel("Filter photos").accessibilityValue(browseFilterTitle)
+        .accessibilityIdentifier("gallery.filter.menu")
+    }.padding(.horizontal, 16)
+  }
+  private var browseFilterTitle: String {
+    switch browseFilter {
+    case .all: return "All photos"
+    case .favorites: return "Favorites"
+    case .screenshots: return "Screenshots"
+    case .withLocation: return "With a location"
+    }
+  }
+  private var browseFilterPicker: some View {
+    Picker("Show", selection: $browseFilter) {
+      Text("All").tag(PhotoBrowseFilter.all)
+      Text("Favorites").tag(PhotoBrowseFilter.favorites)
+      Text("Screenshots").tag(PhotoBrowseFilter.screenshots)
+      Text("With a location").tag(PhotoBrowseFilter.withLocation)
+    }.accessibilityIdentifier("gallery.filter")
+  }
+  private var deviceBrowseOptions: some View {
+    Group {
+      if !allPhotos {
+        Menu { browseFilterPicker } label: { Label("Filter", systemImage: "line.3.horizontal.decrease") }
+      }
       if allPhotos { Toggle("Group by moment", isOn: $groupMoments) }
     }
   }
@@ -1277,8 +1389,8 @@ struct RecentPhotosView: View {
           .accessibilityHint("Choose to save your photos across your devices")
           .accessibilityIdentifier("home.sync")
       } else {
-        Button("Sync", systemImage: services?.automaticPhotoSync.enabled == true ? "icloud.fill" : "icloud") { openPhotoSync() }
-          .labelStyle(.iconOnly).font(.title3)
+        Button { openPhotoSync() } label: { PhotoHomeCloudLabel(services: services) }
+          .font(.title3)
           .frame(width: 44, height: 44)
           .accessibilityIdentifier("home.sync")
       }
@@ -1351,8 +1463,7 @@ struct RecentPhotosView: View {
     share(selectedPhotos.values.map(\.photo).sorted { ($0.capturedAt ?? .distantPast) > ($1.capturedAt ?? .distantPast) })
   }
   private func loadMoreDevicePhotos(after id: String) {
-    guard allPhotos, browseFilter == .all, store.hasMorePhotos,
-      let index = store.photos.firstIndex(where: { $0.id == id }), index >= max(0, store.photos.count - 20) else { return }
+    guard allPhotos, browseFilter == .all, store.isNearBrowseEnd(id) else { return }
     store.loadMorePhotos()
   }
   private var saveFromViewer: ((RecentPhoto) -> Void)? {
@@ -1863,43 +1974,12 @@ private struct RecentLivePhotoPlayer: UIViewRepresentable {
   }
 }
 
-struct PhotoTimelineSavedItem {
-  let photo: LocalPhoto
-  let facts: RecentPhotoFacts
-}
-
 private struct SavedTimelinePage: Equatable {
   let count: Int
   let binding: SavedLibraryOpenBinding
   let filter: PhotoBrowseFilter
   let dates: PhotoBrowseDateScope
   let isActive: Bool
-}
-
-enum PhotoTimelinePolicy {
-  static func groups(device: [PhotoBrowseItem], saved: [PhotoTimelineSavedItem], sources: [BackupSource],
-    account: String?, filter: PhotoBrowseFilter = .all, grouping: PhotoBrowseGrouping = .days,
-    calendar: Calendar = .current, dates: PhotoBrowseDateScope = .all, now: Date = Date()) -> [PhotoBrowseGroup] {
-    // Only current, permitted device revisions can hide their verified saved copy.
-    // A saved favorite still appears when its device counterpart fails this filter.
-    let records = Dictionary(device.filter { filter.includes($0.facts) && dates.includes($0.facts.capturedAt, now: now, calendar: calendar) }.map {
-      ($0.source.id, SearchRecord(id: $0.source.id, revision: $0.source.revision))
-    }, uniquingKeysWith: { _, current in current })
-    let copies = ConsumerSearchBinding.verifiedCopies(sources: sources, records: records)
-    var items = device.map { item in
-      PhotoBrowseItem(source: RecentPhotoSource(id: ConsumerPhotoReference.device(item.source.id).id,
-        revision: item.source.revision), facts: item.facts)
-    }
-    for item in saved {
-      let photo = item.photo
-      guard let account, photo.manifest.ownerAccountId == account,
-        photo.manifest.photoId == photo.id, ["committed", "saved"].contains(photo.transferState),
-        !ConsumerSearchBinding.duplicate(saved: photo, copies: copies) else { continue }
-      items.append(PhotoBrowseItem(source: RecentPhotoSource(id: ConsumerPhotoReference.saved(photo.id).id,
-        revision: photo.metadata.originalSha256 + "|" + photo.manifest.metadataRepresentation.ciphertextSha256), facts: item.facts))
-    }
-    return PhotoBrowsing.groups(items, filter: filter, grouping: grouping, calendar: calendar, dates: dates, now: now)
-  }
 }
 
 enum SavedPhotosPresentationPolicy {
@@ -1958,18 +2038,48 @@ struct ConsumerSearchPresentationID: Equatable {
 }
 #endif
 
+@MainActor private final class RecentPhotoLookup {
+  private var page: UUID?
+  private var picks: UInt64 = 0
+  private var scope = ""
+  private var values: [String: RecentPhoto] = [:]
+  func photos(page: UUID, picks: UInt64, scope: String, makePhotos: () -> [RecentPhoto]) -> [String: RecentPhoto] {
+    if self.page != page || self.picks != picks || self.scope != scope {
+      values = Dictionary(makePhotos().map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+      self.page = page; self.picks = picks; self.scope = scope
+    }
+    return values
+  }
+}
+
 private struct RecentPhotoCell: View {
   let photo: RecentPhoto
   let store: RecentPhotosStore
   let selected: Bool
   let open: () -> Void
   let toggle: () -> Void
+  #if !FOTORO_LOCAL_PREVIEW
+  var services: AppServices? = nil
+  private var syncStatus: PhotoSyncItemStatus? { services?.photoSyncItem(sourceID: photo.id, revision: photo.sourceRevision) }
+  #endif
+  private var accessibilityStatus: String {
+    var values = selected ? ["Selected"] : []
+    #if !FOTORO_LOCAL_PREVIEW
+    if let status = syncStatus { values.append(status.accessibilityText) }
+    #endif
+    return values.joined(separator: ", ")
+  }
   var body: some View {
     Button(action: open) {
       GeometryReader { geometry in
-        PhotosImage(photo: photo, store: store).scaledToFill()
+        PhotosImage(photo: photo, store: store, thumbnailSide: geometry.size.width).scaledToFill()
           .frame(width: geometry.size.width, height: geometry.size.height).clipped()
       }.aspectRatio(1, contentMode: .fit)
+        #if !FOTORO_LOCAL_PREVIEW
+        .overlay(alignment: .topTrailing) {
+          if let status = syncStatus { PhotoSyncTileIndicator(status: status) }
+        }
+        #endif
         .overlay(alignment: .bottomLeading) {
           if photo.isVideo { Image(systemName: "play.fill").padding(8).accessibilityLabel("Video") }
           else if photo.isLivePhoto { Image(systemName: "livephoto").padding(8).accessibilityLabel("Live Photo") }
@@ -1978,9 +2088,35 @@ private struct RecentPhotoCell: View {
           if selected { Image(systemName: "checkmark.circle.fill").padding(8) }
         }
     }.buttonStyle(.plain).id(photo.id)
-      .accessibilityValue(selected ? "Selected" : "")
-      .onAppear { store.cache([photo.asset], start: true) }
-      .onDisappear { store.cache([photo.asset], start: false) }
+      .accessibilityValue(accessibilityStatus)
       .contextMenu { Button(selected ? "Deselect" : "Select", action: toggle) }
   }
 }
+
+#if !FOTORO_LOCAL_PREVIEW
+private struct PhotoHomeSyncProgress: View {
+  let services: AppServices
+  var body: some View {
+    PhotoSyncRail(summary: services.consumerSyncSummary, progress: services.photoSyncProgress)
+      .background(.black)
+  }
+}
+private struct PhotoHomeCloudLabel: View {
+  let services: AppServices?
+  private var state: ConsumerSyncState { services?.consumerSyncSummary.state ?? .notStarted }
+  private var active: Bool { [.preparing, .uploading, .checking].contains(state) }
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  var body: some View {
+    ZStack(alignment: .bottomTrailing) {
+      Image(systemName: state == .upToDate ? "checkmark.icloud" : "icloud")
+      if active {
+        Group {
+          if reduceMotion { Image(systemName: "arrow.up.circle.fill").font(.caption2) }
+          else { ProgressView().controlSize(.mini).scaleEffect(0.65) }
+        }.frame(width: 12, height: 12).background(.black, in: .circle).offset(x: 4, y: 3)
+      }
+    }.accessibilityElement(children: .ignore).accessibilityLabel("Sync")
+      .accessibilityValue(active ? "Syncing photos" : state == .upToDate ? "Photos saved to Fotoro" : "Open sync status")
+  }
+}
+#endif

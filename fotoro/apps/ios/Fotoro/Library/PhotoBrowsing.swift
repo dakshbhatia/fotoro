@@ -36,6 +36,34 @@ struct PhotoBrowseGroup: Identifiable {
   var isUndated: Bool { start == nil }
 }
 
+struct PhotoBrowseProjectionID: Equatable {
+  var storePage: UUID
+  var picks: UInt64 = 0
+  var catalog: UInt64 = 0
+  var sources: UInt64 = 0
+  var account: String? = nil
+  var vault: UUID? = nil
+  var filter: PhotoBrowseFilter
+  var dates: PhotoBrowseDateScope
+  var moments: Bool
+  var scope: String
+  var calendar: Calendar = .current
+  var day: Date
+}
+
+// The view supplies generation bindings before the expensive metadata closure.
+@MainActor final class PhotoBrowseProjection {
+  private var identity: PhotoBrowseProjectionID?
+  private var value: [PhotoBrowseGroup] = []
+  func groups(for identity: PhotoBrowseProjectionID, makeGroups: () -> [PhotoBrowseGroup]) -> [PhotoBrowseGroup] {
+    if self.identity == identity { return value }
+    value = makeGroups()
+    self.identity = identity
+    return value
+  }
+  func clear() { identity = nil; value = [] }
+}
+
 enum PhotoBrowsing {
   static let maximumMomentSpan: TimeInterval = 2 * 3600
 
@@ -49,23 +77,33 @@ enum PhotoBrowsing {
     // A refreshed source snapshot replaces an earlier occurrence of the same
     // photo; its current revision and filter facts travel together.
     var unique: [String: PhotoBrowseItem] = [:]
+    unique.reserveCapacity(items.count)
     for item in items { unique[item.source.id] = item }
+    let cutoff = dates == .recent ? RecentPhotosPolicy.cutoff(now: now, calendar: calendar) : nil
     var dated: [DatedItem] = []
+    dated.reserveCapacity(unique.count)
     var undated: [PhotoBrowseItem] = []
     for item in unique.values {
-      guard dates.includes(item.facts.capturedAt, now: now, calendar: calendar) else { continue }
-      guard let date = item.facts.capturedAt, date.timeIntervalSince1970.isFinite,
-        let day = calendar.dateInterval(of: .day, for: date)
+      if let cutoff {
+        guard let date = item.facts.capturedAt, date >= cutoff, date <= now else { continue }
+      }
+      guard let date = item.facts.capturedAt, date.timeIntervalSince1970.isFinite
       else { undated.append(item); continue }
-      dated.append(DatedItem(item: item, date: date, day: day))
+      dated.append(DatedItem(item: item, date: date))
     }
     dated.sort {
       $0.date == $1.date ? $0.item.source.id < $1.item.source.id : $0.date < $1.date
     }
     var buckets: [Bucket] = []
     for item in dated {
+      let day: DateInterval
+      if let previous = buckets.last, item.date >= previous.day.start, item.date < previous.day.end {
+        day = previous.day
+      } else if let interval = calendar.dateInterval(of: .day, for: item.date) {
+        day = interval
+      } else { undated.append(item.item); continue }
       let joinsPrevious: Bool
-      if let last = buckets.last, last.day.start == item.day.start {
+      if let last = buckets.last, last.day.start == day.start {
         joinsPrevious = grouping == .days
           || item.date.timeIntervalSince(last.start) <= maximumMomentSpan
       } else { joinsPrevious = false }
@@ -73,9 +111,9 @@ enum PhotoBrowsing {
         buckets[buckets.count - 1].items.append(item)
         buckets[buckets.count - 1].end = item.date
       } else {
-        let dayID = "day:\(calendar.identifier):\(calendar.timeZone.identifier):\(item.day.start.timeIntervalSince1970)"
+        let dayID = "day:\(calendar.identifier):\(calendar.timeZone.identifier):\(day.start.timeIntervalSince1970)"
         let id = grouping == .days ? dayID : "moment:\(dayID):\(item.item.source.id)"
-        buckets.append(Bucket(id: id, start: item.date, end: item.date, day: item.day, items: [item]))
+        buckets.append(Bucket(id: id, start: item.date, end: item.date, day: day, items: [item]))
       }
     }
     if order == .newestFirst { buckets.reverse() }
@@ -105,7 +143,6 @@ enum PhotoBrowsing {
   private struct DatedItem {
     var item: PhotoBrowseItem
     var date: Date
-    var day: DateInterval
   }
   private struct Bucket {
     var id: String
@@ -115,3 +152,42 @@ enum PhotoBrowsing {
     var items: [DatedItem]
   }
 }
+
+#if !FOTORO_LOCAL_PREVIEW
+struct PhotoTimelineSavedItem {
+  let photo: LocalPhoto
+  let facts: RecentPhotoFacts
+}
+
+enum PhotoTimelinePolicy {
+  static func groups(device: [PhotoBrowseItem], saved: [PhotoTimelineSavedItem], sources: [BackupSource],
+    account: String?, filter: PhotoBrowseFilter = .all, grouping: PhotoBrowseGrouping = .days,
+    calendar: Calendar = .current, dates: PhotoBrowseDateScope = .all, now: Date = Date()) -> [PhotoBrowseGroup] {
+    // Only current, permitted device revisions can hide their verified saved copy.
+    // A saved favorite still appears when its device counterpart fails this filter.
+    let cutoff = dates == .recent ? RecentPhotosPolicy.cutoff(now: now, calendar: calendar) : nil
+    let records = Dictionary(device.filter { item in
+      guard filter.includes(item.facts) else { return false }
+      guard let cutoff else { return true }
+      guard let date = item.facts.capturedAt else { return false }
+      return date >= cutoff && date <= now
+    }.map {
+      ($0.source.id, SearchRecord(id: $0.source.id, revision: $0.source.revision))
+    }, uniquingKeysWith: { _, current in current })
+    let copies = ConsumerSearchBinding.verifiedCopies(sources: sources, records: records)
+    var items = device.map { item in
+      PhotoBrowseItem(source: RecentPhotoSource(id: ConsumerPhotoReference.device(item.source.id).id,
+        revision: item.source.revision), facts: item.facts)
+    }
+    for item in saved {
+      let photo = item.photo
+      guard let account, photo.manifest.ownerAccountId == account,
+        photo.manifest.photoId == photo.id, ["committed", "saved"].contains(photo.transferState),
+        !ConsumerSearchBinding.duplicate(saved: photo, copies: copies) else { continue }
+      items.append(PhotoBrowseItem(source: RecentPhotoSource(id: ConsumerPhotoReference.saved(photo.id).id,
+        revision: photo.metadata.originalSha256 + "|" + photo.manifest.metadataRepresentation.ciphertextSha256), facts: item.facts))
+    }
+    return PhotoBrowsing.groups(items, filter: filter, grouping: grouping, calendar: calendar, dates: dates, now: now)
+  }
+}
+#endif

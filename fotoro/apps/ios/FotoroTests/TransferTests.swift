@@ -3,6 +3,36 @@ import XCTest
 @testable import Fotoro
 
 final class TransferTests: XCTestCase {
+  @MainActor func testOnlyExplicitIncompleteCommitRecoveryProbeIsDiagnosticPendingRatherThanFailure() async throws {
+    let incomplete = "11111111-1111-4111-8111-111111111111"
+    let conflict = "22222222-2222-4222-8222-222222222222"
+    for (id, probe, outcome, reason) in [
+      (incomplete, true, NativeDiagnosticOutcome.changed, NativeDiagnosticReason.recoveryProbe),
+      (incomplete, false, .failed, .http),
+      (conflict, true, .failed, .http),
+    ] {
+      let diagnostics = NativeDiagnostics(fileURL: nil, emitSystemLog: false)
+      let session = AccountSession(); session.fixture = false
+      let configuration = URLSessionConfiguration.ephemeral
+      configuration.protocolClasses = [CommitProbeProtocol.self]
+      let api = APIClient(session: session, baseURL: URL(string: "https://commit-probe.test")!,
+        networkConfiguration: configuration, diagnostics: diagnostics)
+      do {
+        _ = try await api.commit(id, recoveryProbe: probe)
+        XCTFail("A recovery probe still throws the typed pending error to its caller")
+      } catch {
+        XCTAssertEqual((error as? FotoroError)?.message, id == incomplete ? "UPLOAD_INCOMPLETE" : "IDEMPOTENCY_CONFLICT")
+        XCTAssertEqual((error as? FotoroError)?.statusCode, 409)
+      }
+      let events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: diagnostics.exportJSON())
+      XCTAssertEqual(events.map(\.outcome), [.started, outcome])
+      XCTAssertEqual(events.last?.reason, reason)
+      XCTAssertEqual(events.last?.endpoint, .upload)
+      let exported = String(decoding: diagnostics.exportJSON(), as: UTF8.self)
+      XCTAssertFalse(exported.contains(id), "Diagnostics cannot include representation or upload identifiers")
+      XCTAssertFalse(exported.contains("commit-probe.test"))
+    }
+  }
   @MainActor func testJournalRestartAndTransactionalCursor() async throws {
     let path = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
     let s = try AppServices(root: path)
@@ -211,6 +241,21 @@ private final class CommitRetryProtocol: URLProtocol, @unchecked Sendable {
       client?.urlProtocol(self, didLoad: Data("{\"version\":1,\"code\":\"INTERNAL_ERROR\",\"retryable\":true}".utf8))
       client?.urlProtocolDidFinishLoading(self)
     }
+  }
+  override func stopLoading() {}
+}
+
+private final class CommitProbeProtocol: URLProtocol, @unchecked Sendable {
+  override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "commit-probe.test" }
+  override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+  override func startLoading() {
+    let incomplete = request.url!.path.contains("11111111-1111-4111-8111-111111111111")
+    let code = incomplete ? "UPLOAD_INCOMPLETE" : "IDEMPOTENCY_CONFLICT"
+    let response = HTTPURLResponse(url: request.url!, statusCode: 409, httpVersion: nil,
+      headerFields: ["Content-Type": "application/json"])!
+    client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+    client?.urlProtocol(self, didLoad: Data("{\"version\":1,\"code\":\"\(code)\",\"retryable\":false}".utf8))
+    client?.urlProtocolDidFinishLoading(self)
   }
   override func stopLoading() {}
 }

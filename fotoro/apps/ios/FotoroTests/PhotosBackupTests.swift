@@ -5,6 +5,34 @@ import XCTest
 @testable import Fotoro
 
 final class PhotosBackupTests: XCTestCase {
+  func testTransferProjectionFencesRevisionsAndCountsSourceBatchWithoutInventingByteProgress() {
+    let sources = [
+      BackupSource(id: "saved", photoId: "shared", phase: .committed, sourceRevision: "r1"),
+      BackupSource(id: "alias", photoId: "shared", phase: .committed, sourceRevision: "r2"),
+      BackupSource(id: "active", photoId: "new", phase: .queued, sourceRevision: "r3"),
+      BackupSource(id: "excluded", photoId: "unsupported", phase: .skipped, sourceRevision: "r4"),
+      BackupSource(id: "failed", photoId: "retry", phase: .failed, sourceRevision: "r5"),
+      BackupSource(id: "fotoro-retained-original:old", photoId: "old", phase: .queued, sourceRevision: "older"),
+    ]
+    let batch = Array(sources.prefix(5))
+    let progress = PhotoSyncProgress.derive(sources: sources, batchSources: batch, totalKnown: true,
+      preparingSourceID: nil, activeTransfer: PhotoSyncItemStatus(photoID: "new", phase: .uploading),
+      pendingPhotoIDs: ["new", "old"], failedPhotoIDs: [])
+    XCTAssertEqual(progress.completed, 2, "Two admitted Photos sources share one saved original")
+    XCTAssertEqual(progress.total, 5)
+    XCTAssertEqual(progress.skipped, 1)
+    XCTAssertEqual(progress.failed, 1)
+    XCTAssertEqual(progress.status(for: RecentPhotoSource(id: "active", revision: "r3"))?.phase, .uploading)
+    XCTAssertNil(progress.status(for: RecentPhotoSource(id: "active", revision: "edited")))
+    XCTAssertEqual(progress.itemsByPhotoID["shared"]?.phase, .saved)
+    XCTAssertEqual(progress.itemsBySourceID["excluded"]?.phase, .skipped)
+    XCTAssertEqual(progress.itemsBySourceID["failed"]?.phase, .needsAttention)
+    XCTAssertNil(progress.itemsBySourceID["fotoro-retained-original:old"])
+    let paused = PhotoSyncProgress.derive(sources: sources, batchSources: batch, totalKnown: false,
+      preparingSourceID: nil, activeTransfer: nil, pendingPhotoIDs: ["new"], failedPhotoIDs: [])
+    XCTAssertNil(paused.total, "A scan that has not established its batch cannot show a percentage")
+    XCTAssertEqual(paused.itemsBySourceID["active"]?.phase, .waiting, "Durable queued work is not evidence of an active upload")
+  }
   @MainActor func testCancelledCommitPausesReviewedBackupWithoutFailureAndRetriesSameJournal() async throws {
     let context = try PausedUploadContext()
     defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
@@ -786,6 +814,87 @@ final class PhotosBackupTests: XCTestCase {
 }
 
 final class AutomaticPhotoSyncTests: XCTestCase {
+  @MainActor func testAutomaticTransportCancellationLeavesRetryableWorkWithoutClaimingCompletion() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
+    let diagnostics = NativeDiagnostics(fileURL: nil, emitSystemLog: false)
+    let services = try await context.enroll(diagnostics: diagnostics)
+    defer { services.vault.lock() }
+    let bytes = try Data(contentsOf: context.sample)
+    services.automaticPhotosAuthorization = { .authorized }
+    services.photosBackupSnapshot = { _ in [BackupCandidate(id: "chosen", capturedAt: Date(), sourceRevision: "current")] }
+    services.importer = PhotoImport(store: services.store, sourceReader: { _ in
+      (bytes, "public-sample.jpg", false)
+    }, sourceRevision: { _ in "current" })
+    PausedUploadProtocol.server.failCommitReads(.cancelled)
+    try services.enableAutomaticPhotoSync()
+    await services.waitForAutomaticPhotoSync()
+    XCTAssertEqual(services.backup.status.phase, .paused)
+    XCTAssertEqual(services.backup.status.pending, 1)
+    XCTAssertEqual(services.backup.status.failed, 0)
+    XCTAssertEqual(services.automaticPhotoSync.phase, .needsAttention, "Transport interruption cannot claim automatic sync is ready")
+    let events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: diagnostics.exportJSON())
+    XCTAssertEqual(events.last(where: { $0.phase == .sync && $0.step == .action })?.outcome, .cancelled)
+    XCTAssertEqual(events.last(where: { $0.phase == .sync && $0.step == .action })?.reason, .cancelled)
+    let queued = try services.store.backupSource("chosen")
+    XCTAssertEqual(queued.phase, .queued)
+    XCTAssertNil(queued.message)
+    XCTAssertTrue(services.journal.errors.isEmpty)
+    services.kickAutomaticPhotoSync()
+    await services.waitForAutomaticPhotoSync()
+    XCTAssertEqual(try services.store.backupSource("chosen").photoId, queued.photoId)
+    XCTAssertEqual(services.backup.status.completed, 1)
+    XCTAssertEqual(services.automaticPhotoSync.phase, .ready)
+    XCTAssertTrue(try services.journal.entries().isEmpty)
+  }
+  @MainActor func testUnrelatedLibraryChangesDoNotRestartActiveOriginalPreparation() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
+    let services = try await context.enroll()
+    defer { services.vault.lock() }
+    let bytes = try Data(contentsOf: context.sample)
+    let gate = BackupGate()
+    let reads = AutomaticSourceReads()
+    services.automaticPhotosAuthorization = { .authorized }
+    services.photosBackupSnapshot = { _ in
+      [BackupCandidate(id: "unchanged", capturedAt: Date(), sourceRevision: "current")]
+    }
+    services.importer = PhotoImport(store: services.store, sourceReader: { source in
+      await reads.record(source.resourceIdentifier)
+      if await reads.values().count == 1 { await gate.wait() }
+      return (bytes, "public-sample.jpg", false)
+    }, sourceRevision: { _ in "current" })
+    try services.enableAutomaticPhotoSync()
+    while !gate.entered { await Task.yield() }
+    services.refreshConsumerSyncSummary()
+    XCTAssertEqual(services.photoSyncProgress.completed, 0)
+    XCTAssertEqual(services.photoSyncProgress.total, 1)
+    XCTAssertEqual(services.photoSyncItem(sourceID: "unchanged", revision: "current")?.phase, .preparing)
+    // PhotoKit can announce an unrelated change while downloading this original.
+    // Its admitted identifier and revision remain current throughout both events.
+    services.kickAutomaticPhotoSync(sourcesChanged: true)
+    services.kickAutomaticPhotoSync(sourcesChanged: true)
+    gate.open()
+    await services.waitForAutomaticPhotoSync()
+    let completedReads = await reads.values()
+    XCTAssertEqual(completedReads, ["unchanged"], "An unchanged active original must not download and encrypt again")
+    XCTAssertEqual(try services.store.backupSource("unchanged").phase, .committed)
+    XCTAssertEqual(services.backup.status.completed, 1)
+    XCTAssertEqual(services.backup.status.pending, 0)
+    XCTAssertTrue(services.journal.errors.isEmpty)
+    services.refreshConsumerSyncSummary()
+    XCTAssertEqual(services.photoSyncProgress.completed, 1)
+    XCTAssertEqual(services.photoSyncProgress.total, 1)
+    XCTAssertEqual(services.photoSyncItem(sourceID: "unchanged", revision: "current")?.phase, .saved)
+    XCTAssertNil(services.photoSyncItem(sourceID: "unchanged", revision: "edited"))
+    let sourceGeneration = services.consumerBackupSourcesGeneration
+    services.refreshConsumerSyncSummary()
+    XCTAssertEqual(services.consumerBackupSourcesGeneration, sourceGeneration, "An unchanged summary cannot rebuild the browse source projection")
+    services.vault.lock()
+    XCTAssertTrue(services.consumerBackupSources.isEmpty)
+    XCTAssertTrue(services.photoSyncProgress.itemsBySourceID.isEmpty)
+    XCTAssertNil(services.photoSyncItem(sourceID: "unchanged", revision: "current"))
+  }
   @MainActor func testExcludedNewRevisionStaysIncompleteAndRetriesWhenCompleteResourcesReturn() async throws {
     let context = try PausedUploadContext()
     defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
@@ -1417,13 +1526,13 @@ private actor AutomaticSourceReads {
     UserDefaults.standard.set("https://pause-sync.test", forKey: "fotoro.api")
     PausedUploadProtocol.server.reset()
   }
-  func restoredServices() throws -> AppServices {
+  func restoredServices(diagnostics: NativeDiagnostics = .shared) throws -> AppServices {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [PausedUploadProtocol.self]
-    return try AppServices(root: root, networkConfiguration: configuration)
+    return try AppServices(root: root, networkConfiguration: configuration, diagnostics: diagnostics)
   }
-  func enroll(accountId id: String? = nil) async throws -> AppServices {
-    let services = try restoredServices()
+  func enroll(accountId id: String? = nil, diagnostics: NativeDiagnostics = .shared) async throws -> AppServices {
+    let services = try restoredServices(diagnostics: diagnostics)
     var card = accounts.accounts[0]
     card.accountId = id ?? accountId
     enrolled.append(card.accountId)
