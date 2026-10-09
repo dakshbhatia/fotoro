@@ -83,7 +83,7 @@ struct AutomaticPhotoSyncStatus {
   }
 }
 
-struct BackupSource: Codable, Identifiable {
+struct BackupSource: Codable, Identifiable, Equatable {
   enum Phase: String, Codable { case pending, queued, committed, skipped, failed }
   var id: String
   var photoId: String
@@ -183,6 +183,67 @@ struct BackupCandidate {
   var skipReason: String?
   var sourceRevision: String?
 }
+struct PhotoSyncItemStatus: Equatable {
+  enum Phase: Equatable { case waiting, preparing, uploading, finishing, saved, skipped, needsAttention }
+  var sourceRevision: String?
+  var photoID: String
+  var phase: Phase
+}
+
+struct PhotoSyncProgress: Equatable {
+  var completed = 0
+  var total: Int?
+  var skipped = 0
+  var failed = 0
+  var itemsBySourceID: [String: PhotoSyncItemStatus] = [:]
+  var itemsByPhotoID: [String: PhotoSyncItemStatus] = [:]
+
+  func status(for source: RecentPhotoSource) -> PhotoSyncItemStatus? {
+    guard let status = itemsBySourceID[source.id], status.sourceRevision == source.revision else { return nil }
+    return status
+  }
+
+  static func derive(sources: [BackupSource], batchSources: [BackupSource], totalKnown: Bool,
+    preparingSourceID: String?, activeTransfer: PhotoSyncItemStatus?,
+    pendingPhotoIDs: Set<String>, failedPhotoIDs: Set<String>) -> Self {
+    var value = Self(completed: batchSources.filter { $0.phase == .committed }.count,
+      total: totalKnown ? batchSources.count : nil,
+      skipped: batchSources.filter { $0.phase == .skipped }.count,
+      failed: batchSources.filter {
+        $0.phase == .failed || ($0.phase == .queued && $0.message != nil) || failedPhotoIDs.contains($0.photoId)
+      }.count)
+    for id in pendingPhotoIDs {
+      value.itemsByPhotoID[id] = PhotoSyncItemStatus(photoID: id,
+        phase: failedPhotoIDs.contains(id) ? .needsAttention : .waiting)
+    }
+    for source in sources where !source.isRetainedOriginal {
+      var phase: PhotoSyncItemStatus.Phase
+      switch source.phase {
+      case .committed: phase = .saved
+      case .skipped: phase = .skipped
+      case .failed: phase = .needsAttention
+      case .pending: phase = .waiting
+      case .queued: phase = source.message != nil || failedPhotoIDs.contains(source.photoId) ? .needsAttention : .waiting
+      }
+      if phase != .saved && phase != .skipped {
+        if preparingSourceID == source.id { phase = .preparing }
+        if activeTransfer?.photoID == source.photoId, let activeTransfer { phase = activeTransfer.phase }
+      }
+      let item = PhotoSyncItemStatus(sourceRevision: source.sourceRevision, photoID: source.photoId, phase: phase)
+      value.itemsBySourceID[source.id] = item
+      // Several Photos identifiers can resolve to the same verified original.
+      // A saved copy stays saved when another source alias still needs preparation.
+      if value.itemsByPhotoID[source.photoId]?.phase != .saved {
+        value.itemsByPhotoID[source.photoId] = item
+      }
+    }
+    if let activeTransfer, value.itemsByPhotoID[activeTransfer.photoID]?.phase != .saved {
+      value.itemsByPhotoID[activeTransfer.photoID] = activeTransfer
+    }
+    return value
+  }
+}
+
 struct BackupStatus: Codable {
   enum Phase: String, Codable { case idle, scanning, running, paused, failed, partial, complete }
   var phase: Phase = .idle
@@ -197,6 +258,7 @@ struct BackupStatus: Codable {
 @MainActor @Observable final class PhotosBackup {
   let store: LibraryStore
   private(set) var status: BackupStatus
+  private(set) var activeSource: BackupSource?
   private var selectionIDs: Set<String>?
   private var task: Task<Void, Never>?
   var isRunning: Bool { task != nil }
@@ -245,7 +307,10 @@ struct BackupStatus: Codable {
     try persist()
   }
   private func countedSources() throws -> [BackupSource] {
-    try store.backupSources().filter {
+    countedSources(from: try store.backupSources())
+  }
+  func countedSources(from sources: [BackupSource]) -> [BackupSource] {
+    sources.filter {
       !$0.isRetainedOriginal && (selectionIDs == nil || selectionIDs?.contains($0.id) == true
         || $0.phase == .queued || $0.phase == .committed)
     }
@@ -328,11 +393,14 @@ struct BackupStatus: Codable {
         try refreshCounts()
         for var source in work {
           try fence()
+          activeSource = source
+          defer { activeSource = nil }
           do {
             if source.phase != .queued {
               try await stage(source, dates[source.id])
               try fence()
               source = try store.backupSource(source.id)
+              activeSource = source
             }
             if source.phase != .committed { try await upload(source) }
             try fence()

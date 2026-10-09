@@ -28,6 +28,32 @@ final class PhotoBrowsingTests: XCTestCase {
     let all = PhotoBrowsing.groups(items, filter: .favorites, calendar: calendar, dates: .all, now: date(10, 8))
     XCTAssertEqual(all.flatMap(\.sources).map(\.id), ["future", "recent", "old", "undated"])
   }
+  @MainActor func testProjectionReusesMetadataWorkAndCannotKeepAnotherSourceOrAccount() {
+    let projection = PhotoBrowseProjection()
+    var identity = PhotoBrowseProjectionID(storePage: UUID(), account: "first", vault: UUID(),
+      filter: .all, dates: .all, moments: false, scope: "Photos", calendar: calendar, day: date(10, 2))
+    var items = [photo("a", at: date(10, 2), favorite: true), photo("b", at: date(10, 1))]
+    var builds = 0
+    func groups() -> [PhotoBrowseGroup] {
+      projection.groups(for: identity) {
+        builds += 1
+        return PhotoBrowsing.groups(items, filter: identity.filter, calendar: identity.calendar,
+          dates: identity.dates, now: identity.day)
+      }
+    }
+    XCTAssertEqual(groups().flatMap(\.sources).map(\.id), ["a", "b"])
+    for _ in 0..<20 { XCTAssertEqual(groups().count, 2) }
+    XCTAssertEqual(builds, 1, "Unchanged render reads must not rebuild metadata")
+    identity.filter = .favorites
+    XCTAssertEqual(groups().flatMap(\.sources).map(\.id), ["a"])
+    XCTAssertEqual(builds, 2)
+    items = [photo("a", at: date(10, 2), revision: "edited")]
+    identity.storePage = UUID()
+    XCTAssertTrue(groups().isEmpty, "A correction must invalidate cached favorite facts")
+    identity.account = "second"; identity.vault = UUID(); items = []
+    XCTAssertTrue(groups().isEmpty, "Another account must not reuse the prior projection")
+    XCTAssertEqual(builds, 4)
+  }
   func testFiltersUseOnlyCurrentSuppliedFactsWithoutInferringPlaces() {
     let ordinary = photo("plain")
     let favorite = photo("favorite", favorite: true)

@@ -1,9 +1,49 @@
 import Photos
+import UIKit
 import XCTest
 
 @testable import Fotoro
 
 final class RecentPhotosTests: XCTestCase {
+  @MainActor func testThumbnailCacheReusesOnlyMatchingPreviewAndRejectsWithdrawnAccessAndOldCallbacks() {
+    var permission = PHAuthorizationStatus.authorized
+    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in [] })
+    let source = RecentPhotoSource(id: "photo", revision: "current")
+    let target = CGSize(width: 384, height: 384)
+    let image = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).image { context in
+      UIColor.red.setFill(); context.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
+    }
+    let generation = store.thumbnailGeneration
+    store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: generation)
+    XCTAssertTrue(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true) === image)
+    XCTAssertNil(store.cachedThumbnail(for: source, targetSize: CGSize(width: 512, height: 512), networkAllowed: true))
+    XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: false))
+    XCTAssertNil(store.cachedThumbnail(for: RecentPhotoSource(id: "photo", revision: "edited"), targetSize: target, networkAllowed: true))
+    permission = .denied
+    XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true))
+    permission = .authorized
+    store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: generation)
+    XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true), "Access withdrawal invalidates callbacks even after access returns")
+    let fresh = store.thumbnailGeneration
+    store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: fresh)
+    XCTAssertNotNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true))
+    permission = .limited
+    XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true), "Narrower Photos access must drop full-access previews")
+    let limited = store.thumbnailGeneration
+    store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: limited)
+    store.restoreAccess()
+    defer { store.pauseAnalysis() }
+    store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: limited)
+    XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true), "A Photos refresh must clear thumbnails and reject its old callbacks")
+  }
+  @MainActor func testThumbnailCacheDoesNotRetainViewerSizedImages() {
+    let store = RecentPhotosStore(authorization: { .authorized }, readPhotos: { _ in [] })
+    let source = RecentPhotoSource(id: "photo", revision: "current")
+    let image = UIGraphicsImageRenderer(size: CGSize(width: 16, height: 16)).image { _ in }
+    let target = CGSize(width: 1600, height: 1600)
+    store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: store.thumbnailGeneration)
+    XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true))
+  }
   @MainActor func testUnavailableSavedPreviewCanRetryWithoutUploadingOrReplacingTheOriginal() async throws {
     let services = try await previewServices()
     defer { services.vault.lock(); Keychain.remove(services.session.accountId!); try? FileManager.default.removeItem(at: services.storageRoot) }

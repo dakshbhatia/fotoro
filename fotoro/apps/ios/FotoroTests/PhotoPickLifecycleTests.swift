@@ -77,9 +77,10 @@ import XCTest
   }
   func testChangingBrowseDatesResetsPagesAndStopsThePreviousMetadataContinuation() async {
     var reads: [Range<Int>] = []
+    var recentReads = 0
     let store = RecentPhotosStore(authorization: { .authorized }, readBrowseSource: { _ in
       PhotoBrowseSource(count: 601) { range in reads.append(range); return [] }
-    }, readRecentPhotos: { _ in [] })
+    }, readRecentPhotos: { _ in recentReads += 1; return [] })
     defer { store.pauseAnalysis() }
     store.restoreAccess()
     store.loadMorePhotos()
@@ -89,6 +90,7 @@ import XCTest
       return true
     })
     XCTAssertEqual(reads, [0..<200, 200..<400, 0..<200], "The old date scope cannot append another page after expansion")
+    XCTAssertEqual(recentReads, 1, "Changing browse dates must reuse the separate Picks source")
     XCTAssertEqual(store.browseDates, .all)
     XCTAssertTrue(store.hasMorePhotos)
   }

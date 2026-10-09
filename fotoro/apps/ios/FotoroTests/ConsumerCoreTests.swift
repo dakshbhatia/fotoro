@@ -4,6 +4,34 @@ import Photos
 @testable import Fotoro
 
 final class ConsumerCoreTests: XCTestCase {
+  @MainActor func testEmptySavedContinuationDoesNotInvalidateCatalogAndNonemptyPageStillPublishes() async throws {
+    try await withSavedLibrary { services, _ in
+      var newest = try self.samplePhoto()
+      newest.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+      newest.metadata.sourceDate = "2026-10-08T12:00:00.000Z"
+      try services.store.put(newest)
+      try services.reload()
+      let initialGeneration = services.consumerCatalogGeneration
+      try services.loadMore()
+      XCTAssertEqual(services.photos.map(\.id), [newest.id])
+      XCTAssertEqual(services.consumerCatalogGeneration, initialGeneration,
+        "An empty continuation cannot announce a new catalog and rearm the gallery footer")
+
+      var older = try self.samplePhoto()
+      older.manifest.ownerAccountId = newest.manifest.ownerAccountId
+      older.metadata.sourceDate = "2026-10-07T12:00:00.000Z"
+      try services.store.put(older)
+      try services.loadMore()
+      XCTAssertEqual(services.photos.map(\.id), [newest.id, older.id])
+      XCTAssertEqual(services.consumerCatalogGeneration, initialGeneration + 1,
+        "An admitted older photo still invalidates catalog projections once")
+      let completeGeneration = services.consumerCatalogGeneration
+      for _ in 0..<3 { try services.loadMore() }
+      XCTAssertEqual(services.photos.map(\.id), [newest.id, older.id])
+      XCTAssertEqual(services.consumerCatalogGeneration, completeGeneration,
+        "Repeated end-of-list callbacks must settle without a generation feedback loop")
+    }
+  }
   @MainActor func testMixedOriginalShareKeepsEverySelectedSourceAndSeparateResourceNames() async throws {
     let deviceDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()).appendingPathComponent(Wire.id())
     let savedDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("fotoro-share-" + Wire.id())
