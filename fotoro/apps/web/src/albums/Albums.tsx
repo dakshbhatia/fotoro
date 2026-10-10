@@ -6,7 +6,7 @@ import {TripDownloadLease} from "./download-lease";
 import {cleanupTripDownloads, prepareTripDownload, type TripDownloadProgress} from "./download";
 import {TripPicks} from "./TripPicks";
 import {AlbumNameChoices} from "./AlbumNameChoices";
-import {useEffect, useMemo, useRef, useState} from "react";
+import {lazy, Suspense, useEffect, useMemo, useRef, useState} from "react";
 import type {AccountCardV1} from "@fotoro/contracts";
 import {ALBUM_DEFINITION_KIND, readAlbumSignedBody, validateAlbumDefinition, type AlbumOverviewV1} from "@fotoro/contracts/albums";
 import {createAlbumLink} from "@fotoro/contracts/albums-links";
@@ -29,6 +29,9 @@ import {albumDateTag, albumMemberLabel} from "./presentation";
 import {Icon} from "../library/icons";
 import {joinAlbumInvitation, loadAlbumEntry, reviewAlbumOwner, unsupportedAlbumCapabilities, type AlbumOwnerEntry} from "./bootstrap";
 import {subscribeAlbumLifetime} from "./entry";
+import {copyAlbumInvitation} from "./invitation";
+
+const AlbumContacts = lazy(() => import("../exchange/Exchange").then(module => ({default: module.Exchange})));
 
 function readableError(error: unknown) {
   const code = error instanceof Error ? error.message : "";
@@ -95,6 +98,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   const [peopleFilter, setPeopleFilter] = useState(emptyPeopleFilter), [from, setFrom] = useState(""), [through, setThrough] = useState(""), [groupCopies, setGroupCopies] = useState(true);
   const [detailDraft, setDetailDraft] = useState<{photo: Photo; source: OwnedAlbumDetails; revision: number; people: string[]; location: boolean; existing: boolean; unavailable: number} | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState(""), [title, setTitle] = useState(""), [invitees, setInvitees] = useState(new Set<string>()), [confirmEnd, setConfirmEnd] = useState(false);
+  const [showContacts, setShowContacts] = useState(false);
   const [creating, setCreating] = useState(false), [unsupported, setUnsupported] = useState(false), [entryFailed, setEntryFailed] = useState(false);
   const preparedDownload = useRef<{access: AlbumAccess; photo: Photo; controller: AbortController} | null>(null);
   const tripDownload = useRef<{controller: AbortController; access?: AlbumAccess; lease?: TripDownloadLease} | null>(null);
@@ -110,7 +114,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   const scope: ShareScope = {signal: controller.signal, current: () => alive.current && sameVault(session) && (!incoming || incoming.current(session))};
   const closeAlbum = () => {clearTripDownload(); clearDownload(); const previous = accessRef.current; accessRef.current = null; previous?.dispose(); setAccess(null); setPhotos([]); publishPage({hasMore: false, photoCount: 0}); setPreview(null); setQuery(""); setFiltersOpen(false); setShowTripPicks(false); setSearchFailed(false); setConfirmEnd(false); setFacts(new Map()); setFactsState("loading"); setPeopleFilter(emptyPeopleFilter()); setFrom(""); setThrough(""); setDetailDraft(null);};
   const close = () => {alive.current = false; controller.abort(); closeAlbum(); onClose();};
-  useDialogFocus(panel, () => preview ? setPreview(null) : close());
+  useDialogFocus(panel, () => preview ? setPreview(null) : close(), !showContacts);
   useEffect(() => {setDetailDraft(null); if (preview) previewPanel.current?.focus({preventScroll: true});}, [preview]);
   useEffect(() => {
     clearDownload();
@@ -322,7 +326,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     }
     finally {if (preparedDownload.current === prepared) clearDownload();}
   });
-  return <aside ref={panel} className="albums-sheet" role="dialog" aria-modal="true" aria-label="Trips" tabIndex={-1}>
+  return <><aside style={showContacts ? {display: "none"} : undefined} ref={panel} className="albums-sheet" role="dialog" aria-modal="true" aria-label="Trips" tabIndex={-1}>
     <header inert={preview ? true : undefined}>
       {access && <button className="album-icon-button" disabled={busy} onClick={closeAlbum} aria-label="All trips"><Icon kind="previous" /></button>}
       <div className="album-heading"><h2>{access ? access.title : creating ? "New trip" : "Trips"}</h2>
@@ -337,7 +341,12 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
           {incoming && onRetryAccount && <button disabled={busy} onClick={onRetryAccount}>Use another account</button>}
           {access && <details className="album-roster"><summary>Details</summary><ul>{access.definition.members.map(member => <li key={member.card.accountId}><span>{contributor(member.card.accountId)}</span><small>{identityLabel(member.card)}</small></li>)}</ul></details>}
           {access?.definition.ownerAccountId === session.accountId && <>
-            <button disabled={busy} onClick={() => void action(async () => {const link = createAlbumLink(access.albumId, session.card, location.origin); await navigator.clipboard.writeText(link); if (scope.current?.()) setNotice("Album link copied. Only invited accounts can accept it.");})}>Copy invitation link</button>
+            <label>Invitation link<input readOnly value={createAlbumLink(access.albumId, session.card, location.origin)} onFocus={event => event.target.select()} /></label>
+            <button disabled={busy} onClick={() => void action(async () => {
+              const opened = access, current = () => !!scope.current?.() && accessRef.current === opened && opened.current();
+              const result = await copyAlbumInvitation(createAlbumLink(opened.albumId, session.card, location.origin), current, navigator.clipboard);
+              if (result && current()) setNotice(result === "copied" ? "Album link copied. Only invited accounts can accept it." : "Select and copy the invitation link in More. Only invited accounts can accept it.");
+            })}>Copy invitation link</button>
             <details><summary>End access</summary><label><input type="checkbox" checked={confirmEnd} onChange={event => setConfirmEnd(event.target.checked)} />End trip access for everyone</label><button disabled={busy || !confirmEnd} onClick={() => void action(async () => {await access.end(); closeAlbum(); await loadInbox(); setError(""); setNotice("Album access ended.");})}>End access</button></details>
           </>}
         </div>
@@ -430,7 +439,8 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
             <label>Trip title<input value={title} onChange={event => {creationDraft.current = {}; setTitle(event.target.value);}} required disabled={busy} aria-describedby="album-title-limit" /></label>
             <p className="hint" id="album-title-limit">Up to 80 characters. Choose 1 to 11 accepted contacts. Invitations require acceptance.</p>
             <fieldset disabled={busy}><legend>Invite contacts</legend>{cards.map(card => <label key={card.accountId}><input type="checkbox" checked={invitees.has(card.accountId)} disabled={!invitees.has(card.accountId) && invitees.size >= 11} onChange={event => {creationDraft.current = {}; setInvitees(previous => {const next = new Set(previous); if (event.target.checked) next.add(card.accountId); else next.delete(card.accountId); return next;});}} />{contributor(card.accountId)}</label>)}</fieldset>
-            {!cards.length && <p className="hint">Accept contacts in Share in Fotoro first.</p>}
+            {!cards.length && <p className="hint">Accept a contact before inviting them to your trip.</p>}
+            <button type="button" disabled={busy} onClick={() => setShowContacts(true)}>Add a contact</button>
             <button type="submit" className="primary-action" disabled={busy || !title.trim() || [...title].length > 80 || !invitees.size}>Create and invite</button>
             <button type="button" disabled={busy} onClick={() => setCreating(false)}>Cancel</button>
           </form>}
@@ -462,5 +472,9 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
           })}>{detailDraft.people.length || detailDraft.location ? "Share selected details" : "Clear shared details"}</button><button disabled={busy} onClick={() => void openDetails(preview)}>Refresh details</button><button disabled={busy} onClick={() => setDetailDraft(null)}>Cancel</button></div></section>}
         </details>
     </section>}
-  </aside>;
+  </aside>
+    {showContacts && <Suspense fallback={<section className="sheet share-sheet" style={{zIndex: 71}} role="dialog" aria-modal="true" aria-label="Contacts"><p role="status">Opening contacts…</p><button autoFocus onClick={() => setShowContacts(false)}>Back to trip</button></section>}>
+      <AlbumContacts contactsOnly onClose={() => setShowContacts(false)} />
+    </Suspense>}
+  </>;
 }

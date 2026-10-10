@@ -4,7 +4,6 @@ import type {
   WrappedKeyV1,
   DeviceChallengeV1,
 } from "@fotoro/contracts";
-import {validateWire} from "@fotoro/contracts/validate";
 type VaultCrypto = typeof import("./crypto-runtime");
 let cryptoRuntime: VaultCrypto | undefined;
 // Local browsing needs the session identity and lock events, but no crypto.
@@ -307,7 +306,7 @@ export async function requestDeviceApproval(current = () => true) {
 }
 
 export function reviewDeviceChallenge(text: string) {
-  const v = requireVault();
+  const v = requireVault(), {validateWire} = unlockedCrypto();
   let challenge: DeviceChallengeV1;
   try {challenge = validateWire<DeviceChallengeV1>("DeviceChallengeV1", JSON.parse(text));}
   catch {throw new Error("INVALID_DEVICE_CHALLENGE");}
@@ -316,7 +315,7 @@ export function reviewDeviceChallenge(text: string) {
   return challenge;
 }
 export async function approveDeviceChallenge(text: string, current = () => true) {
-  const { sodium, b64, unb64, signPayload, api } = unlockedCrypto();
+  const { sodium, b64, unb64, signPayload, api, validateWire } = unlockedCrypto();
   const v = requireVault(), token = generation, origin = location.origin;
   if (!current()) throw new DOMException("Device approval cancelled", "AbortError");
   const challenge = reviewDeviceChallenge(text);

@@ -1,18 +1,41 @@
-# Verification — October 9, 2026
+# Verification — October 10, 2026
 
 This is the current evidence record. [The backlog](product-backlog.md) owns next
 work; [product](product.md) owns the intended experience. Earlier measurements and
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
 
-Current browser distribution is PR 66 in production, Worker
-`2ca350dc-3ccb-4bca-97a6-decd3054264f`. Native PR 66 is TestFlight
-0.1.0 (59), verified `VALID` and `IN_BETA_TESTING` in the existing internal
-group. All 23 hosted contexts passed on qualified head
-`a9e0cd351c9cf8acbf0c62d37c6e1bba8ae99cfa`; merge
-`755fb7ec7b7ccec74561b6caffb41edf1ba23529` has the same tree. Migration 0010
-is applied. The physical iPhone was observed with build 56 installed; current
-physical Trip and scrolling acceptance remain unverified.
+Latest verified distribution before this pass is PR 77 in production, Worker
+`dd6a9562-8888-4440-844a-4c98ee1c6d96` at 100%. All 23 hosted contexts passed;
+merge `e61e474bedd2700e16bcea93d36be6f1fb2bcf3a` has the qualified tree.
+Native 0.1.0 (65) passed archive and distribution IPA audits and uploaded through
+Xcode on October 10. Apple last reported processing; its TestFlight installability
+has not been read back. Migration 0010 is applied. The paired physical iPhone
+still has build 61 installed. Its bounded diagnostic ring ends October 10 at
+04:52 UTC, before the latest fixes; it does not qualify builds 65 or later.
+
+## October 10 core usability — locally qualified
+
+New trip can open the existing reviewed contact flow and return to the same
+name, invitee choices and photo selection. The nested Contacts mode omits unrelated
+photo-sharing controls and inbox requests. New contacts still require an explicit
+member choice; identity review and the fixed signed roster remain unchanged.
+Browser invitations remain selectable when clipboard access is unavailable.
+
+Saved search matches all query words across evidence belonging to the same photo,
+so a reviewed name and place can combine with a trusted capture-date query.
+Ownership, source digest and explicit People filters still gate results. Select
+results adds eligible photos without erasing earlier choices or toggling already
+selected Saved photos off. Existing export validation rejects changed sources.
+
+Browser challenge and approval-receipt validators remain exact, but load through
+the existing deferred vault runtime. A fresh build measures 450,547 bytes across
+eight static startup chunks, within the unchanged 500 KiB budget. The full check
+builds the browser before its tests so the emitted budget cannot inspect an older
+build. Local core/API/browser checks pass: 691 browser and 122 API tests, zero
+failures. The full native simulator suite passes 638 with two skips and no failures.
+These checks do not establish physical scroll frame pacing, real Safari passkeys,
+cross-device original restoration or a family's complete Trip journey.
 
 ## October 9 chosen photos to Trip — locally qualified
 

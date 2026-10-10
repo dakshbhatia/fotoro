@@ -880,6 +880,41 @@ final class ConsumerCoreTests: XCTestCase {
     XCTAssertEqual(try services.annotations.ledger.pendingIDs(), [exif.id])
   }
 
+  @MainActor func testSavedFamilyQueryCombinesOnlySamePhotoEvidenceAndTrustedCaptureDate() async throws {
+    try await withSavedLibrary { services, _ in
+      let account = try XCTUnwrap(services.session.accountId)
+      let card = try services.session.requireCard(account), bundle = try services.vault.requireBundle()
+      let mom = Wire.id()
+      var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+      @MainActor func saved(named: Bool, located: Bool, source: String = "photos", date: String = "2026-10-05T12:00:00.000Z", stale: Bool = false) throws -> LocalPhoto {
+        var photo = try self.samplePhoto(); photo.manifest.ownerAccountId = account
+        photo.metadata.filename = "camera.jpg"; photo.metadata.sourceDate = date; photo.metadata.dateSource = source
+        try services.store.put(photo)
+        var annotation = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+        if named {
+          annotation.facts = try PhotoPeopleFacts.replacing([], with: [PhotoPersonAssignment(p: mom, n: "Mom", b: [0,0,100,100])],
+            originalSha256: stale ? Data("different-original".utf8).digest : photo.metadata.originalSha256)
+        }
+        if located { try annotation.setLocation(PhotoLocationV1(latitude: 40.7128, longitude: -74.006, source: "photos", name: "New York")) }
+        try services.annotations.ledger.edit(annotation, photo: photo, bundle: bundle, card: card)
+        return photo
+      }
+      let together = try saved(named: true, located: true)
+      _ = try saved(named: true, located: false)
+      _ = try saved(named: false, located: true)
+      _ = try saved(named: true, located: true, source: "import")
+      _ = try saved(named: true, located: true, date: "2026-11-01T00:00:00.000Z")
+      _ = try saved(named: true, located: true, stale: true)
+      try services.reload()
+      let result = try await services.searchCatalog("Móm New York 2026-10", calendar: calendar)
+      XCTAssertEqual(result.map(\.id), [together.id], "Names, place and dates must all belong to one eligible source")
+      XCTAssertTrue(services.matches(together, query: "Móm New York"), "Loaded filtering and catalog search use the same text semantics")
+      let wrongPerson = try await services.searchCatalog("Mom New York 2026-10", calendar: calendar,
+        people: PeopleSearchSelection(personIDs: [Wire.id()]))
+      XCTAssertTrue(wrongPerson.isEmpty, "Text evidence cannot bypass a reviewed-person filter")
+    }
+  }
+
   @MainActor func testSavedReviewedPeopleChoicesFindAnyAndEveryoneWithoutPhotosPermission() async throws {
     try await withSavedLibrary { services, _ in
       let account = try XCTUnwrap(services.session.accountId)

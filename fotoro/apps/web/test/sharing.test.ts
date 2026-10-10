@@ -512,3 +512,34 @@ test("accepted save replay survives revoked grants and JSON field reordering wit
   const replay = await saveReceivedPhoto(detail.grant.grantId, photo.manifest.photoId);
   assert.equal(first.photoId, replay.photoId); assert.equal(first.operationId, replay.operationId);
 }));
+
+
+test("trip contact review uses accepted identities without opening the unrelated photo inbox", async () => scoped(async () => {
+  const session = await open(1), sender = accounts.accounts[0];
+  await pinCard(sender); await saveContactName(sender.accountId, "Alice");
+  globalThis.fetch = (async () => assert.fail("Trip contact review must not depend on grants or photo navigation")) as typeof fetch;
+  const state: ExchangeUpdate = {};
+  await loadExchangeContext(session, {}, update => Object.assign(state, update), undefined, true);
+  assert.deepEqual(state.people, [sender]); assert.equal(state.names?.get(sender.accountId), "Alice");
+  assert.equal(state.grants, undefined); assert.equal(state.inboxFailed, undefined);
+  const markup = renderToStaticMarkup(createElement(Exchange, {contactsOnly: true, onClose() {}}));
+  assert.match(markup, /Add someone’s contact link/);
+  assert.match(markup, /Share my contact link/); assert.match(markup, /Back to trip/);
+  assert.doesNotMatch(markup, /Received photos|Open photos|Sent photos|Photo access/);
+  const ordinary = renderToStaticMarkup(createElement(Exchange, {selection: [], onClose() {}, onReceived() {}, onRefresh() {}}));
+  assert.match(ordinary, /Received photos/);
+}));
+
+test("trip contact review still gates a changed identity and cannot publish after cancellation", async () => scoped(async () => {
+  const session = await open(1), sender = accounts.accounts[0];
+  await pinCard(sender); await saveContactName(sender.accountId, "Alice");
+  const changed = {...sender, signingPublicKey: accounts.accounts[1].signingPublicKey};
+  const updates: ExchangeUpdate[] = [];
+  await loadExchangeContext(session, {}, update => updates.push(update), changed, true);
+  assert.equal(updates[0].candidateChecked, false);
+  assert.equal(updates.some(update => update.identityChanged === true), true);
+  assert.equal(updates.at(-1)?.candidateChecked, true);
+  assert.deepEqual(await trustedCard(sender.accountId), sender, "Review cannot silently replace the accepted identity");
+  const controller = new AbortController(); controller.abort();
+  await loadExchangeContext(session, {signal: controller.signal}, () => assert.fail("Cancelled review must not publish"), changed, true);
+}));

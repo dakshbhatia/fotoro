@@ -1811,6 +1811,7 @@ enum ReviewedPhotosBackupPolicy {
     let card = try session.requireCard(account)
     let ledger = annotations.ledger
     let parsed = NaturalDateQuery.parse(query, now: now, calendar: calendar)
+    let evidenceQuery = PhotoEvidenceQuery(parsed.text)
     #if DEBUG
       let willRead = catalogSearchWillRead
     #endif
@@ -1837,8 +1838,7 @@ enum ReviewedPhotosBackupPolicy {
           let scenes = SearchVisualPolicy.validated(value?.visual).map(\.label)
           let captureTerms = PhotoCaptureFacts.read(value?.facts, originalSha256: photo.metadata.originalSha256)?.searchText ?? ""
           let terms = [captureTerms, photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + PhotoLocationFacts.userFacts(value?.facts).filter { !PhotoPeopleFacts.isReserved($0) && !$0.hasPrefix("fotoro.ai.v1:") && !PhotoCaptureFacts.isReserved($0) } + confirmed.map(\.n) + (value?.location?.searchTerms ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""]
-          if parsed.text.isEmpty || terms.contains(where: { SearchNormalization.text($0).contains(parsed.text) })
-            || scenes.contains(where: { SearchNormalization.text($0).hasPrefix(parsed.text) }) { matches.append(photo) }
+          if evidenceQuery.matches(terms: terms, scenes: scenes) { matches.append(photo) }
         }
         guard page.count == 1000, let last = page.last else { break }
         after = last.id
@@ -1857,9 +1857,9 @@ enum ReviewedPhotosBackupPolicy {
   func matches(_ photo: LocalPhoto, query: String) -> Bool {
     guard !query.isEmpty else { return true }
     let value = photoAnnotations[photo.id]
-    return SearchVisualPolicy.validated(value?.visual).contains { SearchNormalization.text($0.label).hasPrefix(SearchNormalization.text(query)) }
-      || ([PhotoCaptureFacts.read(value?.facts, originalSha256: photo.metadata.originalSha256)?.searchText ?? "", photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + PhotoLocationFacts.userFacts(value?.facts).filter { !PhotoPeopleFacts.isReserved($0) && !$0.hasPrefix("fotoro.ai.v1:") && !PhotoCaptureFacts.isReserved($0) } + PhotoPeopleFacts.read(value?.facts ?? [], originalSha256: photo.metadata.originalSha256).map(\.n) + (value?.location?.searchTerms ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""])
-      .contains { $0.localizedCaseInsensitiveContains(query) }
+    return PhotoEvidenceQuery(query).matches(
+      terms: [PhotoCaptureFacts.read(value?.facts, originalSha256: photo.metadata.originalSha256)?.searchText ?? "", photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + PhotoLocationFacts.userFacts(value?.facts).filter { !PhotoPeopleFacts.isReserved($0) && !$0.hasPrefix("fotoro.ai.v1:") && !PhotoCaptureFacts.isReserved($0) } + PhotoPeopleFacts.read(value?.facts ?? [], originalSha256: photo.metadata.originalSha256).map(\.n) + (value?.location?.searchTerms ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""],
+      scenes: SearchVisualPolicy.validated(value?.visual).map(\.label))
   }
   private func automaticDerivedSourceCurrent(_ source: BackupSource) -> Bool {
     #if DEBUG

@@ -17,7 +17,7 @@ interface ExchangeContextUpdate {
   candidate?: AccountCardV1; candidateChecked?: boolean; candidateName?: string; identityChanged?: boolean;
   names?: Map<string, string>; people?: AccountCardV1[]; grants?: GrantV1[]; inboxFailed?: boolean;
 }
-export async function loadExchangeContext(session: UnlockedVault, scope: ShareScope, publish: (update: ExchangeContextUpdate) => void, card?: AccountCardV1) {
+export async function loadExchangeContext(session: UnlockedVault, scope: ShareScope, publish: (update: ExchangeContextUpdate) => void, card?: AccountCardV1, contactsOnly = false) {
   const current = () => sameVault(session) && !scope.signal?.aborted && (!scope.current || scope.current());
   if (!current()) return;
   if (card) {
@@ -37,7 +37,7 @@ export async function loadExchangeContext(session: UnlockedVault, scope: ShareSc
   }
   await Promise.all([
     Promise.all([contacts(scope), contactNames(scope)]).then(([people, names]) => {if (current()) publish({people, names});}),
-    api<{grants: GrantV1[]}>("/v1/grants", undefined, "GrantInboxV1", "GET", scope.signal)
+    !contactsOnly && api<{grants: GrantV1[]}>("/v1/grants", undefined, "GrantInboxV1", "GET", scope.signal)
       .then(inbox => {if (current()) publish({grants: inbox.grants, inboxFailed: false});})
       .catch(() => {if (current()) publish({inboxFailed: true});}),
   ]);
@@ -56,14 +56,13 @@ function SharePreview({photo}: {photo: Photo}) {
   return <span className="share-preview">{url ? <img src={url} alt={photo.metadata.filename} /> : <span>{photo.metadata.filename}</span>}</span>;
 }
 
-export function Exchange({selection, incoming, onClose, onReceived, onRefresh, onRetryPassword}: {
-  selection: Photo[];
-  incoming?: IncomingShareIntent | null;
-  onClose: () => void;
-  onReceived: (photos: Photo[], grant: GrantV1, sender?: string) => void;
-  onRefresh: () => void;
-  onRetryPassword?: () => void;
-}) {
+type ExchangeProps = {onClose: () => void; onRetryPassword?: () => void} & (
+  {contactsOnly: true; selection?: never; incoming?: never; onReceived?: never; onRefresh?: never} |
+  {contactsOnly?: false; selection: Photo[]; incoming?: IncomingShareIntent | null;
+    onReceived: (photos: Photo[], grant: GrantV1, sender?: string) => void; onRefresh: () => void}
+);
+
+export function Exchange({selection = [], incoming, onClose, onReceived, onRefresh, onRetryPassword, contactsOnly = false}: ExchangeProps) {
   const panel = useRef<HTMLElement>(null);
   useDialogFocus(panel, onClose);
   const [session] = useState(requireVault), [snapshot] = useState(() => new ShareSelection(selection));
@@ -95,14 +94,14 @@ export function Exchange({selection, incoming, onClose, onReceived, onRefresh, o
     if (update.grants) setGrants(update.grants);
     if (update.inboxFailed !== undefined) setInboxFailed(update.inboxFailed);
   };
-  const reload = () => loadExchangeContext(session, scope, applyContext);
+  const reload = () => loadExchangeContext(session, scope, applyContext, undefined, contactsOnly);
   useEffect(() => {
     mounted.current = true;
     if (incoming?.pending) incoming.bindInitialVault(session);
     const card = incoming?.pending ? incoming.link.kind === "contact" ? incoming.link.card : incoming.link.senderCard : undefined;
     if (card && incoming?.link.kind === "contact") void reload().catch(error => {if (current()) setStatus(readableShareError(error));});
-    void run(() => loadExchangeContext(session, scope, applyContext, card), card ? "Checking sender…" : "Loading shared photos…");
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    void run(() => loadExchangeContext(session, scope, applyContext, card, contactsOnly), card ? "Checking sender…" : contactsOnly ? "Loading contacts…" : "Loading shared photos…");
+    const timer = contactsOnly ? undefined : window.setInterval(() => setNow(Date.now()), 1000);
     return () => {mounted.current = false; controller.current.abort(); snapshot.dispose(); window.clearInterval(timer);};
   }, []);
   useEffect(() => subscribeContacts(() => {
@@ -132,8 +131,8 @@ export function Exchange({selection, incoming, onClose, onReceived, onRefresh, o
     if (incoming?.link.kind === "moment") {
       const result = await receive(incoming.link.grantId, scope, candidate);
       if (!current()) {for (const photo of result.photos) photo.metadataKey.fill(0); return;}
-      onReceived(result.photos, result.grant, candidateName.trim() || "Fotoro " + result.grant.ownerAccountId.slice(0, 8));
-    } else {setCandidate(undefined); setCandidateChecked(false); setEditingContact(false); setLinkInput(""); await reload(); if (current()) setStatus(editingContact ? "Contact saved." : "Contact accepted. You can share photos with this person.");}
+      onReceived!(result.photos, result.grant, candidateName.trim() || "Fotoro " + result.grant.ownerAccountId.slice(0, 8));
+    } else {setCandidate(undefined); setCandidateChecked(false); setEditingContact(false); setLinkInput(""); await reload(); if (current()) setStatus(editingContact ? "Contact saved." : contactsOnly ? "Contact accepted. Return to your trip to invite them." : "Contact accepted. You can share photos with this person.");}
   }, incoming?.link.kind === "moment" ? "Opening shared photos…" : "Accepting contact…");
   const copyLink = (value: string) => run(async () => {
     setOutputLink(value);
@@ -156,9 +155,9 @@ export function Exchange({selection, incoming, onClose, onReceived, onRefresh, o
   const isMoment = incoming?.pending && incoming.link.kind === "moment";
   const received = grants.filter(grant => grant.recipientAccountId === session.accountId);
   const sent = grants.filter(grant => grant.ownerAccountId === session.accountId);
-  return <section className="sheet share-sheet" ref={panel} tabIndex={-1} role="dialog" aria-modal="true" aria-label={isMoment ? "Open shared photos" : count ? "Share photos" : "Shared photos"}>
-    <button className="close" onClick={onClose} aria-label="Close sharing"><Icon kind="close" /></button>
-    <h2>{isMoment ? "Someone shared photos with you" : count ? `Share ${count} ${count === 1 ? "photo" : "photos"}` : "Shared photos"}</h2>
+  return <section className="sheet share-sheet" style={contactsOnly ? {zIndex: 71} : undefined} ref={panel} tabIndex={-1} role="dialog" aria-modal="true" aria-label={isMoment ? "Open shared photos" : count ? "Share photos" : contactsOnly ? "Contacts" : "Shared photos"}>
+    <button className="close" onClick={onClose} aria-label={contactsOnly ? "Back to trip" : "Close sharing"}><Icon kind="close" /></button>
+    <h2>{isMoment ? "Someone shared photos with you" : count ? `Share ${count} ${count === 1 ? "photo" : "photos"}` : contactsOnly ? "Contacts" : "Shared photos"}</h2>
     {count > 0 && <div className="share-photo-strip" aria-label="Selected photos">{snapshot.photos.slice(0, 5).map(photo => <SharePreview key={photo.manifest.photoId} photo={photo} />)}{count > 5 && <span>+{count - 5}</span>}</div>}
     {isMoment && <p className="hint">Open with the Fotoro password this invitation was sent to. Photos stay here until you choose Save.</p>}
     {!isMoment && <ContactSyncReview session={session} scope={scope} busy={busy} run={run} />}
@@ -188,13 +187,15 @@ export function Exchange({selection, incoming, onClose, onReceived, onRefresh, o
       {invitation && <div className="invitation-ready"><h3>For {contactLabel(invitation.recipientAccountId)}</h3><div className="actions"><button disabled={busy} className="primary-action" onClick={() => shareLink(createMomentLink(invitation.grantId, session.card))}>Send photos</button><button disabled={busy} onClick={() => {setInvitation(undefined); setOutputLink(""); setRecipient(undefined); setStatus("");}}>Choose another person</button></div><details><summary>More</summary><button disabled={busy} onClick={() => void copyLink(createMomentLink(invitation.grantId, session.card))}>Copy link</button></details></div>}
       {!count && <div className="contact-link"><p className="hint">Your contact link lets someone invite you to photos.</p><div className="actions"><button disabled={busy} onClick={() => shareLink(ownLink)}>Share my contact link</button><button disabled={busy} onClick={() => void copyLink(ownLink)}>Copy my contact link</button></div></div>}
     </>}
-    {outputLink && <details className="copy-link"><summary>Link</summary><label>Photo link<input readOnly value={outputLink} onFocus={event => event.target.select()} /></label></details>}
+    {contactsOnly && !candidate && <form onSubmit={event => {event.preventDefault(); void inspectLink();}}><label>Add someone’s contact link<input type="url" autoComplete="off" value={linkInput} onChange={event => setLinkInput(event.target.value)} placeholder="https://fotoro.cloud/#contact=…" /></label><button disabled={busy || !linkInput.trim()}>Continue</button></form>}
+    {contactsOnly && <button disabled={busy} onClick={onClose}>Back to trip</button>}
+    {outputLink && <details className="copy-link"><summary>Link</summary><label>{contactsOnly ? "Contact link" : "Photo link"}<input readOnly value={outputLink} onFocus={event => event.target.select()} /></label></details>}
     <p role="status" className="share-status">{busy ? working : status}</p>
     {isMoment && onRetryPassword && <button disabled={busy} onClick={onRetryPassword}>Use another Fotoro password</button>}
-    {!isMoment && <details className="share-inbox" open={!count}><summary>{count ? "Shared moments" : "Received and sent"}</summary>
+    {!isMoment && !contactsOnly && <details className="share-inbox" open={!count}><summary>{count ? "Shared moments" : "Received and sent"}</summary>
       <div className="share-inbox-heading"><h3>Received photos</h3><button disabled={busy} onClick={() => void run(async () => {await syncContacts(session, scope).catch(() => {}); if (current()) await reload();}, "Refreshing shared photos…")}>{inboxFailed ? "Try again" : "Refresh"}</button></div>
       {inboxFailed ? <p className="hint">Shared photos couldn’t load. Try again.</p> : !received.length && <p className="hint">Photos shared with you appear here.</p>}
-      {received.map(grant => <div className="grant" key={grant.grantId}><p>Photos from {contactLabel(grant.ownerAccountId)}</p><p className="hint">{grantState(grant, now)}</p><button disabled={busy || !!grant.revokedAt || (!!grant.expiresAt && Date.parse(grant.expiresAt) <= now)} onClick={() => void run(async () => {const result = await receive(grant.grantId, scope); if (current()) onReceived(result.photos, result.grant, contactLabel(result.grant.ownerAccountId)); else for (const photo of result.photos) photo.metadataKey.fill(0);}, "Opening shared photos…")}>Open photos</button>{count > 0 && grant.role === "contributor" && <button disabled={busy || !!grant.revokedAt || (!!grant.expiresAt && Date.parse(grant.expiresAt) <= now)} onClick={() => void run(async () => {await contribute(grant, snapshot.photos, scope); if (current()) {setStatus("Photos added."); onRefresh();}}, "Adding selected photos…")}>Add selected photos</button>}</div>)}
+      {received.map(grant => <div className="grant" key={grant.grantId}><p>Photos from {contactLabel(grant.ownerAccountId)}</p><p className="hint">{grantState(grant, now)}</p><button disabled={busy || !!grant.revokedAt || (!!grant.expiresAt && Date.parse(grant.expiresAt) <= now)} onClick={() => void run(async () => {const result = await receive(grant.grantId, scope); if (current()) onReceived!(result.photos, result.grant, contactLabel(result.grant.ownerAccountId)); else for (const photo of result.photos) photo.metadataKey.fill(0);}, "Opening shared photos…")}>Open photos</button>{count > 0 && grant.role === "contributor" && <button disabled={busy || !!grant.revokedAt || (!!grant.expiresAt && Date.parse(grant.expiresAt) <= now)} onClick={() => void run(async () => {await contribute(grant, snapshot.photos, scope); if (current()) {setStatus("Photos added."); onRefresh!();}}, "Adding selected photos…")}>Add selected photos</button>}</div>)}
       {!count && <form onSubmit={event => {event.preventDefault(); void inspectLink();}}><label>Add someone’s contact link<input type="url" autoComplete="off" value={linkInput} onChange={event => setLinkInput(event.target.value)} placeholder="https://fotoro.cloud/#contact=…" /></label><button disabled={busy || !linkInput.trim()}>Continue</button></form>}
       {sent.length > 0 && <details><summary>Sent photos</summary>{sent.map(grant => <div className="grant" key={grant.grantId}><p>Shared with {contactLabel(grant.recipientAccountId)}</p><p className="hint">{grantState(grant, now)}</p><div className="actions"><button disabled={busy || !!grant.revokedAt || (!!grant.expiresAt && Date.parse(grant.expiresAt) <= now)} onClick={() => shareLink(createMomentLink(grant.grantId, session.card))}>Share invitation</button><button disabled={busy || !!grant.revokedAt} onClick={() => void run(async () => {await api("/v1/grants/" + grant.grantId, undefined, "GrantV1", "DELETE", scope.signal); if (current()) {await reload(); setStatus("Access ended. Copies already saved stay in their library.");}}, "Ending access…")}>End access</button></div></div>)}</details>}
     </details>}

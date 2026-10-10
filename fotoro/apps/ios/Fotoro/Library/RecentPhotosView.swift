@@ -1966,15 +1966,13 @@ struct RecentPhotosView: View {
     guard !preparingShare else { return }
     selecting = true
     queryFocused = false
-    selectedPhotos.removeAll()
-    selectedSavedPhotos.removeAll()
     let references = ConsumerSearchBinding.selectionForResults(currentSearchHits, reviewedIDs: bestShots.snapshot?.recommendations.ids)
     for reference in references {
       switch reference {
       case .device(let id):
         if selectedPhotos[id] == nil, let photo = search.assets[id] { toggleSelection(photo) }
       case .saved(let id):
-        if let photo = savedResults[id] { toggleSavedSelection(photo) }
+        if !selectedSavedPhotos.contains(id), let photo = savedResults[id] { toggleSavedSelection(photo) }
       }
     }
   }

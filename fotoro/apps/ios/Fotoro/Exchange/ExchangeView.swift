@@ -17,6 +17,7 @@ private struct ReceivedViewerPresentation: Identifiable {
 struct ExchangeView: View {
   @Bindable var services: AppServices
   let selected: [LocalPhoto]
+  var contactsOnly = false
   var incoming: FotoroShareLink? = nil
   var onRetryPassword: ((FotoroShareLink) -> Void)? = nil
   @State private var temporary = false
@@ -132,7 +133,7 @@ struct ExchangeView: View {
             Button("Cancel", role: .cancel) { focusedField = nil; candidate = nil; link = ""; name = "" }
           }
         }
-        if !selected.isEmpty {
+        if !contactsOnly && !selected.isEmpty {
           Section("\(selected.count) \(selected.count == 1 ? "photo" : "photos")") {
             ScrollView(.horizontal, showsIndicators: false) {
               HStack(spacing: 3) {
@@ -184,7 +185,7 @@ struct ExchangeView: View {
             }
           }
         }
-        if selected.isEmpty {
+        if !contactsOnly && selected.isEmpty {
         if let grant = services.selectedGrant {
           Section("Photos from \(services.contactName(grant.ownerAccountId))") {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3) {
@@ -243,35 +244,36 @@ struct ExchangeView: View {
         }
         }
         contactSyncReview
-        Section(selected.isEmpty ? "People" : "Add a person") {
-          if selected.isEmpty, let account, let card = try? services.session.requireCard(account),
+        Section(contactsOnly ? "Contacts" : selected.isEmpty ? "People" : "Add a person") {
+          if contactsOnly || selected.isEmpty, let account, let card = try? services.session.requireCard(account),
             let url = try? FotoroShareLinks.contactURL(card, origin: services.api.origin) {
             ShareLink("Share my contact link", item: url).accessibilityIdentifier("sharing.contact")
             Button("Show my contact code") { shareCode = ShareCodePresentation(url: url, title: "My contact link") }
           }
-          if !selected.isEmpty, !contacts.isEmpty {
+          if !contactsOnly && !selected.isEmpty, !contacts.isEmpty {
             DisclosureGroup("Add a person") { contactEntry }
           } else {
             contactEntry
           }
-          if selected.isEmpty {
+          if contactsOnly || selected.isEmpty {
             ForEach(contacts, id: \.accountId) { card in Text(services.contactName(card.accountId)) }
           }
         }
         }.padding(16)
       }.buttonStyle(.glass).controlSize(.large)
         .scrollDismissesKeyboard(.interactively)
-        .navigationTitle(selected.isEmpty ? "Shared photos" : "Share photos")
+        .navigationTitle(contactsOnly ? "Contacts" : selected.isEmpty ? "Shared photos" : "Share photos")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         .task {
           guard !preparedIncoming else { return }
           preparedIncoming = true
-          candidate = incoming
+          if !contactsOnly { candidate = incoming }
+          else if case .contact = incoming { candidate = incoming }
           if let card = candidateCard, contacts.contains(where: { $0.accountId == card.accountId }) { name = services.contactName(card.accountId) }
         }
-        .task(id: scenePhase) { await refreshMoments() }
-        .task(id: services.selectedGrant?.expiresAt) { await waitForExpiry() }
+        .task(id: scenePhase) { if !contactsOnly { await refreshMoments() } }
+        .task(id: services.selectedGrant?.expiresAt) { if !contactsOnly { await waitForExpiry() } }
         .fullScreenCover(item: $openedPhoto) { presentation in
           PhotoViewer(services: services, initialID: presentation.photo.id,
             displayedPhotos: presentation.photos, receivedGrant: presentation.grant)
@@ -281,12 +283,15 @@ struct ExchangeView: View {
         .sheet(item: $shareCode) { ShareCodeView(presentation: $0) }
         .onChange(of: scenePhase) { if scenePhase == .background { operation?.cancel() } }
         .onChange(of: services.photoAccountAccess) { operation?.cancel(); dismiss() }
+        .onChange(of: services.api.baseURL) {
+          if contactsOnly { operation?.cancel(); candidate = nil; link = ""; name = ""; dismiss() }
+        }
         .onChange(of: services.selectedGrant) { previous, current in
-          if previous != nil && current == nil { feedback = "These shared photos are no longer available. Copies you saved stay in your Fotoro." }
+          if !contactsOnly && previous != nil && current == nil { feedback = "These shared photos are no longer available. Copies you saved stay in your Fotoro." }
         }
         .onDisappear {
           operation?.cancel()
-          if openedPhoto == nil { services.cancelSharedMomentRefresh() }
+          if !contactsOnly && openedPhoto == nil { services.cancelSharedMomentRefresh() }
         }
         .alert("Fotoro", isPresented: Binding(get: { services.error != nil }, set: { if !$0 { services.error = nil } })) {
           Button("OK") { services.error = nil }
@@ -324,7 +329,9 @@ struct ExchangeView: View {
     let text = link.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !text.isEmpty, !services.busy else { return }
     do {
-      candidate = try FotoroShareLinks.parse(text, expectedOrigin: services.api.origin)
+      let parsed = try FotoroShareLinks.parse(text, expectedOrigin: services.api.origin)
+      if contactsOnly, case .moment = parsed { throw FotoroError("Use this person's Fotoro contact link.") }
+      candidate = parsed
       if let card = candidateCard { name = contacts.contains(where: { $0.accountId == card.accountId }) ? services.contactName(card.accountId) : "" }
       focusedField = nil
     } catch { services.error = error.localizedDescription }
