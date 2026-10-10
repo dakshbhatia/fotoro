@@ -286,7 +286,7 @@ struct LibraryView: View {
           resumeSelectedSave()
           openIncomingLink()
         } else {
-          services.setPhotoSyncForeground(false)
+          services.setPhotoSyncForeground(false, reason: .inactive)
         }
       }
       .sheet(isPresented: $sharingOriginals, onDismiss: cleanupShare) {

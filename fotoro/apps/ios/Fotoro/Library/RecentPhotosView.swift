@@ -748,7 +748,7 @@ struct RecentPhotosView: View {
             if services == nil { services = try AppServices() }
             services?.bindLocalSearch(search)
             services?.bindRecentPhotos(store)
-            services?.setPhotoSyncForeground(scenePhase == .active)
+            services?.setPhotoSyncForeground(scenePhase == .active, reason: scenePhase == .background ? .background : .inactive)
             await services?.resumeSavedAccount(initialRestoration: true)
           } catch { store.error = error.localizedDescription }
 #endif
@@ -774,7 +774,7 @@ struct RecentPhotosView: View {
     } else {
       cancelBestShots()
 #if !FOTORO_LOCAL_PREVIEW
-      services?.setPhotoSyncForeground(false)
+      services?.setPhotoSyncForeground(false, reason: phase == .background ? .background : .inactive)
       if phase == .background {
         shareTask?.cancel(); cleanupShare()
         savedPassword = nil
@@ -1690,7 +1690,7 @@ struct RecentPhotosView: View {
       if services == nil { services = try AppServices() }
       services?.bindLocalSearch(search)
       services?.bindRecentPhotos(store)
-      services?.setPhotoSyncForeground(scenePhase == .active)
+      services?.setPhotoSyncForeground(scenePhase == .active, reason: scenePhase == .background ? .background : .inactive)
       if let services {
         let requiresAuthentication = savedRefresh.requiresAuthentication(services)
           || (services.session.accountId != nil && PhotoSyncAccountPolicy.requiresAuthentication(

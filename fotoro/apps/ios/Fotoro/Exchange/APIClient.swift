@@ -7,8 +7,8 @@ enum NativeDiagnosticOutcome: String, Codable, Sendable { case started, complete
 enum NativeDiagnosticOperation: String, Codable, Sendable { case app, api, auth, sync, share, albums, search, metadata, people, consent, picks }
 enum NativeDiagnosticStep: String, Codable, Sendable { case action, request, response, decode, credential, unlock, catalog, verify, persist, transfer, annotation, scan, analysis, export }
 enum NativeDiagnosticReason: String, Codable, Sendable {
-  case cancelled, contextChanged, background, recoveryProbe, network, http, decode, validation, unknown
-  case signedOut, locked, permissionRequired, paused, offline, retryRequired, waiting, pendingTransfers, pendingAnnotations, sourceUnavailable, current
+  case cancelled, contextChanged, inactive, background, recoveryProbe, network, http, decode, validation, unknown
+  case signedOut, locked, permissionRequired, paused, offline, retryRequired, waiting, pendingTransfers, unpreparedSources, skippedSources, pendingAnnotations, sourceUnavailable, current
   static func failure(_ error: Error) -> Self {
     if error is CancellationError || (error as? URLError)?.code == .cancelled { return .cancelled }
     if error is DecodingError { return .decode }

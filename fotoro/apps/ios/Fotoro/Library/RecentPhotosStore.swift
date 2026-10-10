@@ -212,6 +212,7 @@ struct PhotoPreviewProgress {
       width: $0.asset.pixelWidth, height: $0.asset.pixelHeight, favorite: $0.isFavorite, isScreenshot: $0.isScreenshot) }
   }
   @ObservationIgnored private var analysisTask: Task<Void, Never>?
+  @ObservationIgnored private var analysisCandidates: [AutomaticPhotoPickCandidate]?
   @ObservationIgnored private var settlingAnalysis: Task<Void, Never>?
   @ObservationIgnored private var analysisGeneration = UUID()
   @ObservationIgnored private var observing = false
@@ -269,18 +270,20 @@ struct PhotoPreviewProgress {
     analysisTask?.cancel()
     settlingAnalysis = analysisTask ?? settlingAnalysis
     analysisTask = nil
+    analysisCandidates = nil
     picks.invalidate()
   }
   func restartAnalysis() { cancelAnalysis(); picksSnapshot = nil; if RecentPhotosPolicy.canRead(status) { beginAnalysis() } }
   private func beginAnalysis() {
     guard analysisPermitted, analysisTask == nil else { return }
     let candidates = pickCandidates
+    analysisCandidates = candidates
     let token = UUID()
     analysisGeneration = token
     let previous = settlingAnalysis
     analysisTask = Task { [weak self] in
       guard let self else { return }
-      defer { if analysisGeneration == token { analysisTask = nil } }
+      defer { if analysisGeneration == token { analysisTask = nil; analysisCandidates = nil } }
       do {
         await previous?.value
         try Task.checkCancellation()
@@ -419,6 +422,7 @@ struct PhotoPreviewProgress {
     recentPhotos = candidates.filter { !validatesBrowsingSources || revisions[$0.id] == $0.sourceRevision }
     if let snapshot = picksSnapshot, snapshot.recommendations.unassessed == 0,
       snapshot.matches(pickCandidates) { return }
+    if analysisTask != nil, let analysisCandidates, PhotoPicksSnapshot.matches(analysisCandidates, pickCandidates) { return }
     cancelAnalysis()
     picksSnapshot = nil
     beginAnalysis()

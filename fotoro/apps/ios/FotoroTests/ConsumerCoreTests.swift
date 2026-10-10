@@ -1349,6 +1349,105 @@ extension ConsumerCoreTests {
       XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" })
     }
   }
+  @MainActor func testCatalogSyncSharesEquivalentReadsWithoutCancellingAnotherWaiter() async throws {
+    let gate = SavedLibraryRequestGate(started: expectation(description: "Shared catalog read"))
+    defer { gate.release.signal() }
+    try await withSavedLibrary(gate: gate) { services, server in
+      let first = Task { try await services.sync() }
+      await fulfillment(of: [gate.started], timeout: 3)
+      let joined = expectation(description: "Second caller joined")
+      let second = Task { joined.fulfill(); try await services.sync() }
+      await fulfillment(of: [joined], timeout: 1)
+      first.cancel()
+      await Task.yield()
+      XCTAssertEqual(server.requests.count, 1)
+      XCTAssertEqual(services.consumerSyncSummary.state, .checking)
+      gate.release.signal()
+      do { try await first.value; XCTFail("Cancelled caller reported success") } catch is CancellationError {}
+      try await second.value
+      XCTAssertNotNil(try services.consumerSavedPhoto(server.photoID))
+      XCTAssertEqual(server.requests.filter { $0.path == "/v1/changes" }.count, 1)
+      try await services.sync()
+      XCTAssertEqual(server.requests.filter { $0.path == "/v1/changes" }.count, 2, "A later recheck must not reuse a completed read")
+      XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" })
+    }
+  }
+  @MainActor func testSharedCatalogSyncRejectsCancelledOrWithdrawnContextBeforePublication() async throws {
+    for interruption in ["cancel", "lock", "account", "origin", "token", "session", "store", "cursor"] {
+      let gate = SavedLibraryRequestGate(started: expectation(description: "Held catalog " + interruption))
+      defer { gate.release.signal() }
+      try await withSavedLibrary(gate: gate) { services, server in
+        let catalog = services.store
+        if interruption == "session" { services.session.bearerToken = "retained-session" }
+        let first = Task { try await services.sync() }
+        await fulfillment(of: [gate.started], timeout: 3)
+        let joined = expectation(description: "Joined catalog " + interruption)
+        let second = Task { joined.fulfill(); try await services.sync() }
+        await fulfillment(of: [joined], timeout: 1)
+        switch interruption {
+        case "cancel": first.cancel(); second.cancel(); await Task.yield()
+        case "lock": services.vault.lock()
+        case "account": services.session.accountId = Wire.id()
+        case "origin": services.api.baseURL = URL(string: "https://different-service.test")!
+        case "session": services.session.fixture = false
+        case "store": try services.activateAccount()
+        case "cursor": try catalog.apply(ChangePageV1(version: 1, mediaVersion: 1, changes: [], nextCursor: "external", hasMore: false), verified: [:])
+        default: services.session.bearerToken = "replacement-session"
+        }
+        gate.release.signal()
+        for caller in [first, second] {
+          do { try await caller.value; XCTFail("Withdrawn read reported success: " + interruption) } catch is CancellationError {}
+        }
+        XCTAssertEqual(try catalog.cursor(), interruption == "cursor" ? "external" : nil, interruption)
+        XCTAssertTrue(try catalog.photos().isEmpty, interruption)
+        XCTAssertEqual(server.requests.filter { $0.path == "/v1/changes" }.count, 1)
+        XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" })
+      }
+    }
+  }
+  @MainActor func testCatalogSyncJoinsCurrentPageAfterOwnedCursorAdvances() async throws {
+    let gate = SavedLibraryRequestGate(started: expectation(description: "Second catalog page held"), cursor: "1")
+    defer { gate.release.signal() }
+    try await withSavedLibrary(gate: gate, multipage: true) { services, server in
+      let first = Task { try await services.sync() }
+      await fulfillment(of: [gate.started], timeout: 3)
+      XCTAssertEqual(try services.store.cursor(), "1")
+      let joined = expectation(description: "Caller joins current catalog page")
+      let second = Task { joined.fulfill(); try await services.sync() }
+      await fulfillment(of: [joined], timeout: 1)
+      XCTAssertEqual(server.requests.filter { $0.path == "/v1/changes" }.count, 2)
+      gate.release.signal()
+      try await first.value; try await second.value
+      XCTAssertEqual(try services.store.cursor(), "2")
+      XCTAssertEqual(server.requests.filter { $0.path == "/v1/changes" }.map(\.cursor), [nil, "1"])
+      XCTAssertNotNil(try services.consumerSavedPhoto(server.photoID))
+    }
+  }
+  @MainActor func testPhotosRefreshJoinsAutomaticPreflightWithoutCancellingIt() async throws {
+    let gate = SavedLibraryRequestGate(started: expectation(description: "Automatic and Photos catalog read"))
+    defer { gate.release.signal() }
+    try await withSavedLibrary(gate: gate) { services, server in
+      services.session.fixture = false
+      services.session.bearerToken = "controlled-private-session"
+      services.automaticPhotosAuthorization = { .authorized }
+      services.photosBackupSnapshot = { _ in [] }
+      try services.enableAutomaticPhotoSync()
+      await fulfillment(of: [gate.started], timeout: 3)
+      let refresh = SavedLibraryRefresh(), joined = expectation(description: "Visible Photos refresh joined")
+      let reading = Task { joined.fulfill(); await refresh.open(services, recheck: true) }
+      await fulfillment(of: [joined], timeout: 1)
+      refresh.cancel()
+      await Task.yield()
+      XCTAssertEqual(server.requests.count, 1)
+      gate.release.signal()
+      await reading.value
+      await services.waitForAutomaticPhotoSync()
+      XCTAssertNotNil(try services.consumerSavedPhoto(server.photoID))
+      XCTAssertEqual(server.requests.filter { $0.path == "/v1/changes" }.count, 1)
+      XCTAssertTrue(try services.journal.entries().isEmpty)
+      XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" })
+    }
+  }
   @MainActor func testReturningToSavedRechecksCatalogWithoutSendingPausedOriginalsOrLocalDrafts() async throws {
     try await withSavedLibrary { services, server in
       var queued = try self.samplePhoto()
@@ -1700,7 +1799,7 @@ extension ConsumerCoreTests {
   @MainActor private func withSavedLibrary(gate: SavedLibraryRequestGate? = nil, failFirst: Bool = false,
     failureCode: String = "CONTROLLED_CATALOG_UNAVAILABLE",
     networkFailure: URLError.Code? = nil,
-    original: Data? = nil, mediaVersion: Int? = 1, peerContribution: Bool = false,
+    original: Data? = nil, mediaVersion: Int? = 1, peerContribution: Bool = false, multipage: Bool = false,
     check: @MainActor (AppServices, SavedLibraryServer) async throws -> Void) async throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
     let previousCards = UserDefaults.standard.object(forKey: "fotoro.pinnedCards")
@@ -1709,7 +1808,7 @@ extension ConsumerCoreTests {
     let secret = accounts.testSecrets[0]
     let server = try SavedLibraryServer(card: card, secret: secret, gate: gate, failFirst: failFirst,
       failureCode: failureCode, networkFailure: networkFailure,
-      original: original ?? Data("jpg".utf8), mediaVersion: mediaVersion, peerContribution: peerContribution)
+      original: original ?? Data("jpg".utf8), mediaVersion: mediaVersion, peerContribution: peerContribution, multipage: multipage)
     SavedLibraryProtocol.server = server
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [SavedLibraryProtocol.self]
@@ -1767,23 +1866,27 @@ private actor SavedShareDownloadGate {
 private final class SavedLibraryRequestGate: @unchecked Sendable {
   let started: XCTestExpectation
   let release = DispatchSemaphore(value: 0)
-  init(started: XCTestExpectation) { self.started = started }
+  let cursor: String?
+  init(started: XCTestExpectation, cursor: String? = nil) { self.started = started; self.cursor = cursor }
 }
 private final class SavedLibraryServer: @unchecked Sendable {
-  struct Request { var method: String; var path: String; var mediaAware: Bool }
+  struct Request { var method: String; var path: String; var mediaAware: Bool; var cursor: String? }
   let photoID = Wire.id(), objectID = Wire.id()
   let peerPhotoID = Wire.id(), peerAccountID = Wire.id()
   private let lock = NSLock()
   private var recorded: [Request] = []
   private let gate: SavedLibraryRequestGate?
+  private var gateUsed = false
+  private let multipage: Bool
   private var failFirst: Bool
   private var networkFailure: URLError.Code?
   private let failureCode: String
   private let page: Data
   private let metadata: Data
   init(card: AccountCardV1, secret: FixtureSecrets, gate: SavedLibraryRequestGate?, failFirst: Bool,
-    failureCode: String, networkFailure: URLError.Code?, original: Data, mediaVersion: Int?, peerContribution: Bool) throws {
+    failureCode: String, networkFailure: URLError.Code?, original: Data, mediaVersion: Int?, peerContribution: Bool, multipage: Bool = false) throws {
     self.gate = gate; self.failFirst = failFirst
+    self.multipage = multipage
     self.failureCode = failureCode
     self.networkFailure = networkFailure
     let crypto = CryptoAdapter(), key = crypto.randomKey()
@@ -1823,18 +1926,30 @@ private final class SavedLibraryServer: @unchecked Sendable {
     guard request.httpMethod == "GET", let path = request.url?.path else { throw FotoroError("Catalog reading sent a write") }
     let mediaAware = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?
       .contains { $0.name == "media" && $0.value == "1" } == true
-    lock.lock(); recorded.append(Request(method: "GET", path: path, mediaAware: mediaAware)); let first = recorded.count == 1
+    let cursor = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "cursor" }?.value
+    lock.lock(); recorded.append(Request(method: "GET", path: path, mediaAware: mediaAware, cursor: cursor)); let first = recorded.count == 1
+    let hold = !gateUsed && (gate?.cursor.map { path == "/v1/changes" && cursor == $0 } ?? first)
+    if hold { gateUsed = true }
     let fail = failFirst && path == "/v1/changes"; if fail { failFirst = false }
     let networkError = path == "/v1/changes" ? networkFailure : nil
     if networkError != nil { networkFailure = nil }
     lock.unlock()
-    if first, let gate { gate.started.fulfill(); _ = gate.release.wait(timeout: .now() + 5) }
+    if hold, let gate { gate.started.fulfill(); _ = gate.release.wait(timeout: .now() + 5) }
     if let networkError { throw URLError(networkError) }
     if fail {
       return (failureCode == "UNAUTHENTICATED" ? 401 : 503,
         try JSONSerialization.data(withJSONObject: ["code": failureCode, "retryable": true]))
     }
-    if path == "/v1/changes" { return (200, page) }
+    if path == "/v1/changes" {
+      if multipage {
+        var value = try Wire.decode(ChangePageV1.self, page)
+        value.changes = cursor == nil ? value.changes : []
+        value.nextCursor = cursor == nil ? "1" : "2"
+        value.hasMore = cursor == nil
+        return (200, try Wire.encode(value))
+      }
+      return (200, page)
+    }
     if path == "/v1/objects/" + objectID { return (200, metadata) }
     if path == "/v1/grants" { return (200, try Wire.encode(GrantInboxV1(version: 1, grants: []))) }
     throw FotoroError("Unexpected catalog read")

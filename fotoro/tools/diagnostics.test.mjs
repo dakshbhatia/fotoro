@@ -50,3 +50,35 @@ test("malformed server records cannot synthesize successful requests", () => {
     {event: "api.request", status: 500}, {event: "api.error", status: 200},
   ])), []);
 });
+test("preserves inactive versus background interruption through safe native trace summaries", () => {
+  for (const reason of ["inactive", "background"]) {
+    const report = summarizeDiagnostics(parseDiagnostics(JSON.stringify([
+      {phase: "sync", operation: "sync", step: "action", outcome: "started", traceId},
+      {phase: "sync", operation: "sync", step: "action", outcome: "cancelled", reason, traceId, elapsedMS: 30},
+    ])));
+    assert.equal(report.flows[0].result, "cancelled");
+    assert.equal(report.flows[0].reason, reason);
+    assert.equal(report.flows[0].elapsedMS, 30);
+  }
+});
+test("retains distinct unfinished source reasons and finite processed Picks counters without private fields", () => {
+  for (const reason of ["pendingTransfers", "unpreparedSources", "skippedSources"]) {
+    const [event] = parseDiagnostics(JSON.stringify({phase: "sync", outcome: "changed", state: "needsAttention", step: "transfer", reason,
+      completed: 3, pending: 0, filename: "private-photo.jpg", photoId: "private-source"}));
+    assert.equal(event.reason, reason);
+    assert.equal(event.completed, 3);
+    assert.equal(event.pending, 0);
+    assert.ok(!JSON.stringify(event).includes("private-"));
+  }
+  const events = parseDiagnostics(JSON.stringify([
+    {phase: "picks", outcome: "completed", completed: 3, pending: 0},
+    {phase: "picks", outcome: "cancelled", completed: 2, pending: 498},
+    {phase: "picks", outcome: "cancelled", completed: -1, pending: "private-photo"},
+    {phase: "picks", outcome: "cancelled", completed: 1_000_001, pending: 1.5},
+  ]));
+  assert.deepEqual(events.slice(0, 2).map(({completed, pending}) => ({completed, pending})), [{completed: 3, pending: 0}, {completed: 2, pending: 498}]);
+  for (const event of events.slice(2)) {
+    assert.equal(event.completed, undefined);
+    assert.equal(event.pending, undefined);
+  }
+});
