@@ -185,20 +185,25 @@ final class SearchLifecycleTests: XCTestCase {
       }
       // The app host restores its own durable search on launch; this interaction test owns its index.
       let search = LocalSearchStore(root: FileManager.default.temporaryDirectory.appendingPathComponent("PhotoKitSearch-" + UUID().uuidString))
+      defer { search.pause() }
       search.open(status: status)
-      // Label editing needs this asset's verified metadata, while OCR may continue for other photos.
-      for _ in 0..<200 where !search.canEditLabels(assetID) { try await Task.sleep(for: .milliseconds(50)) }
-      XCTAssertTrue(search.canEditLabels(assetID))
-      XCTAssertNotNil(search.assets[assetID])
+      // Metadata scanning can outlast 10 seconds in a reused public fixture library.
+      // Wait for readiness; do not let a timeout cascade into unsaved label assertions.
+      let clock = ContinuousClock()
+      let deadline = clock.now.advanced(by: .seconds(30))
+      while !search.canEditLabels(assetID), clock.now < deadline {
+        try await Task.sleep(for: .milliseconds(50))
+      }
+      try XCTUnwrap(search.assets[assetID], "Metadata snapshot did not publish the created fixture")
+      guard search.canEditLabels(assetID) else { return XCTFail("Metadata snapshot did not become editable") }
       XCTAssertFalse(RecentPhotosPolicy.includes(captured, now: Date()))
       let suppliedLabel = "Older public receipt \(assetID.prefix(8))"
-      search.setLabels([suppliedLabel], photoID: assetID)
+      guard search.setLabels([suppliedLabel], photoID: assetID) else { return XCTFail("Fixture label was not saved") }
       search.updateQuery(suppliedLabel)
       for _ in 0..<100 where search.response.leading?.id != assetID {
         try await Task.sleep(for: .milliseconds(20))
       }
       XCTAssertEqual(search.response.leading?.id, assetID)
-      search.pause()
       print("Simulator all-age public asset verified outside recent canvas: \(assetID)")
     #else
       throw XCTSkip("Public fixture injection is Simulator-only.")
