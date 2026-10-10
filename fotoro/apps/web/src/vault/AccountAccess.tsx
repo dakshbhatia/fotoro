@@ -1,10 +1,11 @@
 import {useEffect, useRef} from "react";
-export function AccountAccess({ password, onPassword, generatedPassword, busy, passwordFallback = false, onSignIn, onPasskey, onAnotherAccount, onCreate, onContinue, onBack, onCopy, onSave }: {
+export function AccountAccess({ password, onPassword, generatedPassword, busy, passwordFallback = false, heading, onSignIn, onPasskey, onAnotherAccount, onCreate, onContinue, onBack, onCopy, onSave }: {
   password: string;
   onPassword: (password: string) => void;
   generatedPassword: string;
   busy: boolean;
   passwordFallback?: boolean;
+  heading?: string;
   onSignIn: () => void;
   onPasskey?: () => void;
   onAnotherAccount?: () => void;
@@ -22,7 +23,7 @@ export function AccountAccess({ password, onPassword, generatedPassword, busy, p
     }
   }, [passwordFallback, busy, generatedPassword]);
   if (generatedPassword) return <form className="account-access" aria-busy={busy} onSubmit={event => {event.preventDefault(); if (!busy) onContinue();}}>
-    <h2>Start your Fotoro</h2>
+    <h2>{heading ?? "Start your Fotoro"}</h2>
     <p className="account-password-note">Keep this password to open your photos on another device.</p>
     <label className="account-field">
       <span>Fotoro password</span>
@@ -46,7 +47,7 @@ export function AccountAccess({ password, onPassword, generatedPassword, busy, p
       <button className="primary-action" type="submit" disabled={busy || !password.trim()}>Open Fotoro</button>
     </form>;
   return <>
-    <h2>Sign in</h2>
+    <h2>{heading ?? "Sign in"}</h2>
     {onPasskey && <button className="primary-action" disabled={busy} onClick={onPasskey}>Continue with a passkey</button>}
     {onAnotherAccount && <button className="text-button" disabled={busy} onClick={onAnotherAccount}>Use another account</button>}
     {onPasskey ? <details ref={passwordDetails} open={passwordFallback || undefined} className="account-password-choice"><summary>Use Fotoro password</summary>{passwordForm}</details> : passwordForm}

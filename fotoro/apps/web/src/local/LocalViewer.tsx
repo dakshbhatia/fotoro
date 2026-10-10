@@ -55,7 +55,7 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
   return <div className="viewer" ref={panel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Photo viewer">
     <div className="viewer-top glass">
       <button onClick={onClose} aria-label="Close viewer"><Icon kind="close" /></button>
-      <span>{index + 1} / {photos.length}</span>
+      {photos.length > 1 && <span>{index + 1} / {photos.length}</span>}
       <button onClick={() => setDetails(!details)} aria-label="More photo options" aria-expanded={details}>More</button>
     </div>
     <div className="view-image" onDoubleClick={() => setZoom(!zoom)}
@@ -71,10 +71,7 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
     </div>
     {!photo.file && <p className="original-gate">Reselect the original to Save or Share. <button onClick={onReselect}>Reselect</button></p>}
     <div className="viewer-bottom glass">
-      <button aria-label="Previous photo" disabled={index === 0} onClick={() => setSelected(photos[index - 1].id)}><Icon kind="previous" /></button>
-      {onSave && <button disabled={!photo.file || sharing || saved} onClick={() => {
-        if (photo.file && !isSaved?.(photo) && alive.current && currentPhoto.current === photo) onSave(photo);
-      }}>{saved ? "Saved" : "Save"}</button>}
+      {index > 0 && <button aria-label="Previous photo" onClick={() => setSelected(photos[index - 1].id)}><Icon kind="previous" /></button>}
       <button className="primary-action" disabled={!photo.file || sharing} onClick={async () => {
         if (!photo.file || shareAttempt.pending) return;
         const current = () => alive.current && currentPhoto.current === photo && photo.current?.() !== false && document.visibilityState !== "hidden";
@@ -83,7 +80,7 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
         catch (error) {if (current()) setStatus("The photo could not be shared. Download the original from More.");}
         finally {if (alive.current) setSharing(false);}
       }}>{sharing ? "Sharing…" : "Share"}</button>
-      <button aria-label="Next photo" disabled={index === photos.length - 1} onClick={() => setSelected(photos[index + 1].id)}><Icon kind="next" /></button>
+      {index < photos.length - 1 && <button aria-label="Next photo" onClick={() => setSelected(photos[index + 1].id)}><Icon kind="next" /></button>}
     </div>
     {details && <aside className="details local-details">
       <button onClick={() => setZoom(!zoom)}>{zoom ? "Fit" : "Zoom"}</button>
@@ -97,6 +94,9 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
         getPreview={async signal => {const loaded = await resources.load(photo, "preview", signal); return loaded.blob;}}
         onObservation={observation => intelligence.keep(photo, observation)} /></Suspense>}
       <p>{photo.file ? "Original file unchanged" : "Retained preview · original not selected"}</p>
+      {onSave && <button disabled={!photo.file || sharing || saved} onClick={() => {
+        if (photo.file && !isSaved?.(photo) && alive.current && currentPhoto.current === photo) onSave(photo);
+      }}>{saved ? "Saved" : "Save to Fotoro"}</button>}
       {onFavorite && <button aria-pressed={!!photo.favorite} onClick={() => {
         if (alive.current && currentPhoto.current === photo) onFavorite(photo.id, !photo.favorite);
       }}>{photo.favorite ? "Unfavorite" : "Favorite"}</button>}

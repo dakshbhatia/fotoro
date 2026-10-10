@@ -962,6 +962,9 @@ export default function CloudApp({
     if (!active || !account || !sharePhotos?.length) return;
     openSharing(sharePhotos);
   }, [active, account, sharePhotos]);
+  const tripPhotoCount = active && document.visibilityState !== "hidden" && saveIntent?.pending && chosenTrip?.request === saveIntent
+    && saveIntent.snapshot.photos.every(photo => photo.current?.() !== false)
+    ? saveIntent.snapshot.files.length + new Set(chosenTrip.savedSources.map(source => source.photoId)).size : 0;
   return (
     <>
       <main className={"cloud-library" + (selecting ? " exchange-selection" : "")} aria-busy={searchResult.searching || undefined} inert={viewing || exchange || menu || preparedOriginals || placesOpen || peopleOpen || albumsOpen ? true : undefined}>
@@ -1012,6 +1015,7 @@ export default function CloudApp({
             {incoming?.pending && <p className="hint">{incoming.link.kind === "moment" ? "Enter the Fotoro password this photo invitation was sent to." : "Enter your Fotoro password to accept this contact."}</p>}
             {incomingAlbum?.pending && <p className="hint">Sign in to the Fotoro account invited to this album.</p>}
             <AccountAccess
+              heading={tripPhotoCount ? `Add ${tripPhotoCount} ${tripPhotoCount === 1 ? "photo" : "photos"} to a trip` : undefined}
               passwordFallback={passwordFallback}
               password={recovery}
               onPassword={setRecovery}
@@ -1076,16 +1080,23 @@ export default function CloudApp({
                 Public test account · private uploads disabled.
               </p>
             )}
-            {(photos.length > 0 || !!received?.length || !!query) && <div className="consumer-search">
+            {(photos.length > 0 || !!received?.length || !!query) && <div className="photo-browse-toolbar"><div className="consumer-search">
               <SearchIcon />
               <input ref={searchInput} aria-label="Search photos" placeholder="Search photos" value={query} onChange={event => {setQuery(event.target.value); setCommittedMeaning(undefined);}} />
               {query && <button onClick={() => {setQuery(""); setCommittedMeaning(undefined); searchInput.current?.focus();}} aria-label="Clear search">×</button>}
+            </div>
+            {!received && photos.length > 0 && <details className="photo-browse-filters" onKeyDown={event => {
+              if (event.key === "Escape") {event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();}
+            }}><summary>Filters<span className="photo-browse-filter-state">{[
+              recentBrowseActive(true, query) ? recentOnly ? "Last 30 days" : catalogIncomplete ? "All loaded photos" : "All photos" : undefined,
+              familyFilter ? `${peopleFind.filter.ids.size} ${peopleFind.filter.ids.size === 1 ? "person" : "people"}${peopleFind.filter.mode === "everyone" ? " · Everyone" : ""}` : undefined,
+            ].filter(Boolean).join(" · ")}</span></summary><div className="photo-browse-filter-options">
+              {recentBrowseActive(true, query) && <label className="local-check"><input type="checkbox" checked={recentOnly} disabled={preparingOriginals || sharingOriginals} onChange={event => setRecentOnly(event.target.checked)} />Last 30 days</label>}
+              <PeopleFilter people={peopleFind.people} value={peopleFind.filter} onChange={peopleFind.change}
+                disabled={preparingOriginals || sharingOriginals} onReview={!publicDemo ? () => setPeopleOpen(true) : undefined} />
+            </div></details>}
             </div>}
-            {!received && photos.length > 0 && <div className="people-find-controls"><PeopleFilter people={peopleFind.people} value={peopleFind.filter} onChange={peopleFind.change}
-              disabled={preparingOriginals || sharingOriginals} onReview={!publicDemo ? () => setPeopleOpen(true) : undefined} />
-              {(familyFilter || normalizeSearch(query)) && <button disabled={busy || preparingOriginals || sharingOriginals || searchResult.searching || bestShots.busy || !shown.length} onClick={selectResults}>Select these {shown.length}</button>}
-            </div>}
-            {!received && photos.length > 0 && recentBrowseActive(true, query) && <button className="local-filter" aria-label={recentOnly ? "Show all loaded photos" : "Browse the last 30 days"} onClick={() => setRecentOnly(current => !current)}>{recentOnly ? "Last 30 days ×" : catalogIncomplete ? "All loaded photos" : "All photos"}</button>}
+            {!received && photos.length > 0 && (familyFilter || normalizeSearch(query)) && <div className="photo-browse-result-actions"><button disabled={busy || preparingOriginals || sharingOriginals || searchResult.searching || bestShots.busy || !shown.length} onClick={selectResults}>Select {shown.length} {shown.length === 1 ? "photo" : "photos"}</button></div>}
             {!received && catalogIncomplete && <div className="hint" aria-label="Saved coverage"><p role="status">{catalogCoverage!.loaded} Saved {catalogCoverage!.loaded === 1 ? "photo loaded" : "photos loaded"}. Date, search and People filters cover loaded photos only.</p><button disabled={busy || preparingOriginals || sharingOriginals} onClick={() => void run(async () => {
               const session = requireVault(); browseFor(session);
               catalogBrowse.current!.limit += 100;
@@ -1152,13 +1163,13 @@ export default function CloudApp({
             )}
             {!received && selected.size > 0 && <div className="consumer-selection glass" aria-label="Selected photos">
               <span role="status">{selected.size} selected</span>
-              <button disabled={busy || sharingOriginals} onClick={() => {if (!running.current) setSelected(new Set());}}>Clear</button>
               <AlbumContinuation destination={albumDestination} photos={chosen} disabled={busy || preparingOriginals || sharingOriginals || chosen.length > 100} onContinue={(items, albumId) => {if (!running.current) openAlbums(items, albumId);}} />
               <button ref={originalButton} className="primary-action" disabled={busy || preparingOriginals || sharingOriginals} onClick={() => void prepareSelectedOriginals()}>{preparingOriginals ? "Preparing…" : "Share"}</button>
               {!publicDemo && !albumDestination?.current() && <button disabled={busy || preparingOriginals || sharingOriginals || chosen.length > 100} onClick={() => {if (!running.current) openAlbums(chosen);}}>Add to trip</button>}
               {chosen.length > 100 && <small>Choose up to 100 photos to add to a trip.</small>}
               <details className="selection-more" onKeyDown={event => {if (event.key === "Escape") {event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();}}}>
-                <summary>More</summary><div><button disabled={busy || preparingOriginals || sharingOriginals} onClick={() => {if (!running.current) openSharing(chosen);}}>Share in Fotoro</button></div>
+                <summary>More</summary><div><button disabled={busy || preparingOriginals || sharingOriginals} onClick={() => {if (!running.current) openSharing(chosen);}}>Share in Fotoro</button>
+                <button disabled={busy || sharingOriginals} onClick={() => {if (!running.current) setSelected(new Set());}}>Clear selection</button></div>
               </details>
             </div>}
             <input

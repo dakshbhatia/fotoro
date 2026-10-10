@@ -3,7 +3,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { type LocalPhoto, LocalResources } from "./resources";
 import {captureGroup} from "./capture-groups";
 import {PhotoTable} from "./PhotoTable";
-import {photoColumns, type PhotoColumn} from "./photo-table";
+import type {PhotoColumn} from "./photo-table";
 import {useLocalThumbnail} from "./useLocalThumbnail";
 import {usePhotoNavigation} from "../library/photo-navigation";
 export interface PickSelection {
@@ -55,31 +55,12 @@ function Tile({
     </div>
   );
 }
-export function LocalLibrary({
-  ...props
-}: Parameters<typeof LocalGrid>[0]) {
-  const [view, setView] = useState<"grid" | "table">("grid");
-  const [columns, setColumns] = useState<ReadonlySet<PhotoColumn>>(() => new Set(["name", "date", "type", "availability"]));
-  const visibleColumns = photoColumns.filter(column => columns.has(column.id)).map(column => column.id);
-  return <>
-    <div className="photo-view-controls">
-      <details className="photo-view-options" onKeyDown={event => {
-        if (event.key === "Escape") {event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();}
-      }}><summary>View</summary><div role="group" aria-label="Photo view">
-        <button aria-pressed={view === "grid"} onClick={event => {setView("grid"); const menu = event.currentTarget.closest("details"); if (menu) {menu.open = false; menu.querySelector("summary")?.focus();}}}>Grid</button>
-        <button aria-pressed={view === "table"} onClick={event => {setView("table"); const menu = event.currentTarget.closest("details"); if (menu) {menu.open = false; menu.querySelector("summary")?.focus();}}}>Table</button>
-      </div></details>
-      {view === "table" && <details className="photo-column-options" onKeyDown={event => {
-        if(event.key === "Escape") {event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();}
-      }}><summary>Columns</summary><fieldset><legend className="visually-hidden">Visible columns</legend>
-        {photoColumns.map(column => <label key={column.id}><input type="checkbox" checked={columns.has(column.id)} disabled={column.id === "name"} onChange={event => {
-          const checked = event.target.checked; setColumns(current => {const next = new Set(current); checked ? next.add(column.id) : next.delete(column.id); return next;});
-        }} />{column.label}</label>)}
-      </fieldset></details>}
-    </div>
-    {view === "grid" ? <LocalGrid {...props} /> : <PhotoTable {...props} columns={visibleColumns} />}
-  </>;
+export function LocalLibrary({view, columns, ...props}: Parameters<typeof LocalGrid>[0] & {
+  view: "grid" | "table"; columns: PhotoColumn[];
+}) {
+  return view === "grid" ? <LocalGrid {...props} /> : <PhotoTable {...props} columns={columns} />;
 }
+
 function LocalGrid({
   photos,
   resources,
