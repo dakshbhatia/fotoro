@@ -170,7 +170,8 @@ enum PhotoBrowsing {
       dated.append(DatedItem(item: item, date: date))
     }
     dated.sort {
-      $0.date == $1.date ? $0.item.source.id < $1.item.source.id : $0.date < $1.date
+      if $0.date == $1.date { return $0.item.source.id < $1.item.source.id }
+      return order == .newestFirst ? $0.date > $1.date : $0.date < $1.date
     }
     var buckets: [Bucket] = []
     for item in dated {
@@ -182,29 +183,29 @@ enum PhotoBrowsing {
       } else { undated.append(item.item); continue }
       let joinsPrevious: Bool
       if let last = buckets.last, last.day.start == day.start {
+        // Anchor in browsing order so appending older pages cannot repartition
+        // already loaded newest-first moments or replace their identities.
+        let span = order == .newestFirst
+          ? last.end.timeIntervalSince(item.date) : item.date.timeIntervalSince(last.start)
         joinsPrevious = grouping == .days
-          || item.date.timeIntervalSince(last.start) <= maximumMomentSpan
+          || span <= maximumMomentSpan
       } else { joinsPrevious = false }
       if joinsPrevious {
         buckets[buckets.count - 1].items.append(item)
-        buckets[buckets.count - 1].end = item.date
+        buckets[buckets.count - 1].start = min(buckets[buckets.count - 1].start, item.date)
+        buckets[buckets.count - 1].end = max(buckets[buckets.count - 1].end, item.date)
       } else {
         let dayID = "day:\(calendar.identifier):\(calendar.timeZone.identifier):\(day.start.timeIntervalSince1970)"
-        let id = grouping == .days ? dayID : "moment:\(dayID):\(item.item.source.id)"
+        // Photos pages can split capture-time ties. A newly loaded tied source
+        // may sort before this source without changing the moment's time anchor.
+        let id = grouping == .days ? dayID : "moment:\(dayID):\(item.date.timeIntervalSince1970)"
         buckets.append(Bucket(id: id, start: item.date, end: item.date, day: day, items: [item]))
       }
     }
-    if order == .newestFirst { buckets.reverse() }
     var groups: [PhotoBrowseGroup] = []
     for bucket in buckets {
-      var visible = bucket.items.filter { filter.includes($0.item.facts) }
+      let visible = bucket.items.filter { filter.includes($0.item.facts) }
       guard !visible.isEmpty else { continue }
-      // Capture ties always use source ID order, independent of fetch order.
-      if order == .newestFirst {
-        visible.sort {
-          $0.date == $1.date ? $0.item.source.id < $1.item.source.id : $0.date > $1.date
-        }
-      }
       let start = grouping == .days ? bucket.day.start : bucket.start
       let end = grouping == .days ? bucket.day.end : bucket.end
       groups.append(PhotoBrowseGroup(id: bucket.id, start: start, end: end,

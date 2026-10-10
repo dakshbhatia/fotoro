@@ -40,6 +40,7 @@ struct LibraryView: View {
   @State private var favoritesOnly = false
   @State private var savedHasMore = true
   @State private var catalogSearch = SavedCatalogSearch()
+  @State private var dayProjection = PhotoBrowseValueProjection<SavedLibraryDayProjectionID, [(String, [Int])]>()
   @State private var searchAttempt: UInt64 = 0
   @State private var selection = SavedPhotoSelection()
   @State private var catalogRefresh = SavedLibraryRefresh()
@@ -71,16 +72,27 @@ struct LibraryView: View {
     }
   }
   var days: [(String, [LocalPhoto])] {
-    let formatter = DateFormatter()
-    formatter.dateFormat = "yyyy-MM-dd"
-    let groups = Dictionary(grouping: filtered) { photo in
-      Wire.parseDate(photo.metadata.sourceDate).map(formatter.string) ?? "Date unavailable"
+    let current = filtered
+    let calendar = Calendar.current
+    let identity = SavedLibraryDayProjectionID(binding: SavedLibraryOpenBinding(services),
+      permitted: services.photoAccountAccess != nil, origin: services.api.baseURL.absoluteString,
+      catalog: services.consumerCatalogGeneration, query: query, favoritesOnly: favoritesOnly,
+      calendar: calendar, locale: Locale.current,
+      sources: current.map { SavedLibraryDaySource(id: $0.id, date: $0.metadata.sourceDate) })
+    let groups = dayProjection.value(for: identity) {
+      let formatter = DateFormatter()
+      formatter.dateFormat = "yyyy-MM-dd"
+      let groups = Dictionary(grouping: current.indices) { index in
+        Wire.parseDate(current[index].metadata.sourceDate).map(formatter.string) ?? "Date unavailable"
+      }
+      return groups.keys.sorted { lhs, rhs in
+        if lhs == "Date unavailable" { return false }
+        if rhs == "Date unavailable" { return true }
+        return lhs > rhs
+      }.map { ($0, groups[$0]!) }
     }
-    return groups.keys.sorted { lhs, rhs in
-      if lhs == "Date unavailable" { return false }
-      if rhs == "Date unavailable" { return true }
-      return lhs > rhs
-    }.map { ($0, groups[$0]!) }
+    // Cache grouping only, so changed photo metadata and local URLs remain current.
+    return groups.map { ($0.0, $0.1.map { current[$0] }) }
   }
   var body: some View {
     NavigationStack { libraryAlerts }.preferredColorScheme(.dark)
@@ -713,6 +725,23 @@ func savedLibraryEmptyMessage(sync: AutomaticPhotoSyncStatus, favoritesOnly: Boo
   return "Save photos in Fotoro, or pull down to check photos saved on another device."
 }
 
+private struct SavedLibraryDaySource: Equatable {
+  var id: String
+  var date: String
+}
+
+private struct SavedLibraryDayProjectionID: Equatable {
+  var binding: SavedLibraryOpenBinding
+  var permitted: Bool
+  var origin: String
+  var catalog: UInt64
+  var query: String
+  var favoritesOnly: Bool
+  var calendar: Calendar
+  var locale: Locale
+  var sources: [SavedLibraryDaySource]
+}
+
 struct SavedCatalogSearchPresentationID: Equatable {
   var query: String
   var catalog: UInt64
@@ -785,6 +814,7 @@ struct LibraryPhotoCell: View {
   private var syncStatus: PhotoSyncItemStatus? { services?.photoSyncItem(photoID: photo.id) }
 
   var body: some View {
+    let syncStatus = syncStatus
     Button(action: open) {
       ZStack(alignment: .bottomTrailing) {
         GeometryReader { geometry in
@@ -839,18 +869,21 @@ private struct SavedLibraryPageRequest: Equatable {
 }
 
 struct SavedLibraryPaginationFooter: View {
+  @State private var visible = false
   let services: AppServices
   @Binding var hasMore: Bool
   let isActive: Bool
   let failed: (String) -> Void
   var body: some View {
-    let request = SavedLibraryPageRequest(page: SavedLibraryPageID(services), isActive: isActive)
+    let request = SavedLibraryPageRequest(page: SavedLibraryPageID(services), isActive: isActive && visible)
     ProgressView("Loading photos…").font(.footnote).padding().frame(maxWidth: .infinity)
+      .onScrollVisibilityChange(threshold: 0.1) { visible = $0 }
+      .onDisappear { visible = false }
       .task(id: request) {
         // A sparse filter can expose several consecutive empty metadata pages.
         // One bounded page per task lets scrolling away or leaving cancel work.
         await Task.yield()
-        guard !Task.isCancelled, isActive, SavedLibraryPageID(services) == request.page else { return }
+        guard !Task.isCancelled, isActive, visible, SavedLibraryPageID(services) == request.page else { return }
         do {
           if let more = try SavedLibraryPageLoading.load(services, expected: request.page, isActive: isActive) { hasMore = more }
         } catch {

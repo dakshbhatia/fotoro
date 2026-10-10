@@ -175,6 +175,7 @@ struct ConsumerSearchResultsView: View {
     return hits.filter { review.recommendations.ids.contains($0.id) }
   }
   var body: some View {
+    let matches = matches
     VStack(alignment: .leading, spacing: 16) {
       if !search.peopleSelection.isEmpty {
         SearchPeopleSummary(search: search, edit: editPeople)

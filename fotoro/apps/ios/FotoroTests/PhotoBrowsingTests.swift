@@ -313,14 +313,76 @@ final class PhotoBrowsingTests: XCTestCase {
       photo("night", at: date(10, 2, hour: 23, minute: 59)),
       photo("next", at: date(10, 3))]
     let groups = PhotoBrowsing.groups(items, grouping: .moments, calendar: calendar)
-    XCTAssertEqual(groups.map { $0.sources.map(\.id) }, [["next"], ["night"], ["later"], ["edge", "middle", "anchor"]])
+    XCTAssertEqual(groups.map { $0.sources.map(\.id) }, [["next"], ["night"], ["later", "edge", "middle"], ["anchor"]])
     XCTAssertTrue(groups.allSatisfy { $0.end!.timeIntervalSince($0.start!) <= PhotoBrowsing.maximumMomentSpan })
     XCTAssertEqual(groups.last?.start, date(10, 2, hour: 8))
-    XCTAssertEqual(groups.last?.end, date(10, 2, hour: 10))
+    XCTAssertEqual(groups.last?.end, date(10, 2, hour: 8))
+    XCTAssertEqual(groups[2].start, date(10, 2, hour: 9, minute: 30))
+    XCTAssertEqual(groups[2].end, date(10, 2, hour: 11))
+  }
+  func testAppendingOlderPagesPreservesNewestFirstMomentIdentityAndLoadedMembers() {
+    let loaded = [photo("newest", at: date(10, 2, hour: 11)),
+      photo("middle", at: date(10, 2, hour: 9, minute: 30))]
+    let initial = PhotoBrowsing.groups(loaded, grouping: .moments, calendar: calendar)
+    let older = [photo("edge", at: date(10, 2, hour: 9)),
+      photo("earlier", at: date(10, 2, hour: 8)),
+      photo("previous-day", at: date(10, 1, hour: 23, minute: 59))]
+    let paged = PhotoBrowsing.groups(loaded + older, grouping: .moments, calendar: calendar)
+    let loadedIDs = Set(loaded.map { $0.source.id })
+    XCTAssertEqual(initial.count, 1)
+    XCTAssertEqual(paged.map { $0.sources.map(\.id) }, [["newest", "middle", "edge"], ["earlier"], ["previous-day"]])
+    for group in initial {
+      let current = paged.first { $0.id == group.id }
+      XCTAssertNotNil(current)
+      XCTAssertEqual(current?.sources.filter { loadedIDs.contains($0.id) }, group.sources)
+    }
+    XCTAssertEqual(paged.first?.start, date(10, 2, hour: 9))
+    XCTAssertEqual(paged.first?.end, date(10, 2, hour: 11))
+    XCTAssertTrue(paged.allSatisfy { $0.end!.timeIntervalSince($0.start!) <= PhotoBrowsing.maximumMomentSpan })
+  }
+  func testOldestFirstMomentsKeepOldestAnchorsAndBoundedAscendingMembers() {
+    let loaded = [photo("anchor", at: date(10, 2, hour: 8)),
+      photo("middle", at: date(10, 2, hour: 9, minute: 30)),
+      photo("edge", at: date(10, 2, hour: 10))]
+    let initial = PhotoBrowsing.groups(loaded, grouping: .moments, order: .oldestFirst, calendar: calendar)
+    let current = PhotoBrowsing.groups(loaded + [photo("later", at: date(10, 2, hour: 11)),
+      photo("next-day", at: date(10, 3))], grouping: .moments, order: .oldestFirst, calendar: calendar)
+    XCTAssertEqual(current.map { $0.sources.map(\.id) }, [["anchor", "middle", "edge"], ["later"], ["next-day"]])
+    XCTAssertEqual(current.first?.id, initial.first?.id)
+    XCTAssertEqual(current.first?.sources, initial.first?.sources)
+    XCTAssertEqual(current.first?.start, date(10, 2, hour: 8))
+    XCTAssertEqual(current.first?.end, date(10, 2, hour: 10))
+    XCTAssertTrue(current.allSatisfy { $0.end!.timeIntervalSince($0.start!) <= PhotoBrowsing.maximumMomentSpan })
+  }
+  func testMomentCaptureTiesAndUndatedSourcesHaveDeterministicOrder() {
+    let items = [photo("b", at: date(10, 2, hour: 10)),
+      photo("a", at: date(10, 2, hour: 10)), photo("unknown-b"), photo("unknown-a")]
+    for order in [PhotoBrowseOrder.newestFirst, .oldestFirst] {
+      let groups = PhotoBrowsing.groups(items, grouping: .moments, order: order, calendar: calendar)
+      let reversed = PhotoBrowsing.groups(Array(items.reversed()), grouping: .moments, order: order, calendar: calendar)
+      XCTAssertEqual(groups.map(\.id), reversed.map(\.id))
+      XCTAssertEqual(groups.map { $0.sources.map(\.id) }, [["a", "b"], ["unknown-a", "unknown-b"]])
+      XCTAssertEqual(groups.map(\.sources), reversed.map(\.sources))
+      XCTAssertNil(groups.last?.start)
+      XCTAssertNil(groups.last?.end)
+    }
+  }
+  func testPagingCaptureTimeTiesDoesNotReplaceMomentIdentity() {
+    let loaded = photo("b", at: date(10, 2, hour: 10))
+    let tied = photo("a", at: date(10, 2, hour: 10))
+    for order in [PhotoBrowseOrder.newestFirst, .oldestFirst] {
+      let initial = PhotoBrowsing.groups([loaded], grouping: .moments, order: order, calendar: calendar)
+      let paged = PhotoBrowsing.groups([loaded, tied], grouping: .moments, order: order, calendar: calendar)
+      XCTAssertEqual(paged.map(\.id), initial.map(\.id))
+      XCTAssertEqual(paged.first?.sources.map(\.id), ["a", "b"])
+      XCTAssertEqual(paged.first?.sources.filter { $0.id == loaded.source.id }, initial.first?.sources)
+      XCTAssertEqual(paged.first?.start, initial.first?.start)
+      XCTAssertEqual(paged.first?.end, initial.first?.end)
+    }
   }
   func testFilteringDoesNotChangeExistingDayOrMomentIDs() {
-    let items = [photo("anchor", at: date(10, 2, hour: 8)),
-      photo("favorite", at: date(10, 2, hour: 9), favorite: true)]
+    let items = [photo("anchor", at: date(10, 2, hour: 9)),
+      photo("favorite", at: date(10, 2, hour: 8), favorite: true)]
     for grouping in [PhotoBrowseGrouping.days, .moments] {
       let all = PhotoBrowsing.groups(items, grouping: grouping, calendar: calendar)
       let favorites = PhotoBrowsing.groups(items, filter: .favorites, grouping: grouping, calendar: calendar)

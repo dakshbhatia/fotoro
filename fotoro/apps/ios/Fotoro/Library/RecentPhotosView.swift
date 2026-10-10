@@ -19,9 +19,6 @@ struct PhotosImage: View {
   @State private var active = false
   @State private var progress = PhotoPreviewProgress()
   @State private var retry = 0
-  @State private var cachedAsset: PHAsset?
-  @State private var cachedTarget: CGSize?
-  @State private var cachedOptions: PHImageRequestOptions?
   @State private var displayedSource: RecentPhotoSource?
   @Environment(\.displayScale) private var displayScale
   private var targetSize: CGSize {
@@ -55,7 +52,6 @@ struct PhotosImage: View {
     }
     .task(id: photo.id + "|" + photo.sourceRevision + "|\(retry)|\(targetSize.width)|\(networkAllowed)") {
       if let request { store.images.cancelImageRequest(request) }
-      stopCaching()
       let source = RecentPhotoSource(photo)
       if displayedSource != source { image = nil; displayedSource = source }
       progress = PhotoPreviewProgress()
@@ -73,10 +69,6 @@ struct PhotosImage: View {
       options.isNetworkAccessAllowed = networkAllowed
       options.deliveryMode = .opportunistic
       if !large { options.resizeMode = .fast }
-      if !large {
-        cachedAsset = photo.asset; cachedTarget = target; cachedOptions = options
-        store.cache([photo.asset], start: true, targetSize: target, options: options)
-      }
       request = store.images.requestImage(
         for: photo.asset,
         targetSize: target,
@@ -101,14 +93,31 @@ struct PhotosImage: View {
       active = false
       generation = UUID()
       if let request { store.images.cancelImageRequest(request) }
-      stopCaching()
       image = nil
     }
     .accessibilityLabel(photo.capturedAt?.formatted(date: .complete, time: .shortened) ?? "Photo")
   }
-  private func stopCaching() {
-    if let cachedAsset, let cachedTarget { store.cache([cachedAsset], start: false, targetSize: cachedTarget, options: cachedOptions) }
-    cachedAsset = nil; cachedTarget = nil; cachedOptions = nil
+}
+
+// Viewport visibility, rather than lazy-view creation, admits the next page.
+// Page changes may continue loading while this footer is actually on screen.
+private struct DevicePhotosPaginationFooter: View {
+  let store: RecentPhotosStore
+  let filter: PhotoBrowseFilter
+  let dates: PhotoBrowseDateScope
+  let isActive: Bool
+  @State private var visible = false
+  var body: some View {
+    let request = PhotoBrowseContinuation(page: store.browsePage, filter: filter,
+      dates: dates, isActive: isActive && visible)
+    ProgressView(filter == .all ? "Loading photos…" : "Looking for matching photos…")
+      .font(.footnote).padding().frame(maxWidth: .infinity)
+      .onScrollVisibilityChange(threshold: 0.1) { visible = $0 }
+      .onDisappear { visible = false }
+      .task(id: request) {
+        guard request.isActive else { return }
+        await store.loadMorePhotos(matching: filter, whileActive: { isActive && visible })
+      }
   }
 }
 
@@ -1339,12 +1348,8 @@ struct RecentPhotosView: View {
         }.buttonStyle(.plain).accessibilityIdentifier("gallery.overview.\(group.id)")
       }
       if store.hasMorePhotos {
-        ProgressView("Loading photos…").font(.footnote).padding().frame(maxWidth: .infinity)
-          .task(id: PhotoBrowseContinuation(page: store.browsePage, filter: browseFilter,
-            dates: browseDates, isActive: scenePhase == .active)) {
-            guard scenePhase == .active else { return }
-            await store.loadMorePhotos(matching: browseFilter, whileActive: { scenePhase == .active })
-          }
+        DevicePhotosPaginationFooter(store: store, filter: browseFilter, dates: browseDates,
+          isActive: scenePhase == .active)
       }
       #if !FOTORO_LOCAL_PREVIEW
       if savedHasMore, let services, services.photoAccountAccess != nil {
@@ -1379,10 +1384,12 @@ struct RecentPhotosView: View {
       ForEach(allPhotos ? overviewSnapshot.days : homeGroups) { group in
         Section {
           ForEach(group.sources, id: \.id) { source in
-            if let photo = current[source.id], photo.sourceRevision == source.revision {
-        deviceCell(photo)
-          .onAppear { loadMoreDevicePhotos(after: photo.id) }
-            }
+            ZStack {
+              Color.clear
+              if let photo = current[source.id], photo.sourceRevision == source.revision {
+                deviceCell(photo)
+              }
+            }.aspectRatio(1, contentMode: .fit)
           }
         } header: {
           if allPhotos {
@@ -1392,12 +1399,8 @@ struct RecentPhotosView: View {
       }
       if allPhotos, store.hasMorePhotos {
         Section {} footer: {
-          ProgressView(browseFilter == .all ? "Loading photos…" : "Looking for matching photos…")
-            .font(.footnote).padding().frame(maxWidth: .infinity)
-            .task(id: PhotoBrowseContinuation(page: store.browsePage, filter: browseFilter, dates: browseDates, isActive: scenePhase == .active)) {
-              guard scenePhase == .active else { return }
-              await store.loadMorePhotos(matching: browseFilter, whileActive: { scenePhase == .active })
-            }
+          DevicePhotosPaginationFooter(store: store, filter: browseFilter, dates: browseDates,
+            isActive: scenePhase == .active)
         }
       }
     }
@@ -1410,19 +1413,21 @@ struct RecentPhotosView: View {
       ForEach(overviewSnapshot.days) { group in
         Section {
           ForEach(group.sources, id: \.id) { source in
-            if source.id.hasPrefix("device:"), let photo = device[String(source.id.dropFirst("device:".count))],
-              photo.sourceRevision == source.revision {
-              RecentPhotoCell(photo: photo, store: store, selected: selected.contains(photo.id), open: {
-                if selecting { toggleSelection(photo) } else { openViewer(photo) }
-              }, toggle: { toggleSelection(photo) }, services: services)
-                .id(source.id).onAppear { loadMoreDevicePhotos(after: photo.id) }
-            } else if let photo = saved[source.id] {
-              LibraryPhotoCell(photo: photo, isSelected: selectedSavedPhotos.contains(photo.id), open: {
-                if selecting { toggleSavedSelection(photo) }
-                else { savedViewer = SavedPhotoViewerPresentation(initial: photo, photos: drilledSavedPhotos) }
-              }, toggleSelection: { toggleSavedSelection(photo) }, services: services)
-                .id(source.id)
-            }
+            ZStack {
+              Color.clear
+              if source.id.hasPrefix("device:"), let photo = device[String(source.id.dropFirst("device:".count))],
+                photo.sourceRevision == source.revision {
+                RecentPhotoCell(photo: photo, store: store, selected: selected.contains(photo.id), open: {
+                  if selecting { toggleSelection(photo) } else { openViewer(photo) }
+                }, toggle: { toggleSelection(photo) }, services: services)
+              } else if let photo = saved[source.id],
+                photo.metadata.originalSha256 + "|" + photo.manifest.metadataRepresentation.ciphertextSha256 == source.revision {
+                LibraryPhotoCell(photo: photo, isSelected: selectedSavedPhotos.contains(photo.id), open: {
+                  if selecting { toggleSavedSelection(photo) }
+                  else { savedViewer = SavedPhotoViewerPresentation(initial: photo, photos: drilledSavedPhotos) }
+                }, toggleSelection: { toggleSavedSelection(photo) }, services: services)
+              }
+            }.aspectRatio(1, contentMode: .fit)
           }
         } header: {
           dayHeader(group)
@@ -1430,12 +1435,8 @@ struct RecentPhotosView: View {
       }
       if store.hasMorePhotos {
         Section {} footer: {
-          ProgressView(browseFilter == .all ? "Loading photos…" : "Looking for matching photos…")
-            .font(.footnote).padding().frame(maxWidth: .infinity)
-            .task(id: PhotoBrowseContinuation(page: store.browsePage, filter: browseFilter, dates: browseDates, isActive: scenePhase == .active)) {
-              guard scenePhase == .active else { return }
-              await store.loadMorePhotos(matching: browseFilter, whileActive: { scenePhase == .active })
-            }
+          DevicePhotosPaginationFooter(store: store, filter: browseFilter, dates: browseDates,
+            isActive: scenePhase == .active)
         }
       }
       if savedHasMore, let services, services.photoAccountAccess != nil {
@@ -1687,10 +1688,6 @@ struct RecentPhotosView: View {
   #endif
   private func shareSelectedDevicePhotos() {
     share(selectedPhotos.values.map(\.photo).sorted { ($0.capturedAt ?? .distantPast) > ($1.capturedAt ?? .distantPast) })
-  }
-  private func loadMoreDevicePhotos(after id: String) {
-    guard allPhotos, browseFilter == .all, store.isNearBrowseEnd(id) else { return }
-    store.loadMorePhotos()
   }
   private var saveFromViewer: ((RecentPhoto) -> Void)? {
 #if FOTORO_LOCAL_PREVIEW
@@ -2271,14 +2268,20 @@ private struct RecentPhotoCell: View {
   var services: AppServices? = nil
   private var syncStatus: PhotoSyncItemStatus? { services?.photoSyncItem(sourceID: photo.id, revision: photo.sourceRevision) }
   #endif
-  private var accessibilityStatus: String {
+  private func accessibilityStatus(syncText: String?) -> String {
     var values = selected ? ["Selected"] : []
     #if !FOTORO_LOCAL_PREVIEW
-    if let status = syncStatus { values.append(status.accessibilityText) }
+    if let syncText { values.append(syncText) }
     #endif
     return values.joined(separator: ", ")
   }
   var body: some View {
+    #if !FOTORO_LOCAL_PREVIEW
+    let syncStatus = syncStatus
+    let syncText = syncStatus?.accessibilityText
+    #else
+    let syncText: String? = nil
+    #endif
     Button(action: open) {
       GeometryReader { geometry in
         PhotosImage(photo: photo, store: store, thumbnailSide: geometry.size.width).scaledToFill()
@@ -2297,7 +2300,7 @@ private struct RecentPhotoCell: View {
           if selected { Image(systemName: "checkmark.circle.fill").padding(8) }
         }
     }.buttonStyle(.plain)
-      .accessibilityValue(accessibilityStatus)
+      .accessibilityValue(accessibilityStatus(syncText: syncText))
       .contextMenu { Button(selected ? "Deselect" : "Select", action: toggle) }
   }
 }
