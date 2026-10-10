@@ -1,5 +1,6 @@
 import AuthenticationServices
 import XCTest
+import Sodium
 
 @testable import Fotoro
 
@@ -1251,6 +1252,155 @@ final class RecoveryTests: XCTestCase {
     try await newDevice.vault.unlock(.localKeychain)
     XCTAssertEqual(try newDevice.vault.requireBundle().vaultKey, account.vaultKey)
   }
+  @MainActor func testDeviceRequestRejectsLateEnrollmentAndCompletionAcrossCancellationAndContextChanges() async throws {
+    for phase in ["begin", "complete"] {
+      for interruption in ["success", "cancel", "lock", "account", "device", "token", "origin", "server", "expiry"] {
+        let gate = DeviceTrustTestGate(started: expectation(description: phase + interruption))
+        let secrets = try fixture(FixtureAccounts.self, "accounts").testSecrets[0]
+        var card = try fixture(FixtureAccounts.self, "accounts").accounts[0]
+        card.accountId = Wire.id()
+        let suite = "device-trust-" + Wire.id()
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let session = AccountSession(loadSession: { throw FotoroError("No session") }, persistSession: { _ in }, defaults: defaults)
+        try session.accept(trustSession(card)); try session.pin(card)
+        let api = APIClient(session: session, baseURL: URL(string: "https://device-trust.invalid")!,
+          diagnostics: NativeDiagnostics(fileURL: nil, emitSystemLog: false))
+        var stores = 0
+        let vault = VaultStore(session: session, api: api, storeBundle: { _, _ in stores += 1 })
+        let clock = DeviceTrustTestClock()
+        var challenge: DeviceChallengeV1?
+        let bundle = AccountBundle(vaultKey: secrets.vaultKey, boxSecretKey: secrets.boxSecretKey,
+          signingSecretKey: secrets.signingSecretKey)
+        let trust = DeviceTrust(session: session, api: api, vault: vault, now: { clock.date }, enroll: { request in
+          let value = DeviceChallengeV1(version: 1, deviceId: request.deviceId,
+            boxPublicKey: request.boxPublicKey, origin: request.origin, enrollmentId: Wire.id(),
+            accountId: card.accountId, challenge: Data(repeating: 3, count: 32).b64,
+            expiresAt: ISO8601DateFormatter().string(from: clock.date.addingTimeInterval(240)), state: "pending")
+          challenge = value
+          if phase == "begin" { await gate.wait() }
+          return value
+        }, complete: { _, _ in
+          let value = try XCTUnwrap(challenge)
+          let ciphertext = try XCTUnwrap(Sodium().box.seal(message: Array(try Wire.encode(bundle)),
+            recipientPublicKey: Array(try Data(b64: value.boxPublicKey))))
+          let sealed = Data(ciphertext).b64
+          let signed = try CryptoAdapter().sign(DeviceApprovalBody(challenge: value, sealedBundle: sealed),
+            kind: "device-approval", accountId: card.accountId, secret: Data(b64: secrets.signingSecretKey))
+          var completed = value; completed.state = "completed"
+          await gate.wait()
+          return DeviceCompleteResponse(version: 1, sealedBundle: sealed, signedPayload: signed, challenge: completed)
+        })
+        if phase == "complete" { try await trust.begin() }
+        let task = Task { if phase == "begin" { try await trust.begin() } else { try await trust.complete() } }
+        await fulfillment(of: [gate.started], timeout: 3)
+        switch interruption {
+        case "success": break
+        case "cancel": task.cancel()
+        case "lock": vault.lock()
+        case "account": session.accountId = Wire.id()
+        case "device": session.deviceId = Wire.id()
+        case "token": session.bearerToken = "replacement-public-session"
+        case "origin": api.baseURL = URL(string: "https://replacement.invalid")!
+        case "server": api.baseURL = URL(string: "https://device-trust.invalid/different-api")!
+        default: clock.date = clock.date.addingTimeInterval(600)
+        }
+        gate.resume()
+        if interruption == "success" {
+          try await task.value
+          XCTAssertEqual(vault.isUnlocked, phase == "complete")
+          XCTAssertEqual(stores, phase == "complete" ? 1 : 0)
+          if phase == "begin" {
+            let publicRequest = try XCTUnwrap(trust.challengeJSON)
+            let pending = try XCTUnwrap(trust.pending)
+            XCTAssertFalse(publicRequest.contains(pending.secret))
+            XCTAssertEqual(try Wire.decode(DeviceChallengeV1.self, Data(publicRequest.utf8)), pending.challenge)
+          } else { XCTAssertNil(trust.pending) }
+          trust.cancel()
+          continue
+        }
+        do { try await task.value; XCTFail("Withdrawn device approval was accepted") } catch {}
+        XCTAssertNil(trust.pending)
+        XCTAssertNil(trust.challengeJSON)
+        XCTAssertFalse(trust.inProgress)
+        XCTAssertFalse(vault.isUnlocked)
+        XCTAssertEqual(stores, 0)
+      }
+    }
+  }
+  @MainActor func testDeviceApprovalRequiresUnlockedOwnerAndExactUnexpiredResponse() async throws {
+    let secrets = try fixture(FixtureAccounts.self, "accounts").testSecrets[0]
+    var card = try fixture(FixtureAccounts.self, "accounts").accounts[0]; card.accountId = Wire.id()
+    let suite = "device-approval-" + Wire.id(), defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let session = AccountSession(loadSession: { throw FotoroError("No session") }, persistSession: { _ in }, defaults: defaults)
+    try session.accept(trustSession(card)); try session.pin(card)
+    let api = APIClient(session: session, baseURL: URL(string: "https://device-trust.invalid")!,
+      diagnostics: NativeDiagnostics(fileURL: nil, emitSystemLog: false))
+    let vault = VaultStore(session: session, api: api, storeBundle: { _, _ in })
+    let bundle = AccountBundle(vaultKey: secrets.vaultKey, boxSecretKey: secrets.boxSecretKey, signingSecretKey: secrets.signingSecretKey)
+    let key = Data(repeating: 1, count: 32), wrapped = try CryptoAdapter().wrap(Wire.encode(bundle), key: key)
+    let clock = DeviceTrustTestClock()
+    var posts = 0, mismatch = false
+    let trust = DeviceTrust(session: session, api: api, vault: vault, now: { clock.date }, approve: { _, request in
+      posts += 1
+      let body = try Wire.decode(DeviceApprovalBody.self, Data(b64: request.signedPayload.body))
+      var response = body.challenge; response.state = "approved"
+      if mismatch { response.deviceId = Wire.id() }
+      return response
+    })
+    let challenge = DeviceChallengeV1(version: 1, deviceId: Wire.id(), boxPublicKey: card.boxPublicKey,
+      origin: api.origin, enrollmentId: Wire.id(), accountId: card.accountId,
+      challenge: Data(repeating: 2, count: 32).b64,
+      expiresAt: ISO8601DateFormatter().string(from: clock.date.addingTimeInterval(240)), state: "pending")
+    let json = String(decoding: try Wire.encode(challenge), as: UTF8.self)
+    XCTAssertThrowsError(try trust.review(json))
+    do { try await trust.approve(json); XCTFail("Locked owner approved") } catch {}
+    XCTAssertEqual(posts, 0)
+    try await vault.unlock(.recoveryEnvelope(secret: key, wrapper: wrapped))
+    XCTAssertEqual(try trust.review(json), challenge)
+    try await trust.approve(json)
+    mismatch = true
+    do { try await trust.approve(json); XCTFail("Mismatched approval receipt accepted") } catch {}
+    for interruption in ["cancel", "lock", "account", "device", "token", "origin", "server", "expiry"] {
+      try session.accept(trustSession(card)); try session.pin(card)
+      api.baseURL = URL(string: "https://device-trust.invalid")!
+      clock.date = Date()
+      vault.lock()
+      try await vault.unlock(.recoveryEnvelope(secret: key, wrapper: wrapped))
+      let gate = DeviceTrustTestGate(started: expectation(description: "approve " + interruption))
+      let guardedTrust = DeviceTrust(session: session, api: api, vault: vault, now: { clock.date }, approve: { _, request in
+        let body = try Wire.decode(DeviceApprovalBody.self, Data(b64: request.signedPayload.body))
+        var response = body.challenge; response.state = "approved"
+        await gate.wait()
+        return response
+      })
+      let approval = Task { try await guardedTrust.approve(json) }
+      await fulfillment(of: [gate.started], timeout: 3)
+      switch interruption {
+      case "cancel": approval.cancel()
+      case "lock": vault.lock()
+      case "account": session.accountId = Wire.id()
+      case "device": session.deviceId = Wire.id()
+      case "token": session.bearerToken = "replacement-public-session"
+      case "origin": api.baseURL = URL(string: "https://replacement.invalid")!
+      case "server": api.baseURL = URL(string: "https://device-trust.invalid/changed")!
+      default: clock.date = clock.date.addingTimeInterval(600)
+      }
+      gate.resume()
+      do { try await approval.value; XCTFail("Withdrawn approval was accepted") } catch {}
+      XCTAssertFalse(guardedTrust.inProgress)
+    }
+    try session.accept(trustSession(card)); try session.pin(card)
+    api.baseURL = URL(string: "https://device-trust.invalid")!
+    vault.lock(); try await vault.unlock(.recoveryEnvelope(secret: key, wrapper: wrapped))
+    clock.date = clock.date.addingTimeInterval(600)
+    XCTAssertThrowsError(try trust.review(json))
+    do { try await trust.approve(json); XCTFail("Expired request approved") } catch {}
+    XCTAssertEqual(posts, 2)
+    XCTAssertFalse(trust.inProgress)
+  }
+
 }
 
 private final class NativeLoginResponses: @unchecked Sendable {
@@ -1457,4 +1607,15 @@ private final class NativeLoginProtocol: URLProtocol, @unchecked Sendable {
     } catch { client?.urlProtocol(self, didFailWithError: error) }
   }
   override func stopLoading() {}
+}
+
+@MainActor private final class DeviceTrustTestClock { var date = Date() }
+@MainActor private final class DeviceTrustTestGate {
+  let started: XCTestExpectation
+  private var continuation: CheckedContinuation<Void, Never>?
+  init(started: XCTestExpectation) { self.started = started }
+  func wait() async {
+    await withCheckedContinuation { continuation in self.continuation = continuation; started.fulfill() }
+  }
+  func resume() { continuation?.resume(); continuation = nil }
 }

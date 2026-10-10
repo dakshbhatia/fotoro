@@ -21,6 +21,7 @@ struct NativeAlbumContext: Equatable {
   let photo: PhotoAccountAccess
   let origin: String
   let apiOrigin: String
+  let endpoint: String
   let cards: [String: AccountCardV1]
   let token: String?
   let fixture: Bool
@@ -42,6 +43,17 @@ struct NativeAlbumAccess {
   let definition: AlbumDefinitionV1
   let key: Data
 }
+private struct NativeAlbumBrowseIdentity: Equatable {
+  let context: NativeAlbumContext?
+  let endpoint: String
+  let albumID: String?
+  let items: UInt64
+  let facts: UInt64
+  let filter: NativeAlbumSearchFilter
+  let groupDuplicates: Bool
+  let calendar: Calendar
+  let day: Date
+}
 
 @MainActor @Observable final class NativeAlbumService {
   let services: AppServices
@@ -54,7 +66,9 @@ struct NativeAlbumAccess {
   private var access: NativeAlbumAccess?
   private(set) var nextCursor: String?
   private var cursors = Set<String>()
-  private(set) var sharedFacts: [String: AlbumPhotoFactsContentV1] = [:]
+  private(set) var sharedFacts: [String: AlbumPhotoFactsContentV1] = [:] { didSet { sharedFactsGeneration &+= 1 } }
+  private var sharedFactsGeneration: UInt64 = 0
+  private let browseProjection = PhotoBrowseValueProjection<NativeAlbumBrowseIdentity, NativeAlbumSearchSnapshot>()
   private(set) var factsSupported: Bool?
   private(set) var factsError: String?
   private(set) var factsNextCursor: String?
@@ -82,6 +96,7 @@ struct NativeAlbumAccess {
     }
   }
   func clear() {
+    browseProjection.clear()
     epoch = UUID(); access = nil; opened = nil; items = []; albums = []; inboxError = nil; nextCursor = nil; cursors = []
     clearFacts()
     if let directory { try? FileManager.default.removeItem(at: directory) }
@@ -91,7 +106,7 @@ struct NativeAlbumAccess {
     try Task.checkCancellation()
     guard let photo = services.photoAccountAccess, services.session.isSignedIn,
       let origin = BackgroundUploadPolicy.origin(services.api.baseURL) else { throw FotoroError("Open Fotoro to use albums.") }
-    return NativeAlbumContext(photo: photo, origin: origin, apiOrigin: services.api.origin,
+    return NativeAlbumContext(photo: photo, origin: origin, apiOrigin: services.api.origin, endpoint: services.api.baseURL.absoluteString,
       cards: services.session.pinnedCards, token: services.session.bearerToken, fixture: services.session.fixture, epoch: epoch)
   }
   func isCurrent(_ expected: NativeAlbumContext) -> Bool {
@@ -101,10 +116,22 @@ struct NativeAlbumAccess {
     guard let captured = access?.context, opened != nil,
       captured.photo == services.photoAccountAccess,
       captured.origin == BackgroundUploadPolicy.origin(services.api.baseURL),
-      captured.apiOrigin == services.api.origin, captured.cards == services.session.pinnedCards,
+      captured.apiOrigin == services.api.origin, captured.endpoint == services.api.baseURL.absoluteString,
+      captured.cards == services.session.pinnedCards,
       captured.token == services.session.bearerToken, captured.fixture == services.session.fixture,
       captured.epoch == epoch else { return nil }
     return captured.photo
+  }
+  func browse(filter: NativeAlbumSearchFilter, groupDuplicates: Bool,
+    now: Date = Date(), calendar: Calendar = .current) -> NativeAlbumSearchSnapshot {
+    let captured = currentOpenedPhotoAccess == nil ? nil : access?.context
+    let identity = NativeAlbumBrowseIdentity(context: captured, endpoint: services.api.baseURL.absoluteString,
+      albumID: opened?.id, items: itemsGeneration, facts: sharedFactsGeneration, filter: filter,
+      groupDuplicates: groupDuplicates, calendar: calendar, day: calendar.startOfDay(for: now))
+    return browseProjection.value(for: identity) {
+      NativeAlbumSearch.snapshot(items: captured == nil ? [] : items, facts: sharedFacts,
+        filter: filter, groupDuplicates: groupDuplicates, now: now, calendar: calendar)
+    }
   }
   private func check(_ expected: NativeAlbumContext) throws {
     try Task.checkCancellation()
@@ -173,6 +200,7 @@ struct NativeAlbumAccess {
     }
   }
   private func clearOpen() {
+    browseProjection.clear()
     epoch = UUID(); access = nil; opened = nil; items = []; nextCursor = nil; cursors = []
     clearFacts()
     if let directory { try? FileManager.default.removeItem(at: directory) }; directory = nil; ImageCache.shared.removeAll()
@@ -325,6 +353,70 @@ struct NativeAlbumAccess {
   func loadMore() async throws {
     guard let reading = access, let cursor = nextCursor else { return }
     try await loadPage(reading, cursor: cursor)
+  }
+  // Replace the verified window atomically. Refresh never tears down the viewer,
+  // loaded pages or derivatives while the same signed trip remains admitted.
+  func refreshOpened() async throws {
+    guard let reading = access, let previous = opened else { return }
+    try check(reading.context)
+    let generation = itemsGeneration
+    let retained = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+    let pageLimit = min(10, max(1, (items.count + 99) / 100) + (nextCursor == nil ? 1 : 0))
+    var replacement: [NativeAlbumItem] = [], seen = Set<String>(), nextCursors = Set<String>()
+    var cursor: String?, pages = 0
+    do {
+      var overview = previous.overview
+      var total: Int?
+      repeat {
+        guard pages < 10 else { throw FotoroError("Invalid album pagination.") }
+        let path = "/v1/albums/\(reading.albumID)" + (cursor.map { "?cursor=" + $0 } ?? "")
+        let detail = try await request(AlbumDetailV1.self, path: path, context: reading.context)
+        try validate(detail, access: reading)
+        if let total, total != detail.photoCount { throw FotoroError("Trip changed during refresh. Try again.", statusCode: 503) }
+        total = detail.photoCount
+        overview = detail.overview
+        for offset in stride(from: 0, to: detail.entries.count, by: 4) {
+          let end = min(offset + 4, detail.entries.count)
+          let batch = try await withThrowingTaskGroup(of: (Int, NativeAlbumItem).self) { group in
+            for index in offset..<end {
+              let entry = detail.entries[index], manifest = detail.manifests[index]
+              group.addTask { @MainActor in
+                let (photoManifest, _) = try self.crypto.photo(entry, manifestSigned: manifest,
+                  definition: reading.definition, key: reading.key)
+                if let kept = retained[photoManifest.photoId], kept.entry == entry, kept.signedManifest == manifest {
+                  return (index, kept)
+                }
+                if retained[photoManifest.photoId] != nil { throw FotoroError("A contributed original changed unexpectedly.") }
+                return (index, try await self.photo(entry, manifestSigned: manifest,
+                  access: reading, preservingTransientFailure: true))
+              }
+            }
+            var values: [(Int, NativeAlbumItem)] = []
+            for try await item in group { values.append(item) }
+            return values.sorted { $0.0 < $1.0 }.map(\.1)
+          }
+          try check(reading.context)
+          for item in batch {
+            guard seen.insert(item.id).inserted, replacement.count < 1000 else { throw FotoroError("Duplicate or oversized album.") }
+            replacement.append(item)
+          }
+        }
+        pages += 1; cursor = detail.nextCursor
+        if let cursor { guard nextCursors.insert(cursor).inserted else { throw FotoroError("Invalid album pagination.") } }
+      } while cursor != nil && pages < pageLimit
+      let current = try await membership(reading, preservingTransientFailure: true)
+      try check(reading.context)
+      guard access?.context == reading.context, itemsGeneration == generation else { throw CancellationError() }
+      guard let total, current.photoCount == total else { throw FotoroError("Trip changed during refresh. Try again.", statusCode: 503) }
+      guard replacement.count <= total, cursor != nil || replacement.count == total,
+        Set(retained.keys).isSubset(of: seen) else { throw FotoroError("Trip refresh omitted a contributed original.") }
+      let facts = try boundSharedDetails(pendingFacts, for: replacement)
+      let summary = try summary(overview, context: reading.context)
+      items = replacement; cursors = nextCursors; nextCursor = cursor; sharedFacts = facts; opened = summary
+    } catch {
+      if isCurrent(reading.context), !Self.preservesReadAccess(error) { clearOpen() }
+      throw error
+    }
   }
   // One metadata page per call lets the view yield to changed filters and user actions.
   // The epoch also rejects a completion from a closed or reopened trip.
@@ -782,7 +874,10 @@ struct NativeAlbumAccess {
     try await membership(reading, preservingTransientFailure: true); try check(reading.context)
     let completedID = journalID(reading)
     try await services.store.database.write { db in try db.execute(sql: "DELETE FROM operations WHERE id=?", arguments: [completedID]) }
-    try await refresh(); try await open(reading.albumID)
+    try await refresh()
+    try check(reading.context)
+    guard access?.context == reading.context, opened?.id == reading.albumID else { throw CancellationError() }
+    try await refreshOpened()
   }
   func retryAddition() async throws {
     guard let reading = access, let pending = try services.store.existingOperation(journalID(reading), as: NativeAlbumPendingAppend.self) else { return }
@@ -792,9 +887,9 @@ struct NativeAlbumAccess {
     guard let reading = access else { throw FotoroError("Open an accepted album first.") }
     let current = try selected(photos, reading: reading), original = reading.context
     for offset in stride(from: 0, to: current.count, by: 100) {
-      let now = try context()
-      guard now.photo == original.photo, now.origin == original.origin, now.apiOrigin == original.apiOrigin,
-        now.cards == original.cards, now.token == original.token, now.fixture == original.fixture else { throw CancellationError() }
+      try check(original)
+      guard access?.context == original, access?.albumID == reading.albumID,
+        access?.signedDefinition == reading.signedDefinition else { throw CancellationError() }
       try await appendBatch(Array(current[offset..<min(offset + 100, current.count)]))
     }
   }

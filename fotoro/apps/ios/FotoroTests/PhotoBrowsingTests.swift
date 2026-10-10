@@ -170,7 +170,125 @@ final class PhotoBrowsingTests: XCTestCase {
     XCTAssertTrue(groups().isEmpty, "Another account must not reuse the prior projection")
     XCTAssertEqual(builds, 4)
   }
+
+  @MainActor func testFilterRoundTripsReuseCurrentMetadataAndGroupsButDiscardEveryOldSnapshot() {
+    let projection = PhotoBrowseProjection()
+    let metadata = PhotoBrowseValueProjection<PhotoBrowseMetadataID, [PhotoBrowseItem]>()
+    let firstCatalog = NSObject(), replacementCatalog = NSObject()
+    var identity = PhotoBrowseProjectionID(storePage: UUID(), account: "first", vault: UUID(),
+      catalogIdentity: ObjectIdentifier(firstCatalog), origin: "https://photos.example/first",
+      filter: .all, dates: .all, moments: false, scope: "Photos", calendar: calendar, day: date(10, 5))
+    var items = [photo("favorite", at: date(10, 4), favorite: true),
+      photo("screen", at: date(10, 3), screenshot: true),
+      photo("place", at: date(10, 2), location: "40, -74"), photo("ordinary", at: date(10, 1))]
+    var metadataReads = 0, groupBuilds = 0
+    func read(_ filter: PhotoBrowseFilter) -> [RecentPhotoSource] {
+      identity.filter = filter
+      return projection.groups(for: identity) {
+        groupBuilds += 1
+        let current = metadata.value(for: identity.metadata) {
+          metadataReads += 1
+          return items
+        }
+        return PhotoBrowsing.groups(current, filter: filter, calendar: identity.calendar,
+          dates: identity.dates, now: identity.day)
+      }.flatMap(\.sources)
+    }
+    for _ in 0..<20 {
+      XCTAssertEqual(read(.all).map(\.id), ["favorite", "screen", "place", "ordinary"])
+      XCTAssertEqual(read(.favorites).map(\.id), ["favorite"])
+      XCTAssertEqual(read(.screenshots).map(\.id), ["screen"])
+      XCTAssertEqual(read(.withLocation).map(\.id), ["place"])
+    }
+    XCTAssertEqual(metadataReads, 1, "Changing filters must not reread Photos facts or parse saved dates")
+    XCTAssertEqual(groupBuilds, 4, "Each finite filter builds only once for the current snapshot")
+
+    // A corrected source must replace every warmed filter, including All.
+    items = [photo("favorite", at: date(10, 4), revision: "edited", screenshot: true)]
+    identity.storePage = UUID()
+    XCTAssertTrue(read(.favorites).isEmpty)
+    XCTAssertEqual(read(.screenshots), [RecentPhotoSource(id: "favorite", revision: "edited")])
+    XCTAssertEqual(read(.all), [RecentPhotoSource(id: "favorite", revision: "edited")])
+    XCTAssertEqual(metadataReads, 2)
+    XCTAssertEqual(groupBuilds, 7)
+
+    // Generation and access changes cannot retrieve an older filter result.
+    let changes: [(inout PhotoBrowseProjectionID) -> Void] = [
+      { $0.catalogIdentity = ObjectIdentifier(replacementCatalog) },
+      { $0.origin = "https://photos.example/second" },
+      { $0.catalog += 1 }, { $0.sources += 1 }, { $0.picks += 1 },
+      { $0.account = nil }, { $0.vault = UUID() },
+      { $0.calendar.timeZone = TimeZone(secondsFromGMT: 0)! },
+      { $0.day = $0.day.addingTimeInterval(86400) }, { $0.dates = .recent },
+      { $0.scope = "Picks" }, { $0.moments = true },
+    ]
+    for change in changes {
+      items = []
+      let priorMetadata = identity.metadata, priorReads = metadataReads
+      change(&identity)
+      XCTAssertTrue(read(.all).isEmpty)
+      XCTAssertTrue(read(.screenshots).isEmpty)
+      if priorMetadata == identity.metadata {
+        XCTAssertEqual(metadataReads, priorReads, "Backup/presentation changes must reuse the metadata snapshot")
+      } else {
+        XCTAssertEqual(metadataReads, priorReads + 1, "Every source/access change must replace metadata")
+      }
+    }
+    XCTAssertEqual(metadataReads, 9)
+    XCTAssertEqual(groupBuilds, 31)
+    projection.clear()
+    XCTAssertTrue(read(.all).isEmpty)
+    XCTAssertEqual(groupBuilds, 32, "Clearing the projection also drops every warmed filter")
+  }
   #if !FOTORO_LOCAL_PREVIEW
+  func testCompiledTripFilterIntersectsOneCapturedRelativeDayWithExplicitHalfOpenBounds() {
+    let owner = "owner"
+    let signed = SignedPayloadV1(kind: "test", accountId: owner, body: "", signature: "")
+    func item(_ id: String, _ captured: Date, source: String = "photos") -> NativeAlbumItem {
+      var value = savedPhoto(id, account: owner)
+      value.metadata.sourceDate = ISO8601DateFormatter().string(from: captured)
+      value.metadata.dateSource = source
+      return NativeAlbumItem(entry: signed, signedManifest: signed, photo: value)
+    }
+    let filter = NativeAlbumSearchFilter(query: "yesterday", from: date(10, 2, hour: 10), until: date(10, 3))
+    let compiled = filter.compiled(now: date(10, 3, hour: 23), calendar: calendar)
+    let items = [item("before", date(10, 2, hour: 9)), item("first", date(10, 2, hour: 10)),
+      item("last", date(10, 2, hour: 23)), item("end", date(10, 3)),
+      item("import", date(10, 2, hour: 12), source: "import")]
+    XCTAssertEqual(items.filter { compiled.includes($0, facts: nil) }.map(\.id), ["first", "last"])
+    XCTAssertEqual(NativeAlbumSearch.snapshot(items: items, facts: [:], filter: filter,
+      groupDuplicates: false, now: date(10, 3, hour: 23), calendar: calendar).items.map(\.id), ["first", "last"])
+    XCTAssertEqual(NativeAlbumSearch.snapshot(items: items, facts: [:], filter: NativeAlbumSearchFilter(),
+      groupDuplicates: false).items.map(\.id), items.map(\.id), "Empty filters preserve undated/imported evidence and input order")
+  }
+
+  func testTripSnapshotFiltersContributorEvidenceBeforeDuplicateGroupingAndReplacesFacts() {
+    let signed = SignedPayloadV1(kind: "test", accountId: "first", body: "", signature: "")
+    let first = NativeAlbumItem(entry: signed, signedManifest: signed, photo: savedPhoto("first-photo", account: "first"))
+    let second = NativeAlbumItem(entry: signed, signedManifest: signed, photo: savedPhoto("second-photo", account: "second"))
+    func facts(_ item: NativeAlbumItem, _ people: [String]) -> AlbumPhotoFactsContentV1 {
+      AlbumPhotoFactsContentV1(albumId: "trip", photoId: item.id, ownerAccountId: item.photo.manifest.ownerAccountId,
+        definitionSignature: "definition", revision: 1, originalSha256: item.photo.metadata.originalSha256,
+        people: people, location: PhotoLocationV1(latitude: 40, longitude: -74, source: "photos", name: "New York"))
+    }
+    let mom = NativeAlbumPersonChoice(contributor: "first", name: "Mom").id
+    let dad = NativeAlbumPersonChoice(contributor: "first", name: "Dad").id
+    let filter = NativeAlbumSearchFilter(query: "Mom", place: " NEW YORK ", people: [mom, dad], match: .everyone)
+    var supplied = [first.id: facts(first, ["Mom"]), second.id: facts(second, ["Mom", "Dad"])]
+    let initial = NativeAlbumSearch.snapshot(items: [first, second], facts: supplied, filter: filter, groupDuplicates: true)
+    XCTAssertTrue(initial.items.isEmpty, "Duplicate copies cannot pool contributor-scoped names")
+    supplied[first.id] = facts(first, ["Mom", "Dad"])
+    let edited = NativeAlbumSearch.snapshot(items: [first, second], facts: supplied, filter: filter, groupDuplicates: true)
+    XCTAssertEqual(edited.items.map(\.id), [first.id])
+    XCTAssertEqual(edited.groups.map { $0.copies.map(\.id) }, [[first.id]])
+    let unfiltered = NativeAlbumSearch.snapshot(items: [first, second], facts: supplied,
+      filter: NativeAlbumSearchFilter(), groupDuplicates: true)
+    XCTAssertEqual(unfiltered.groups.map { $0.copies.map(\.id) }, [[first.id, second.id]])
+    let separate = NativeAlbumSearch.snapshot(items: [first, second], facts: supplied,
+      filter: NativeAlbumSearchFilter(), groupDuplicates: false)
+    XCTAssertEqual(separate.groups.map { $0.copies.map(\.id) }, [[first.id], [second.id]])
+  }
+
   @MainActor func testSavedCatalogProjectionReusesArrayAndLookupAndFencesAccountVaultCatalogAndAccess() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
     defer { try? FileManager.default.removeItem(at: root) }
@@ -210,9 +328,11 @@ final class PhotoBrowsingTests: XCTestCase {
     XCTAssertTrue(read().lookup.isEmpty, "A new vault generation cannot retain the old snapshot")
     binding.catalog = ObjectIdentifier(secondStore); identity.binding = binding; catalog = [savedPhoto("replacement-photo", account: "second")]
     XCTAssertEqual(read().photos.map(\.id), ["replacement-photo"])
+    identity.origin = "https://photos.example/replacement"; catalog = []
+    XCTAssertTrue(read().lookup.isEmpty, "An endpoint change with the same account/vault must discard the lookup")
     identity.binding = nil; identity.permitted = false
     XCTAssertTrue(read().lookup.isEmpty, "Removing services must discard the prior catalog")
-    XCTAssertEqual(builds, 8)
+    XCTAssertEqual(builds, 9)
   }
   private func savedPhoto(_ id: String, account: String, state: String = "committed") -> LocalPhoto {
     let representation = RepresentationV1(binding: MediaBinding(photoId: id, representationId: "metadata", kind: "metadata"),
@@ -245,7 +365,9 @@ final class PhotoBrowsingTests: XCTestCase {
     XCTAssertEqual(read(), ["snapshot-2-true"])
     identity.calendar.timeZone = TimeZone(secondsFromGMT: 0)!
     _ = read()
-    XCTAssertEqual(builds, 6, "Day buckets must follow the current calendar")
+    identity.origin = "https://photos.example/replacement"
+    _ = read()
+    XCTAssertEqual(builds, 7, "Day buckets must follow the current calendar and endpoint")
   }
   #endif
   func testFiltersUseOnlyCurrentSuppliedFactsWithoutInferringPlaces() {

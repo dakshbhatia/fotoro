@@ -1,5 +1,16 @@
 import type {Photo} from "../library/catalog";
 export interface AlbumPhotoGroup {photo: Photo; copies: Photo[];}
+// Arrows follow the visible tiles; choosing another contributor's copy keeps
+// the same position rather than adding repeated originals to the sequence.
+export function albumPreviewNavigation(groups: readonly AlbumPhotoGroup[], preview: Photo | null) {
+  const index = preview ? groups.findIndex(group => group.copies.includes(preview)) : -1;
+  return {
+    index, count: groups.length,
+    previous: index > 0 ? groups[index - 1].photo : undefined,
+    next: index >= 0 ? groups[index + 1]?.photo : undefined,
+    copies: index >= 0 ? groups[index].copies : [],
+  };
+}
 export function albumPhotoGroups(photos: readonly Photo[], groupCopies = true, current = () => true): AlbumPhotoGroup[] {
   if (!current()) return [];
   const groups = new Map<string, AlbumPhotoGroup>();

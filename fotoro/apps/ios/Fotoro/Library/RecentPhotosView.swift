@@ -369,9 +369,11 @@ struct RecentPhotosView: View {
   @State private var overviewProjection = PhotoBrowseValueProjection<PhotoBrowseOverviewProjectionID, PhotoBrowseOverviewSnapshot>()
   @State private var suggestionProjection = PhotoBrowseValueProjection<PhotoBrowseProjectionID, [PhotoBrowseSearchSuggestion]>()
   @State private var homeProjection = PhotoBrowseProjection()
+  @State private var homeItemsProjection = PhotoBrowseValueProjection<PhotoBrowseMetadataID, [PhotoBrowseItem]>()
   @State private var deviceLookup = RecentPhotoLookup()
   #if !FOTORO_LOCAL_PREVIEW
   @State private var timelineProjection = PhotoBrowseProjection()
+  @State private var timelineItemsProjection = PhotoBrowseValueProjection<PhotoBrowseMetadataID, PhotoTimelineBrowseItems>()
   @State private var savedCatalogProjection = PhotoBrowseValueProjection<SavedPhotoCatalogProjectionID, SavedPhotoCatalogSnapshot>()
   @State private var savedProjection = PhotoBrowseValueProjection<SavedPhotoBrowseProjectionID, SavedPhotoBrowseSnapshot>()
   #endif
@@ -425,27 +427,34 @@ struct RecentPhotosView: View {
     if allPhotos { return store.photos }
     return store.picksSnapshot == nil ? store.recentPhotos : store.pickedPhotos
   }
+  // Completing automatic picks must not rebuild the unchanged Photos timeline.
+  private var browsePicksGeneration: UInt64 { scope == .picks ? store.picksGeneration : 0 }
   private var browseProjectionID: PhotoBrowseProjectionID {
     #if !FOTORO_LOCAL_PREVIEW
-      PhotoBrowseProjectionID(storePage: store.browsePage, picks: store.picksGeneration,
+      PhotoBrowseProjectionID(storePage: store.browsePage, picks: browsePicksGeneration,
         catalog: services?.consumerCatalogGeneration ?? 0, sources: services?.consumerBackupSourcesGeneration ?? 0,
         account: services?.photoAccountAccess?.account, vault: services?.vault.generation,
+        catalogIdentity: services.map { ObjectIdentifier($0.store) }, origin: services?.api.baseURL.absoluteString,
         filter: browseFilter, dates: browseDates, moments: groupMoments, scope: scope.rawValue, day: Calendar.current.startOfDay(for: Date()))
     #else
-      PhotoBrowseProjectionID(storePage: store.browsePage, picks: store.picksGeneration,
+      PhotoBrowseProjectionID(storePage: store.browsePage, picks: browsePicksGeneration,
         filter: browseFilter, dates: browseDates, moments: groupMoments, scope: scope.rawValue, day: Calendar.current.startOfDay(for: Date()))
     #endif
   }
   private var homePhotoLookup: [String: RecentPhoto] {
-    deviceLookup.photos(page: store.browsePage, picks: store.picksGeneration, scope: scope.rawValue) { baseHomePhotos }
+    deviceLookup.photos(for: browseProjectionID.metadata) { baseHomePhotos }
   }
   private var homeGroups: [PhotoBrowseGroup] {
     homeProjection.groups(for: browseProjectionID) {
-      PhotoBrowsing.groups(homePhotoLookup.values.map { photo in
-        PhotoBrowseItem(source: RecentPhotoSource(photo), facts: RecentPhotoFacts(
-          capturedAt: photo.capturedAt, favorite: photo.isFavorite, screenshot: photo.isScreenshot,
-          livePhoto: photo.isLivePhoto, location: photo.location))
-      }, filter: browseFilter, grouping: groupMoments ? .moments : .days, dates: browseDates)
+      let items = homeItemsProjection.value(for: browseProjectionID.metadata) {
+        homePhotoLookup.values.map { photo in
+          PhotoBrowseItem(source: RecentPhotoSource(photo), facts: RecentPhotoFacts(
+            capturedAt: photo.capturedAt, favorite: photo.isFavorite, screenshot: photo.isScreenshot,
+            livePhoto: photo.isLivePhoto, location: photo.location))
+        }
+      }
+      return PhotoBrowsing.groups(items, filter: browseFilter,
+        grouping: groupMoments ? .moments : .days, dates: browseDates)
     }
   }
   private var browseGroups: [PhotoBrowseGroup] {
@@ -549,7 +558,7 @@ struct RecentPhotosView: View {
     let calendar = Calendar.current
     let identity = SavedPhotoBrowseProjectionID(binding: services.map(SavedLibraryOpenBinding.init),
       permitted: services?.photoAccountAccess != nil, catalog: services?.consumerCatalogGeneration ?? 0,
-      favoritesOnly: savedFavoritesOnly, calendar: calendar)
+      favoritesOnly: savedFavoritesOnly, calendar: calendar, origin: services?.api.baseURL.absoluteString)
     return savedProjection.value(for: identity) {
       guard let services, identity.permitted else { return SavedPhotoBrowseSnapshot() }
       let photos = allOwnedPhotos.filter { !savedFavoritesOnly || services.annotation($0).favorite == true }
@@ -568,7 +577,8 @@ struct RecentPhotosView: View {
   private var allOwnedPhotos: [LocalPhoto] { savedCatalogSnapshot.photos }
   private var savedCatalogSnapshot: SavedPhotoCatalogSnapshot {
     let identity = SavedPhotoCatalogProjectionID(binding: services.map(SavedLibraryOpenBinding.init),
-      permitted: services?.photoAccountAccess != nil, catalog: services?.consumerCatalogGeneration ?? 0)
+      permitted: services?.photoAccountAccess != nil, catalog: services?.consumerCatalogGeneration ?? 0,
+      origin: services?.api.baseURL.absoluteString)
     return savedCatalogProjection.value(for: identity) {
       guard let services, identity.permitted else { return SavedPhotoCatalogSnapshot() }
       return SavedPhotoCatalogSnapshot(photos: services.photos, account: services.session.accountId)
@@ -576,19 +586,22 @@ struct RecentPhotosView: View {
   }
   private var timelineGroups: [PhotoBrowseGroup] {
     timelineProjection.groups(for: browseProjectionID) {
-      let device = homePhotoLookup.values.map { photo in
-        PhotoBrowseItem(source: RecentPhotoSource(photo), facts: RecentPhotoFacts(
-          capturedAt: photo.capturedAt, favorite: photo.isFavorite, screenshot: photo.isScreenshot,
-          livePhoto: photo.isLivePhoto, location: photo.location))
+      let items = timelineItemsProjection.value(for: browseProjectionID.metadata) {
+        let device = homePhotoLookup.values.map { photo in
+          PhotoBrowseItem(source: RecentPhotoSource(photo), facts: RecentPhotoFacts(
+            capturedAt: photo.capturedAt, favorite: photo.isFavorite, screenshot: photo.isScreenshot,
+            livePhoto: photo.isLivePhoto, location: photo.location))
+        }
+        let saved = allOwnedPhotos.map { photo in
+          let annotation = services?.annotation(photo)
+          return PhotoTimelineSavedItem(photo: photo, facts: RecentPhotoFacts(
+            capturedAt: ["exif", "photos"].contains(photo.metadata.dateSource) ? Wire.parseDate(photo.metadata.sourceDate) : nil, favorite: annotation?.favorite == true,
+            screenshot: annotation?.facts?.contains("screenshot") == true,
+            livePhoto: photo.metadata.mediaType == CameraMedia.liveType, location: annotation?.location?.displayName))
+        }
+        return PhotoTimelineBrowseItems(device: device, saved: saved)
       }
-      let saved = allOwnedPhotos.map { photo in
-        let annotation = services?.annotation(photo)
-        return PhotoTimelineSavedItem(photo: photo, facts: RecentPhotoFacts(
-          capturedAt: ["exif", "photos"].contains(photo.metadata.dateSource) ? Wire.parseDate(photo.metadata.sourceDate) : nil, favorite: annotation?.favorite == true,
-          screenshot: annotation?.facts?.contains("screenshot") == true,
-          livePhoto: photo.metadata.mediaType == CameraMedia.liveType, location: annotation?.location?.displayName))
-      }
-      return PhotoTimelinePolicy.groups(device: device, saved: saved,
+      return PhotoTimelinePolicy.groups(device: items.device, saved: items.saved,
         sources: services?.consumerBackupSources ?? [],
         account: services?.photoAccountAccess?.account, filter: browseFilter,
         grouping: groupMoments ? .moments : .days, dates: browseDates)
@@ -2312,14 +2325,12 @@ struct ConsumerSearchPresentationID: Equatable {
 #endif
 
 @MainActor private final class RecentPhotoLookup {
-  private var page: UUID?
-  private var picks: UInt64 = 0
-  private var scope = ""
+  private var identity: PhotoBrowseMetadataID?
   private var values: [String: RecentPhoto] = [:]
-  func photos(page: UUID, picks: UInt64, scope: String, makePhotos: () -> [RecentPhoto]) -> [String: RecentPhoto] {
-    if self.page != page || self.picks != picks || self.scope != scope {
+  func photos(for identity: PhotoBrowseMetadataID, makePhotos: () -> [RecentPhoto]) -> [String: RecentPhoto] {
+    if self.identity != identity {
       values = Dictionary(makePhotos().map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
-      self.page = page; self.picks = picks; self.scope = scope
+      self.identity = identity
     }
     return values
   }

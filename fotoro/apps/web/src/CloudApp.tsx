@@ -1,7 +1,7 @@
 import {diagnose, diagnosticReason, type DiagnosticContext} from "./diagnostics";
 import {CopyDiagnostics} from "./components/CopyDiagnostics";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import type { GrantV1, PhotoLocationV1 } from "@fotoro/contracts";
+import type { DeviceChallengeV1, GrantV1, PhotoLocationV1 } from "@fotoro/contracts";
 import {annotationLocation} from "@fotoro/contracts/location";
 import { ready } from "@fotoro/crypto";
 import { Library } from "./library/Library";
@@ -13,6 +13,7 @@ import {
   requireVault,
   vaultGeneration,
   vaultLockDetail,
+  authenticatedApprovalAccount, requestDeviceApproval, cancelDeviceApproval, deviceApprovalDeadline, reviewDeviceChallenge, approveDeviceChallenge, unlockVault,
 } from "./vault/vault";
 import {
   publicTestSession,
@@ -191,6 +192,23 @@ export default function CloudApp({
     return {limit: catalogBrowse.current.limit, retainPhotoIds: [...new Set([...currentSelection.current, ...consumerSelection.idsFor(session, session.accountId, location.origin), ...(expiredSelection.current?.photoIdsFor(session.accountId) ?? []), ...(albumDetailPhoto.current?.session === session ? [albumDetailPhoto.current.photoId] : [])])]};
   };
   const [passwordFallback, setPasswordFallback] = useState(false);
+  const [approvalAccount, setApprovalAccount] = useState<string>(), [deviceChallenge, setDeviceChallenge] = useState<DeviceChallengeV1>();
+  const [approvalText, setApprovalText] = useState(""), [approvalReview, setApprovalReview] = useState<{challenge: DeviceChallengeV1; session: UnlockedVault; generation: number; origin: string}>();
+  const approvalEpoch = useRef(0);
+  const cancelApproval = () => {approvalEpoch.current++; cancelDeviceApproval(); setDeviceChallenge(undefined); setApprovalReview(undefined); setApprovalText("");};
+  useEffect(() => {
+    const clearApproval = () => {cancelApproval(); setApprovalAccount(undefined);};
+    const hidden = () => {if (document.visibilityState === "hidden") clearApproval();};
+    window.addEventListener("fotoro-lock", clearApproval); window.addEventListener("pagehide", clearApproval); document.addEventListener("visibilitychange", hidden);
+    return () => {cancelDeviceApproval(); approvalEpoch.current++; window.removeEventListener("fotoro-lock", clearApproval); window.removeEventListener("pagehide", clearApproval); document.removeEventListener("visibilitychange", hidden);};
+  }, []);
+  useEffect(() => {if (!active) cancelApproval();}, [active]);
+  useEffect(() => {
+    if (!deviceChallenge) return;
+    const deadline = deviceApprovalDeadline(deviceChallenge.enrollmentId) ?? Date.parse(deviceChallenge.expiresAt);
+    const timer = window.setTimeout(() => {cancelApproval(); setStatus(authenticatedApprovalAccount() ? "This approval request expired. Request approval again." : "Sign in again to request device approval.");}, Math.max(0, deadline - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [deviceChallenge]);
   useEffect(() => {setPasswordFallback(false);}, [account]);
   const [placesOpen, setPlacesOpen] = useState(false), [placeResources] = useState(() => new ConsumerPreviewResources());
   const [peopleOpen, setPeopleOpen] = useState(false);
@@ -221,7 +239,7 @@ export default function CloudApp({
   }, [active, account, recoveryNew]);
   const accountPanel = useRef<HTMLElement>(null), menuRef = useRef(menu);
   menuRef.current = menu;
-  const closeAccountPanel = () => {authIntent.current++; menuRef.current = false; setMenu(false);};
+  const closeAccountPanel = () => {authIntent.current++; cancelApproval(); menuRef.current = false; setMenu(false);};
   useDialogFocus(accountPanel, closeAccountPanel, menu && active && !!account);
   useEffect(() => {
     const picker = input.current;
@@ -410,7 +428,13 @@ export default function CloudApp({
       if (!session || sameVault(session)) {
         const message = e instanceof ApiError && ["UNAUTHENTICATED", "HTTP_401"].includes(e.code)
           ? "Enter your Fotoro password again to continue." : e instanceof Error && e.message === "TRIP_SAVE_INCOMPLETE"
-            ? "The chosen originals could not open for this trip. Retry to continue." : readableSyncError(e);
+            ? "The chosen originals could not open for this trip. Retry to continue." : e instanceof Error && e.message === "PRF_UNAVAILABLE_USE_RECOVERY" && authenticatedApprovalAccount()
+            ? "Signed in. Unlock with your Fotoro password or approve this device from an unlocked device." : e instanceof Error && e.message === "DEVICE_APPROVAL_EXPIRED"
+            ? "This approval request expired. Request approval again." : e instanceof Error && e.message === "DEVICE_APPROVAL_REQUIRED"
+            ? "Approval is not ready. Confirm it on your unlocked device, then try unlock again." : e instanceof Error && e.message === "INVALID_DEVICE_CHALLENGE"
+            ? "This request is invalid, expired, or belongs to another account or site." : e instanceof Error && e.message === "DEVICE_COPY_UNAVAILABLE"
+            ? "Copy is unavailable. Select and copy the public request below." : e instanceof Error && /INVALID_DEVICE_APPROVAL_RECEIPT|INVALID_DEVICE_COMPLETION|INVALID_DEVICE_SIGNATURE|DEVICE_BINDING_MISMATCH/.test(e.message)
+            ? "This device approval could not be verified. Request approval again." : readableSyncError(e);
         setStatus(accountAction && message.startsWith("Save could not finish.") ? "Sign-in could not finish. Check your connection and try again." : message);
         setNeedsAttention(true);
       }
@@ -433,14 +457,15 @@ export default function CloudApp({
     }
     return accepted;
   };
-  const login = async (fn: (current: () => boolean) => Promise<unknown>, passkey = false) => {
+  const login = async (fn: (current: () => boolean) => Promise<unknown>, passkey = false, completingApproval = false) => {
+    if (!completingApproval) {cancelApproval(); setApprovalAccount(undefined);}
     const request = saveIntentRef.current, version = authIntent.current;
     return run(async () => {
       const ticket = request?.beginAuthentication(vaultGeneration());
       const shareRequest = incomingRef.current, shareTicket = shareRequest?.beginAuthentication(vaultGeneration());
       const albumRequest = albumIncomingRef.current, albumTicket = albumRequest?.beginAuthentication(vaultGeneration());
       try {await fn(() => activeRef.current && authIntent.current === version);}
-      catch (error) {if (passkey && !(error instanceof Error && error.name === "AbortError") && activeRef.current && authIntent.current === version) setPasswordFallback(true); request?.finishAuthentication(ticket, undefined, error); shareRequest?.finishAuthentication(shareTicket); albumRequest?.finishAuthentication(albumTicket); throw error;}
+      catch (error) {if (passkey && !(error instanceof Error && error.name === "AbortError") && activeRef.current && authIntent.current === version) {setPasswordFallback(true); setApprovalAccount(authenticatedApprovalAccount());} request?.finishAuthentication(ticket, undefined, error); shareRequest?.finishAuthentication(shareTicket); albumRequest?.finishAuthentication(albumTicket); throw error;}
       if (!activeRef.current || authIntent.current !== version) {request?.cancel(); shareRequest?.cancel(); albumRequest?.cancel(); return;}
       let opened: {session: UnlockedVault; generation: number; origin: string};
       try {
@@ -980,6 +1005,7 @@ export default function CloudApp({
           {!unlocked && <button
             ref={backButton}
             onClick={() => {
+              cancelApproval(); setApprovalAccount(undefined);
               if (!account) {
                 authIntent.current++;
                 cancelEnrollment();
@@ -1043,6 +1069,42 @@ export default function CloudApp({
                 setTimeout(() => URL.revokeObjectURL(url), 1000);
               }}
             />
+
+            {approvalAccount && authenticatedApprovalAccount() === approvalAccount && <details open onToggle={event => {if (event.target === event.currentTarget && !event.currentTarget.open) cancelApproval();}}>
+              <summary>Unlock with another device</summary>
+              <p className="hint">Use a device where this Fotoro account is already unlocked.</p>
+              {!deviceChallenge ? <button disabled={busy} onClick={() => {const epoch = approvalEpoch.current; void run(async () => {
+                const current = () => activeRef.current && document.visibilityState !== "hidden" && approvalEpoch.current === epoch && authenticatedApprovalAccount() === approvalAccount;
+                try {const challenge = await requestDeviceApproval(current); if (current()) setDeviceChallenge(challenge);}
+                catch (error) {
+                  if (error instanceof ApiError && error.status === 401 && approvalEpoch.current === epoch) {cancelApproval(); setApprovalAccount(undefined); throw error;}
+                  if (!current()) return false; throw error;
+                }
+              }, true);}}>Request approval</button> : <>
+                <p className="hint">On your unlocked device, open Settings → Open on another device → Approve a device. Paste this public request and confirm only if it came from you. Keep this page open.</p>
+                <textarea aria-label="Public device approval request" readOnly value={JSON.stringify(deviceChallenge)} />
+                <p className="hint">Request {deviceChallenge.challenge.slice(0, 12)} · Expires {new Date(deviceApprovalDeadline(deviceChallenge.enrollmentId) ?? deviceChallenge.expiresAt).toLocaleTimeString()}.</p>
+                <button disabled={busy} onClick={() => {const text = JSON.stringify(deviceChallenge), epoch = approvalEpoch.current; void run(async () => {
+                  if (approvalEpoch.current !== epoch || !activeRef.current || document.visibilityState === "hidden") return false;
+                  if (!navigator.clipboard) throw new Error("DEVICE_COPY_UNAVAILABLE");
+                  try {await navigator.clipboard.writeText(text);}
+                  catch {if (approvalEpoch.current !== epoch) return false; throw new Error("DEVICE_COPY_UNAVAILABLE");}
+                  if (approvalEpoch.current === epoch) setStatus("Public request copied.");
+                });}}>Copy public request</button>
+                <button className="primary-action" disabled={busy} onClick={() => {const challenge = deviceChallenge, epoch = approvalEpoch.current; void login(async current => {
+                  if (approvalEpoch.current !== epoch || authenticatedApprovalAccount() !== approvalAccount) throw new DOMException("Device approval cancelled", "AbortError");
+                  try {await unlockVault({kind: "trustedDevice", enrollmentId: challenge.enrollmentId});}
+                  catch (error) {
+                    if (deviceApprovalDeadline(challenge.enrollmentId) === undefined) cancelApproval();
+                    if (error instanceof ApiError && error.status === 401) setApprovalAccount(undefined);
+                    throw error;
+                  }
+                  // Successful unlock emits the normal lock event, clearing the public UI.
+                  if (!current()) {lockVault(); throw new DOMException("Device approval cancelled", "AbortError");}
+                }, false, true);}}>I approved it — unlock</button>
+              </>}
+              <button onClick={cancelApproval}>Cancel request</button>
+            </details>}
 
             {fixtureMode && (
               <details>
@@ -1245,6 +1307,25 @@ export default function CloudApp({
                 setStatus(ready ? "Passkey added. Choose Use a passkey on your other device." : "Passkey added. Keep your Fotoro password to unlock photos on another device.");
               }, true);}}>Add a passkey</button>}
               <p className="hint">Automatic sync enabled in the Fotoro app can add photos here too. Photos opened in this browser stay here until you choose Save.</p>
+              <details onToggle={event => {if (event.target === event.currentTarget && !event.currentTarget.open) {setApprovalText(""); setApprovalReview(undefined); approvalEpoch.current++;}}}>
+                <summary>Approve a device</summary>
+                <p className="hint">Paste the public approval request from your other device.</p>
+                <textarea aria-label="Device approval request to review" value={approvalText} disabled={busy} onChange={event => {approvalEpoch.current++; setApprovalText(event.target.value); setApprovalReview(undefined);}} />
+                <button disabled={busy || !approvalText.trim()} onClick={() => {const epoch = approvalEpoch.current; void run(async () => {
+                  if (!activeRef.current || !menuRef.current || document.visibilityState === "hidden" || approvalEpoch.current !== epoch) return false;
+                  const session = requireVault(), challenge = reviewDeviceChallenge(approvalText); setApprovalReview({challenge, session, generation: vaultGeneration(), origin: location.origin});
+                });}}>Review request</button>
+                {approvalReview && <>
+                  <p className="hint">This request is for your current Fotoro account at {approvalReview.challenge.origin}. Request {approvalReview.challenge.challenge.slice(0, 12)} · Device {approvalReview.challenge.deviceId}. Expires {new Date(approvalReview.challenge.expiresAt).toLocaleTimeString()}.</p>
+                  <p className="hint">Confirm that this exact request came from your device. Approval gives that device access to your photos.</p>
+                  <button className="primary-action" disabled={busy || publicDemo} onClick={() => {const reviewed = approvalReview, epoch = approvalEpoch.current; void run(async () => {
+                    const current = () => activeRef.current && menuRef.current && document.visibilityState !== "hidden" && approvalEpoch.current === epoch && sameVault(reviewed.session) && vaultGeneration() === reviewed.generation && location.origin === reviewed.origin;
+                    try {await approveDeviceChallenge(JSON.stringify(reviewed.challenge), current);}
+                    catch (error) {if (!current()) return false; throw error;}
+                    if (current()) {setApprovalReview(undefined); setApprovalText(""); setStatus("Device approved. Return to that device and choose unlock.");}
+                  }, true);}}>Confirm and approve my device</button>
+                </>}
+              </details>
             </details>
             <details>
               <summary>Settings</summary>

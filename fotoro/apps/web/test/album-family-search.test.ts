@@ -1,4 +1,4 @@
-import {albumDetailsSelection} from "../src/albums/detail-selection";
+import {albumDetailsSelection, retainAlbumDetailsDraft} from "../src/albums/detail-selection";
 import "fake-indexeddb/auto";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -20,7 +20,7 @@ import {loadAlbumSearchPages} from "../src/albums/search-loading";
 import {joinAlbumInvitation} from "../src/albums/bootstrap";
 import {collect, source, digest, type Photo} from "../src/library/catalog";
 import {ownedAlbumDetails} from "../src/albums/details";
-import {albumPhotoGroups} from "../src/albums/browse";
+import {albumPhotoGroups, albumPreviewNavigation} from "../src/albums/browse";
 import {albumPersonKey, albumReviewedPeople, searchAlbumPhotos} from "../src/albums/search";
 import type {OwnedPhotoSnapshot} from "../src/library/consumer-search";
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), {status});
@@ -194,6 +194,27 @@ test("late shared facts and changed owned annotations cannot publish across clos
   assert.equal(access.current(), false);
 }));
 
+test("new contributions retain unsaved shared-detail choices only for the unchanged admitted source", () => scoped(async () => {
+  const data = await fixture(), session = await open(0), access = await AlbumAccess.open(data.overview(), {});
+  const [photo] = (await access.loadPhotoPage()).photos, source = reviewed(data.initial[0].photo, session, "Mum");
+  const latest = await access.shareDetails(photo, source, {people: true, location: false}, 1);
+  const draft = {photo, source, revision: 2, people: ["Mum"], location: true, existing: true, unavailable: 0};
+  data.entries.push(data.other);
+  const refreshed = await AlbumAccess.open(data.overview(), {}), loaded = await refreshed.loadPhotoPage();
+  const retained = access.adoptRefresh(refreshed, loaded.photos);
+  assert.equal(retained.length, 2); assert.equal(retained[0], photo);
+  assert.equal(retainAlbumDetailsDraft(draft, retained), draft, "Refresh must preserve the contributor's unsaved location choice");
+  // Another device changes the shared revision while this draft is open.
+  await access.shareDetails(photo, source, {people: false, location: false}, latest.revision + 1);
+  await assert.rejects(access.shareDetails(photo, source, draft, draft.revision), /CONFLICT/, "Preserving the draft cannot bypass remote revision conflict checks");
+  assert.equal(retainAlbumDetailsDraft(draft, retained.filter(item => item !== photo)), null);
+  assert.equal(retainAlbumDetailsDraft(draft, [{...photo}]), null, "A replacement object cannot inherit choices even if its IDs match");
+  data.initial[0].photo.annotations = {...data.initial[0].photo.annotations!, caption: "new private revision"};
+  assert.equal(source.current(), false);
+  assert.equal(retainAlbumDetailsDraft(draft, retained), null, "Changed private reviewed details require a fresh explicit review");
+  access.dispose();
+}));
+
 test("equal shared names stay contributor-scoped, date constraints apply before grouping, and grouping preserves source distinctions", () => {
   const sha = b64(new Uint8Array(32)), photos = Array.from({length: 250}, (_, n) => ({manifest: {photoId: String(n), ownerAccountId: n % 2 ? "A" : "B"},
     metadata: {filename: "public.png", originalSha256: sha, originalBytes: 20, mediaType: "image/png", sourceDate: "2021-10-01T12:00:00Z", dateSource: "photos"}, annotations: {facts: ["private"]}} as Photo));
@@ -247,4 +268,33 @@ test("family query ANDs shared name, place and natural capture month on the same
   const stale = new Map(facts); stale.set("match", {...facts.get("match")!, originalSha256: "changed"});
   assert.deepEqual(searchAlbumPhotos(rows, "Mum London June 2025", () => true, Date.now(), {facts: stale}), []);
   assert.equal(albumPhotoGroups(searchAlbumPhotos(rows, "Mum London June 2025", () => true, Date.now(), {facts}))[0].copies.length, 1, "Other exact copies cannot supply missing query fields");
+});
+
+test("grouped trip preview follows matching tiles while contributor copies stay individually reachable", () => {
+  const photo = (id: string, owner: string, digest: number) => ({manifest: {photoId: id, ownerAccountId: owner},
+    metadata: {filename: id + ".jpg", originalSha256: b64(new Uint8Array(32).fill(digest)), originalBytes: 20,
+      mediaType: "image/jpeg", sourceDate: "2025-06-03T12:00:00Z", dateSource: "photos"}} as Photo);
+  const first = photo("first", "A", 1), firstCopy = photo("first-copy", "B", 1), second = photo("second", "A", 2), last = photo("last", "B", 3);
+  const rows = [first, firstCopy, second, last];
+  const facts = new Map(rows.map(row => [row.manifest.photoId, {version: 1 as const, albumId: "album", photoId: row.manifest.photoId,
+    ownerAccountId: row.manifest.ownerAccountId, definitionSignature: "signed", revision: 1,
+    originalSha256: row.metadata.originalSha256, people: row === first ? ["Dad"] : ["Mum"]}]));
+  const grouped = albumPhotoGroups(searchAlbumPhotos(rows, "", () => true, Date.now(), {facts}));
+  const openedCopy = albumPreviewNavigation(grouped, firstCopy);
+  assert.equal(openedCopy.index, 0); assert.equal(openedCopy.count, 3);
+  assert.equal(openedCopy.previous, undefined); assert.equal(openedCopy.next, second);
+  assert.deepEqual(openedCopy.copies, [first, firstCopy], "The owner-specific original and details remain reachable");
+  const middle = albumPreviewNavigation(grouped, openedCopy.next!);
+  assert.equal(middle.previous, first); assert.equal(middle.next, last);
+  assert.equal(albumPreviewNavigation(grouped, last).next, undefined);
+  const matching = albumPhotoGroups(searchAlbumPhotos(rows, "Mum", () => true, Date.now(), {facts}));
+  assert.equal(albumPreviewNavigation(matching, firstCopy).next, second);
+  assert.deepEqual(albumPreviewNavigation(matching, firstCopy).copies, [firstCopy], "Copies that do not satisfy the search never supply fields or navigation");
+  const outside = albumPreviewNavigation(matching, first);
+  assert.equal(outside.index, -1); assert.equal(outside.previous, undefined); assert.equal(outside.next, undefined);
+  assert.deepEqual(outside.copies, []);
+  const ungrouped = albumPhotoGroups(rows, false);
+  assert.equal(albumPreviewNavigation(ungrouped, first).next, firstCopy);
+  assert.equal(albumPreviewNavigation(ungrouped, firstCopy).previous, first);
+  assert.equal(albumPreviewNavigation(ungrouped, firstCopy).count, 4);
 });

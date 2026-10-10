@@ -22,6 +22,7 @@ import { api, scopedApi, ApiError, ApiTransportError, setFixtureAccount, fixture
 import { get, put, clearAccount } from "../exchange/cache";
 import {
   configureVault,
+  configureApprovalVault,
   configureDevice,
   unlockVault,
   requireVault,
@@ -186,7 +187,10 @@ async function passkeyLoginAction(diagnostic: DiagnosticContext, current: () => 
       configureDevice(verified.deviceId);
       session = verified;
     }
-    if (!output || output.length !== 32 || !wrapper) throw new Error("PRF_UNAVAILABLE_USE_RECOVERY");
+    if (!output || output.length !== 32 || !wrapper) {
+      configureApprovalVault(vault, session.expiresAt);
+      throw new Error("PRF_UNAVAILABLE_USE_RECOVERY");
+    }
     configureVault(vault, output, response.id);
     opened = await unlockVault({kind: "prf"});
     if (!current() || vaultGeneration() !== generation + 1 || location.origin !== origin)

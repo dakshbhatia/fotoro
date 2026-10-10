@@ -43,30 +43,67 @@ struct PhotoBrowseProjectionID: Equatable {
   var sources: UInt64 = 0
   var account: String? = nil
   var vault: UUID? = nil
+  var catalogIdentity: ObjectIdentifier? = nil
+  var origin: String? = nil
   var filter: PhotoBrowseFilter
   var dates: PhotoBrowseDateScope
   var moments: Bool
   var scope: String
   var calendar: Calendar = .current
   var day: Date
+
+  // Filters change presentation, not the source metadata snapshot. Every other
+  // binding remains part of the identity, including access and source revisions.
+  var unfiltered: Self {
+    var value = self
+    value.filter = .all
+    return value
+  }
+
+  var metadata: PhotoBrowseMetadataID {
+    PhotoBrowseMetadataID(storePage: storePage, picks: picks, catalog: catalog,
+      account: account, vault: vault, catalogIdentity: catalogIdentity, origin: origin, scope: scope)
+  }
+}
+
+// Photos page/picks generations replace asset revisions and capture facts;
+// catalog generation replaces saved metadata, URLs, and browse annotations.
+// Account, vault, store and endpoint changes always discard the snapshot.
+// Backup status and calendar/filter/grouping choices only affect presentation.
+struct PhotoBrowseMetadataID: Equatable {
+  let storePage: UUID
+  let picks: UInt64
+  let catalog: UInt64
+  let account: String?
+  let vault: UUID?
+  let catalogIdentity: ObjectIdentifier?
+  let origin: String?
+  let scope: String
 }
 
 // The view supplies generation bindings before the expensive metadata closure.
 @MainActor final class PhotoBrowseProjection {
   private var identity: PhotoBrowseProjectionID?
-  private var value: [PhotoBrowseGroup] = []
+  private var values: [PhotoBrowseFilter: [PhotoBrowseGroup]] = [:]
   func groups(for identity: PhotoBrowseProjectionID, makeGroups: () -> [PhotoBrowseGroup]) -> [PhotoBrowseGroup] {
-    if self.identity == identity { return value }
-    value = makeGroups()
-    self.identity = identity
+    let snapshot = identity.unfiltered
+    if self.identity != snapshot {
+      values.removeAll(keepingCapacity: true)
+      self.identity = snapshot
+    }
+    if let value = values[identity.filter] { return value }
+    let value = makeGroups()
+    // At most one result per finite filter, for the current snapshot only.
+    values[identity.filter] = value
     return value
   }
-  func clear() { identity = nil; value = [] }
+  func clear() { identity = nil; values.removeAll() }
 }
 
 // Keep catalog derivation outside repeated cell and selection render reads.
 @MainActor final class PhotoBrowseValueProjection<Identity: Equatable, Value> {
   private var cached: (identity: Identity, value: Value)?
+  func clear() { cached = nil }
   func value(for identity: Identity, makeValue: () -> Value) -> Value {
     if let cached, cached.identity == identity { return cached.value }
     let value = makeValue()
@@ -80,6 +117,7 @@ struct SavedPhotoCatalogProjectionID: Equatable {
   var binding: SavedLibraryOpenBinding?
   var permitted: Bool
   var catalog: UInt64
+  var origin: String? = nil
 }
 struct SavedPhotoCatalogSnapshot {
   let photos: [LocalPhoto]
@@ -97,6 +135,7 @@ struct SavedPhotoBrowseProjectionID: Equatable {
   var catalog: UInt64
   var favoritesOnly: Bool
   var calendar: Calendar
+  var origin: String? = nil
 }
 struct SavedPhotoBrowseSnapshot {
   var photos: [LocalPhoto] = []
@@ -317,6 +356,11 @@ enum PhotoBrowsing {
 struct PhotoTimelineSavedItem {
   let photo: LocalPhoto
   let facts: RecentPhotoFacts
+}
+
+struct PhotoTimelineBrowseItems {
+  let device: [PhotoBrowseItem]
+  let saved: [PhotoTimelineSavedItem]
 }
 
 enum PhotoTimelinePolicy {
