@@ -13,6 +13,7 @@ import {collect, source, digest, type Photo} from "../src/library/catalog";
 import {AlbumAccess, createAlbum, albumOwnedSelection, albumCapabilities, albumOriginalFiles, downloadAlbumOriginal, type AlbumCreationDraft} from "../src/albums/service";
 import {searchAlbumPhotos} from "../src/albums/search";
 import {ShareSelection} from "../src/exchange/sharing";
+import {PendingAlbumContribution} from "../src/albums/pending-contribution";
 import {chosenAlbumPhotos} from "../src/local/selection";
 import type {OwnedPhotoSnapshot} from "../src/library/consumer-search";
 await ready;
@@ -150,11 +151,80 @@ test("append retries retain exact encrypted signed entries and re-adding an exis
     return response({...active, version: 1, entries: published ? stored!.entries : [], manifests: published ? stored!.manifests : [], nextCursor: null, hasMore: false});
   };
   const access = await AlbumAccess.open({...overview(data), photoCount: 0}, {}), snapshot = new ShareSelection([data.photo]);
-  await assert.rejects(access.add(snapshot.photos, () => [data.photo]), /Response lost/);
-  assert.equal(await access.add(snapshot.photos, () => [data.photo]), 1); assert.equal(attempts, 2);
+  const choice = new PendingAlbumContribution([data.photo], () => access.current());
+  let retained: readonly Photo[] = [];
+  const add = (photos: readonly Photo[]) => {retained = photos; return access.add(photos, () => [data.photo]);};
+  await assert.rejects(choice.add(add), /Response lost/);
+  assert.equal(choice.current, true, "Failed trip add keeps exactly the already-Saved choice for explicit retry");
+  assert.ok(retained[0].metadataKey.some(byte => byte !== 0));
+  assert.equal(await choice.add(add), 1); assert.equal(attempts, 2);
+  assert.equal(choice.current, false); assert.ok(retained[0].metadataKey.every(byte => byte === 0), "Successful retry clears its copied metadata key");
   assert.equal(await access.add(snapshot.photos, () => [data.photo]), 0); assert.equal(attempts, 2);
   const rows = await all("saves"); assert.equal(rows.length, 1); assert.equal(JSON.stringify(rows).includes(data.photo.metadata.filename), false); assert.equal(JSON.stringify(rows).includes(data.photo.manifest.photoId), false);
   access.dispose(); snapshot.dispose(); assert.ok(data.photo.metadataKey.some(byte => byte !== 0), "Closing album selection preserves the catalog key");
+}));
+
+test("chosen contributions retry transient access reads before and after commit without duplicate additions", () => scoped(async () => {
+  for (const phase of [1, 2, 3]) {
+    const data = await fixture(); let accessReads = 0, writes = 0, failing = true, published = false;
+    let stored: ReturnType<typeof validateAlbumAppend> | undefined;
+    globalThis.fetch = async (path, init) => {
+      const url = String(path), active = {...overview(data), photoCount: published ? 1 : 0};
+      if (url.endsWith("/access")) {
+        if (failing && ++accessReads === phase) {
+          if (phase === 1) throw new TypeError("Network interrupted");
+          return response({}, 503);
+        }
+        return response(active);
+      }
+      if (url.endsWith("/manifest")) return response(data.signed);
+      if (url.endsWith("/photos")) {
+        writes++; const request = validateAlbumAppend(JSON.parse(String(init?.body)));
+        if (stored) assert.deepEqual(request, stored); else stored = request;
+        published = true;
+        return response({version: 1, albumId: data.made.definition.albumId, operationId: request.operationId, added: 1, photoCount: 1});
+      }
+      return response({...active, version: 1, entries: published ? stored!.entries : [], manifests: published ? stored!.manifests : [], nextCursor: null, hasMore: false});
+    };
+    const access = await AlbumAccess.open({...overview(data), photoCount: 0}, {});
+    const choice = new PendingAlbumContribution([data.photo], () => access.current());
+    let retained: readonly Photo[] = [];
+    const add = (photos: readonly Photo[]) => {retained = photos; return access.add(photos, () => [data.photo]);};
+    await assert.rejects(choice.add(add));
+    assert.equal(access.current(), true); assert.equal(choice.current, true);
+    assert.ok(retained[0].metadataKey.some(byte => byte !== 0));
+    assert.equal(writes, phase === 3 ? 1 : 0, "No contribution passes an unsuccessful fresh access check");
+    failing = false;
+    assert.equal(await choice.add(add), phase === 3 ? 0 : 1);
+    assert.equal(writes, 1, "An already committed addition is not sent again");
+    assert.equal(choice.current, false); assert.ok(retained[0].metadataKey.every(byte => byte === 0));
+    assert.ok(data.photo.metadataKey.some(byte => byte !== 0)); access.dispose();
+  }
+}));
+
+test("direct contribution denials and invalid receipts cancel the chosen retry and its copied keys", () => scoped(async () => {
+  for (const failure of ["denied", "malformed", "binding"] as const) {
+    const data = await fixture();
+    globalThis.fetch = async (path, init) => {
+      const url = String(path), active = {...overview(data), photoCount: 0};
+      if (url.endsWith("/access")) return response(active);
+      if (url.endsWith("/manifest")) return response(data.signed);
+      if (url.endsWith("/photos")) {
+        if (failure === "denied") return response({code: "ALBUM_INACTIVE", retryable: true}, 403);
+        if (failure === "malformed") return response({added: 1});
+        const request = validateAlbumAppend(JSON.parse(String(init?.body)));
+        return response({version: 1, albumId: crypto.randomUUID(), operationId: request.operationId, added: 1, photoCount: 1});
+      }
+      return response({...active, version: 1, entries: [], manifests: [], nextCursor: null, hasMore: false});
+    };
+    const access = await AlbumAccess.open({...overview(data), photoCount: 0}, {});
+    const choice = new PendingAlbumContribution([data.photo], () => access.current());
+    let retained: readonly Photo[] = [];
+    await assert.rejects(choice.add(photos => {retained = photos; return access.add(photos, () => [data.photo]);}));
+    assert.equal(access.current(), false); assert.equal(choice.current, false);
+    assert.ok(retained[0].metadataKey.every(byte => byte === 0));
+    assert.ok(data.photo.metadataKey.some(byte => byte !== 0));
+  }
 }));
 
 test("selection fences exclude received, withdrawn, replaced originals and duplicates but allow annotation-only projections", () => scoped(async () => {
@@ -521,6 +591,33 @@ test("ordinary paging retains strict disposal after transient metadata failure",
   const access = await AlbumAccess.open(active, {}), first = await access.loadPhotoPage(); fail = true;
   await assert.rejects(access.loadPhotoPage(first.nextCursor));
   assert.equal(access.current(), false); assert.ok(first.photos[0].metadataKey.every(byte => byte === 0));
+}));
+
+test("background overview retries temporary failures while confirmed denial wipes the displayed reader", () => scoped(async () => {
+  for (const failure of ["transport", 408, 429, 503, 403] as const) {
+    const data = await fixture(); let failing = false;
+    globalThis.fetch = async path => {
+      const url = String(path);
+      if (url.endsWith("/access")) {
+        if (failing) {
+          if (failure === "transport") throw new TypeError("Network interrupted");
+          return response({code: "ALBUM_INACTIVE", retryable: true}, failure);
+        }
+        return response(overview(data));
+      }
+      if (url.startsWith("/v1/albums/")) return response({...overview(data), version: 1, entries: [data.entry], manifests: [data.signed], hasMore: false, nextCursor: null});
+      return new Response(new Uint8Array(data.objects.get(url.split("/").at(-1)!)!));
+    };
+    const access = await AlbumAccess.open(overview(data), {}), [photo] = (await access.loadPhotoPage()).photos;
+    failing = true; await assert.rejects(access.refreshOverview());
+    assert.equal(access.current(), failure !== 403);
+    assert.equal(photo.metadataKey.some(byte => byte !== 0), failure !== 403);
+    if (failure !== 403) {
+      failing = false; assert.equal((await access.refreshOverview()).photoCount, 1);
+      assert.deepEqual(await access.bytes(photo, "original", new AbortController().signal), data.original);
+    }
+    access.dispose();
+  }
 }));
 
 test("search shared details retries fresh initial and final access fences without erasing photo keys", () => scoped(async () => {

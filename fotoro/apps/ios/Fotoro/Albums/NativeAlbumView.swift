@@ -449,9 +449,10 @@ struct NativeAlbumView: View {
     }
   }
   private var tripAddButton: some View {
-    Button(selected.isEmpty ? "Add photos" : "Add \(selected.count)", systemImage: "plus") {
-      if selected.isEmpty { feedback = nil; showPicker = true }
-      else { run { try await model.append(selected); feedback = "Photos added." } }
+    Button(model.hasPendingAddition ? "Retry adding photos" : selected.isEmpty ? "Add photos" : "Add \(selected.count)",
+      systemImage: model.hasPendingAddition ? "arrow.clockwise" : "plus") {
+      if !model.hasPendingAddition && selected.isEmpty { feedback = nil; showPicker = true }
+      else { run { try await model.addChosen(selected); feedback = "Photos added." } }
     }.buttonStyle(.borderedProminent).disabled(busy).frame(minHeight: 44).accessibilityIdentifier("albums.add")
   }
   private var tripDownloadButton: some View {

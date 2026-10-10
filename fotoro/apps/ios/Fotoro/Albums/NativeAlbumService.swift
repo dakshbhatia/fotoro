@@ -883,6 +883,29 @@ private struct NativeAlbumBrowseIdentity: Equatable {
     guard let reading = access, let pending = try services.store.existingOperation(journalID(reading), as: NativeAlbumPendingAppend.self) else { return }
     try await send(pending, reading: reading)
   }
+  func addChosen(_ photos: [LocalPhoto]) async throws {
+    guard let reading = access else { throw FotoroError("Open an accepted album first.") }
+    try check(reading.context)
+    if photos.isEmpty { try await retryAddition(); return }
+    let chosen = try selected(photos, reading: reading), ids = Set(chosen.map(\.id))
+    guard let pending = try services.store.existingOperation(journalID(reading), as: NativeAlbumPendingAppend.self) else {
+      try await append(chosen); return
+    }
+    let pendingIDs = try zip(pending.request.entries, pending.request.manifests).map { entry, signed in
+      try crypto.photo(entry, manifestSigned: signed, definition: reading.definition, key: reading.key).0.photoId
+    }
+    guard !pendingIDs.isEmpty, Set(pendingIDs).isSubset(of: ids) else {
+      throw FotoroError("Retry the previous chosen photos before adding a different selection.")
+    }
+    try await retryAddition()
+    try check(reading.context)
+    guard access?.context == reading.context, access?.albumID == reading.albumID,
+      access?.signedDefinition == reading.signedDefinition else { throw CancellationError() }
+    // The journal covers one wire batch. Finish the unchanged chosen set; append
+    // verifies sources again and skips IDs already committed by the replay.
+    _ = try selected(chosen, reading: reading)
+    try await append(chosen)
+  }
   func append(_ photos: [LocalPhoto]) async throws {
     guard let reading = access else { throw FotoroError("Open an accepted album first.") }
     let current = try selected(photos, reading: reading), original = reading.context

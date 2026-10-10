@@ -5,7 +5,7 @@ import type {OwnedAlbumDetails} from "./details";
 import {diagnose, type DiagnosticContext} from "../diagnostics";
 import type {AccountCardV1, SignedPayloadV1} from "@fotoro/contracts";
 import {acceptedPhotoManifestKind} from "@fotoro/contracts/camera-media";
-import {validateWire} from "@fotoro/contracts/validate";
+import {validateWire, WireError} from "@fotoro/contracts/validate";
 import {ALBUM_DEFINITION_KIND, ALBUM_PHOTO_KIND, readAlbumSignedBody, validateAlbumPhoto, validateAlbumDefinition, validateAlbumInbox, validateAlbumDetail, validateAlbumOverview, validateAlbumTitle, validateAlbumAppendResult, validateAlbumAppend, type AlbumAppendV1, type AlbumOverviewV1, type AlbumDetailV1} from "@fotoro/contracts/albums";
 import {makeAlbumDefinition, openAlbumDefinition, makeAlbumAction, makeAlbumPhoto, openAlbumPhoto, verifyAlbumPhoto} from "@fotoro/crypto/albums";
 import {ready, verifyPayload, unb64, utf8, wrapKey, unwrapKey} from "@fotoro/crypto";
@@ -20,7 +20,7 @@ import {savedOriginalSelectionCurrent, shareOriginals} from "../library/system-s
 import {AlbumRasterCache} from "./raster-cache";
 import {savedRasterSource} from "../library/saved-raster";
 import {cameraOriginalFiles} from "../media/camera-original";
-function transientAlbumRead(error: unknown) {
+export function transientAlbumRead(error: unknown) {
   return error instanceof ApiTransportError || error instanceof ApiError &&
     (error.status === 408 || error.status === 429 || error.status !== undefined && error.status >= 500 && error.status <= 599);
 }
@@ -208,6 +208,7 @@ export class AlbumAccess {
       await this.trusted(); return value;
     } catch (error) {if (!preserveTransientFailure || !transientAlbumRead(error)) this.dispose(); else this.check(); throw error;}
   }
+  refreshOverview() {return diagnose("album", diagnostic => this.assertAccessRequest(diagnostic, true), "refresh");}
   accept() {return diagnose("album", diagnostic => this.acceptAction(diagnostic), "accept");}
   private async acceptAction(diagnostic: DiagnosticContext) {
     const request = scopedApi(diagnostic);
@@ -406,10 +407,19 @@ export class AlbumAccess {
     refreshed.photos.clear(); refreshed.photoSources.clear(); refreshed.dispose();
     return photos;
   }
-  add(chosen: readonly Photo[], latest: () => readonly Photo[]) {return diagnose("album", diagnostic => this.addAction(diagnostic, chosen, latest), "add");}
+  add(chosen: readonly Photo[], latest: () => readonly Photo[]) {
+    return diagnose("album", async diagnostic => {
+      try {return await this.addAction(diagnostic, chosen, latest);}
+      catch (error) {
+        if (error instanceof WireError || error instanceof ApiError && [401, 403, 409].includes(error.status ?? 0)
+          || error instanceof Error && ["ALBUM_BINDING_MISMATCH", "ALBUM_PAGE_MISMATCH", "ALBUM_ACCESS_ENDED"].includes(error.message)) this.dispose();
+        throw error;
+      }
+    }, "add");
+  }
   private async addAction(diagnostic: DiagnosticContext, chosen: readonly Photo[], latest: () => readonly Photo[]) {
     const requestApi = scopedApi(diagnostic);
-    albumOwnedSelection(chosen, this.session, latest()); await this.assertAccess(diagnostic);
+    albumOwnedSelection(chosen, this.session, latest()); await this.assertAccessRequest(diagnostic, true);
     // Never generate a different immutable envelope for a contribution already present.
     const existing = new Set<string>(); let page = await this.detail(undefined, diagnostic); const cursors = new Set<string>();
     for (;;) {
@@ -439,10 +449,10 @@ export class AlbumAccess {
       }
       const entries = batch.map((photo, n) => makeAlbumPhoto({definition: this.definition, manifest: manifests[n], metadataKey: photo.metadataKey, albumKey: this.key, signingSecretKey: this.session.signingSecretKey}));
       const request = await retainAppend({version: 1, operationId, entries, manifests}, this.albumId, this.session, this.scope);
-      await this.assertAccess(diagnostic); albumOwnedSelection(chosen, this.session, latest());
+      await this.assertAccessRequest(diagnostic, true); albumOwnedSelection(chosen, this.session, latest());
       const result = validateAlbumAppendResult(await requestApi("/v1/albums/" + this.albumId + "/photos", request, undefined, "POST", this.scope.signal)); this.check();
       if (result.albumId !== this.albumId || result.operationId !== request.operationId || result.added > batch.length) throw new Error("ALBUM_BINDING_MISMATCH");
-      await this.assertAccess(diagnostic); added += result.added;
+      await this.assertAccessRequest(diagnostic, true); added += result.added;
     }
     return added;
   }
