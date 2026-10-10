@@ -336,7 +336,9 @@ private struct NativeAlbumBrowseIdentity: Equatable {
     access = reading; opened = value
     do { try await loadPage(reading, cursor: nil) }
     catch { if access?.context == captured { clearOpen() }; throw error }
-    do { try await loadMoreSharedDetails() }
+    // Photos are already admitted; optional shared details cannot discard that
+    // verified page merely because their membership recheck is temporarily offline.
+    do { try await loadMoreSharedDetails(preservingTransientFailure: true) }
     catch is CancellationError {
       if access?.context == captured { clearOpen() }
       throw CancellationError()
@@ -352,7 +354,7 @@ private struct NativeAlbumBrowseIdentity: Equatable {
   }
   func loadMore() async throws {
     guard let reading = access, let cursor = nextCursor else { return }
-    try await loadPage(reading, cursor: cursor)
+    try await loadPage(reading, cursor: cursor, preservingTransientFailure: true)
   }
   // Replace the verified window atomically. Refresh never tears down the viewer,
   // loaded pages or derivatives while the same signed trip remains admitted.
@@ -510,6 +512,9 @@ private struct NativeAlbumBrowseIdentity: Equatable {
   func loadMoreSharedDetails(preservingTransientFailure: Bool = false) async throws {
     guard refreshingFacts == nil else { return }
     guard let reading = access else { throw FotoroError("Open an accepted album first.") }
+    // A continuation keeps its verified window on temporary connectivity failure.
+    // The initial read still uses the caller's stricter admission policy.
+    let preserveWindow = preservingTransientFailure || factsPageLoaded
     do {
       if factsSupported == nil {
         do {
@@ -521,10 +526,10 @@ private struct NativeAlbumBrowseIdentity: Equatable {
         }
       }
       guard factsSupported == true, !factsPageLoaded || factsNextCursor != nil else { return }
-      try await membership(reading, preservingTransientFailure: preservingTransientFailure)
+      try await membership(reading, preservingTransientFailure: preserveWindow)
       let page = try await readFactsPage(reading, cursor: factsNextCursor, cursors: factsCursors,
         listed: factsListedIDs, values: pendingFacts)
-      try await membership(reading, preservingTransientFailure: preservingTransientFailure); try check(reading.context)
+      try await membership(reading, preservingTransientFailure: preserveWindow); try check(reading.context)
       pendingFacts = page.values; factsPageLoaded = true; factsLoadedPages += 1; factsNextCursor = page.cursor
       factsListedIDs = page.listed
       if let cursor = page.cursor { factsCursors.insert(cursor) }

@@ -200,16 +200,21 @@ export async function pendingImports() {
     .filter(([key]) => key.startsWith(id + ":"))
     .map(([, value]) => decryptPrivate<PendingImport>(value));
 }
-export async function resumePendingImports(signal?: AbortSignal, diagnostic?: DiagnosticContext) {
+export async function resumePendingImports(signal?: AbortSignal, diagnostic?: DiagnosticContext, photoIds?: readonly string[], current?: () => boolean) {
   const request = diagnostic ? scopedApi(diagnostic) : api;
   const v = requireVault();
   if (fixtureMode || isPublicDemoAccount(v.accountId)) return;
   const check = () => {
     assertVault(v);
     signal?.throwIfAborted();
+    if (current?.() === false) throw new DOMException("Import choice withdrawn", "AbortError");
   };
-  for (const pending of await pendingImports()) {
+  const chosen = photoIds ? new Set(photoIds) : undefined;
+  if (chosen?.size === 0) return;
+  check(); const queue = await pendingImports(); check();
+  for (const pending of queue) {
     check();
+    if (chosen && !chosen.has(pending.photoId)) continue;
     if (pending.state === "committed") continue;
     const journalKey = v.accountId + ":" + pending.operationId;
     const persist = () => {
@@ -227,6 +232,7 @@ export async function resumePendingImports(signal?: AbortSignal, diagnostic?: Di
         }
         if (part.reservation) {
           try {
+            check();
             const commit = await request<UploadCommitV1>(
               "/v1/uploads/" + part.reservation.uploadId + "/commit",
               {},
@@ -288,6 +294,7 @@ export async function resumePendingImports(signal?: AbortSignal, diagnostic?: Di
         if (!response.ok) throw new Error("UPLOAD_FAILED");
         pending.state = "committing";
         await persist();
+        check();
         const commit = await request<UploadCommitV1>(
           "/v1/uploads/" + part.reservation!.uploadId + "/commit",
           {},
@@ -345,8 +352,10 @@ export async function resumePendingImports(signal?: AbortSignal, diagnostic?: Di
           key,
         })),
       ]);
+      check();
     } catch (e) {
       if (!sameVault(v)) throw new Error("VAULT_LOCKED");
+      if (current?.() === false) throw new DOMException("Import choice withdrawn", "AbortError");
       if (signal?.aborted) {
         pending.state = "queued";
         pending.error = undefined;

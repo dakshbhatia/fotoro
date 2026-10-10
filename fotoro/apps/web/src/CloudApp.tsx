@@ -36,6 +36,7 @@ import {ExpiredSavedSelection, IncomingShareIntent, grantState, ShareSelection} 
 import {ReceivedAccessRefresh} from "./exchange/received-access";
 import {
   stageImport,
+  resumePendingImports,
   pendingImports,
   type PendingImport,
 } from "./exchange/journal";
@@ -1434,16 +1435,18 @@ export default function CloudApp({
         />
       )}
       {active && albumsOpen && unlocked && <AlbumPanel key={albumPanelKey} selection={albumEntryRevision.photos(albumSelection)} initialAlbumId={albumDestination?.current() ? albumDestination.albumId : undefined} currentPhotos={() => currentCatalog.current} currentOwnedPhotos={() => currentOwnedSnapshot.current}
-        onImportPhotos={async (files, signal, current) => {
-          const session = requireVault();
-          const check = () => {signal.throwIfAborted(); if (!current() || !sameVault(session) || !activeRef.current) throw new DOMException("Trip closed", "AbortError");};
+        onImportPhotos={async (choice, signal, current) => {
+          const session = requireVault(), origin = location.origin;
+          const check = () => {signal.throwIfAborted(); if (!current() || !choice.current || !sameVault(session) || !activeRef.current || location.origin !== origin) throw new DOMException("Trip closed", "AbortError");};
           check(); if (publicDemo) throw new Error("PUBLIC_TEST_ACCOUNT_UPLOAD_DISABLED");
-          if (!files.length || files.length > 100) throw new Error("TRIP_CHOOSE_1_TO_100_FILES");
-          await continueSync(session); check();
-          return saveTripFiles(files, {signal, current: () => current() && sameVault(session) && activeRef.current,
-            stage: async file => {check(); const staged = await stageImport(file, undefined, signal); check(); return staged.photoId;},
-            drain: async () => {check(); await saveSync(session, signal); check();},
-            unresolved: async () => {const pending = await pendingImports(); check(); return pending.some(item => item.state !== "committed");},
+          return saveTripFiles(choice, {signal, current: () => current() && choice.current && sameVault(session) && activeRef.current && location.origin === origin,
+            stage: async file => {check(); const staged = await stageImport(file, undefined, signal); check(); return {photoId: staged.photoId, sourceDigest: staged.sourceDigest};},
+            drain: async photoIds => {
+              check(); const pending = await pendingImports(); check();
+              if (choice.sources.some(source => !pending.some(item => item.photoId === source.photoId && item.sourceDigest === source.sourceDigest))) throw new Error("TRIP_SOURCE_CHANGED");
+              await resumePendingImports(signal, undefined, photoIds, () => current() && choice.current && sameVault(session) && activeRef.current && location.origin === origin); check();
+            },
+            unresolved: async photoIds => {const pending = await pendingImports(); check(); return photoIds.some(id => !pending.some(item => item.photoId === id && item.state === "committed"));},
             load: async photoIds => {
               const pending = await pendingImports(); check();
               const sources = tripSavedSources(photoIds, session.accountId, pending);
