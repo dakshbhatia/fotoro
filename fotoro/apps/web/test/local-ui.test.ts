@@ -11,10 +11,11 @@ test('retained preview viewer gates Share until a live original is reselected',(
  assert.match(markup,/disabled=""[^>]*>Share/);assert.match(markup,/Reselect the original/);
  assert.match(markup,/aria-label="More photo options"/); assert.doesNotMatch(markup,/>Download original</);
 });
-test('local original viewer keeps one primary Share and a separate manual Save',()=>{
+test('local original viewer exposes Share without secondary actions before opening More',()=>{
  const original={...photo('a'),file:new File(['exact original'],'same.png')};
  const markup=renderToStaticMarkup(createElement(LocalViewer,{photos:[original],initial:'a',resources:new LocalResources(),onClose:()=>{},onSave:()=>{}}));
- assert.match(markup,/>Save</); assert.match(markup,/class="primary-action"[^>]*>Share</);
+ assert.match(markup,/aria-label="More photo options"/); assert.match(markup,/class="primary-action"[^>]*>Share</);
+ assert.doesNotMatch(markup,/>Save(?: to Fotoro)?</);
  assert.doesNotMatch(markup,/>Zoom</); assert.doesNotMatch(markup,/>Download original</);
 });
 test('digest-based reselection reconnects labels without trusting an equal filename',()=>{

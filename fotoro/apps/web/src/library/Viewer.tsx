@@ -258,8 +258,7 @@ export function Viewer({
         </div> : <p role="status">Opening photo…</p>}
       </div>
       <div className="viewer-bottom glass" inert={prepared ? true : undefined}>
-        {photos.length > 1 && <button
-          disabled={index === 0}
+        {index > 0 && <button
           onClick={() => setSelected(photos[index - 1].manifest.photoId)}
           aria-label="Previous photo"
         >
@@ -285,8 +284,7 @@ export function Viewer({
             {saving ? "Saving…" : saveState === "saved" ? "Saved" : saveState === "failed" ? "Retry Save" : "Save"}
           </button>
         )}
-        {photos.length > 1 && <button
-          disabled={index === photos.length - 1}
+        {index < photos.length - 1 && <button
           onClick={() => setSelected(photos[index + 1].manifest.photoId)}
           aria-label="Next photo"
         >

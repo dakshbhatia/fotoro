@@ -1,0 +1,86 @@
+:is(.local-trial, .cloud-library) .photo-browse-toolbar {
+  position: relative;
+  z-index: 9;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 12px;
+  width: min(680px, calc(100% - 32px));
+  margin: 0 auto 10px;
+}
+
+:is(.local-trial, .cloud-library) .photo-browse-toolbar > .consumer-search {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  margin: 0;
+}
+
+:is(.local-trial, .cloud-library) .photo-browse-filters > summary {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 44px;
+  padding: 4px 0 4px 4px;
+  cursor: pointer;
+  font-size: 14px;
+  list-style: none;
+}
+
+:is(.local-trial, .cloud-library) .photo-browse-filters > summary::-webkit-details-marker { display: none; }
+:is(.local-trial, .cloud-library) .photo-browse-filters > summary:focus-visible { outline: 2px solid var(--photo-accent); outline-offset: 4px; }
+:is(.local-trial, .cloud-library) .photo-browse-filter-state { max-width: 130px; color: var(--photo-muted); font-size: 11px; line-height: 1.35; }
+:is(.local-trial, .cloud-library) .photo-browse-filter-state:empty { display: none; }
+
+:is(.local-trial, .cloud-library) .photo-browse-filter-options {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: min(460px, 100%);
+  max-height: calc(100dvh - 180px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px;
+  border: 1px solid var(--photo-selected);
+  border-radius: 16px;
+  background: var(--photo-background);
+  box-shadow: 0 12px 40px #0008;
+}
+
+:is(.local-trial, .cloud-library) .photo-browse-filter-options .local-check { margin: 0; min-height: 44px; }
+:is(.local-trial, .cloud-library) .photo-browse-filter-options .people-filter > summary { padding-left: 0; }
+:is(.local-trial, .cloud-library) .photo-browse-filter-options .people-filter-options { border: 0; padding: 0 0 12px; }
+:is(.local-trial, .cloud-library) .photo-browse-filter-options button { min-height: 44px; }
+:is(.local-trial, .cloud-library) .photo-browse-view { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+:is(.local-trial, .cloud-library) .photo-browse-view > span { flex: 1; }
+:is(.local-trial, .cloud-library) .photo-browse-view button { min-width: 64px; }
+:is(.local-trial, .cloud-library) .photo-browse-view button[aria-pressed="true"] { border-color: var(--photo-accent); color: var(--photo-accent); }
+:is(.local-trial, .cloud-library) .photo-browse-columns > summary { min-height: 44px; padding: 12px 0; cursor: pointer; }
+:is(.local-trial, .cloud-library) .photo-browse-columns fieldset { margin: 0; padding: 0; border: 0; }
+:is(.local-trial, .cloud-library) .photo-browse-columns label { display: flex; align-items: center; gap: 8px; min-height: 44px; }
+:is(.local-trial, .cloud-library) .photo-browse-columns input { width: 20px; height: 20px; accent-color: var(--photo-accent); }
+:is(.local-trial, .cloud-library) .photo-browse-result-actions { display: flex; flex: 0 0 auto; padding: 0 24px 8px; }
+:is(.local-trial, .cloud-library) .photo-browse-result-actions button { min-height: 44px; }
+
+:is(.local-trial, .cloud-library) .consumer-selection {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+:is(.local-trial, .cloud-library) .consumer-selection > :is(p, span) { min-width: 0; white-space: normal; }
+:is(.local-trial, .cloud-library) .consumer-selection > button { min-width: 0; padding: 10px 12px; }
+:is(.local-trial, .cloud-library) .consumer-selection .selection-more > summary { padding: 10px 12px; }
+:is(.local-trial, .cloud-library) .consumer-selection > small { grid-column: 1 / -1; }
+
+@media (max-width: 700px) {
+  :is(.local-trial, .cloud-library) .photo-browse-toolbar { gap: 8px; width: calc(100% - 24px); }
+  :is(.local-trial, .cloud-library) .photo-browse-result-actions { padding-left: 12px; padding-right: 12px; }
+  :is(.local-trial, .cloud-library) .consumer-selection { gap: 6px; padding: 8px 10px; }
+}
+
+@media (max-width: 360px) {
+  :is(.local-trial, .cloud-library) .consumer-selection { grid-template-columns: repeat(3, minmax(44px, 1fr)); }
+  :is(.local-trial, .cloud-library) .consumer-selection > :is(p, span) { grid-column: 1 / -1; }
+}
