@@ -1,4 +1,3 @@
-/** The public invitation remains selectable when browser clipboard permission is unavailable. */
 export async function copyAlbumInvitation(link: string, current: () => boolean,
   clipboard?: Pick<Clipboard, "writeText">): Promise<"copied" | "manual" | undefined> {
   if (!current()) return;
