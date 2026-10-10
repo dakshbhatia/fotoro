@@ -1,10 +1,82 @@
 import GRDB
+import Observation
 import Photos
 import XCTest
 
 @testable import Fotoro
 
 final class PhotosBackupTests: XCTestCase {
+  @MainActor func testSyncTileObservationIgnoresUnrelatedItemsAndAggregateCounts() {
+    let projection = PhotoSyncItemProjection()
+    let catalog = NSObject()
+    let context = PhotoSyncItemProjection.Context(
+      access: PhotoAccountAccess(account: "account", vault: UUID(), catalog: ObjectIdentifier(catalog)),
+      origin: "https://photos.test")
+    let a = PhotoSyncItemStatus(sourceRevision: "a1", photoID: "photo-a", phase: .waiting)
+    let b = PhotoSyncItemStatus(sourceRevision: "b1", photoID: "photo-b", phase: .saved)
+    var progress = PhotoSyncProgress(itemsBySourceID: ["a": a, "b": b],
+      itemsByPhotoID: ["photo-a": a, "photo-b": b])
+    projection.replace(with: progress, context: context)
+    let changedA = SyncObservationCounter(), changedB = SyncObservationCounter()
+    let changedSavedA = SyncObservationCounter(), changedMissing = SyncObservationCounter()
+    withObservationTracking { _ = projection[.source("a")] } onChange: { changedA.increment() }
+    withObservationTracking { _ = projection[.source("b")] } onChange: { changedB.increment() }
+    withObservationTracking { _ = projection[.saved("photo-a")] } onChange: { changedSavedA.increment() }
+    withObservationTracking { _ = projection[.source("missing")] } onChange: { changedMissing.increment() }
+    progress.completed = 1
+    progress.total = 20
+    projection.replace(with: progress, context: context)
+    projection.replace(with: progress, context: context)
+    XCTAssertEqual(changedA.value, 0)
+    XCTAssertEqual(changedB.value, 0)
+    XCTAssertEqual(changedSavedA.value, 0)
+    let uploading = PhotoSyncItemStatus(sourceRevision: "a1", photoID: "photo-a", phase: .uploading)
+    progress.itemsBySourceID["a"] = uploading
+    progress.itemsByPhotoID["photo-a"] = uploading
+    projection.replace(with: progress, context: context)
+    XCTAssertEqual(changedA.value, 1)
+    XCTAssertEqual(changedSavedA.value, 1)
+    XCTAssertEqual(changedB.value, 0, "An unrelated tile must keep its observation alive")
+    XCTAssertEqual(changedMissing.value, 0)
+    progress.itemsBySourceID["b"] = nil
+    projection.replace(with: progress, context: context)
+    XCTAssertEqual(changedB.value, 1, "Removing a source must invalidate its tile")
+    progress.itemsBySourceID["missing"] = uploading
+    projection.replace(with: progress, context: context)
+    XCTAssertEqual(changedMissing.value, 1, "A previously absent status must invalidate its tile")
+  }
+
+  @MainActor func testSyncTileProjectionFencesContextChangesAndDoesNotRetainAbsentReads() {
+    let projection = PhotoSyncItemProjection()
+    let catalog = NSObject()
+    var context = PhotoSyncItemProjection.Context(
+      access: PhotoAccountAccess(account: "account", vault: UUID(), catalog: ObjectIdentifier(catalog)),
+      origin: "https://photos.test")
+    let item = PhotoSyncItemStatus(sourceRevision: "current", photoID: "photo", phase: .saved)
+    let progress = PhotoSyncProgress(itemsBySourceID: ["source": item], itemsByPhotoID: ["photo": item])
+    projection.replace(with: progress, context: context)
+    for index in 0..<10_000 {
+      XCTAssertNil(projection[.source("absent-\(index)")])
+      XCTAssertNil(projection[.saved("absent-\(index)")])
+    }
+    XCTAssertEqual(projection.count, 2, "Scrolling past absent statuses cannot grow a slot cache")
+    let changedContext = SyncObservationCounter()
+    withObservationTracking { _ = projection.context } onChange: { changedContext.increment() }
+    context.origin = "https://other.test"
+    projection.replace(with: progress, context: context)
+    XCTAssertEqual(changedContext.value, 1, "Equal item statuses still need a new account/origin context")
+    let withdrawnSource = SyncObservationCounter(), withdrawnSaved = SyncObservationCounter()
+    withObservationTracking { _ = projection[.source("source")] } onChange: { withdrawnSource.increment() }
+    withObservationTracking { _ = projection[.saved("photo")] } onChange: { withdrawnSaved.increment() }
+    projection.replace(with: progress, context: nil)
+    XCTAssertNil(projection.context)
+    XCTAssertNil(projection[.source("source")])
+    XCTAssertNil(projection[.saved("photo")])
+    XCTAssertEqual(withdrawnSource.value, 1)
+    XCTAssertEqual(withdrawnSaved.value, 1)
+    XCTAssertEqual(projection.count, 0, "Withdrawal removes all backing entries even if a stale value is supplied")
+  }
+
   func testTransferProjectionFencesRevisionsAndCountsSourceBatchWithoutInventingByteProgress() {
     let sources = [
       BackupSource(id: "saved", photoId: "shared", phase: .committed, sourceRevision: "r1"),
@@ -911,6 +983,34 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     XCTAssertEqual(services.photoSyncProgress.total, 1)
     XCTAssertEqual(services.photoSyncItem(sourceID: "unchanged", revision: "current")?.phase, .saved)
     XCTAssertNil(services.photoSyncItem(sourceID: "unchanged", revision: "edited"))
+    let savedID = try services.store.backupSource("unchanged").photoId
+    XCTAssertEqual(services.photoSyncItem(photoID: savedID)?.phase, .saved)
+    let originalOrigin = services.api.baseURL
+    services.api.baseURL = URL(string: "https://other-sync-origin.test")!
+    XCTAssertNil(services.photoSyncItem(sourceID: "unchanged", revision: "current"))
+    XCTAssertNil(services.photoSyncItem(photoID: savedID))
+    services.api.baseURL = originalOrigin
+    let originalAccount = services.session.accountId
+    services.session.accountId = Wire.id()
+    XCTAssertNil(services.photoSyncItem(sourceID: "unchanged", revision: "current"))
+    XCTAssertNil(services.photoSyncItem(photoID: savedID))
+    services.session.accountId = originalAccount
+    XCTAssertEqual(services.photoSyncItem(photoID: savedID)?.phase, .saved)
+    let tileChanges = SyncObservationCounter(), savedTileChanges = SyncObservationCounter()
+    let summaryChanges = SyncObservationCounter()
+    withObservationTracking {
+      _ = services.photoSyncItem(sourceID: "unchanged", revision: "current")
+    } onChange: { tileChanges.increment() }
+    withObservationTracking {
+      _ = services.photoSyncItem(photoID: savedID)
+    } onChange: { savedTileChanges.increment() }
+    withObservationTracking { _ = services.photoSyncProgress } onChange: { summaryChanges.increment() }
+    try services.store.putBackupSource(BackupSource(id: "unrelated-observed", photoId: Wire.id(),
+      phase: .skipped, sourceRevision: "unrelated"))
+    services.refreshConsumerSyncSummary()
+    XCTAssertEqual(tileChanges.value, 0, "A status elsewhere cannot invalidate the source tile")
+    XCTAssertEqual(savedTileChanges.value, 0, "A status elsewhere cannot invalidate the saved tile")
+    XCTAssertEqual(summaryChanges.value, 1, "Aggregate progress still notifies summary readers")
     let sourceGeneration = services.consumerBackupSourcesGeneration
     services.refreshConsumerSyncSummary()
     XCTAssertEqual(services.consumerBackupSourcesGeneration, sourceGeneration, "An unchanged summary cannot rebuild the browse source projection")
@@ -918,6 +1018,9 @@ final class AutomaticPhotoSyncTests: XCTestCase {
     XCTAssertTrue(services.consumerBackupSources.isEmpty)
     XCTAssertTrue(services.photoSyncProgress.itemsBySourceID.isEmpty)
     XCTAssertNil(services.photoSyncItem(sourceID: "unchanged", revision: "current"))
+    XCTAssertNil(services.photoSyncItem(photoID: savedID))
+    XCTAssertEqual(tileChanges.value, 1, "Locking invalidates the source tile's live access")
+    XCTAssertEqual(savedTileChanges.value, 1, "Locking invalidates the saved tile's live access")
   }
   @MainActor func testExcludedNewRevisionStaysIncompleteAndRetriesWhenCompleteResourcesReturn() async throws {
     let context = try PausedUploadContext()
@@ -1786,4 +1889,11 @@ private final class UploadRequestGate: @unchecked Sendable {
     lock.lock(); visits += 1; let first = visits == 1; lock.unlock()
     if first { _ = release.wait(timeout: .now() + 10) }
   }
+}
+
+private final class SyncObservationCounter: @unchecked Sendable {
+  private let lock = NSLock()
+  private var count = 0
+  var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+  func increment() { lock.lock(); defer { lock.unlock() }; count += 1 }
 }

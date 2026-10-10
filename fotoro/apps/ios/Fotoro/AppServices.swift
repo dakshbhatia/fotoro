@@ -122,6 +122,8 @@ enum ReviewedPhotosBackupPolicy {
   #if DEBUG
     @ObservationIgnored var consumerShareDidWrite: ((URL) -> Void)?
     @ObservationIgnored var catalogSearchWillRead: (@Sendable () -> Void)?
+    @ObservationIgnored var savedVisualEmbedding: (@MainActor (SearchPreview) async throws -> [Float])?
+    func waitForSavedVisualEvidence() async { await savedVisualTask?.value }
     @ObservationIgnored var photosBackupSnapshot: ((Date) throws -> [BackupCandidate])?
     @ObservationIgnored var automaticPhotosAuthorization: (() -> PHAuthorizationStatus)?
   #endif
@@ -129,10 +131,12 @@ enum ReviewedPhotosBackupPolicy {
   private(set) var consumerBackupSources: [BackupSource] = []
   private(set) var consumerBackupSourcesGeneration: UInt64 = 0
   private(set) var photoSyncProgress = PhotoSyncProgress()
+  @ObservationIgnored private let photoSyncItems = PhotoSyncItemProjection()
   @ObservationIgnored private var consumerTransferProjection: [TransferEntry] = []
   @ObservationIgnored private var consumerProjectionAccess: PhotoAccountAccess?
   @ObservationIgnored private var consumerProjectionOrigin: String?
   private(set) var consumerCatalogGeneration: UInt64 = 0
+  private(set) var consumerSavedEvidenceGeneration: UInt64 = 0
   private var activatedPhotoAccount: PhotoAccountAccess?
   @ObservationIgnored private var diagnosticAccountState: NativeDiagnosticAccountState?
   @ObservationIgnored private var diagnosticSyncReason: NativeDiagnosticReason?
@@ -158,19 +162,22 @@ enum ReviewedPhotosBackupPolicy {
     let account = vault.isUnlocked ? session.accountId : nil
     let generation = vault.generation
     let catalog = store
+    let origin = BackgroundUploadPolicy.origin(api.baseURL)
     let libraryGeneration = local.libraryGeneration
     let deviceHits = try await local.consumerResults(query)
     try Task.checkCancellation()
     let saved: [LocalPhoto]
     var visualSavedIDs = Set<String>()
     if let account {
-      guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account else { throw CancellationError() }
+      guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account,
+        BackgroundUploadPolicy.origin(api.baseURL) == origin else { throw CancellationError() }
       let lexical = try await searchCatalog(query, people: people).filter { ["committed", "saved"].contains($0.transferState) }
       let visual = local.acceptedMeaningID == nil ? try await consumerSavedVisualSearch(query, people: people) : []
       let matched = Set(lexical.map(\.id))
       saved = lexical + visual.filter { !matched.contains($0.id) }
       visualSavedIDs = Set(visual.map(\.id)).subtracting(matched)
-      guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account else { throw CancellationError() }
+      guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account,
+        BackgroundUploadPolicy.origin(api.baseURL) == origin else { throw CancellationError() }
     } else { saved = [] }
     try Task.checkCancellation()
     guard local.peopleSelection == people else { throw CancellationError() }
@@ -205,6 +212,7 @@ enum ReviewedPhotosBackupPolicy {
     let phrase = NaturalDateQuery.parse(query).text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard phrase.count >= 3, vault.isUnlocked, let account = session.accountId else { return [] }
     let catalog = store, generation = vault.generation
+    let origin = BackgroundUploadPolicy.origin(api.baseURL)
     let root = catalog.root.appendingPathComponent("VisualSearch", isDirectory: true)
     if savedVisualRoot != root {
       invalidateSavedVisualSearch()
@@ -217,7 +225,8 @@ enum ReviewedPhotosBackupPolicy {
       let candidates = try await searchCatalog("").filter { ["committed", "saved"].contains($0.transferState) }
       try Task.checkCancellation()
       guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account,
-        consumerCatalogGeneration == catalogSnapshotGeneration else {
+        consumerCatalogGeneration == catalogSnapshotGeneration,
+        BackgroundUploadPolicy.origin(api.baseURL) == origin else {
         throw CancellationError()
       }
       let records = candidates.map { photo -> SearchRecord in
@@ -232,7 +241,8 @@ enum ReviewedPhotosBackupPolicy {
       _ = try await Task.detached(priority: .utility) { try index.replacePermitted(records) }.value
       try Task.checkCancellation()
       guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account,
-        consumerCatalogGeneration == catalogSnapshotGeneration else {
+        consumerCatalogGeneration == catalogSnapshotGeneration,
+        BackgroundUploadPolicy.origin(api.baseURL) == origin else {
         throw CancellationError()
       }
       savedVisualCatalogGeneration = catalogSnapshotGeneration
@@ -248,14 +258,17 @@ enum ReviewedPhotosBackupPolicy {
         @MainActor func current() -> Bool {
           !Task.isCancelled && savedVisualWork == work && vault.isUnlocked && vault.generation == generation
             && store === catalog && session.accountId == account && photoSyncForeground
+            && BackgroundUploadPolicy.origin(api.baseURL) == origin
         }
         @MainActor func notifyProgress() {
-          let snapshotWasCurrent = savedVisualCatalogGeneration == consumerCatalogGeneration
-          consumerCatalogGeneration &+= 1
-          if snapshotWasCurrent { savedVisualCatalogGeneration = consumerCatalogGeneration }
+          consumerSavedEvidenceGeneration &+= 1
         }
         do {
-          try await PhotoSemanticProcessor.shared.prepare()
+          #if DEBUG
+            if savedVisualEmbedding == nil { try await PhotoSemanticProcessor.shared.prepare() }
+          #else
+            try await PhotoSemanticProcessor.shared.prepare()
+          #endif
           guard current() else { return }
           let pending = try await Task.detached { try index.pendingSemanticRecords() }.value
           var completed = 0
@@ -269,12 +282,19 @@ enum ReviewedPhotosBackupPolicy {
                 let url = updated.previewURL,
                 let preview = try await Self.semanticPreview(url) else { continue }
               guard current() else { return }
-              let vector = try await PhotoSemanticProcessor.shared.image(preview)
+              let vector: [Float]
+              #if DEBUG
+                if let savedVisualEmbedding { vector = try await savedVisualEmbedding(preview) }
+                else { vector = try await PhotoSemanticProcessor.shared.image(preview) }
+              #else
+                vector = try await PhotoSemanticProcessor.shared.image(preview)
+              #endif
               guard current() else { return }
-              _ = try await Task.detached {
+              let applied = try await Task.detached {
                 try index.applySemantic(vector, photoID: record.id, revision: record.revision, generation: fence)
               }.value
               guard current() else { return }
+              guard applied else { continue }
               completed += 1
               if completed % 8 == 0 { notifyProgress() }
             } catch is CancellationError { return } catch { continue }
@@ -289,7 +309,8 @@ enum ReviewedPhotosBackupPolicy {
       let base = try index.search(query, scope: SearchScope(source: "saved", people: people))
       return try index.addingSemantic(vector, to: base)
     }.value
-    guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account else {
+    guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account,
+      BackgroundUploadPolicy.origin(api.baseURL) == origin else {
       throw CancellationError()
     }
     return try response.results.compactMap { try consumerSavedPhoto($0.id) }
@@ -402,14 +423,17 @@ enum ReviewedPhotosBackupPolicy {
     } catch { try? FileManager.default.removeItem(at: directory); throw error }
   }
   func photoSyncItem(sourceID: String, revision: String) -> PhotoSyncItemStatus? {
+    _ = photoSyncItems.context
     guard photoAccountAccess == consumerProjectionAccess, photoAccountAccess != nil,
       BackgroundUploadPolicy.origin(api.baseURL) == consumerProjectionOrigin else { return nil }
-    return photoSyncProgress.status(for: RecentPhotoSource(id: sourceID, revision: revision))
+    guard let status = photoSyncItems[.source(sourceID)], status.sourceRevision == revision else { return nil }
+    return status
   }
   func photoSyncItem(photoID: String) -> PhotoSyncItemStatus? {
+    _ = photoSyncItems.context
     guard photoAccountAccess == consumerProjectionAccess, photoAccountAccess != nil,
       BackgroundUploadPolicy.origin(api.baseURL) == consumerProjectionOrigin else { return nil }
-    return photoSyncProgress.itemsByPhotoID[photoID]
+    return photoSyncItems[.saved(photoID)]
   }
   private func clearConsumerPhotoSyncProjection() {
     if !consumerBackupSources.isEmpty || consumerProjectionAccess != nil {
@@ -419,7 +443,7 @@ enum ReviewedPhotosBackupPolicy {
     consumerProjectionAccess = nil
     consumerProjectionOrigin = nil
     consumerTransferProjection = []
-    if photoSyncProgress != PhotoSyncProgress() { photoSyncProgress = PhotoSyncProgress() }
+    publishPhotoSyncProgress(PhotoSyncProgress())
   }
   private func refreshPhotoSyncProgress() {
     guard session.isSignedIn, vault.isUnlocked, let account = session.accountId,
@@ -436,7 +460,14 @@ enum ReviewedPhotosBackupPolicy {
       activeTransfer: journal.activeTransfer,
       pendingPhotoIDs: Set(consumerTransferProjection.map { $0.photo.id }),
       failedPhotoIDs: Set(journal.errors.keys))
+    publishPhotoSyncProgress(value)
+  }
+  private func publishPhotoSyncProgress(_ value: PhotoSyncProgress) {
     if photoSyncProgress != value { photoSyncProgress = value }
+    let context = consumerProjectionAccess.flatMap { access in
+      consumerProjectionOrigin.map { PhotoSyncItemProjection.Context(access: access, origin: $0) }
+    }
+    photoSyncItems.replace(with: value, context: context)
   }
   private func observePhotoSyncActivity() {
     let token = consumerObservation

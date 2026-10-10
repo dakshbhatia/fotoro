@@ -244,6 +244,48 @@ struct PhotoSyncProgress: Equatable {
   }
 }
 
+// Tiles subscribe to their dictionary key, while summary views observe aggregate progress.
+// Reads never retain a slot: storage contains only the current authorized projection.
+@MainActor final class PhotoSyncItemProjection: Observable {
+  enum Key: Hashable {
+    case source(String)
+    case saved(String)
+  }
+  struct Context: Equatable {
+    var access: PhotoAccountAccess
+    var origin: String
+  }
+  private let registrar = ObservationRegistrar()
+  private var items: [Key: PhotoSyncItemStatus] = [:]
+  private var currentContext: Context?
+  var context: Context? {
+    registrar.access(self, keyPath: \PhotoSyncItemProjection.context)
+    return currentContext
+  }
+  subscript(key: Key) -> PhotoSyncItemStatus? {
+    registrar.access(self, keyPath: \PhotoSyncItemProjection.[key])
+    return items[key]
+  }
+  var count: Int { items.count }
+  func replace(with progress: PhotoSyncProgress, context: Context?) {
+    var next: [Key: PhotoSyncItemStatus] = [:]
+    if context != nil {
+      for (id, status) in progress.itemsBySourceID { next[.source(id)] = status }
+      for (id, status) in progress.itemsByPhotoID { next[.saved(id)] = status }
+    }
+    for key in Set(items.keys).union(next.keys) where items[key] != next[key] {
+      registrar.withMutation(of: self, keyPath: \PhotoSyncItemProjection.[key]) {
+        items[key] = next[key]
+      }
+    }
+    if currentContext != context {
+      registrar.withMutation(of: self, keyPath: \PhotoSyncItemProjection.context) {
+        currentContext = context
+      }
+    }
+  }
+}
+
 struct BackupStatus: Codable {
   enum Phase: String, Codable { case idle, scanning, running, paused, failed, partial, complete }
   var phase: Phase = .idle

@@ -13,7 +13,7 @@ struct SearchVisualResult: Sendable {
   var labels: [SearchVisualLabel]
   var processor: String
 }
-struct LocalSearchFields: Codable, Sendable {
+struct LocalSearchFields: Codable, Equatable, Sendable {
   var labels: [String]
   var captions: [String]
   var keywords: [String]
@@ -27,7 +27,7 @@ struct LocalSearchFields: Codable, Sendable {
   var visualProcessor: String?
   var captureMetadata: PhotoCaptureMetadata? = nil
 }
-struct SearchRecord: Codable, Sendable {
+struct SearchRecord: Codable, Equatable, Sendable {
   var version = 1
   var id: String
   var scope = "photos"

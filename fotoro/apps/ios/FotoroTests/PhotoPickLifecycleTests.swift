@@ -10,6 +10,183 @@ import XCTest
   private var signal: AutomaticPhotoPickSignals {
     AutomaticPhotoPickSignals(hash: 1, luminance: 0.5, contrast: 0.2, sharpness: 0.2, color: [0.3, 0.4, 0.3])
   }
+  private func permittedPickPhotos(count: Int) throws -> (PHAuthorizationStatus, [RecentPhoto], Date) {
+    let permission = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+    guard RecentPhotosPolicy.canRead(permission) else {
+      throw XCTSkip("Permit the public Simulator Photos library to verify interaction admission.")
+    }
+    let options = PHFetchOptions()
+    options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+    var photos: [RecentPhoto] = []
+    var now: Date?
+    PHAsset.fetchAssets(with: .image, options: options).enumerateObjects { asset, _, stop in
+      guard !asset.isHidden, !asset.mediaSubtypes.contains(.photoScreenshot), let date = asset.creationDate else { return }
+      let reference = now ?? date
+      now = reference
+      guard RecentPhotosPolicy.includes(date, now: reference) else { stop.pointee = true; return }
+      photos.append(RecentPhoto(asset: asset))
+      if photos.count == count { stop.pointee = true }
+    }
+    guard photos.count == count, let now else {
+      throw XCTSkip("Interaction admission needs \(count) permitted public photos within one recent window.")
+    }
+    return (permission, photos, now)
+  }
+  func testHeldAutomaticPicksYieldToScrollingAndResumeCachedSignalsWithoutMetadataRefresh() async throws {
+    let (permission, photos, now) = try permittedPickPhotos(count: 2)
+    let gate = PickPreviewGate()
+    let held = expectation(description: "Automatic analyzer has cached the first source and holds the second")
+    let cancelled = expectation(description: "Held preview observes automatic cancellation")
+    let resumed = expectation(description: "Idle admission resumes the uncached source")
+    var previews: [String] = [], metadataReads = 0
+    let analyzer = PhotoPickAnalyzer(preview: { source in
+      previews.append(source.id)
+      if previews.count == 2 {
+        held.fulfill(); await gate.wait()
+        if Task.isCancelled { cancelled.fulfill() }
+      } else if previews.count == 3 { resumed.fulfill() }
+      return self.signal
+    })
+    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in
+      metadataReads += 1; return photos
+    }, picks: analyzer)
+    defer { store.pauseAnalysis(); gate.open() }
+    store.restoreAccess(now: now)
+    PHPhotoLibrary.shared().unregisterChangeObserver(store)
+    await fulfillment(of: [held], timeout: 1)
+    store.setBrowseInteractionActive(true)
+    gate.open()
+    await fulfillment(of: [cancelled], timeout: 1)
+    try await Task.sleep(for: .milliseconds(100))
+    XCTAssertEqual(previews, photos.map(\.id), "Scrolling cannot start another automatic preview")
+    XCTAssertNil(store.picksSnapshot, "A canceled preview cannot publish its old snapshot")
+    store.setBrowseInteractionActive(false)
+    await fulfillment(of: [resumed], timeout: 2)
+    let result = try await store.completedPicks()
+    XCTAssertEqual(previews, [photos[0].id, photos[1].id, photos[1].id], "The completed first source must reuse its signal cache")
+    XCTAssertEqual(result.recommendations.unassessed, 0)
+    XCTAssertEqual(metadataReads, 1, "Resuming automatic analysis must not refresh or rescan metadata")
+    store.setBrowseInteractionActive(true)
+    store.setBrowseInteractionActive(false)
+    try await Task.sleep(for: .milliseconds(600))
+    XCTAssertEqual(previews.count, 3, "A finished snapshot needs no new idle work")
+    XCTAssertEqual(metadataReads, 1)
+  }
+  func testExplicitPicksBypassIdleDelayAndSurviveAutomaticInteractionTransitions() async throws {
+    let (permission, photos, now) = try permittedPickPhotos(count: 1)
+    let gate = PickPreviewGate(), started = expectation(description: "Explicit action bypasses scrolling admission")
+    var previews = 0, metadataReads = 0
+    let analyzer = PhotoPickAnalyzer(preview: { _ in
+      previews += 1; started.fulfill(); await gate.wait(); return self.signal
+    })
+    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in
+      metadataReads += 1; return photos
+    }, picks: analyzer)
+    defer { store.pauseAnalysis(); gate.open() }
+    store.setBrowseInteractionActive(true)
+    store.restoreAccess(now: now)
+    PHPhotoLibrary.shared().unregisterChangeObserver(store)
+    let explicit = Task { try await store.completedPicks() }
+    await fulfillment(of: [started], timeout: 1)
+    store.setBrowseInteractionActive(false)
+    store.setBrowseInteractionActive(true)
+    store.setBrowseInteractionActive(false)
+    store.setAutomaticAnalysisActive(false)
+    store.setAutomaticAnalysisActive(true)
+    gate.open()
+    let result = try await explicit.value
+    XCTAssertEqual(result.recommendations.unassessed, 0)
+    XCTAssertEqual(previews, 1, "Automatic admission transitions cannot cancel or replace explicit work")
+    XCTAssertEqual(metadataReads, 1)
+  }
+  func testCanceledExplicitRequestReleasesAdmissionBeforeHeldPreviewSettles() async throws {
+    let (permission, photos, now) = try permittedPickPhotos(count: 1)
+    let gate = PickPreviewGate()
+    let held = expectation(description: "Explicit analyzer holds its preview")
+    let cancelled = expectation(description: "Last canceled request releases shared analysis before preview settlement")
+    var previews = 0
+    let analyzer = PhotoPickAnalyzer(preview: { _ in
+      previews += 1
+      return await withTaskCancellationHandler {
+        held.fulfill(); await gate.wait(); return self.signal
+      } onCancel: { cancelled.fulfill() }
+    })
+    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in photos }, picks: analyzer)
+    defer { store.pauseAnalysis(); gate.open() }
+    store.setBrowseInteractionActive(true)
+    store.restoreAccess(now: now)
+    PHPhotoLibrary.shared().unregisterChangeObserver(store)
+    let request = Task { try await store.completedPicks() }
+    await fulfillment(of: [held], timeout: 1)
+    store.setBrowseInteractionActive(false)
+    request.cancel()
+    store.setBrowseInteractionActive(true)
+    store.setAutomaticAnalysisActive(false)
+    await fulfillment(of: [cancelled], timeout: 1)
+    XCTAssertEqual(previews, 1)
+    XCTAssertNil(store.picksSnapshot)
+    gate.open()
+    do { _ = try await request.value; XCTFail("Canceled explicit request returned picks") }
+    catch is CancellationError {}
+    XCTAssertNil(store.picksSnapshot, "The late canceled preview must not publish its snapshot")
+  }
+  func testCancelingOneExplicitRequestKeepsAnotherRequestAdmitted() async throws {
+    let (permission, photos, now) = try permittedPickPhotos(count: 1)
+    let gate = PickPreviewGate()
+    let held = expectation(description: "Shared explicit analyzer holds its preview")
+    let secondWaiting = expectation(description: "Second explicit caller awaits the shared analyzer")
+    let interrupted = expectation(description: "Canceling one caller must not cancel the remaining explicit analyzer")
+    interrupted.isInverted = true
+    var previews = 0
+    let analyzer = PhotoPickAnalyzer(preview: { _ in
+      previews += 1
+      return await withTaskCancellationHandler {
+        held.fulfill(); await gate.wait(); return self.signal
+      } onCancel: { interrupted.fulfill() }
+    })
+    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in photos }, picks: analyzer)
+    defer { store.pauseAnalysis(); gate.open() }
+    store.setBrowseInteractionActive(true)
+    store.restoreAccess(now: now)
+    PHPhotoLibrary.shared().unregisterChangeObserver(store)
+    let first = Task { try await store.completedPicks() }
+    await fulfillment(of: [held], timeout: 1)
+    let second = Task {
+      secondWaiting.fulfill()
+      return try await store.completedPicks()
+    }
+    await fulfillment(of: [secondWaiting], timeout: 1)
+    first.cancel()
+    store.setBrowseInteractionActive(false)
+    store.setBrowseInteractionActive(true)
+    store.setAutomaticAnalysisActive(false)
+    await fulfillment(of: [interrupted], timeout: 0.1)
+    gate.open()
+    do { _ = try await first.value; XCTFail("Canceled caller returned shared picks") }
+    catch is CancellationError {}
+    let result = try await second.value
+    XCTAssertEqual(result.recommendations.unassessed, 0)
+    XCTAssertEqual(result.candidates.map(\.id), photos.map(\.id))
+    XCTAssertEqual(previews, 1, "The remaining caller must retain the original shared request")
+  }
+  func testIdleResumeCannotAnalyzeWithdrawnPermissionOrSources() async throws {
+    let (permission, photos, now) = try permittedPickPhotos(count: 1)
+    for revokePermission in [false, true] {
+      var currentPermission = permission, sourcesCurrent = true, previews = 0
+      let analyzer = PhotoPickAnalyzer(preview: { _ in previews += 1; return self.signal },
+        isCurrent: { _ in sourcesCurrent })
+      let store = RecentPhotosStore(authorization: { currentPermission }, readPhotos: { _ in photos }, picks: analyzer)
+      defer { store.pauseAnalysis() }
+      store.setBrowseInteractionActive(true)
+      store.restoreAccess(now: now)
+      PHPhotoLibrary.shared().unregisterChangeObserver(store)
+      store.setBrowseInteractionActive(false)
+      if revokePermission { currentPermission = .denied } else { sourcesCurrent = false }
+      try await Task.sleep(for: .milliseconds(650))
+      XCTAssertEqual(previews, 0)
+      XCTAssertNil(store.picksSnapshot)
+    }
+  }
   func testSnapshotDistinguishesMissingCaptureDateFromEpoch() {
     let missing = AutomaticPhotoPickCandidate(id: "a", sourceRevision: "1", capturedAt: nil, width: 100, height: 100, favorite: false, isScreenshot: false)
     let epoch = AutomaticPhotoPickCandidate(id: "a", sourceRevision: "1", capturedAt: Date(timeIntervalSince1970: 0), width: 100, height: 100, favorite: false, isScreenshot: false)

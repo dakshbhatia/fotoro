@@ -136,7 +136,7 @@ struct NativeAlbumView: View {
   private var binding: String {
     let access = services.photoAccountAccess
     return (access?.account ?? "") + (access?.vault.uuidString ?? "") + services.api.baseURL.absoluteString
-      + String(describing: scenePhase)
+      + String(scenePhase == .background)
   }
   private var wantsWholeTripSearch: Bool { familyFilter.hasFilters || showFamilyFilters }
   private var filteredItems: [NativeAlbumItem] {
@@ -194,7 +194,7 @@ struct NativeAlbumView: View {
         }
       }
       .task(id: binding) {
-        guard scenePhase == .active else { suspendAlbum(); return }
+        guard scenePhase != .background else { suspendAlbum(); return }
         stop(); model.clear(); invitationPrepared = false; title = ""; memberIDs = []; feedback = nil; familyFilter = NativeAlbumSearchFilter()
         guard services.photoAccountAccess != nil else { resumeState.intent = nil; return }
         do {
@@ -220,7 +220,7 @@ struct NativeAlbumView: View {
       .onChange(of: operationID) { _, id in if id == nil { startTripSearch() } }
       .onChange(of: model.searchCoverageID) { _, _ in searchError = nil; startTripSearch() }
       .onChange(of: scenePhase) { _, phase in
-        if phase != .active { suspendAlbum() }
+        if phase == .background { suspendAlbum() }
       }
       .onChange(of: model.opened?.id) { _, id in
         if id == nil { cleanupTripDownload(); viewer = nil; link = nil; showFamilyFilters = false; showPicker = false }
@@ -973,9 +973,13 @@ private struct NativeAlbumPhotoView: View {
   @State private var feedback: String?
   @State private var operation: Task<Void, Never>?
   @State private var loading = false
+  @State private var savedOriginals = Set<String>()
   @State private var showDetailsEditor = false
   @Environment(\.scenePhase) private var scenePhase
   @Environment(\.dismiss) private var dismiss
+  private var originalIdentity: String {
+    item.photo.metadata.originalSha256 + "|\(item.photo.metadata.originalBytes)|" + item.photo.metadata.mediaType
+  }
   var body: some View {
     NavigationStack {
       VStack {
@@ -1023,11 +1027,31 @@ private struct NativeAlbumPhotoView: View {
             catch is CancellationError {} catch { feedback = error.localizedDescription }
           }
         }.disabled(loading) }
+        ToolbarItem(placement: .bottomBar) {
+          Button(savedOriginals.contains(originalIdentity) ? "Saved to Photos" : "Save to Photos", systemImage: "square.and.arrow.down") {
+            guard !loading, !savedOriginals.contains(originalIdentity) else { return }
+            let identity = originalIdentity
+            loading = true
+            operation = Task {
+              defer { loading = false; operation = nil }
+              do {
+                try await model.saveToPhotos(item)
+                try Task.checkCancellation()
+                savedOriginals.insert(identity)
+                feedback = "Original saved to Photos."
+              } catch is CancellationError {} catch { feedback = error.localizedDescription }
+            }
+          }.disabled(loading || savedOriginals.contains(originalIdentity))
+            .accessibilityIdentifier("albums.photo.saveToPhotos")
+        }
       }
       .task(id: item.id) { do { preview = try await model.preview(item) } catch is CancellationError {} catch { feedback = error.localizedDescription } }
       .sheet(isPresented: $showShare, onDismiss: cleanup) { OriginalShareSheet(urls: exports) { _ in cleanup() } }
       .sheet(isPresented: $showDetailsEditor) { NativeAlbumSharedDetailsEditor(model: model, item: item) }
-      .onChange(of: scenePhase) { _, phase in if phase != .active { operation?.cancel(); cleanup(); cleanupMotion(); preview = nil; dismiss() } }
+      .onChange(of: scenePhase) { _, phase in
+        if phase == .inactive { player?.pause() }
+        if phase == .background { operation?.cancel(); cleanup(); cleanupMotion(); preview = nil; dismiss() }
+      }
       .onDisappear { operation?.cancel(); cleanup(); cleanupMotion(); preview = nil }
     }
   }

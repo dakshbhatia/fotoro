@@ -1,9 +1,170 @@
 import XCTest
 import GRDB
+import Observation
 import Photos
 @testable import Fotoro
 
 final class ConsumerCoreTests: XCTestCase {
+  @MainActor func testPhotosExportPreservesOriginalResourcesUntilCreationCompletes() async throws {
+    let archive = try Data(contentsOf: XCTUnwrap(Bundle(for: Self.self).url(forResource: "camera-live", withExtension: "fotoro-live")))
+    let pair = try CameraMedia.decodeLivePhoto(archive)
+    for (type, bytes, expected) in [
+      ("image/jpeg", Data("original-jpeg".utf8), [Data("original-jpeg".utf8)]),
+      ("video/quicktime", pair.motion.bytes, [pair.motion.bytes]),
+      (CameraMedia.liveType, archive, [pair.still.bytes, pair.motion.bytes]),
+    ] {
+      let directory = FileManager.default.temporaryDirectory.appendingPathComponent("fotoro-share-" + Wire.id())
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      let url = directory.appendingPathComponent("download")
+      try bytes.write(to: url)
+      defer { try? FileManager.default.removeItem(at: directory) }
+      var metadata = try samplePhoto().metadata
+      metadata.mediaType = type; metadata.originalBytes = bytes.count; metadata.originalSha256 = bytes.digest
+      var checks = 0, writes = 0
+      try await CameraMedia.restoreOriginalToPhotos(url, metadata: metadata, check: { checks += 1 },
+        requestAccess: { .authorized }, restore: { urls, restored in
+          writes += 1
+          XCTAssertEqual(restored, metadata)
+          XCTAssertEqual(try urls.map { try Data(contentsOf: $0) }, expected)
+          await Task.yield()
+          XCTAssertTrue(urls.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+        })
+      XCTAssertEqual(checks, 4); XCTAssertEqual(writes, 1)
+      XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    }
+  }
+  @MainActor func testPhotosExportRejectsWithdrawnAccessAfterPermissionPromptAndCleansFiles() async throws {
+    for denied in [false, true] {
+      let directory = FileManager.default.temporaryDirectory.appendingPathComponent("fotoro-share-" + Wire.id())
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      let url = directory.appendingPathComponent("download")
+      try Data("jpg".utf8).write(to: url)
+      defer { try? FileManager.default.removeItem(at: directory) }
+      let metadata = try samplePhoto().metadata
+      var current = true, writes = 0
+      do {
+        try await CameraMedia.restoreOriginalToPhotos(url, metadata: metadata, check: {
+          if !current { throw CancellationError() }
+        }, requestAccess: {
+          if !denied { current = false }
+          return denied ? .denied : .authorized
+        }, restore: { _, _ in writes += 1 })
+        XCTFail("Withdrawn source or denied permission must prevent PhotoKit admission")
+      } catch {
+        if !denied { XCTAssertTrue(error is CancellationError) }
+      }
+      XCTAssertEqual(writes, 0)
+      XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    }
+  }
+  func testPhotosExportCaptureDateRequiresActualCaptureProvenance() throws {
+    var metadata = try samplePhoto().metadata
+    metadata.sourceDate = "2024-05-06T12:00:00.000Z"
+    for source in ["photos", "exif"] {
+      metadata.dateSource = source
+      XCTAssertEqual(CameraMedia.captureDate(metadata), Wire.parseDate(metadata.sourceDate))
+    }
+    for source in ["import", "unknown"] {
+      metadata.dateSource = source
+      XCTAssertNil(CameraMedia.captureDate(metadata))
+    }
+    metadata.dateSource = "photos"; metadata.sourceDate = "invalid"
+    XCTAssertNil(CameraMedia.captureDate(metadata))
+  }
+  @MainActor func testPhotosExportChecksEveryBoundaryAndCleansCreationFailures() async throws {
+    for rejectedCheck in 1...5 {
+      let directory = FileManager.default.temporaryDirectory.appendingPathComponent("fotoro-share-" + Wire.id())
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      let url = directory.appendingPathComponent("download")
+      try Data("jpg".utf8).write(to: url)
+      defer { try? FileManager.default.removeItem(at: directory) }
+      let metadata = try samplePhoto().metadata
+      var checks = 0, writes = 0
+      do {
+        try await CameraMedia.restoreOriginalToPhotos(url, metadata: metadata, check: {
+          checks += 1
+          if checks == rejectedCheck { throw CancellationError() }
+        }, requestAccess: { .authorized }, restore: { _, _ in
+          writes += 1
+          if rejectedCheck == 5 { throw FotoroError("Creation failed") }
+        })
+        XCTFail("Stale admission or creation failure must propagate")
+      } catch {
+        if rejectedCheck < 5 { XCTAssertTrue(error is CancellationError) }
+      }
+      XCTAssertEqual(writes, rejectedCheck >= 4 ? 1 : 0)
+      XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    }
+  }
+  @MainActor func testSavedSemanticPublicationRefreshesEvidenceWithoutInvalidatingBrowseCatalog() async throws {
+    try await withSavedLibrary { services, _ in
+      var photo = try self.samplePhoto()
+      photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+      let preview = try Data(contentsOf: XCTUnwrap(Bundle(for: Self.self).url(forResource: "neutral-a", withExtension: "png")))
+      photo.previewURL = try services.store.write(preview, name: "semantic-preview.png")
+      try services.store.put(photo)
+      try services.reload()
+      var vector = [Float](repeating: 0, count: 512); vector[0] = 1
+      services.savedVisualEmbedding = { _ in vector }
+      services.setPhotoSyncForeground(true)
+      defer { services.setPhotoSyncForeground(false) }
+      let catalog = services.consumerCatalogGeneration
+      let evidence = services.consumerSavedEvidenceGeneration
+      let browseChanges = SavedSemanticObservationCounter(), evidenceChanges = SavedSemanticObservationCounter()
+      withObservationTracking { _ = services.consumerCatalogGeneration } onChange: { browseChanges.increment() }
+      withObservationTracking { _ = services.consumerSavedEvidenceGeneration } onChange: { evidenceChanges.increment() }
+      let local = LocalSearchStore(index: try SearchIndex())
+      _ = try await services.consumerSearch("semantic scene", local: local)
+      await services.waitForSavedVisualEvidence()
+      let index = try SearchIndex(root: services.store.root.appendingPathComponent("VisualSearch"))
+      XCTAssertFalse(try index.needsSemantic(photoID: photo.id, revision: photo.metadata.originalSha256),
+        "The production saved worker must commit the injected vector before publishing evidence")
+      let result = try index.addingSemantic(vector, to: index.search("semantic scene", scope: SearchScope(source: "saved")))
+      XCTAssertEqual(result.results.map(\.id), [photo.id])
+      XCTAssertEqual(services.consumerSavedEvidenceGeneration, evidence + 1)
+      XCTAssertEqual(evidenceChanges.value, 1)
+      XCTAssertEqual(services.consumerCatalogGeneration, catalog)
+      XCTAssertEqual(browseChanges.value, 0, "Vector publication must not rearm browse projection or pagination")
+      _ = try await services.consumerSearch("semantic scene", local: local)
+      await services.waitForSavedVisualEvidence()
+      XCTAssertEqual(services.consumerSavedEvidenceGeneration, evidence + 1, "No pending vectors means no new evidence publication")
+      try services.reload()
+      XCTAssertEqual(services.consumerCatalogGeneration, catalog + 1)
+      XCTAssertEqual(browseChanges.value, 1, "A real catalog reload must retain its browse invalidation")
+    }
+  }
+
+  @MainActor func testSavedSemanticWorkerRejectsOriginWithdrawalBeforeVectorCommit() async throws {
+    try await withSavedLibrary { services, _ in
+      var photo = try self.samplePhoto()
+      photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+      let preview = try Data(contentsOf: XCTUnwrap(Bundle(for: Self.self).url(forResource: "neutral-a", withExtension: "png")))
+      photo.previewURL = try services.store.write(preview, name: "semantic-held-preview.png")
+      try services.store.put(photo)
+      try services.reload()
+      let started = self.expectation(description: "Saved vector generation is held")
+      let gate = SavedSemanticEmbeddingGate()
+      services.savedVisualEmbedding = { _ in
+        started.fulfill()
+        await gate.wait()
+        var vector = [Float](repeating: 0, count: 512); vector[0] = 1
+        return vector
+      }
+      services.setPhotoSyncForeground(true)
+      defer { services.setPhotoSyncForeground(false); gate.open() }
+      let catalog = services.consumerCatalogGeneration, evidence = services.consumerSavedEvidenceGeneration
+      _ = try await services.consumerSearch("semantic scene", local: LocalSearchStore(index: try SearchIndex()))
+      await self.fulfillment(of: [started], timeout: 3)
+      services.api.baseURL = URL(string: "https://withdrawn-origin.test")!
+      gate.open()
+      await services.waitForSavedVisualEvidence()
+      let index = try SearchIndex(root: services.store.root.appendingPathComponent("VisualSearch"))
+      XCTAssertTrue(try index.needsSemantic(photoID: photo.id, revision: photo.metadata.originalSha256))
+      XCTAssertEqual(services.consumerSavedEvidenceGeneration, evidence)
+      XCTAssertEqual(services.consumerCatalogGeneration, catalog)
+    }
+  }
+
   @MainActor func testEmptySavedContinuationDoesNotInvalidateCatalogAndNonemptyPageStillPublishes() async throws {
     try await withSavedLibrary { services, _ in
       var newest = try self.samplePhoto()
@@ -2145,4 +2306,17 @@ private actor ReconciliationReadState {
     }
   }
   func release() { continuation?.resume(); continuation = nil }
+}
+
+private final class SavedSemanticObservationCounter: @unchecked Sendable {
+  private let lock = NSLock()
+  private var count = 0
+  var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+  func increment() { lock.lock(); defer { lock.unlock() }; count += 1 }
+}
+
+@MainActor private final class SavedSemanticEmbeddingGate {
+  private var continuation: CheckedContinuation<Void, Never>?
+  func wait() async { await withCheckedContinuation { continuation = $0 } }
+  func open() { continuation?.resume(); continuation = nil }
 }

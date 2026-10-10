@@ -9,6 +9,31 @@ struct SearchAnalysisProgress: Equatable, Sendable {
   var total: Int
 }
 
+enum SearchMetadataIntake {
+  static func run<Value: Sendable>(
+    _ operation: @escaping @Sendable () async throws -> Value
+  ) async throws -> Value {
+    let worker = Task.detached(priority: .utility, operation: operation)
+    return try await withTaskCancellationHandler {
+      let value = try await worker.value
+      try Task.checkCancellation()
+      return value
+    } onCancel: { worker.cancel() }
+  }
+
+  static func forEach(count: Int, batchSize: Int = 100, _ visit: (Int) throws -> Void) async throws {
+    try Task.checkCancellation()
+    for start in stride(from: 0, to: count, by: max(1, batchSize)) {
+      try Task.checkCancellation()
+      for offset in start..<min(count, start + max(1, batchSize)) {
+        try visit(offset)
+      }
+      await Task.yield()
+    }
+    try Task.checkCancellation()
+  }
+}
+
 @MainActor @Observable final class LocalSearchStore: NSObject, PHPhotoLibraryChangeObserver {
   typealias QueryExecutor = @Sendable (SearchIndex, String, SearchScope, String?, SearchResponse, UInt64) async throws -> SearchResponse
   private(set) var response = SearchResponse()
@@ -191,7 +216,7 @@ struct SearchAnalysisProgress: Equatable, Sendable {
         index = localIndex
         try localIndex.setWorkGeneration(token)
       }
-      let scanned = await Task.detached(priority: .utility) { Self.scan() }.value
+      let scanned = try await SearchMetadataIntake.run { try await Self.scan() }
       guard token == work.generation, !Task.isCancelled,
         RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite))
       else { return }
@@ -386,7 +411,8 @@ struct SearchAnalysisProgress: Equatable, Sendable {
     var photos: [RecentPhoto]
     var records: [SearchRecord]
   }
-  private nonisolated static func scan() -> Scan {
+  private nonisolated static func scan() async throws -> Scan {
+    try Task.checkCancellation()
     let options = PHFetchOptions()
     #if FOTORO_LOCAL_PREVIEW
     options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
@@ -401,7 +427,8 @@ struct SearchAnalysisProgress: Equatable, Sendable {
     let fetched = PHAsset.fetchAssets(with: options)
     var photos: [RecentPhoto] = []
     var records: [SearchRecord] = []
-    fetched.enumerateObjects { asset, _, _ in
+    try await SearchMetadataIntake.forEach(count: fetched.count) { offset in
+      let asset = fetched.object(at: offset)
       #if FOTORO_LOCAL_PREVIEW
         let searchableMedia = asset.mediaType == .image
       #else

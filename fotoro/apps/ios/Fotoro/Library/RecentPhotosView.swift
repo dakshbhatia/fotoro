@@ -340,6 +340,7 @@ struct RecentPhotosView: View {
   @State private var savedFavoritesOnly = false
 #endif
   @State private var selectedPhotos: [String: SelectedRecentPhoto] = [:]
+  @State private var homeVisible = false
   @State private var selecting = false
   @State private var scope = PhotoHomeScope.photos
   @State private var browseFilter = PhotoBrowseFilter.all
@@ -622,6 +623,8 @@ struct RecentPhotosView: View {
           }
         }.id(savedFavoritesOnly).scrollDismissesKeyboard(.interactively)
           .defaultScrollAnchor(.top, for: .initialOffset).scrollBounceBehavior(.basedOnSize)
+          .onScrollPhaseChange { _, phase in store.setBrowseInteractionActive(phase != .idle) }
+          .onDisappear { store.setBrowseInteractionActive(false) }
           .refreshable { await savedRefresh.refresh(services) }
           .task(id: SavedLibraryReadPresentation(services, isActive: scenePhase == .active)) {
             guard !Task.isCancelled else { return }
@@ -643,7 +646,10 @@ struct RecentPhotosView: View {
       results: search.response.results, indexed: search.response.indexed,
       response: search.response.generation, acceptedMeaning: search.acceptedMeaningID,
       catalog: services?.consumerCatalogGeneration,
-      account: services?.session.accountId, vault: services?.vault.generation, people: search.peopleSelection)
+      account: services?.session.accountId, vault: services?.vault.generation, people: search.peopleSelection,
+      savedEvidence: search.hasSearch ? services?.consumerSavedEvidenceGeneration : nil,
+      catalogIdentity: services.map { ObjectIdentifier($0.store) },
+      origin: services.flatMap { BackgroundUploadPolicy.origin($0.api.baseURL) })
   }
 #endif
   var body: some View {
@@ -816,6 +822,10 @@ struct RecentPhotosView: View {
           store.refresh()
         }
         .onChange(of: scenePhase) { handleScenePhaseChange(scenePhase) }
+        .onAppear {
+          homeVisible = true
+          store.setAutomaticAnalysisActive(scenePhase == .active)
+        }
         .task {
           restorePhotos()
 #if !FOTORO_LOCAL_PREVIEW
@@ -829,6 +839,8 @@ struct RecentPhotosView: View {
 #endif
         }
         .onDisappear {
+          homeVisible = false
+          store.setAutomaticAnalysisActive(false)
           cancelBestShots()
           shareTask?.cancel(); cleanupShare()
           #if !FOTORO_LOCAL_PREVIEW
@@ -848,12 +860,14 @@ struct RecentPhotosView: View {
 #endif
   private func handleScenePhaseChange(_ phase: ScenePhase) {
     if phase == .active {
+      store.setAutomaticAnalysisActive(homeVisible)
       restorePhotos()
 #if !FOTORO_LOCAL_PREVIEW
       services?.setPhotoSyncForeground(true)
       if let services { Task { await services.resumeSavedAccount() } }
 #endif
     } else {
+      store.setAutomaticAnalysisActive(false)
       cancelBestShots()
 #if !FOTORO_LOCAL_PREVIEW
       updatePhotoSyncForeground(phase)
@@ -975,6 +989,8 @@ struct RecentPhotosView: View {
       }
       .id(browseViewportKey).scrollDismissesKeyboard(.interactively)
       .defaultScrollAnchor(.top, for: .initialOffset).scrollBounceBehavior(.basedOnSize)
+      .onScrollPhaseChange { _, phase in store.setBrowseInteractionActive(phase != .idle) }
+      .onDisappear { store.setBrowseInteractionActive(false) }
       #if !FOTORO_LOCAL_PREVIEW
         .refreshable {
           if allPhotos, let services { await savedRefresh.refresh(services) }
@@ -2237,9 +2253,13 @@ struct ConsumerSearchPresentationID: Equatable {
   var account: String?
   var vault: UUID?
   var people = PeopleSearchSelection()
+  var savedEvidence: UInt64? = nil
+  var catalogIdentity: ObjectIdentifier? = nil
+  var origin: String? = nil
   func permitsResults(for current: Self) -> Bool {
     query == current.query && library == current.library && acceptedMeaning == current.acceptedMeaning
       && catalog == current.catalog && account == current.account && vault == current.vault && people == current.people
+      && savedEvidence == current.savedEvidence && catalogIdentity == current.catalogIdentity && origin == current.origin
   }
 }
 #endif

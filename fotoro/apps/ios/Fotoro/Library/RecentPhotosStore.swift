@@ -217,6 +217,10 @@ struct PhotoPreviewProgress {
   @ObservationIgnored private var analysisGeneration = UUID()
   @ObservationIgnored private var observing = false
   @ObservationIgnored private var analysisPermitted = true
+  @ObservationIgnored private var automaticAnalysisActive = true
+  @ObservationIgnored private var browseInteractionActive = false
+  @ObservationIgnored private var idleAnalysisTask: Task<Void, Never>?
+  @ObservationIgnored private var explicitAnalysisRequests: Set<UUID> = []
   @ObservationIgnored private(set) var thumbnailGeneration = UUID()
   @ObservationIgnored private var thumbnailAuthorization: PHAuthorizationStatus?
   @ObservationIgnored private var thumbnailSources: [NSString: RecentPhotoSource] = [:]
@@ -263,7 +267,51 @@ struct PhotoPreviewProgress {
   }
   func pauseAnalysis() {
     analysisPermitted = false
+    idleAnalysisTask?.cancel(); idleAnalysisTask = nil
+    browseInteractionActive = false
     cancelAnalysis()
+  }
+  func setAutomaticAnalysisActive(_ active: Bool) {
+    guard automaticAnalysisActive != active else { return }
+    automaticAnalysisActive = active
+    if !active {
+      idleAnalysisTask?.cancel(); idleAnalysisTask = nil
+      browseInteractionActive = false
+      if explicitAnalysisRequests.isEmpty, analysisTask != nil { cancelAnalysis() }
+    } else if needsAutomaticAnalysis {
+      beginAnalysis()
+    }
+  }
+  func setBrowseInteractionActive(_ active: Bool) {
+    guard browseInteractionActive != active else { return }
+    browseInteractionActive = active
+    idleAnalysisTask?.cancel(); idleAnalysisTask = nil
+    if active {
+      if explicitAnalysisRequests.isEmpty, analysisTask != nil { cancelAnalysis() }
+    } else if analysisPermitted, automaticAnalysisActive, explicitAnalysisRequests.isEmpty,
+      needsAutomaticAnalysis {
+      idleAnalysisTask = Task { [weak self] in
+        do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
+        guard let self, !Task.isCancelled else { return }
+        idleAnalysisTask = nil
+        guard analysisPermitted, automaticAnalysisActive, !browseInteractionActive,
+          explicitAnalysisRequests.isEmpty, needsAutomaticAnalysis else { return }
+        beginAnalysis()
+      }
+    }
+  }
+  private var needsAutomaticAnalysis: Bool {
+    !recentPhotos.isEmpty && analysisTask == nil
+      && !(picksSnapshot?.matches(pickCandidates) ?? false)
+  }
+  private var automaticAnalysisAdmitted: Bool {
+    analysisPermitted && automaticAnalysisActive && !browseInteractionActive && idleAnalysisTask == nil
+  }
+  private func releaseExplicitAnalysis(_ request: UUID) {
+    guard explicitAnalysisRequests.remove(request) != nil else { return }
+    if explicitAnalysisRequests.isEmpty, !automaticAnalysisAdmitted, analysisTask != nil {
+      cancelAnalysis()
+    }
   }
   private func cancelAnalysis() {
     analysisGeneration = UUID()
@@ -275,7 +323,9 @@ struct PhotoPreviewProgress {
   }
   func restartAnalysis() { cancelAnalysis(); picksSnapshot = nil; if RecentPhotosPolicy.canRead(status) { beginAnalysis() } }
   private func beginAnalysis() {
-    guard analysisPermitted, analysisTask == nil else { return }
+    guard analysisPermitted, analysisTask == nil,
+      !explicitAnalysisRequests.isEmpty || automaticAnalysisAdmitted
+    else { return }
     let candidates = pickCandidates
     analysisCandidates = candidates
     let token = UUID()
@@ -299,23 +349,34 @@ struct PhotoPreviewProgress {
     }
   }
   func completedPicks() async throws -> PhotoPicksSnapshot {
+    try Task.checkCancellation()
     guard RecentPhotosPolicy.canRead(authorization()) else { throw FotoroError("Allow Photos access to find your picks.") }
     if let result = picksSnapshot, result.recommendations.unassessed == 0,
       result.matches(pickCandidates), PhotoPickAnalyzer.isCurrent(result.candidates) { return result }
-    if analysisTask == nil { beginAnalysis() }
-    while let task = analysisTask {
-      let generation = analysisGeneration
-      await task.value
+    let request = UUID()
+    explicitAnalysisRequests.insert(request)
+    idleAnalysisTask?.cancel(); idleAnalysisTask = nil
+    defer { releaseExplicitAnalysis(request) }
+    return try await withTaskCancellationHandler {
       try Task.checkCancellation()
-      // A Photos refresh can replace the task while this caller is waiting.
-      // Finish its successor before validating the current snapshot.
-      if analysisGeneration == generation { break }
+      if analysisTask == nil { beginAnalysis() }
+      while let task = analysisTask {
+        let generation = analysisGeneration
+        await task.value
+        try Task.checkCancellation()
+        // A Photos refresh can replace the task while this caller is waiting.
+        // Finish its successor before validating the current snapshot.
+        if analysisGeneration == generation { break }
+      }
+      try Task.checkCancellation()
+      guard let result = picksSnapshot, result.matches(pickCandidates), PhotoPickAnalyzer.isCurrent(result.candidates) else {
+        throw FotoroError("Your picks aren't ready. Open Photos and try again after analysis finishes.")
+      }
+      return result
+    } onCancel: { [weak self] in
+      // Release admission before a held preview settles; defer is idempotent.
+      Task { @MainActor [weak self] in self?.releaseExplicitAnalysis(request) }
     }
-    try Task.checkCancellation()
-    guard let result = picksSnapshot, result.matches(pickCandidates), PhotoPickAnalyzer.isCurrent(result.candidates) else {
-      throw FotoroError("Your picks aren't ready. Open Photos and try again after analysis finishes.")
-    }
-    return result
   }
   func restoreAccess(now: Date = Date()) {
     analysisPermitted = true

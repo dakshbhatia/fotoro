@@ -729,6 +729,9 @@ final class RecentPhotosTests: XCTestCase {
     next.catalog = 2
     XCTAssertNotEqual(next, original)
     next = original
+    next.savedEvidence = 1
+    XCTAssertNotEqual(next, original, "Saved vector evidence must restart a search request")
+    next = original
     next.response = 2
     XCTAssertNotEqual(next, original)
     original.response = 2
@@ -769,7 +772,7 @@ final class RecentPhotosTests: XCTestCase {
     enrichment.indexed = 2
     enrichment.results = [SearchHit(id: "new", evidenceClass: 1, reason: "Text")]
     XCTAssertTrue(original.permitsResults(for: enrichment))
-    for field in ["query", "library", "meaning", "catalog", "account", "vault", "people"] {
+    for field in ["query", "library", "meaning", "catalog", "account", "vault", "people", "evidence", "store", "origin"] {
       var changed = enrichment
       switch field {
       case "query": changed.query = "beach"
@@ -778,6 +781,9 @@ final class RecentPhotosTests: XCTestCase {
       case "catalog": changed.catalog = 2
       case "account": changed.account = "other"
       case "people": changed.people = PeopleSearchSelection(personIDs: [UUID().uuidString])
+      case "evidence": changed.savedEvidence = 1
+      case "store": changed.catalogIdentity = ObjectIdentifier(NSObject())
+      case "origin": changed.origin = "https://other.test"
       default: changed.vault = UUID()
       }
       XCTAssertFalse(original.permitsResults(for: changed), field)
