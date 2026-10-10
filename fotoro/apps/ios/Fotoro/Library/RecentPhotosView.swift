@@ -787,7 +787,7 @@ struct RecentPhotosView: View {
         .sheet(item: $people) { _ in PhotoPeopleView(search: search, services: services, findPhotos: { queryFocused = false }) }
         #endif
   }
-  private var sharedHome: some View {
+  private var homeEvents: some View {
     homePresentations
         .onChange(of: query) { cancelBestShots(); search.updateQuery(query) }
         .onChange(of: search.response.generation) { cancelBestShots() }
@@ -822,6 +822,9 @@ struct RecentPhotosView: View {
           store.refresh()
         }
         .onChange(of: scenePhase) { handleScenePhaseChange(scenePhase) }
+  }
+  private var sharedHome: some View {
+    homeEvents
         .onAppear {
           homeVisible = true
           store.setAutomaticAnalysisActive(scenePhase == .active)
