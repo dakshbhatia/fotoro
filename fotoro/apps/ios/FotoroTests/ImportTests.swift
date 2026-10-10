@@ -245,4 +245,107 @@ final class ImportTests: XCTestCase {
       result[0].staged.values.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
   }
 
+  func testPreparedBackupOriginalReadsOncePreservesBytesAndReusesDigestDuplicate() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try LibraryStore(root: root)
+    let bytes = try originalWithCapture()
+    let secret = try fixture(FixtureAccounts.self, "accounts").testSecrets[0]
+    let bundle = AccountBundle(vaultKey: secret.vaultKey, boxSecretKey: secret.boxSecretKey, signingSecretKey: secret.signingSecretKey)
+    let reads = PreparedOriginalReadCount()
+    let importer = PhotoImport(store: store, sourceReader: { _ in
+      await reads.increment(); return (bytes, "original.jpg", false)
+    }, sourceRevision: { _ in "current" }, sourceLocation: { _ in nil }, sourceCaptureMetadata: { _ in nil })
+    var source = try store.backupSource("prepared")
+    source.sourceRevision = "current"
+    let original = try await importer.prepareBackupOriginal(source)
+    XCTAssertEqual(original.digest, bytes.digest)
+    let captured = Date(timeIntervalSince1970: 1_700_000_000)
+    let photo = try await importer.stageBackup(source, accountId: secret.accountId, bundle: bundle,
+      capturedAt: captured, preparedOriginal: original)
+    let readCount = await reads.count
+    XCTAssertEqual(readCount, 1)
+    XCTAssertEqual(photo.metadata.originalSha256, original.digest)
+    XCTAssertEqual(try Data(contentsOf: XCTUnwrap(photo.originalURL)), bytes)
+    XCTAssertEqual(photo.metadata.dateSource, "photos")
+    XCTAssertEqual(photo.metadata.sourceDate, Wire.date(captured))
+    let representation = try XCTUnwrap(photo.manifest.representations.first { $0.binding.kind == "original" })
+    let decrypted = try CryptoAdapter().decrypt(try Data(contentsOf: XCTUnwrap(photo.staged[representation.binding.representationId])),
+      key: Data(b64: XCTUnwrap(photo.metadata.representationKeys[representation.binding.representationId])), representation: representation)
+    XCTAssertEqual(decrypted, bytes)
+    var duplicate = try store.backupSource("duplicate")
+    duplicate.sourceRevision = "current"
+    let duplicateOriginal = try await importer.prepareBackupOriginal(duplicate)
+    let reused = try await importer.stageBackup(duplicate, accountId: secret.accountId, bundle: bundle, preparedOriginal: duplicateOriginal)
+    XCTAssertEqual(reused.photoId, photo.photoId)
+    XCTAssertEqual(try store.photos().count, 1)
+  }
+  func testPreparedBackupOriginalRejectsWrongSourceChangedRevisionAndWithdrawnConsent() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try LibraryStore(root: root), bytes = try originalWithCapture()
+    let secret = try fixture(FixtureAccounts.self, "accounts").testSecrets[0]
+    let bundle = AccountBundle(vaultKey: secret.vaultKey, boxSecretKey: secret.boxSecretKey, signingSecretKey: secret.signingSecretKey)
+    let importer = PhotoImport(store: store, sourceReader: { _ in (bytes, "original.jpg", false) }, sourceRevision: { _ in "current" })
+    var source = try store.backupSource("prepared")
+    source.sourceRevision = "current"
+    let original = try await importer.prepareBackupOriginal(source)
+    var other = source; other.id = "other"
+    do {
+      _ = try await importer.stageBackup(other, accountId: secret.accountId, bundle: bundle, preparedOriginal: original)
+      XCTFail("Prepared bytes must belong to the requested source")
+    } catch { XCTAssertFalse(error is CancellationError) }
+    let changed = PhotoImport(store: store, sourceReader: { _ in XCTFail("Prepared original must not be read again"); return (bytes, "original.jpg", false) },
+      sourceRevision: { _ in "changed" })
+    do {
+      _ = try await changed.stageBackup(source, accountId: secret.accountId, bundle: bundle, preparedOriginal: original)
+      XCTFail("Current revision must still match")
+    } catch { XCTAssertFalse(error is CancellationError) }
+    do {
+      _ = try await importer.stageBackup(source, accountId: secret.accountId, bundle: bundle, valid: { false }, preparedOriginal: original)
+      XCTFail("Consent withdrawal must reject prepared bytes")
+    } catch { XCTAssertTrue(error is CancellationError) }
+    var newRevision = source; newRevision.sourceRevision = "changed"
+    let updated = PhotoImport(store: store, sourceRevision: { _ in "changed" })
+    do {
+      _ = try await updated.stageBackup(newRevision, accountId: secret.accountId, bundle: bundle, preparedOriginal: original)
+      XCTFail("Prepared revision must match the requested revision")
+    } catch { XCTAssertFalse(error is CancellationError) }
+    XCTAssertTrue(try store.photos().isEmpty)
+  }
+  func testBackupPreparationRejectsCancellationDuringOriginalRead() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try LibraryStore(root: root), bytes = try originalWithCapture()
+    let importer = PhotoImport(store: store, sourceReader: { _ in
+      withUnsafeCurrentTask { $0?.cancel() }
+      return (bytes, "original.jpg", false)
+    }, sourceRevision: { _ in "current" })
+    var source = try store.backupSource("prepared"); source.sourceRevision = "current"
+    let task = Task { try await importer.prepareBackupOriginal(source) }
+    do {
+      _ = try await task.value
+      XCTFail("Cancelled original read must not publish prepared bytes")
+    } catch { XCTAssertTrue(error is CancellationError) }
+    XCTAssertTrue(try store.photos().isEmpty)
+  }
+  func testBackupPreparationRechecksConsentAfterReadBeforeReturningBytes() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try LibraryStore(root: root), bytes = try originalWithCapture()
+    let checks = PreparedOriginalReadCount()
+    let importer = PhotoImport(store: store, sourceReader: { _ in (bytes, "original.jpg", false) }, sourceRevision: { _ in "current" })
+    var source = try store.backupSource("prepared"); source.sourceRevision = "current"
+    do {
+      _ = try await importer.prepareBackupOriginal(source, valid: { await checks.increment(); return await checks.count == 1 })
+      XCTFail("Consent withdrawn during the read must reject its result")
+    } catch { XCTAssertTrue(error is CancellationError) }
+    XCTAssertTrue(try store.photos().isEmpty)
+  }
+
+}
+
+private actor PreparedOriginalReadCount {
+  private(set) var count = 0
+  func increment() { count += 1 }
 }

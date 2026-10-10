@@ -2038,6 +2038,8 @@ final class ChangedOriginalReconciliationTests: XCTestCase {
     XCTAssertEqual(current.sourceRevision, "current")
     XCTAssertEqual(current.originalSha256, newOriginal.digest)
     XCTAssertNil(current.message)
+    let changedReadCount = await reads.count()
+    XCTAssertEqual(changedReadCount, 2, "One failed attempt plus one retry; preparation must reuse the verified bytes")
     XCTAssertEqual(services.backup.status.failed, 0)
     XCTAssertEqual(services.automaticPhotoSync.phase, .ready)
     services.refreshConsumerSyncSummary()
@@ -2112,19 +2114,24 @@ final class ChangedOriginalReconciliationTests: XCTestCase {
       services.kickAutomaticPhotoSync()
       await services.waitForAutomaticPhotoSync()
       XCTAssertEqual(try services.store.backupSource("changed"), earlier)
-      XCTAssertFalse(try services.store.backupSources().contains(where: { $0.id == "neighbor" }))
+      XCTAssertEqual(try services.store.backupSource("neighbor").phase, .pending,
+        "Metadata scanning may admit the neighbor, but cancelled verification cannot prepare or upload it")
+      XCTAssertTrue(try services.journal.entries().isEmpty)
       XCTAssertEqual(services.backup.status.phase, .paused)
       XCTAssertEqual(services.backup.status.failed, 0)
       let events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: diagnostics.exportJSON())
       XCTAssertEqual(events.last(where: { $0.phase == .sync && $0.step == .verify })?.outcome, .cancelled)
-      XCTAssertEqual(events.last(where: { $0.phase == .sync && $0.step == .scan })?.outcome, .cancelled)
+      XCTAssertEqual(events.last(where: { $0.phase == .sync && $0.step == .scan })?.outcome, .completed,
+        "Scanning metadata completes before per-source verification begins")
     }
   }
 }
 
 private actor ReconciliationReadState {
   private var unavailable = true
-  func shouldFail() -> Bool { unavailable }
+  private var attempts = 0
+  func shouldFail() -> Bool { attempts += 1; return unavailable }
+  func count() -> Int { attempts }
   func allowRead() { unavailable = false }
 }
 

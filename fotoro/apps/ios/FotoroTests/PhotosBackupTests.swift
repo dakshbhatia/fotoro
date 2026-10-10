@@ -1016,13 +1016,19 @@ final class AutomaticPhotoSyncTests: XCTestCase {
       PausedUploadProtocol.server.reservationGate = nil
       permission = .limited
       let currentBytes = changedDigest ? original + Data("controlled-original-change".utf8) : original
-      services.importer = PhotoImport(store: services.store, sourceReader: { _ in (currentBytes, "public-sample.jpg", false) }, sourceRevision: { _ in "after-edit" })
+      let currentReads = AutomaticSourceReads()
+      services.importer = PhotoImport(store: services.store, sourceReader: { source in
+        await currentReads.record(source.resourceIdentifier)
+        return (currentBytes, "public-sample.jpg", false)
+      }, sourceRevision: { _ in "after-edit" })
       services.kickAutomaticPhotoSync(sourcesChanged: true)
       await services.waitForAutomaticPhotoSync()
       let current = try services.store.backupSource("source")
       XCTAssertEqual(current.phase, .committed)
       XCTAssertEqual(current.sourceRevision, "after-edit")
       XCTAssertEqual(current.originalSha256, currentBytes.digest)
+      let recordedReads = await currentReads.values()
+      XCTAssertEqual(recordedReads, ["source"], "Queued revision verification and replacement preparation share one read")
       XCTAssertEqual(services.automaticPhotoSync.phase, .ready)
       XCTAssertEqual(services.backup.status.pending, 0)
       XCTAssertEqual(services.backup.status.failed, 0)
@@ -1051,6 +1057,90 @@ final class AutomaticPhotoSyncTests: XCTestCase {
         XCTAssertTrue(try services.journal.entries().isEmpty)
         XCTAssertEqual(PausedUploadProtocol.server.publishedPhotoIDs, [queued.photoId])
       }
+    }
+  }
+
+  @MainActor func testChangedOriginalsUploadOneAtATimeWithOneReadEach() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
+    let services = try await context.enroll()
+    defer { services.vault.lock() }
+    let original = try Data(contentsOf: context.sample)
+    let candidates = ["a", "b"]
+    var revision = "before"
+    services.automaticPhotosAuthorization = { .authorized }
+    services.photosBackupSnapshot = { _ in candidates.map {
+      BackupCandidate(id: $0, capturedAt: Date(), sourceRevision: revision)
+    } }
+    services.importer = PhotoImport(store: services.store, sourceReader: { _ in (original, "original.jpg", false) },
+      sourceRevision: { _ in "before" })
+    try services.enableAutomaticPhotoSync()
+    await services.waitForAutomaticPhotoSync()
+    let earlierA = try services.store.backupSource("a"), earlierB = try services.store.backupSource("b")
+    revision = "current"
+    let reads = AutomaticSourceReads()
+    let currentA = original + Data("changed-a".utf8), currentB = original + Data("changed-b".utf8)
+    services.importer = PhotoImport(store: services.store, sourceReader: { selected in
+      await reads.record(selected.resourceIdentifier)
+      if selected.resourceIdentifier == "b" {
+        try await MainActor.run {
+          let first = try services.store.backupSource("a")
+          XCTAssertEqual(first.phase, .committed, "Save the first changed original before downloading the next")
+          XCTAssertNotEqual(first.photoId, earlierA.photoId)
+          XCTAssertTrue(PausedUploadProtocol.server.publishedPhotoIDs.contains(first.photoId))
+        }
+      }
+      return (selected.resourceIdentifier == "a" ? currentA : currentB, "original.jpg", false)
+    }, sourceRevision: { _ in "current" })
+    services.kickAutomaticPhotoSync()
+    await services.waitForAutomaticPhotoSync()
+    let recorded = await reads.values()
+    XCTAssertEqual(recorded, ["a", "b"])
+    for (id, bytes, earlier) in [("a", currentA, earlierA), ("b", currentB, earlierB)] {
+      let source = try services.store.backupSource(id)
+      XCTAssertEqual(source.phase, .committed)
+      XCTAssertEqual(source.sourceRevision, "current")
+      XCTAssertNotEqual(source.photoId, earlier.photoId)
+      XCTAssertEqual(source.originalSha256, bytes.digest)
+      let saved = try XCTUnwrap(services.store.backupPhoto(source.photoId))
+      XCTAssertEqual(try Data(contentsOf: XCTUnwrap(saved.originalURL)), bytes)
+      let preserved = try XCTUnwrap(services.store.backupPhoto(earlier.photoId))
+      XCTAssertEqual(try Data(contentsOf: XCTUnwrap(preserved.originalURL)), original)
+    }
+    XCTAssertTrue(try services.journal.entries().isEmpty)
+    XCTAssertEqual(services.automaticPhotoSync.phase, .ready)
+  }
+
+  @MainActor func testReconciliationFailurePreservesEarlierBindingUntilReplacementIsPersisted() async throws {
+    for replacementPersisted in [false, true] {
+      let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+      defer { try? FileManager.default.removeItem(at: root) }
+      let store = try LibraryStore(root: root), backup = try PhotosBackup(store: store)
+      let earlier = BackupSource(id: "changed", photoId: Wire.id(), phase: .committed,
+        sourceRevision: "before", originalSha256: "earlier-digest")
+      try store.putBackupSource(earlier)
+      let replacementID = Wire.id()
+      backup.start(snapshot: {
+        [BackupCandidate(id: earlier.id, capturedAt: Date(), sourceRevision: "current")]
+      }, valid: { true }, stage: { _, _ in XCTFail("Failed reconciliation cannot stage") },
+        upload: { _ in XCTFail("Failed reconciliation cannot upload") },
+        checkCatalog: { XCTFail("Verification-only failures cannot trigger a catalog read") },
+        checkCatalogOnlyAfterWork: true, restrictQueuedToSnapshot: true,
+        reconcile: { source, candidate in
+          if replacementPersisted {
+            try store.putBackupSource(BackupSource(id: source.id, photoId: replacementID,
+              sourceRevision: candidate.sourceRevision))
+          }
+          throw FotoroError("Controlled preparation failure")
+        })
+      await backup.waitUntilSettled()
+      let current = try store.backupSource(earlier.id)
+      XCTAssertEqual(current.photoId, replacementPersisted ? replacementID : earlier.photoId)
+      XCTAssertEqual(current.phase, replacementPersisted ? .failed : .committed)
+      XCTAssertEqual(current.sourceRevision, replacementPersisted ? "current" : "before")
+      XCTAssertEqual(current.originalSha256, replacementPersisted ? nil : earlier.originalSha256)
+      XCTAssertNotNil(current.message)
+      XCTAssertEqual(backup.status.failed, 1)
     }
   }
 
