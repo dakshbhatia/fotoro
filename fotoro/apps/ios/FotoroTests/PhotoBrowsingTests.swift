@@ -55,6 +55,57 @@ final class PhotoBrowsingTests: XCTestCase {
     XCTAssertEqual(builds, 4)
   }
   #if !FOTORO_LOCAL_PREVIEW
+  @MainActor func testSavedCatalogProjectionReusesArrayAndLookupAndFencesAccountVaultCatalogAndAccess() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
+    let services = try AppServices(root: root, diagnostics: NativeDiagnostics(fileURL: nil, emitSystemLog: false))
+    let secondStore = NSObject()
+    var binding = SavedLibraryOpenBinding(services)
+    binding.account = "first"
+    var identity = SavedPhotoCatalogProjectionID(binding: binding, permitted: true, catalog: 1)
+    let projection = PhotoBrowseValueProjection<SavedPhotoCatalogProjectionID, SavedPhotoCatalogSnapshot>()
+    var builds = 0
+    var catalog = [savedPhoto("first-photo", account: "first"), savedPhoto("peer-photo", account: "second"),
+      savedPhoto("pending-photo", account: "first", state: "pending")]
+    func read() -> SavedPhotoCatalogSnapshot {
+      projection.value(for: identity) {
+        builds += 1
+        return identity.permitted ? SavedPhotoCatalogSnapshot(photos: catalog, account: identity.binding?.account)
+          : SavedPhotoCatalogSnapshot()
+      }
+    }
+    for _ in 0..<100 {
+      XCTAssertEqual(read().photos.map(\.id), ["first-photo"])
+      XCTAssertEqual(read().lookup["saved:first-photo"]?.id, "first-photo")
+      XCTAssertEqual(read().lookup.count, 1, "Peer and pending photos must stay outside both representations")
+    }
+    XCTAssertEqual(builds, 1, "Selection, filter and grouping renders reuse the unfiltered catalog and lookup")
+    catalog.append(savedPhoto("added-photo", account: "first", state: "saved")); identity.catalog += 1
+    XCTAssertEqual(read().lookup["saved:added-photo"]?.id, "added-photo")
+    identity.permitted = false
+    XCTAssertTrue(read().photos.isEmpty)
+    XCTAssertTrue(read().lookup.isEmpty, "Withdrawn access must clear both representations")
+    identity.permitted = true
+    XCTAssertEqual(read().photos.count, 2)
+    binding.account = "second"; identity.binding = binding
+    XCTAssertNil(read().lookup["saved:first-photo"], "An account switch cannot reuse the former account's lookup")
+    XCTAssertEqual(read().photos.map(\.id), ["peer-photo"])
+    binding.vault = UUID(); identity.binding = binding; catalog = []
+    XCTAssertTrue(read().lookup.isEmpty, "A new vault generation cannot retain the old snapshot")
+    binding.catalog = ObjectIdentifier(secondStore); identity.binding = binding; catalog = [savedPhoto("replacement-photo", account: "second")]
+    XCTAssertEqual(read().photos.map(\.id), ["replacement-photo"])
+    identity.binding = nil; identity.permitted = false
+    XCTAssertTrue(read().lookup.isEmpty, "Removing services must discard the prior catalog")
+    XCTAssertEqual(builds, 8)
+  }
+  private func savedPhoto(_ id: String, account: String, state: String = "committed") -> LocalPhoto {
+    let representation = RepresentationV1(binding: MediaBinding(photoId: id, representationId: "metadata", kind: "metadata"),
+      objectId: "object", header: "", ciphertextBytes: 1, ciphertextSha256: "cipher")
+    return LocalPhoto(photoId: id, manifest: PhotoManifestV1(photoId: id, ownerAccountId: account,
+      representations: [], metadataRepresentation: representation, ownerWrappedMetadataKey: WrappedKeyV1(nonce: "", ciphertext: "")),
+      metadata: PhotoMetadataV1(filename: "photo.jpg", mediaType: "image/jpeg", sourceDate: "2026-10-02T00:00:00Z",
+        dateSource: "photos", originalBytes: 1, originalSha256: "original", representationKeys: [:]), transferState: state)
+  }
   @MainActor func testSavedProjectionReusesReadsAndInvalidatesCatalogFavoritesAccessAndCalendar() {
     let projection = PhotoBrowseValueProjection<SavedPhotoBrowseProjectionID, [String]>()
     var identity = SavedPhotoBrowseProjectionID(binding: nil, permitted: true, catalog: 1,

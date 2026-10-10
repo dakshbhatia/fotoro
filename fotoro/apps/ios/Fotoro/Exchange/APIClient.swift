@@ -5,7 +5,7 @@ import AuthenticationServices
 enum NativeDiagnosticPhase: String, Codable, Sendable { case app, api, auth, sync, share, consent, picks, albums, search, metadata, people }
 enum NativeDiagnosticOutcome: String, Codable, Sendable { case started, completed, failed, cancelled, changed }
 enum NativeDiagnosticOperation: String, Codable, Sendable { case app, api, auth, sync, share, albums, search, metadata, people, consent, picks }
-enum NativeDiagnosticStep: String, Codable, Sendable { case action, request, response, decode, credential, unlock, catalog, verify, persist, transfer, annotation, scan, analysis, export }
+enum NativeDiagnosticStep: String, Codable, Sendable { case action, request, response, decode, credential, unlock, catalog, verify, persist, transfer, annotation, scan, prepare, analysis, export, settlePrevious, settleBackup, settleJournal }
 enum NativeDiagnosticReason: String, Codable, Sendable {
   case cancelled, contextChanged, inactive, background, recoveryProbe, network, http, decode, validation, unknown
   case signedOut, locked, permissionRequired, paused, offline, retryRequired, waiting, pendingTransfers, unpreparedSources, skippedSources, pendingAnnotations, sourceUnavailable, current
@@ -20,11 +20,21 @@ final class NativeDiagnosticTrace: @unchecked Sendable {
   @TaskLocal static var current: NativeDiagnosticTrace?
   let id = UUID()
   let operation: NativeDiagnosticOperation
+  let parentTraceId: UUID?
   private let lock = NSLock()
   private var completedStep: NativeDiagnosticStep?
-  init(_ operation: NativeDiagnosticOperation) { self.operation = operation }
+  private var activeStep: NativeDiagnosticStep?
+  init(_ operation: NativeDiagnosticOperation, parentTraceId: UUID? = nil) {
+    self.operation = operation; self.parentTraceId = parentTraceId
+  }
+  var currentStep: NativeDiagnosticStep? { lock.lock(); defer { lock.unlock() }; return activeStep }
+  func entering(_ step: NativeDiagnosticStep?) { lock.lock(); activeStep = step; lock.unlock() }
   var lastCompletedStep: NativeDiagnosticStep? { lock.lock(); defer { lock.unlock() }; return completedStep }
-  func completed(_ step: NativeDiagnosticStep) { lock.lock(); completedStep = step; lock.unlock() }
+  func completed(_ step: NativeDiagnosticStep) {
+    lock.lock(); completedStep = step
+    if activeStep == step { activeStep = nil }
+    lock.unlock()
+  }
   @MainActor static func action<T>(_ operation: NativeDiagnosticOperation, diagnostics: NativeDiagnostics,
     _ body: @MainActor () async throws -> T) async throws -> T {
     // Nested work belongs to its initiating action; only that action owns the terminal event.
@@ -94,6 +104,11 @@ struct NativeDiagnosticEvent: Codable, Sendable {
   let completed: Int?
   let pending: Int?
   let attempted: Int?
+  let cacheHits: Int?
+  let unavailable: Int?
+  let skipped: Int?
+  let currentStep: NativeDiagnosticStep?
+  let parentTraceId: UUID?
   let traceId: UUID?
   let operation: NativeDiagnosticOperation?
   let step: NativeDiagnosticStep?
@@ -106,6 +121,7 @@ struct NativeDiagnosticEvent: Codable, Sendable {
     authorizationCode: ASAuthorizationError.Code? = nil, requestId: String? = nil,
     state: ConsumerSyncState? = nil, accountState: NativeDiagnosticAccountState? = nil,
     completed: Int? = nil, pending: Int? = nil, attempted: Int? = nil,
+    cacheHits: Int? = nil, unavailable: Int? = nil, skipped: Int? = nil,
     trace: NativeDiagnosticTrace? = NativeDiagnosticTrace.current,
     step: NativeDiagnosticStep? = nil, reason: NativeDiagnosticReason? = nil) {
     timestamp = Date().timeIntervalSince1970
@@ -121,6 +137,10 @@ struct NativeDiagnosticEvent: Codable, Sendable {
     self.completed = completed.map { max(0, min($0, 1_000_000)) }
     self.pending = pending.map { max(0, min($0, 1_000_000)) }
     self.attempted = attempted.map { max(0, min($0, 1_000_000)) }
+    self.cacheHits = cacheHits.map { max(0, min($0, 1_000_000)) }
+    self.unavailable = unavailable.map { max(0, min($0, 1_000_000)) }
+    self.skipped = skipped.map { max(0, min($0, 1_000_000)) }
+    currentStep = trace?.currentStep; parentTraceId = trace?.parentTraceId
     traceId = trace?.id; operation = trace?.operation; self.step = step
     lastCompletedStep = trace?.lastCompletedStep; self.reason = reason
     let value = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"

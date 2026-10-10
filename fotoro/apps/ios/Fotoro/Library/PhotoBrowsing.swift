@@ -76,6 +76,21 @@ struct PhotoBrowseProjectionID: Equatable {
 }
 
 #if !FOTORO_LOCAL_PREVIEW
+struct SavedPhotoCatalogProjectionID: Equatable {
+  var binding: SavedLibraryOpenBinding?
+  var permitted: Bool
+  var catalog: UInt64
+}
+struct SavedPhotoCatalogSnapshot {
+  let photos: [LocalPhoto]
+  let lookup: [String: LocalPhoto]
+  init(photos: [LocalPhoto] = [], account: String? = nil) {
+    self.photos = photos.filter {
+      $0.manifest.ownerAccountId == account && ["committed", "saved"].contains($0.transferState)
+    }
+    lookup = Dictionary(self.photos.map { (ConsumerPhotoReference.saved($0.id).id, $0) }, uniquingKeysWith: { _, last in last })
+  }
+}
 struct SavedPhotoBrowseProjectionID: Equatable {
   var binding: SavedLibraryOpenBinding?
   var permitted: Bool

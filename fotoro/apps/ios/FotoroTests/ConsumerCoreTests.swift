@@ -1972,3 +1972,170 @@ private final class SavedLibraryProtocol: URLProtocol, @unchecked Sendable {
   }
   override func stopLoading() {}
 }
+
+final class ChangedOriginalReconciliationTests: XCTestCase {
+  @MainActor func testUnavailableChangedOriginalDoesNotBlockReadyNeighborsAndRetriesWithoutLosingEarlierCopy() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
+    let diagnostics = NativeDiagnostics(fileURL: nil, emitSystemLog: false)
+    let services = try await context.enroll(diagnostics: diagnostics)
+    defer { services.vault.lock() }
+    let original = try Data(contentsOf: context.sample)
+    let newOriginal = try Data(contentsOf: XCTUnwrap(Bundle(for: Self.self).url(forResource: "neutral-a", withExtension: "png")))
+    let queuedOriginal = try Data(contentsOf: XCTUnwrap(Bundle(for: Self.self).url(forResource: "neutral-c", withExtension: "png")))
+    services.automaticPhotosAuthorization = { .authorized }
+    let capturedAt = Date()
+    services.photosBackupSnapshot = { _ in [BackupCandidate(id: "changed", capturedAt: capturedAt, sourceRevision: "before")] }
+    services.importer = PhotoImport(store: services.store, sourceReader: { _ in (original, "earlier.jpg", false) },
+      sourceRevision: { _ in "before" }, sourceLocation: { _ in nil }, sourceCaptureMetadata: { _ in nil })
+    try services.enableAutomaticPhotoSync()
+    await services.waitForAutomaticPhotoSync()
+    let earlier = try services.store.backupSource("changed")
+    let earlierPhoto = try XCTUnwrap(services.store.backupPhoto(earlier.photoId))
+    let reads = ReconciliationReadState()
+    services.importer = PhotoImport(store: services.store, sourceReader: { source in
+      if source.resourceIdentifier == "changed", await reads.shouldFail() { throw URLError(.resourceUnavailable) }
+      return source.resourceIdentifier == "queued" ? (queuedOriginal, "queued.png", false) : (newOriginal, "current.png", false)
+    }, sourceRevision: { _ in "current" }, sourceLocation: { _ in nil }, sourceCaptureMetadata: { _ in nil })
+    var queued = try services.store.backupSource("queued")
+    queued.sourceRevision = "current"
+    try services.store.putBackupSource(queued)
+    _ = try await services.importer.stageBackup(queued, accountId: XCTUnwrap(services.session.accountId),
+      bundle: services.vault.requireBundle(), capturedAt: capturedAt)
+    services.photosBackupSnapshot = { _ in [
+      BackupCandidate(id: "changed", capturedAt: capturedAt, sourceRevision: "current"),
+      BackupCandidate(id: "new", capturedAt: capturedAt, sourceRevision: "current"),
+      BackupCandidate(id: "queued", capturedAt: capturedAt, sourceRevision: "current")
+    ] }
+    services.kickAutomaticPhotoSync()
+    await services.waitForAutomaticPhotoSync()
+    let unavailable = try services.store.backupSource("changed")
+    XCTAssertEqual(unavailable.photoId, earlier.photoId)
+    XCTAssertEqual(unavailable.sourceRevision, earlier.sourceRevision)
+    XCTAssertEqual(unavailable.originalSha256, earlier.originalSha256)
+    XCTAssertEqual(unavailable.phase, .committed)
+    XCTAssertNotNil(unavailable.message)
+    XCTAssertEqual(try services.store.backupSource("new").phase, .committed)
+    XCTAssertEqual(try services.store.backupSource("queued").phase, .committed)
+    XCTAssertTrue(try services.journal.entries().isEmpty)
+    XCTAssertEqual(services.backup.status.failed, 1)
+    XCTAssertEqual(services.automaticPhotoSync.phase, .needsAttention)
+    services.refreshConsumerSyncSummary()
+    XCTAssertNotEqual(services.consumerSyncSummary.state, .upToDate)
+    XCTAssertEqual(services.photoSyncProgress.failed, 1)
+    XCTAssertNil(services.photoSyncItem(sourceID: "changed", revision: "current"), "An earlier saved binding cannot claim this changed revision was saved")
+    XCTAssertEqual(services.photoSyncItem(sourceID: "changed", revision: "before")?.phase, .saved)
+    let events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: diagnostics.exportJSON())
+    XCTAssertEqual(events.last(where: { $0.phase == .sync && $0.step == .verify })?.outcome, .failed)
+    for step in [NativeDiagnosticStep.scan, .prepare, .transfer] {
+      XCTAssertTrue(events.contains(where: { $0.phase == .sync && $0.step == step && $0.outcome == .completed }))
+    }
+    await reads.allowRead()
+    services.kickAutomaticPhotoSync()
+    await services.waitForAutomaticPhotoSync()
+    let current = try services.store.backupSource("changed")
+    XCTAssertEqual(current.phase, .committed)
+    XCTAssertEqual(current.sourceRevision, "current")
+    XCTAssertEqual(current.originalSha256, newOriginal.digest)
+    XCTAssertNil(current.message)
+    XCTAssertEqual(services.backup.status.failed, 0)
+    XCTAssertEqual(services.automaticPhotoSync.phase, .ready)
+    services.refreshConsumerSyncSummary()
+    XCTAssertEqual(services.consumerSyncSummary.state, .upToDate)
+    let preserved = try XCTUnwrap(services.store.backupPhoto(earlier.photoId))
+    XCTAssertEqual(preserved.metadata.sourceDate, earlierPhoto.metadata.sourceDate)
+    XCTAssertEqual(preserved.metadata.originalSha256, original.digest)
+    XCTAssertEqual(try Data(contentsOf: XCTUnwrap(preserved.originalURL)), original)
+  }
+
+  @MainActor func testWithdrawnChangedOriginalDoesNotPersistLateReadFailure() async throws {
+    for withdrawal in ["revision", "permission", "lock"] {
+      let context = try PausedUploadContext()
+      defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
+      let services = try await context.enroll()
+      defer { services.vault.lock() }
+      let bytes = try Data(contentsOf: context.sample)
+      var permission = PHAuthorizationStatus.authorized
+      services.automaticPhotosAuthorization = { permission }
+      services.photosBackupSnapshot = { _ in [BackupCandidate(id: "changed", capturedAt: Date(), sourceRevision: "before")] }
+      services.importer = PhotoImport(store: services.store, sourceReader: { _ in (bytes, "earlier.jpg", false) },
+        sourceRevision: { _ in "before" }, sourceLocation: { _ in nil }, sourceCaptureMetadata: { _ in nil })
+      try services.enableAutomaticPhotoSync()
+      await services.waitForAutomaticPhotoSync()
+      let earlier = try services.store.backupSource("changed")
+      services.photosBackupSnapshot = { _ in [BackupCandidate(id: "changed", capturedAt: Date(), sourceRevision: "current")] }
+      let gate = ReconciliationFailureGate()
+      services.importer = PhotoImport(store: services.store, sourceReader: { _ in
+        await gate.wait()
+        throw URLError(.resourceUnavailable)
+      }, sourceRevision: { _ in "current" }, sourceLocation: { _ in nil }, sourceCaptureMetadata: { _ in nil })
+      services.kickAutomaticPhotoSync()
+      while !gate.entered { await Task.yield() }
+      switch withdrawal {
+      case "revision":
+        services.photosBackupSnapshot = { _ in [BackupCandidate(id: "changed", capturedAt: Date(), sourceRevision: "newer")] }
+      case "permission": permission = .denied
+      default: services.vault.lock()
+      }
+      gate.release()
+      await services.waitForAutomaticPhotoSync()
+      XCTAssertEqual(try services.store.backupSource("changed"), earlier,
+        "A withdrawn context cannot turn a late availability error into a source failure")
+      XCTAssertEqual(services.backup.status.phase, .paused)
+      XCTAssertEqual(services.backup.status.failed, 0)
+    }
+  }
+
+  @MainActor func testCancelledChangedOriginalReadAbortsWithoutPersistingAvailabilityFailure() async throws {
+    for urlCancellation in [false, true] {
+      let context = try PausedUploadContext()
+      defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
+      let diagnostics = NativeDiagnostics(fileURL: nil, emitSystemLog: false)
+      let services = try await context.enroll(diagnostics: diagnostics)
+      defer { services.vault.lock() }
+      let bytes = try Data(contentsOf: context.sample)
+      services.automaticPhotosAuthorization = { .authorized }
+      services.photosBackupSnapshot = { _ in [BackupCandidate(id: "changed", capturedAt: Date(), sourceRevision: "before")] }
+      services.importer = PhotoImport(store: services.store, sourceReader: { _ in (bytes, "earlier.jpg", false) },
+        sourceRevision: { _ in "before" }, sourceLocation: { _ in nil }, sourceCaptureMetadata: { _ in nil })
+      try services.enableAutomaticPhotoSync()
+      await services.waitForAutomaticPhotoSync()
+      let earlier = try services.store.backupSource("changed")
+      services.photosBackupSnapshot = { _ in [
+        BackupCandidate(id: "changed", capturedAt: Date(), sourceRevision: "current"),
+        BackupCandidate(id: "neighbor", capturedAt: Date(), sourceRevision: "current")
+      ] }
+      services.importer = PhotoImport(store: services.store, sourceReader: { _ in
+        if urlCancellation { throw URLError(.cancelled) }
+        throw CancellationError()
+      }, sourceRevision: { _ in "current" }, sourceLocation: { _ in nil }, sourceCaptureMetadata: { _ in nil })
+      services.kickAutomaticPhotoSync()
+      await services.waitForAutomaticPhotoSync()
+      XCTAssertEqual(try services.store.backupSource("changed"), earlier)
+      XCTAssertFalse(try services.store.backupSources().contains(where: { $0.id == "neighbor" }))
+      XCTAssertEqual(services.backup.status.phase, .paused)
+      XCTAssertEqual(services.backup.status.failed, 0)
+      let events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: diagnostics.exportJSON())
+      XCTAssertEqual(events.last(where: { $0.phase == .sync && $0.step == .verify })?.outcome, .cancelled)
+      XCTAssertEqual(events.last(where: { $0.phase == .sync && $0.step == .scan })?.outcome, .cancelled)
+    }
+  }
+}
+
+private actor ReconciliationReadState {
+  private var unavailable = true
+  func shouldFail() -> Bool { unavailable }
+  func allowRead() { unavailable = false }
+}
+
+@MainActor private final class ReconciliationFailureGate {
+  private(set) var entered = false
+  private var continuation: CheckedContinuation<Void, Never>?
+  func wait() async {
+    await withCheckedContinuation { continuation in
+      self.continuation = continuation
+      entered = true
+    }
+  }
+  func release() { continuation?.resume(); continuation = nil }
+}

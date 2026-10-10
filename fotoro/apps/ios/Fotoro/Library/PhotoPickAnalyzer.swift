@@ -29,71 +29,130 @@ struct PhotoPicksSnapshot: Sendable {
   private(set) var total = 0
   private(set) var analyzing = false
   @ObservationIgnored private let preview: Preview
+  @ObservationIgnored private let permissionAvailable: @MainActor () -> Bool
   @ObservationIgnored private let isCurrent: @MainActor ([AutomaticPhotoPickCandidate]) -> Bool
   @ObservationIgnored private var cache: [String: AutomaticPhotoPickSignals] = [:]
   @ObservationIgnored private var generation = UUID()
   init(preview: @escaping Preview = PhotoPickAnalyzer.preview,
-       isCurrent: @escaping @MainActor ([AutomaticPhotoPickCandidate]) -> Bool = PhotoPickAnalyzer.isCurrent) {
+       isCurrent: @escaping @MainActor ([AutomaticPhotoPickCandidate]) -> Bool = PhotoPickAnalyzer.isCurrent,
+       permissionAvailable: @escaping @MainActor () -> Bool = { RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)) }) {
     self.preview = preview
     self.isCurrent = isCurrent
+    self.permissionAvailable = permissionAvailable
   }
   func invalidate() { generation = UUID(); analyzing = false }
   func snapshot(_ candidates: [AutomaticPhotoPickCandidate], valid: @escaping @MainActor () -> Bool = { true }) async throws -> PhotoPicksSnapshot {
+    #if !FOTORO_LOCAL_PREVIEW
+      let trace = NativeDiagnosticTrace(.picks, parentTraceId: NativeDiagnosticTrace.current?.id)
+      return try await NativeDiagnosticTrace.$current.withValue(trace) {
+        try await snapshotWork(candidates, valid: valid)
+      }
+    #else
+      return try await snapshotWork(candidates, valid: valid)
+    #endif
+  }
+  private func snapshotWork(_ candidates: [AutomaticPhotoPickCandidate], valid: @escaping @MainActor () -> Bool) async throws -> PhotoPicksSnapshot {
     var signals: [String: AutomaticPhotoPickSignals] = [:]
     var processed = 0
     #if !FOTORO_LOCAL_PREVIEW
       let started = ProcessInfo.processInfo.systemUptime
+      let trace = NativeDiagnosticTrace.current
       var outcome = NativeDiagnosticOutcome.failed
-      defer {
+      var reason: NativeDiagnosticReason?
+      var cacheHits = 0, unavailable = 0, skipped = 0
+      func record(_ outcome: NativeDiagnosticOutcome, step: NativeDiagnosticStep) {
         NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .picks,
-          outcome: outcome,
-          elapsed: ProcessInfo.processInfo.systemUptime - started,
-          completed: processed, pending: candidates.count - processed))
+          outcome: outcome, elapsed: ProcessInfo.processInfo.systemUptime - started,
+          completed: processed, pending: candidates.count - processed,
+          cacheHits: cacheHits, unavailable: unavailable, skipped: skipped,
+          trace: trace, step: step, reason: reason))
       }
+      trace?.entering(.prepare)
+      record(.started, step: .action)
+      // Keep a held preview visible without adding an event for every source.
+      let progress = Task { @MainActor in
+        while !Task.isCancelled {
+          do { try await Task.sleep(for: .seconds(5)) } catch { return }
+          guard !Task.isCancelled else { return }
+          record(.changed, step: trace?.currentStep ?? .prepare)
+        }
+      }
+      defer { progress.cancel(); record(outcome, step: .action) }
     #endif
     do {
-    let token = UUID()
-    generation = token
-    func check(_ sources: [AutomaticPhotoPickCandidate]) throws {
-      try Task.checkCancellation()
-      guard generation == token, valid(), isCurrent(sources) else { throw CancellationError() }
-    }
-    try check(candidates)
-    analyzing = true
-    defer { if generation == token { analyzing = false } }
-    total = candidates.count
-    completed = 0
-    // Discard removed sources and old revisions; this cache has no disk or account persistence.
-    let keys = Set(candidates.map { $0.id + "|" + $0.sourceRevision })
-    cache = cache.filter { keys.contains($0.key) }
-    for candidate in candidates {
-      try check([candidate])
-      if candidate.isScreenshot && !candidate.favorite {
+      let token = UUID()
+      generation = token
+      func check(_ sources: [AutomaticPhotoPickCandidate]) throws {
+        #if !FOTORO_LOCAL_PREVIEW
+          if Task.isCancelled { reason = .cancelled; throw CancellationError() }
+          guard generation == token, valid() else { reason = .contextChanged; throw CancellationError() }
+          guard isCurrent(sources) else { reason = permissionAvailable() ? .sourceUnavailable : .permissionRequired; throw CancellationError() }
+        #else
+          try Task.checkCancellation()
+          guard generation == token, valid(), isCurrent(sources) else { throw CancellationError() }
+        #endif
+      }
+      try check(candidates)
+      analyzing = true
+      defer { if generation == token { analyzing = false } }
+      total = candidates.count
+      completed = 0
+      // Discard removed sources and old revisions; this cache has no disk or account persistence.
+      let keys = Set(candidates.map { $0.id + "|" + $0.sourceRevision })
+      cache = cache.filter { keys.contains($0.key) }
+      for candidate in candidates {
+        try check([candidate])
+        if candidate.isScreenshot && !candidate.favorite {
+          #if !FOTORO_LOCAL_PREVIEW
+            skipped += 1
+          #endif
+          processed += 1
+          completed = processed
+          await Task.yield()
+          continue
+        }
+        let key = candidate.id + "|" + candidate.sourceRevision
+        if let cached = cache[key] {
+          signals[candidate.id] = cached
+          #if !FOTORO_LOCAL_PREVIEW
+            cacheHits += 1
+          #endif
+        } else {
+          #if !FOTORO_LOCAL_PREVIEW
+            trace?.entering(.prepare)
+          #endif
+          let value = try await preview(candidate)
+          // Nil results crossed the same await and require the same source fence.
+          try check([candidate])
+          if let value {
+            signals[candidate.id] = value
+            cache[key] = value
+          } else {
+            #if !FOTORO_LOCAL_PREVIEW
+              unavailable += 1
+            #endif
+          }
+        }
         processed += 1
         completed = processed
         await Task.yield()
-        continue
       }
-      let key = candidate.id + "|" + candidate.sourceRevision
-      if let cached = cache[key] { signals[candidate.id] = cached }
-      else if let value = try await preview(candidate) {
-        try check([candidate])
-        signals[candidate.id] = value
-        cache[key] = value
-      }
-      try check([candidate])
-      processed += 1
-      completed = processed
-      await Task.yield()
-    }
-    try check(candidates)
-    #if !FOTORO_LOCAL_PREVIEW
-      outcome = .completed
-    #endif
-    return PhotoPicksSnapshot(candidates: candidates, recommendations: AutomaticPhotoPickPolicy.recommend(candidates, signals: signals))
+      try check(candidates)
+      #if !FOTORO_LOCAL_PREVIEW
+        trace?.completed(.prepare)
+        trace?.entering(.analysis)
+      #endif
+      let recommendations = AutomaticPhotoPickPolicy.recommend(candidates, signals: signals)
+      #if !FOTORO_LOCAL_PREVIEW
+        trace?.completed(.analysis)
+        outcome = .completed
+      #endif
+      return PhotoPicksSnapshot(candidates: candidates, recommendations: recommendations)
     } catch {
       #if !FOTORO_LOCAL_PREVIEW
         outcome = .failure(for: error, taskCancelled: Task.isCancelled)
+        if Task.isCancelled { reason = .cancelled }
+        else if reason == nil { reason = .failure(error) }
       #endif
       throw error
     }
@@ -142,6 +201,9 @@ struct PhotoPicksSnapshot: Sendable {
       image.draw(in: CGRect(x: 0, y: 0, width: 256, height: 256))
     }
     guard let cgImage = upright.cgImage else { return nil }
+    #if !FOTORO_LOCAL_PREVIEW
+      NativeDiagnosticTrace.current?.entering(.analysis)
+    #endif
     let worker = Task.detached(priority: .utility) { try enrichedSignals(cgImage) }
     return try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
   }
