@@ -20,7 +20,6 @@ struct LocalSearchView: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
       SearchAlternatives(search: search, selected: choseMeaning)
-      SearchAnalysisActions(search: search)
       if matches.isEmpty {
         SearchEmptyResults(search: search, finished: search.hasCurrentResponse, reviewing: review != nil)
       } else {
@@ -54,6 +53,7 @@ struct LocalSearchView: View {
           }
         }
       }
+      SearchAnalysisActions(search: search)
       if !matches.isEmpty, search.searching || search.indexing {
         SearchProgressFeedback(search: search).padding(.horizontal)
       }
@@ -65,22 +65,26 @@ struct LocalSearchView: View {
 private struct SearchAnalysisActions: View {
   let search: LocalSearchStore
   var body: some View {
-    VStack(alignment: .leading, spacing: 6) {
-      if search.analysisRemaining > 0 {
-        Text("\(search.analysisRemaining) matching photos unattempted").font(.caption).foregroundStyle(.secondary)
-        Button("Next batch", systemImage: "arrow.forward") { search.analyzeMetadataMatches(nextBatch: true) }
-          .accessibilityIdentifier("search.analysis.next")
-      } else if search.hasSearch || search.analysisUnavailable > 0 {
-        Button(search.analysisUnavailable > 0 ? "Retry unavailable photos" : "Analyze metadata matches", systemImage: "text.viewfinder") { search.analyzeMetadataMatches() }
-          .accessibilityIdentifier("search.analysis.matches")
-        Text("Check up to 500 permitted photos matching this date and metadata search. Older OCR and visual results remain searchable.")
-          .font(.caption).foregroundStyle(.secondary)
-      }
-      if search.analysisUnavailable > 0 {
-        Text("\(search.analysisUnavailable) photos have incomplete analysis. Retry after the remaining batches.")
-          .font(.caption).foregroundStyle(.secondary)
-      }
-    }.disabled(search.indexing || !search.canAnalyzeMetadataMatches).padding(.horizontal)
+    if search.hasSearch || search.analysisRemaining > 0 || search.analysisUnavailable > 0 {
+      DisclosureGroup("Photo analysis") {
+        VStack(alignment: .leading, spacing: 6) {
+          if search.analysisRemaining > 0 {
+            Text("\(search.analysisRemaining) more photos to check").font(.caption).foregroundStyle(.secondary)
+            Button("Next batch", systemImage: "arrow.forward") { search.analyzeMetadataMatches(nextBatch: true) }
+              .accessibilityIdentifier("search.analysis.next")
+          } else {
+            Button(search.analysisUnavailable > 0 ? "Retry unavailable photos" : "Check matching photos", systemImage: "text.viewfinder") { search.analyzeMetadataMatches() }
+              .accessibilityIdentifier("search.analysis.matches")
+            Text("Checks up to 500 matching photos on this device.")
+              .font(.caption).foregroundStyle(.secondary)
+          }
+          if search.analysisUnavailable > 0 {
+            Text("\(search.analysisUnavailable) photos need another attempt.")
+              .font(.caption).foregroundStyle(.secondary)
+          }
+        }.disabled(search.indexing || !search.canAnalyzeMetadataMatches)
+      }.font(.footnote).padding(.horizontal)
+    }
   }
 }
 
@@ -176,7 +180,6 @@ struct ConsumerSearchResultsView: View {
         SearchPeopleSummary(search: search, edit: editPeople)
       }
       SearchAlternatives(search: search, selected: choseAlternative)
-      SearchAnalysisActions(search: search)
       if matches.isEmpty {
         SearchEmptyResults(search: search, searchPending: searchPending, finished: searchFinished, reviewing: review != nil, failure: searchFailure, retry: retrySearch)
       } else {
@@ -194,6 +197,7 @@ struct ConsumerSearchResultsView: View {
           }
         }
       }
+      SearchAnalysisActions(search: search)
       if !matches.isEmpty, searchPending || search.searching || search.indexing {
         SearchProgressFeedback(search: search, searchPending: searchPending).padding(.horizontal)
       }

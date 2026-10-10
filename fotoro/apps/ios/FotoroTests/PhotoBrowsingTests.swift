@@ -4,6 +4,122 @@ import XCTest
 @testable import Fotoro
 
 final class PhotoBrowsingTests: XCTestCase {
+  func testOverviewUsesDeduplicatedCurrentSourcesAndNewestCovers() {
+    let groups = PhotoBrowsing.groups([
+      photo("edited", at: date(10, 2), revision: "old"),
+      photo("september", at: date(9, 30)),
+      photo("edited", at: date(10, 4), revision: "current"),
+      photo("newest", at: date(10, 5)), photo("unknown"),
+    ], calendar: calendar)
+    let months = PhotoBrowsing.overviewSnapshot(groups, granularity: .months, calendar: calendar)
+    XCTAssertEqual(months.overview.map(\.cover.id), ["newest", "september", "unknown"])
+    XCTAssertEqual(months.overview.map(\.loadedCount), [2, 1, 1])
+    XCTAssertEqual(months.overview[0].interval?.start, date(10, 1))
+    XCTAssertEqual(months.overview[0].interval?.end, date(11, 1))
+    XCTAssertNil(months.overview.last?.interval)
+    let years = PhotoBrowsing.overviewSnapshot(groups, granularity: .years, calendar: calendar)
+    XCTAssertEqual(years.overview.map(\.loadedCount), [3, 1])
+    XCTAssertEqual(years.overview.first?.cover.id, "newest")
+    XCTAssertEqual(months.days.flatMap(\.sources).first(where: { $0.id == "edited" })?.revision, "current")
+  }
+
+  func testOverviewDrillUsesHalfOpenCalendarIntervalsAndKeepsUnknownDatesReachable() {
+    let groups = PhotoBrowsing.groups([photo("before", at: date(9, 30, hour: 23, minute: 59)),
+      photo("first", at: date(10, 1)), photo("last", at: date(10, 31, hour: 23, minute: 59)),
+      photo("next", at: date(11, 1)), photo("unknown")], calendar: calendar)
+    let selection = PhotoBrowseOverviewSelection(interval: DateInterval(start: date(10, 1), end: date(11, 1)), title: "October")
+    let drill = PhotoBrowsing.overviewSnapshot(groups, granularity: .days, selection: selection, calendar: calendar)
+    XCTAssertEqual(drill.days.flatMap(\.sources).map(\.id), ["last", "first"])
+    XCTAssertTrue(drill.overview.isEmpty)
+    let unknown = PhotoBrowsing.overviewSnapshot(groups, granularity: .days,
+      selection: PhotoBrowseOverviewSelection(interval: nil, title: "Date unavailable"), calendar: calendar)
+    XCTAssertEqual(unknown.days.flatMap(\.sources).map(\.id), ["unknown"])
+  }
+
+  func testYearDrillKeepsOnlyMonthsInSelectedYearAndHonorsLeapAndDSTBoundaries() {
+    let yearStart = calendar.date(from: DateComponents(year: 2026, month: 1, day: 1))!
+    let nextYear = calendar.date(from: DateComponents(year: 2027, month: 1, day: 1))!
+    let groups = PhotoBrowsing.groups([photo("next-year", at: nextYear), photo("march", at: date(3, 8, hour: 23)),
+      photo("november", at: date(11, 1, hour: 23))], calendar: calendar)
+    let selection = PhotoBrowseOverviewSelection(interval: DateInterval(start: yearStart, end: nextYear), title: "2026")
+    let drill = PhotoBrowsing.overviewSnapshot(groups, granularity: .months, selection: selection, calendar: calendar)
+    XCTAssertEqual(drill.overview.map(\.cover.id), ["november", "march"])
+    XCTAssertEqual(drill.overview.last?.interval?.end, date(4, 1))
+    XCTAssertEqual(drill.overview.last?.interval?.duration, 31 * 86400 - 3600)
+    let leapDay = calendar.date(from: DateComponents(year: 2024, month: 2, day: 29))!
+    let leap = PhotoBrowsing.overviewSnapshot(PhotoBrowsing.groups([photo("leap", at: leapDay)], calendar: calendar),
+      granularity: .months, calendar: calendar)
+    XCTAssertEqual(leap.overview.first?.interval?.duration, 29 * 86400)
+  }
+
+  func testOverviewIdentityAndBucketsFollowCalendarAndTimeZone() {
+    let groups = PhotoBrowsing.groups([photo("edge", at: date(9, 30, hour: 23, minute: 30))], calendar: calendar)
+    let local = PhotoBrowsing.overviewSnapshot(groups, granularity: .months, calendar: calendar)
+    var utc = calendar
+    utc.timeZone = TimeZone(secondsFromGMT: 0)!
+    let utcGroups = PhotoBrowsing.groups([photo("edge", at: date(9, 30, hour: 23, minute: 30))], calendar: utc)
+    let universal = PhotoBrowsing.overviewSnapshot(utcGroups, granularity: .months, calendar: utc)
+    XCTAssertNotEqual(local.overview.first?.id, universal.overview.first?.id)
+    XCTAssertEqual(local.overview.first?.interval?.start, date(9, 1))
+    XCTAssertEqual(utc.dateComponents([.month], from: universal.overview[0].interval!.start).month, 10)
+    var buddhist = calendar
+    buddhist = Calendar(identifier: .buddhist)
+    buddhist.timeZone = calendar.timeZone
+    let other = PhotoBrowsing.overviewSnapshot(groups, granularity: .months, calendar: buddhist)
+    XCTAssertNotEqual(local.overview.first?.id, other.overview.first?.id)
+    XCTAssertEqual(local.overview.first?.cover, other.overview.first?.cover)
+  }
+
+  @MainActor func testOverviewProjectionReusesWorkAndFencesDrillAccountAccessAndNewPages() {
+    let projection = PhotoBrowseValueProjection<PhotoBrowseOverviewProjectionID, PhotoBrowseOverviewSnapshot>()
+    var identity = PhotoBrowseOverviewProjectionID(browse: PhotoBrowseProjectionID(storePage: UUID(), account: "a", vault: UUID(),
+      filter: .all, dates: .all, moments: false, scope: "Photos", calendar: calendar, day: date(10, 5)),
+      granularity: .months, selection: nil)
+    var groups = PhotoBrowsing.groups([photo("a", at: date(10, 4))], calendar: calendar)
+    var builds = 0
+    func snapshot() -> PhotoBrowseOverviewSnapshot {
+      projection.value(for: identity) {
+        builds += 1
+        return PhotoBrowsing.overviewSnapshot(groups, granularity: identity.granularity,
+          selection: identity.selection, calendar: identity.browse.calendar)
+      }
+    }
+    for _ in 0..<100 { XCTAssertEqual(snapshot().overview.first?.loadedCount, 1) }
+    XCTAssertEqual(builds, 1)
+    groups = PhotoBrowsing.groups([photo("a", at: date(10, 4)), photo("b", at: date(10, 5))], calendar: calendar)
+    identity.browse.storePage = UUID()
+    XCTAssertEqual(snapshot().overview.first?.loadedCount, 2)
+    identity.selection = PhotoBrowseOverviewSelection(interval: DateInterval(start: date(9, 1), end: date(10, 1)), title: "September")
+    XCTAssertTrue(snapshot().overview.isEmpty)
+    identity.granularity = .days
+    XCTAssertTrue(snapshot().days.isEmpty)
+    groups = []; identity.browse.account = nil; identity.browse.vault = UUID()
+    XCTAssertTrue(snapshot().days.isEmpty, "Withdrawing access cannot reuse a former cover or count")
+    identity.browse.account = "another"; identity.selection = nil; identity.granularity = .years
+    groups = PhotoBrowsing.groups([photo("other", at: date(10, 2))], calendar: calendar)
+    XCTAssertEqual(snapshot().overview.first?.cover.id, "other")
+    identity.browse.calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    _ = snapshot()
+    XCTAssertEqual(builds, 7)
+  }
+
+  func testSearchSuggestionsUseOnlyCurrentAvailableFactsAndGregorianMonthCompletion() {
+    let items = [photo("favorite", at: date(10, 5), favorite: true), photo("screen", at: date(10, 1), screenshot: true),
+      photo("old", at: date(9, 30)), photo("withdrawn", at: date(10, 6), favorite: true)]
+    let groups = PhotoBrowsing.groups(items, calendar: calendar)
+    let current = Dictionary(items.filter { $0.source.id != "withdrawn" }.map { ($0.source.id, $0.facts) }, uniquingKeysWith: { _, last in last })
+    var buddhist = Calendar(identifier: .buddhist)
+    buddhist.timeZone = calendar.timeZone
+    let suggestions = PhotoBrowsing.searchSuggestions(groups, facts: { current[$0.id] }, calendar: buddhist)
+    XCTAssertEqual(suggestions.map(\.query), ["favorite", "screenshot", "2026-10"])
+    XCTAssertEqual(suggestions.map(\.loadedCount), [1, 1, 2])
+    let parsed = NaturalDateQuery.parse(suggestions[2].query, calendar: buddhist)
+    XCTAssertEqual(parsed.scope.from, date(10, 1))
+    XCTAssertEqual(parsed.scope.until, date(11, 1))
+    XCTAssertEqual(parsed.text, "")
+    XCTAssertTrue(PhotoBrowsing.searchSuggestions(groups, facts: { _ in nil }, calendar: calendar).isEmpty)
+  }
+
   private var calendar: Calendar {
     var value = Calendar(identifier: .gregorian)
     value.timeZone = TimeZone(identifier: "America/New_York")!

@@ -4,6 +4,7 @@ import SwiftUI
 import UIKit
 #if !FOTORO_LOCAL_PREVIEW
 import AVKit
+import NukeUI
 #endif
 
 struct PhotosImage: View {
@@ -335,6 +336,11 @@ struct RecentPhotosView: View {
   @State private var browseFilter = PhotoBrowseFilter.all
   @State private var browseDates = PhotoBrowseDateScope.recent
   @State private var groupMoments = false
+  @State private var overviewGranularity = PhotoBrowseOverviewGranularity.days
+  @State private var overviewSelection: PhotoBrowseOverviewSelection?
+  @State private var overviewOrigin = PhotoBrowseOverviewGranularity.days
+  @State private var overviewProjection = PhotoBrowseValueProjection<PhotoBrowseOverviewProjectionID, PhotoBrowseOverviewSnapshot>()
+  @State private var suggestionProjection = PhotoBrowseValueProjection<PhotoBrowseProjectionID, [PhotoBrowseSearchSuggestion]>()
   @State private var homeProjection = PhotoBrowseProjection()
   @State private var deviceLookup = RecentPhotoLookup()
   #if !FOTORO_LOCAL_PREVIEW
@@ -415,10 +421,55 @@ struct RecentPhotosView: View {
       }, filter: browseFilter, grouping: groupMoments ? .moments : .days, dates: browseDates)
     }
   }
+  private var browseGroups: [PhotoBrowseGroup] {
+    #if !FOTORO_LOCAL_PREVIEW
+      if allPhotos { return timelineGroups }
+    #endif
+    return homeGroups
+  }
+  private var overviewSnapshot: PhotoBrowseOverviewSnapshot {
+    let identity = PhotoBrowseOverviewProjectionID(browse: browseProjectionID,
+      granularity: overviewGranularity, selection: overviewSelection)
+    return overviewProjection.value(for: identity) {
+      PhotoBrowsing.overviewSnapshot(browseGroups, granularity: overviewGranularity,
+        selection: overviewSelection, calendar: identity.browse.calendar)
+    }
+  }
+  private var browseSearchSuggestions: [PhotoBrowseSearchSuggestion] {
+    suggestionProjection.value(for: browseProjectionID) {
+      let device = homePhotoLookup
+      #if !FOTORO_LOCAL_PREVIEW
+      let saved = savedCatalogSnapshot.lookup
+      #endif
+      return PhotoBrowsing.searchSuggestions(browseGroups) { source in
+        #if !FOTORO_LOCAL_PREVIEW
+        if let photo = saved[source.id], services?.photoAccountAccess != nil,
+          photo.metadata.originalSha256 + "|" + photo.manifest.metadataRepresentation.ciphertextSha256 == source.revision {
+          let annotation = services?.annotation(photo)
+          return RecentPhotoFacts(capturedAt: ["exif", "photos"].contains(photo.metadata.dateSource) ? Wire.parseDate(photo.metadata.sourceDate) : nil,
+            favorite: annotation?.favorite == true, screenshot: annotation?.facts?.contains("screenshot") == true,
+            livePhoto: photo.metadata.mediaType == CameraMedia.liveType, location: annotation?.location?.displayName)
+        }
+        let id = allPhotos ? String(source.id.dropFirst("device:".count)) : source.id
+        #else
+        let id = source.id
+        #endif
+        guard let photo = device[id], photo.sourceRevision == source.revision else { return nil }
+        return RecentPhotoFacts(capturedAt: photo.capturedAt, favorite: photo.isFavorite,
+          screenshot: photo.isScreenshot, livePhoto: photo.isLivePhoto, location: photo.location)
+      }
+    }
+  }
   private var homePhotos: [RecentPhoto] {
     let current = homePhotoLookup
-    return homeGroups.flatMap(\.sources).compactMap { source in
-      guard let photo = current[source.id], photo.sourceRevision == source.revision else { return nil }
+    let groups = allPhotos ? overviewSnapshot.days : homeGroups
+    return groups.flatMap(\.sources).compactMap { source in
+      #if !FOTORO_LOCAL_PREVIEW
+      let id = allPhotos && source.id.hasPrefix("device:") ? String(source.id.dropFirst("device:".count)) : source.id
+      #else
+      let id = source.id
+      #endif
+      guard let photo = current[id], photo.sourceRevision == source.revision else { return nil }
       return photo
     }
   }
@@ -506,7 +557,7 @@ struct RecentPhotosView: View {
       let saved = allOwnedPhotos.map { photo in
         let annotation = services?.annotation(photo)
         return PhotoTimelineSavedItem(photo: photo, facts: RecentPhotoFacts(
-          capturedAt: Wire.parseDate(photo.metadata.sourceDate), favorite: annotation?.favorite == true,
+          capturedAt: ["exif", "photos"].contains(photo.metadata.dateSource) ? Wire.parseDate(photo.metadata.sourceDate) : nil, favorite: annotation?.favorite == true,
           screenshot: annotation?.facts?.contains("screenshot") == true,
           livePhoto: photo.metadata.mediaType == CameraMedia.liveType, location: annotation?.location?.displayName))
       }
@@ -514,6 +565,14 @@ struct RecentPhotosView: View {
         sources: services?.consumerBackupSources ?? [],
         account: services?.photoAccountAccess?.account, filter: browseFilter,
         grouping: groupMoments ? .moments : .days, dates: browseDates)
+    }
+  }
+  private var drilledSavedPhotos: [LocalPhoto] {
+    let saved = savedCatalogSnapshot.lookup
+    return overviewSnapshot.days.flatMap(\.sources).compactMap { source in
+      guard let photo = saved[source.id],
+        photo.metadata.originalSha256 + "|" + photo.manifest.metadataRepresentation.ciphertextSha256 == source.revision else { return nil }
+      return photo
     }
   }
   private var savedDays: [(String, [LocalPhoto])] { savedSnapshot.days }
@@ -722,12 +781,15 @@ struct RecentPhotosView: View {
         .onChange(of: store.status) { cancelBestShots() }
         .onChange(of: browseDates) {
           cancelBestShots()
+          overviewSelection = nil
           store.setBrowseDates(browseDates)
         }
         .onChange(of: browseFilter) {
           cancelBestShots()
         }
+        .onChange(of: overviewGranularity) { cancelBestShots() }
         .onChange(of: scope) {
+          overviewSelection = nil
           cancelBestShots()
           queryFocused = false
           #if !FOTORO_LOCAL_PREVIEW
@@ -966,7 +1028,7 @@ struct RecentPhotosView: View {
   // Native scrolling owns its offset. Only a new browsing choice resets it;
   // photo/page/progress updates must not become programmatic scroll commands.
   private var browseViewportKey: String {
-    "\(scope.id)|\(browseFilter.id)|\(browseDates.id)|\(groupMoments)|\(search.hasSearch)"
+    "\(scope.id)|\(browseFilter.id)|\(browseDates.id)|\(groupMoments)|\(overviewGranularity.id)|\(overviewSelection?.interval?.start.timeIntervalSince1970.description ?? overviewSelection?.title ?? "all")|\(search.hasSearch)"
   }
   private var bestShotsControls: some View {
     VStack(alignment: .leading, spacing: 8) {
@@ -1178,11 +1240,18 @@ struct RecentPhotosView: View {
       .accessibilityIdentifier("gallery.select")
   }
   @ViewBuilder private var gallery: some View {
-    #if !FOTORO_LOCAL_PREVIEW
-      if allPhotos { timelineGallery } else { deviceGallery }
-    #else
-      deviceGallery
-    #endif
+    if allPhotos, overviewGranularity != .days {
+      overviewGallery
+    } else {
+      #if !FOTORO_LOCAL_PREVIEW
+        if allPhotos { timelineGallery } else { deviceGallery }
+      #else
+        deviceGallery
+      #endif
+      if allPhotos, overviewSelection != nil, overviewSnapshot.days.isEmpty {
+        ContentUnavailableView("No loaded photos in this period", systemImage: "calendar")
+      }
+    }
   }
   private func dayHeader(_ group: PhotoBrowseGroup) -> some View {
     dayHeader(start: group.start, count: group.sources.count, moment: groupMoments, sources: group.sources)
@@ -1256,10 +1325,58 @@ struct RecentPhotosView: View {
     #endif
     return cell
   }
+  private func openOverview(_ group: PhotoBrowseOverviewGroup) {
+    if overviewSelection == nil { overviewOrigin = overviewGranularity }
+    overviewSelection = PhotoBrowseOverviewSelection(interval: group.interval, title: group.title)
+    overviewGranularity = overviewGranularity == .years && group.interval != nil ? .months : .days
+    queryFocused = false
+  }
+  private var overviewGallery: some View {
+    LazyVGrid(columns: [GridItem(.adaptive(minimum: 260, maximum: 520), spacing: 12)], spacing: 12) {
+      ForEach(overviewSnapshot.overview) { group in
+        Button { openOverview(group) } label: {
+          PhotoBrowseOverviewCard(group: group) { side in overviewCover(group.cover, side: side) }
+        }.buttonStyle(.plain).accessibilityIdentifier("gallery.overview.\(group.id)")
+      }
+      if store.hasMorePhotos {
+        ProgressView("Loading photos…").font(.footnote).padding().frame(maxWidth: .infinity)
+          .task(id: PhotoBrowseContinuation(page: store.browsePage, filter: browseFilter,
+            dates: browseDates, isActive: scenePhase == .active)) {
+            guard scenePhase == .active else { return }
+            await store.loadMorePhotos(matching: browseFilter, whileActive: { scenePhase == .active })
+          }
+      }
+      #if !FOTORO_LOCAL_PREVIEW
+      if savedHasMore, let services, services.photoAccountAccess != nil {
+        SavedLibraryPaginationFooter(services: services, hasMore: $savedHasMore,
+          isActive: scenePhase == .active && !savedRefresh.isRefreshing,
+          failed: { store.error = $0 })
+      }
+      #endif
+    }.padding(.horizontal, 12)
+  }
+  @ViewBuilder private func overviewCover(_ source: RecentPhotoSource, side: CGFloat) -> some View {
+    #if !FOTORO_LOCAL_PREVIEW
+    if source.id.hasPrefix("device:"), let photo = homePhotoLookup[String(source.id.dropFirst("device:".count))],
+      photo.sourceRevision == source.revision {
+      PhotosImage(photo: photo, store: store, thumbnailSide: side).scaledToFill()
+    } else if services?.photoAccountAccess != nil, let photo = savedCatalogSnapshot.lookup[source.id],
+      photo.metadata.originalSha256 + "|" + photo.manifest.metadataRepresentation.ciphertextSha256 == source.revision {
+      LazyImage(url: photo.thumbnailURL) { state in
+        if let image = state.image { image.resizable().scaledToFill() }
+        else { Rectangle().fill(.quaternary) }
+      }
+    } else { Rectangle().fill(.quaternary) }
+    #else
+    if let photo = homePhotoLookup[source.id], photo.sourceRevision == source.revision {
+      PhotosImage(photo: photo, store: store, thumbnailSide: side).scaledToFill()
+    } else { Rectangle().fill(.quaternary) }
+    #endif
+  }
   private var deviceGallery: some View {
     let current = homePhotoLookup
     return LazyVGrid(columns: photoColumns, spacing: 3, pinnedViews: [.sectionHeaders]) {
-      ForEach(homeGroups) { group in
+      ForEach(allPhotos ? overviewSnapshot.days : homeGroups) { group in
         Section {
           ForEach(group.sources, id: \.id) { source in
             if let photo = current[source.id], photo.sourceRevision == source.revision {
@@ -1290,7 +1407,7 @@ struct RecentPhotosView: View {
     let device = homePhotoLookup
     let saved = savedCatalogSnapshot.lookup
     return LazyVGrid(columns: photoColumns, spacing: 3, pinnedViews: [.sectionHeaders]) {
-      ForEach(timelineGroups) { group in
+      ForEach(overviewSnapshot.days) { group in
         Section {
           ForEach(group.sources, id: \.id) { source in
             if source.id.hasPrefix("device:"), let photo = device[String(source.id.dropFirst("device:".count))],
@@ -1302,7 +1419,7 @@ struct RecentPhotosView: View {
             } else if let photo = saved[source.id] {
               LibraryPhotoCell(photo: photo, isSelected: selectedSavedPhotos.contains(photo.id), open: {
                 if selecting { toggleSavedSelection(photo) }
-                else { savedViewer = SavedPhotoViewerPresentation(initial: photo, photos: allOwnedPhotos) }
+                else { savedViewer = SavedPhotoViewerPresentation(initial: photo, photos: drilledSavedPhotos) }
               }, toggleSelection: { toggleSavedSelection(photo) }, services: services)
                 .id(source.id)
             }
@@ -1335,6 +1452,14 @@ struct RecentPhotosView: View {
     if canSearch || search.hasSearch {
       content
         .searchable(text: $query, placement: .toolbar, prompt: "Search photos")
+        .searchSuggestions {
+          if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, allPhotos {
+            ForEach(browseSearchSuggestions) { suggestion in
+              PhotoBrowseSuggestionRow(suggestion: suggestion)
+                .searchCompletion(suggestion.query)
+            }
+          }
+        }
         .searchFocused($queryFocused)
         .searchToolbarBehavior(.automatic)
         .searchPresentationToolbarBehavior(.avoidHidingContent)
@@ -1391,6 +1516,15 @@ struct RecentPhotosView: View {
       .accessibilityIdentifier("home.scope")
   }
   private var browseContext: some View {
+    VStack(spacing: 0) {
+      PhotoBrowseOverviewChooser(granularity: $overviewGranularity,
+        selection: overviewSelection, origin: overviewOrigin,
+        clear: { overviewSelection = nil; overviewGranularity = overviewOrigin },
+        choose: { overviewSelection = nil; overviewOrigin = overviewGranularity })
+      browseFilters
+    }
+  }
+  private var browseFilters: some View {
     HStack(spacing: 12) {
       Menu {
         Picker("Dates", selection: $browseDates) {
@@ -2195,3 +2329,71 @@ private struct PhotoHomeCloudLabel: View {
   }
 }
 #endif
+
+private struct PhotoBrowseOverviewChooser: View {
+  @Binding var granularity: PhotoBrowseOverviewGranularity
+  let selection: PhotoBrowseOverviewSelection?
+  let origin: PhotoBrowseOverviewGranularity
+  let clear: () -> Void
+  let choose: () -> Void
+  var body: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      if let selection {
+        HStack {
+          Button(action: clear) {
+            Label(origin == .years ? "All years" : "All months", systemImage: "chevron.left")
+          }.buttonStyle(.plain).frame(minHeight: 44)
+            .accessibilityIdentifier("gallery.overview.clear")
+          Spacer(minLength: 8)
+          Text(selection.title).font(.subheadline).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+      }
+      Picker("Photo overview", selection: Binding(get: { granularity }, set: {
+        granularity = $0
+        choose()
+      })) {
+        Text("Days").tag(PhotoBrowseOverviewGranularity.days)
+        Text("Months").tag(PhotoBrowseOverviewGranularity.months)
+        Text("Years").tag(PhotoBrowseOverviewGranularity.years)
+      }.pickerStyle(.segmented).accessibilityIdentifier("gallery.overview")
+    }.padding(.horizontal, 16).padding(.top, 8)
+  }
+}
+
+private struct PhotoBrowseOverviewCard<Cover: View>: View {
+  let group: PhotoBrowseOverviewGroup
+  @ViewBuilder let cover: (CGFloat) -> Cover
+  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+  var body: some View {
+    GeometryReader { geometry in
+      cover(geometry.size.width).frame(width: geometry.size.width, height: geometry.size.height).clipped()
+        .overlay {
+          LinearGradient(colors: [.clear, .black.opacity(0.8)], startPoint: .center, endPoint: .bottom)
+        }
+        .overlay(alignment: .bottomLeading) {
+          VStack(alignment: .leading, spacing: 4) {
+            Text(group.title).font(.title2.bold())
+            Text("\(group.loadedCount) loaded photos").font(.caption).monospacedDigit()
+          }.foregroundStyle(.white).padding(16)
+        }
+    }.aspectRatio(dynamicTypeSize.isAccessibilitySize ? 1 : 4.0 / 3.0, contentMode: .fit)
+      .clipShape(.rect(cornerRadius: 16))
+      .accessibilityElement(children: .ignore)
+      .accessibilityLabel(group.title)
+      .accessibilityValue("\(group.loadedCount) loaded photos")
+      .accessibilityHint("Show photos from this period")
+  }
+}
+
+private struct PhotoBrowseSuggestionRow: View {
+  let suggestion: PhotoBrowseSearchSuggestion
+  var body: some View {
+    HStack {
+      Label(suggestion.title, systemImage: suggestion.symbol)
+      Spacer()
+      Text("\(suggestion.loadedCount) loaded").font(.caption).foregroundStyle(.secondary).monospacedDigit()
+    }.accessibilityElement(children: .combine)
+      .accessibilityHint("Search permitted photo metadata")
+  }
+}

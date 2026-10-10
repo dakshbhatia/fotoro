@@ -104,6 +104,44 @@ struct SavedPhotoBrowseSnapshot {
 }
 #endif
 
+enum PhotoBrowseOverviewGranularity: String, CaseIterable, Identifiable, Hashable {
+  case days, months, years
+  var id: String { rawValue }
+}
+
+struct PhotoBrowseOverviewGroup: Identifiable {
+  var id: String
+  var interval: DateInterval?
+  var title: String
+  var cover: RecentPhotoSource
+  var loadedCount: Int
+}
+
+// Drill-down state retains dates, never photo metadata from a withdrawn snapshot.
+struct PhotoBrowseOverviewSelection: Equatable {
+  var interval: DateInterval?
+  var title: String
+}
+
+struct PhotoBrowseOverviewProjectionID: Equatable {
+  var browse: PhotoBrowseProjectionID
+  var granularity: PhotoBrowseOverviewGranularity
+  var selection: PhotoBrowseOverviewSelection?
+}
+
+struct PhotoBrowseOverviewSnapshot {
+  var days: [PhotoBrowseGroup]
+  var overview: [PhotoBrowseOverviewGroup]
+}
+
+struct PhotoBrowseSearchSuggestion: Identifiable {
+  var id: String { query }
+  var title: String
+  var query: String
+  var symbol: String
+  var loadedCount: Int
+}
+
 enum PhotoBrowsing {
   static let maximumMomentSpan: TimeInterval = 2 * 3600
 
@@ -178,6 +216,87 @@ enum PhotoBrowsing {
         sources: unknown.map(\.source)))
     }
     return groups
+  }
+
+  static func overviewSnapshot(_ groups: [PhotoBrowseGroup],
+    granularity: PhotoBrowseOverviewGranularity, selection: PhotoBrowseOverviewSelection? = nil,
+    calendar: Calendar = .current) -> PhotoBrowseOverviewSnapshot {
+    let days = groups.filter { group in
+      guard let selection else { return true }
+      guard let interval = selection.interval else { return group.isUndated }
+      guard let start = group.start else { return false }
+      return start >= interval.start && start < interval.end
+    }
+    guard granularity != .days else { return PhotoBrowseOverviewSnapshot(days: days, overview: []) }
+    let component: Calendar.Component = granularity == .years ? .year : .month
+    var buckets: [String: PhotoBrowseOverviewGroup] = [:]
+    // Existing groups and sources already use newest-first order and deduplicated identities.
+    for group in days {
+      guard let cover = group.sources.first else { continue }
+      let interval = group.start.flatMap { calendar.dateInterval(of: component, for: $0) }
+      let id = interval.map {
+        "\(granularity.rawValue):\(calendar.identifier):\(calendar.timeZone.identifier):\($0.start.timeIntervalSince1970)"
+      } ?? "\(granularity.rawValue):unknown-date"
+      if var bucket = buckets[id] {
+        bucket.loadedCount += group.sources.count
+        buckets[id] = bucket
+      } else {
+        let title: String
+        if let interval {
+          let formatter = DateFormatter()
+          formatter.calendar = calendar
+          formatter.timeZone = calendar.timeZone
+          formatter.setLocalizedDateFormatFromTemplate(granularity == .years ? "yyyy" : "MMMM yyyy")
+          title = formatter.string(from: interval.start)
+        } else { title = "Date unavailable" }
+        buckets[id] = PhotoBrowseOverviewGroup(id: id, interval: interval, title: title,
+          cover: cover, loadedCount: group.sources.count)
+      }
+    }
+    let overview = buckets.values.sorted {
+      if $0.interval?.start == $1.interval?.start { return $0.id < $1.id }
+      return ($0.interval?.start ?? .distantPast) > ($1.interval?.start ?? .distantPast)
+    }
+    return PhotoBrowseOverviewSnapshot(days: days, overview: overview)
+  }
+
+  static func searchSuggestions(_ groups: [PhotoBrowseGroup],
+    facts: (RecentPhotoSource) -> RecentPhotoFacts?, calendar: Calendar = .current
+  ) -> [PhotoBrowseSearchSuggestion] {
+    var favorites = 0, screenshots = 0
+    var dated: [Date] = []
+    for group in groups {
+      for source in group.sources {
+        guard let value = facts(source) else { continue }
+        if value.favorite { favorites += 1 }
+        if value.screenshot { screenshots += 1 }
+        if let date = value.capturedAt, date.timeIntervalSince1970.isFinite { dated.append(date) }
+      }
+    }
+    var suggestions: [PhotoBrowseSearchSuggestion] = []
+    if favorites > 0 {
+      suggestions.append(PhotoBrowseSearchSuggestion(title: "Favorites", query: "favorite",
+        symbol: "heart", loadedCount: favorites))
+    }
+    if screenshots > 0 {
+      suggestions.append(PhotoBrowseSearchSuggestion(title: "Screenshots", query: "screenshot",
+        symbol: "rectangle.on.rectangle", loadedCount: screenshots))
+    }
+    // NaturalDateQuery parses ISO months in the Gregorian calendar, in local time.
+    var gregorian = Calendar(identifier: .gregorian)
+    gregorian.timeZone = calendar.timeZone
+    if let newest = dated.max(), let month = gregorian.dateInterval(of: .month, for: newest) {
+      let components = gregorian.dateComponents([.year, .month], from: newest)
+      if let year = components.year, let number = components.month, year > 0, year <= 9999 {
+        let formatter = DateFormatter()
+        formatter.calendar = gregorian; formatter.timeZone = gregorian.timeZone
+        formatter.setLocalizedDateFormatFromTemplate("MMMM yyyy")
+        suggestions.append(PhotoBrowseSearchSuggestion(title: formatter.string(from: newest),
+          query: String(format: "%04d-%02d", year, number), symbol: "calendar",
+          loadedCount: dated.filter { $0 >= month.start && $0 < month.end }.count))
+      }
+    }
+    return suggestions
   }
 
   private struct DatedItem {
