@@ -68,6 +68,37 @@ final class SemanticSearchTests: XCTestCase {
     try index.replacePermitted([])
     XCTAssertTrue(try index.pendingSemanticRecords().isEmpty)
   }
+  func testPendingSemanticKeysetBatchesBoundRowsAndAdvancePastUnavailableSources() throws {
+    let index = try SearchIndex()
+    let records = (0..<300).map { SearchRecord(id: String(format: "scene-%03d", $0)) }
+    try index.replacePermitted(records)
+    XCTAssertEqual(try index.pendingSemanticRecords(limit: 1000).count, 128)
+    let first = try index.pendingSemanticRecords(limit: 64)
+    XCTAssertEqual(first.map(\.id), Array(records.prefix(64)).map(\.id))
+    // An unavailable first batch remains pending, but cannot starve later records.
+    let second = try index.pendingSemanticRecords(after: first.last?.id, limit: 64)
+    XCTAssertEqual(second.map(\.id), Array(records[64..<128]).map(\.id))
+    try index.applySemantic(vector(0), photoID: second[0].id, revision: second[0].revision)
+    XCTAssertFalse(try index.pendingSemanticRecords(after: first.last?.id, limit: 64).contains { $0.id == second[0].id })
+    XCTAssertTrue(try index.pendingSemanticRecords(after: records.last?.id, limit: 64).isEmpty)
+  }
+  func testAutomaticSavedSemanticScopeFiltersDatesAndSourceBeforeLimitWithoutRemovingOlderEvidence() throws {
+    let index = try SearchIndex()
+    let now = try XCTUnwrap(Wire.parseDate("2026-10-10T12:00:00Z"))
+    var older = SearchRecord(id: "a-old"); older.scope = "saved"; older.capturedAt = now.addingTimeInterval(-86400 * 40)
+    var undated = SearchRecord(id: "b-undated"); undated.scope = "saved"
+    var future = SearchRecord(id: "c-future"); future.scope = "saved"; future.capturedAt = now.addingTimeInterval(86400)
+    var device = SearchRecord(id: "d-device"); device.scope = "photos"; device.capturedAt = now
+    var recent = SearchRecord(id: "z-recent"); recent.scope = "saved"; recent.capturedAt = now.addingTimeInterval(-86400)
+    try index.replacePermitted([older, undated, future, device, recent])
+    let scope = PhotoAnalysisScope(now: now)
+    XCTAssertEqual(try index.pendingSemanticRecords(limit: 1, scope: scope).map(\.id), [recent.id],
+      "Disallowed rows sorting first must be excluded before the batch LIMIT")
+    XCTAssertEqual(try index.pendingSemanticRecords().count, 5, "Unscoped diagnostics retain all metadata")
+    XCTAssertTrue(try index.applySemantic(vector(0), photoID: older.id, revision: older.revision))
+    XCTAssertEqual(try index.addingSemantic(vector(0), to: index.search("birthday cake", scope: SearchScope(source: "saved"))).results.map(\.id), [older.id])
+    XCTAssertEqual(try index.pendingSemanticRecords(scope: scope).map(\.id), [recent.id])
+  }
   func testSemanticResultsKeepDateScopeAndExplicitEvidenceAheadOfSimilarity() throws {
     let index = try SearchIndex()
     let date = try XCTUnwrap(Wire.parseDate("2026-10-01T12:00:00Z"))

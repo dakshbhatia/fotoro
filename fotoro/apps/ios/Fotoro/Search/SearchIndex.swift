@@ -112,13 +112,22 @@ final class SearchIndex: @unchecked Sendable {
     }
   }
   #if !FOTORO_LOCAL_PREVIEW
-  func pendingSemanticRecords() throws -> [SearchRecord] {
-    try database.read { db in
+  func pendingSemanticRecords(after: String? = nil, limit: Int = 64, scope: PhotoAnalysisScope? = nil) throws -> [SearchRecord] {
+    var conditions = ["(? IS NULL OR r.id>?)",
+      "(v.photo IS NULL OR v.processor!=? OR v.revision!=json_extract(r.value,'$.revision'))"]
+    var arguments: StatementArguments = [after, after, SemanticVector.processor]
+    if let scope {
+      conditions.append("r.scope='saved'")
+      if let from = scope.scope.from { conditions.append("r.capture>=?"); arguments += [from.timeIntervalSince1970] }
+      if let through = scope.scope.through { conditions.append("r.capture<=?"); arguments += [through.timeIntervalSince1970] }
+      if let until = scope.scope.until { conditions.append("r.capture<?"); arguments += [until.timeIntervalSince1970] }
+    }
+    let condition = conditions.joined(separator: " AND ")
+    return try database.read { db in
       try Row.fetchAll(db, sql: """
         SELECT r.value FROM searchRecords r LEFT JOIN searchVectors v ON v.photo=r.id
-        WHERE v.photo IS NULL OR v.processor!=? OR v.revision!=json_extract(r.value,'$.revision')
-        ORDER BY r.favorite DESC,r.capture DESC,r.id
-        """, arguments: [SemanticVector.processor]).map(decode)
+        WHERE \(condition) ORDER BY r.id LIMIT ?
+        """, arguments: arguments + [max(1, min(limit, 128))]).map(decode)
     }
   }
   func needsSemantic(photoID: String, revision: String) throws -> Bool {

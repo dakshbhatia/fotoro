@@ -5,7 +5,186 @@ import XCTest
 
 @testable import Fotoro
 
+private actor AdmissionQueryProbe {
+  private(set) var queries: [String] = []
+  func record(_ query: String) { queries.append(query) }
+}
+@MainActor private final class AdmissionPreviewGate {
+  private var continuation: CheckedContinuation<Void, Never>?
+  func wait() async { await withCheckedContinuation { continuation = $0 } }
+  func open() { continuation?.resume(); continuation = nil }
+}
+
 final class SearchLifecycleTests: XCTestCase {
+  @MainActor func testQueuedQueryUpdatesInvokeOnlyNewestExecutor() async throws {
+    let probe = AdmissionQueryProbe()
+    let store = LocalSearchStore(index: try SearchIndex(), queryExecutor: { index, query, scope, accepted, previous, generation in
+      await probe.record(query)
+      return try index.search(query, scope: scope, acceptedMeaningID: accepted, previous: previous, generation: generation)
+    })
+    for number in 0..<100 { store.updateQuery("receipt \(number)") }
+    for _ in 0..<200 where store.searching { try await Task.sleep(for: .milliseconds(10)) }
+    let invoked = await probe.queries
+    XCTAssertEqual(invoked, ["receipt 99"])
+    XCTAssertFalse(store.searching)
+    XCTAssertEqual(store.response.query, "receipt 99")
+  }
+  @MainActor func testRepeatedScrollIdleRetainsOneHeldAutomaticWorkerAndResumesWithoutMetadataRefresh() async throws {
+    guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+      let asset = PHAsset.fetchAssets(with: .image, options: nil).firstObject, !asset.isHidden else {
+      throw XCTSkip("Permit a public Simulator photo for automatic analysis admission.")
+    }
+    let photo = RecentPhoto(asset: asset), index = try SearchIndex()
+    var record = SearchRecord(id: photo.id)
+    record.revision = photo.sourceRevision; record.capturedAt = Date(); record.visualStatus = .complete
+    try index.replacePermitted([record])
+    #if !FOTORO_LOCAL_PREVIEW
+      var vector = [Float](repeating: 0, count: 512); vector[0] = 1
+      XCTAssertTrue(try index.applySemantic(vector, photoID: record.id, revision: record.revision))
+    #endif
+    let store = LocalSearchStore(index: index), gate = AdmissionPreviewGate()
+    store.setAutomaticAnalysisActive(false)
+    store.completePermittedSnapshotRefresh(photos: [photo])
+    let held = expectation(description: "Automatic OCR holds one preview")
+    let cancelled = expectation(description: "Scrolling cancels automatic preview")
+    let resumed = expectation(description: "Idle resumes pending cached metadata")
+    var previews = 0, published = 0
+    store.analysisPreview = { _ in
+      previews += 1
+      if previews == 1 {
+        return await withTaskCancellationHandler {
+          held.fulfill(); await gate.wait(); return nil
+        } onCancel: { cancelled.fulfill() }
+      }
+      resumed.fulfill(); return nil
+    }
+    store.onRecordChanged = { _, _ in published += 1 }
+    defer { store.pause(); gate.open() }
+    let library = store.libraryGeneration
+    store.setAutomaticAnalysisActive(true)
+    await fulfillment(of: [held], timeout: 2)
+    store.setBrowseInteractionActive(true)
+    await fulfillment(of: [cancelled], timeout: 1)
+    for _ in 0..<4 {
+      store.setBrowseInteractionActive(false)
+      try await Task.sleep(for: .milliseconds(550))
+      XCTAssertEqual(previews, 1, "Idle cannot read another preview until the canceled worker actually drains")
+      XCTAssertEqual(store.automaticAnalysisWorkerStarts, 1, "Repeated idle cycles cannot accumulate waiting worker tasks")
+      store.setBrowseInteractionActive(true)
+    }
+    store.setBrowseInteractionActive(false)
+    try await Task.sleep(for: .milliseconds(550))
+    XCTAssertEqual(store.automaticAnalysisWorkerStarts, 1)
+    XCTAssertEqual(try index.record(record.id)?.ocrStatus, .pending)
+    XCTAssertEqual(published, 0)
+    XCTAssertEqual(store.assets[photo.id]?.sourceRevision, photo.sourceRevision)
+    gate.open()
+    await fulfillment(of: [resumed], timeout: 2)
+    for _ in 0..<100 where store.indexing { try await Task.sleep(for: .milliseconds(10)) }
+    XCTAssertEqual(previews, 2)
+    XCTAssertEqual(store.automaticAnalysisWorkerStarts, 2)
+    try await Task.sleep(for: .milliseconds(600))
+    XCTAssertEqual(previews, 2, "An unavailable completion must not restart itself")
+    XCTAssertEqual(try index.record(record.id)?.ocrStatus, .unavailable)
+    XCTAssertEqual(store.libraryGeneration, library, "Idle resume cannot rescan or invalidate permitted metadata")
+  }
+  @MainActor func testExplicitAnalysisRemainsAvailableWhileAutomaticAdmissionIsHidden() async throws {
+    guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+      let asset = PHAsset.fetchAssets(with: .image, options: nil).firstObject, !asset.isHidden else {
+      throw XCTSkip("Permit a public Simulator photo for explicit analysis admission.")
+    }
+    let photo = RecentPhoto(asset: asset), index = try SearchIndex()
+    var record = SearchRecord(id: photo.id)
+    record.revision = photo.sourceRevision; record.capturedAt = Date(); record.visualStatus = .complete
+    try index.replacePermitted([record])
+    #if !FOTORO_LOCAL_PREVIEW
+      var vector = [Float](repeating: 0, count: 512); vector[0] = 1
+      XCTAssertTrue(try index.applySemantic(vector, photoID: record.id, revision: record.revision))
+    #endif
+    let store = LocalSearchStore(index: index)
+    store.setAutomaticAnalysisActive(false); store.setBrowseInteractionActive(true)
+    store.completePermittedSnapshotRefresh(photos: [photo])
+    var previews = 0
+    store.analysisPreview = { _ in previews += 1; return nil }
+    defer { store.pause() }
+    try await Task.sleep(for: .milliseconds(600))
+    XCTAssertEqual(previews, 0)
+    store.analyzeMetadataMatches()
+    for _ in 0..<100 where store.indexing { try await Task.sleep(for: .milliseconds(10)) }
+    XCTAssertEqual(previews, 1)
+    XCTAssertEqual(try index.record(record.id)?.ocrStatus, .unavailable)
+  }
+  @MainActor func testExplicitAnalysisWaitsForCanceledAutomaticWorkerWithoutScrollCancelingItsPreview() async throws {
+    guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+      let asset = PHAsset.fetchAssets(with: .image, options: nil).firstObject, !asset.isHidden else {
+      throw XCTSkip("Permit a public Simulator photo for analysis ownership.")
+    }
+    let photo = RecentPhoto(asset: asset), index = try SearchIndex()
+    var record = SearchRecord(id: photo.id)
+    record.revision = photo.sourceRevision; record.capturedAt = Date(); record.visualStatus = .complete
+    try index.replacePermitted([record])
+    #if !FOTORO_LOCAL_PREVIEW
+      var vector = [Float](repeating: 0, count: 512); vector[0] = 1
+      XCTAssertTrue(try index.applySemantic(vector, photoID: record.id, revision: record.revision))
+    #endif
+    let store = LocalSearchStore(index: index), automaticGate = AdmissionPreviewGate(), explicitGate = AdmissionPreviewGate()
+    store.setAutomaticAnalysisActive(false)
+    store.completePermittedSnapshotRefresh(photos: [photo])
+    let automaticHeld = expectation(description: "Automatic preview held")
+    let explicitHeld = expectation(description: "Explicit preview held after automatic drain")
+    let explicitCanceled = expectation(description: "Scrolling must preserve explicit preview")
+    explicitCanceled.isInverted = true
+    var previews = 0
+    store.analysisPreview = { _ in
+      previews += 1
+      if previews == 1 { automaticHeld.fulfill(); await automaticGate.wait(); return nil }
+      return await withTaskCancellationHandler {
+        explicitHeld.fulfill(); await explicitGate.wait(); return nil
+      } onCancel: { explicitCanceled.fulfill() }
+    }
+    defer { store.pause(); automaticGate.open(); explicitGate.open() }
+    store.setAutomaticAnalysisActive(true)
+    await fulfillment(of: [automaticHeld], timeout: 2)
+    store.setAutomaticAnalysisActive(false)
+    store.analyzeMetadataMatches()
+    try await Task.sleep(for: .milliseconds(100))
+    XCTAssertEqual(previews, 1, "Explicit work must await the same retained worker")
+    XCTAssertTrue(store.indexing)
+    automaticGate.open()
+    await fulfillment(of: [explicitHeld], timeout: 2)
+    store.setBrowseInteractionActive(true)
+    store.setBrowseInteractionActive(false)
+    await fulfillment(of: [explicitCanceled], timeout: 0.1)
+    XCTAssertTrue(store.indexing, "The drained automatic worker cannot clear explicit progress")
+    explicitGate.open()
+    for _ in 0..<100 where store.indexing { try await Task.sleep(for: .milliseconds(10)) }
+    XCTAssertEqual(previews, 2)
+    XCTAssertEqual(try index.record(record.id)?.ocrStatus, .unavailable)
+  }
+  @MainActor func testHiddenMetadataRefreshCannotReadPreviewsAndPermissionWithdrawalStillPurges() async throws {
+    let permission = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+    guard RecentPhotosPolicy.canRead(permission), PHAsset.fetchAssets(with: .image, options: nil).count > 0 else {
+      throw XCTSkip("Permit public Simulator Photos for hidden metadata refresh admission.")
+    }
+    let store = LocalSearchStore(index: try SearchIndex())
+    store.setAutomaticAnalysisActive(false)
+    var previews = 0
+    store.analysisPreview = { _ in previews += 1; return nil }
+    let snapshot = expectation(description: "Hidden metadata remains available")
+    store.onSnapshotReady = { snapshot.fulfill() }
+    defer { store.pause(); PHPhotoLibrary.shared().unregisterChangeObserver(store) }
+    store.open(status: permission)
+    PHPhotoLibrary.shared().unregisterChangeObserver(store)
+    await fulfillment(of: [snapshot], timeout: 10)
+    try await Task.sleep(for: .milliseconds(600))
+    XCTAssertFalse(store.assets.isEmpty)
+    XCTAssertEqual(previews, 0, "Refresh entrypoints cannot bypass hidden automatic admission")
+    store.refresh(status: .denied)
+    XCTAssertTrue(store.assets.isEmpty, "Denied access must withdraw the presentation immediately")
+    for _ in 0..<200 where store.indexing { try await Task.sleep(for: .milliseconds(10)) }
+    XCTAssertEqual(previews, 0)
+    XCTAssertFalse(store.canAnalyzeMetadataMatches)
+  }
   func testUnchangedMetadataIntakeRetainsSearchableAnalysisWithoutRebuildingPostings() throws {
     let index = try SearchIndex()
     var incoming = SearchRecord(id: "kept")
