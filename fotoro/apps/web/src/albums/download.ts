@@ -1,9 +1,10 @@
 import {Zip, ZipPassThrough} from "fflate";
-import {ready, sodium, b64} from "@fotoro/crypto";
+import {ready, sodium, b64, CryptoError} from "@fotoro/crypto";
 import {CAMERA_ORIGINAL_LIMIT} from "@fotoro/contracts/camera-media";
 import {diagnose} from "../diagnostics";
+import {ApiError} from "../exchange/api-errors";
 import type {Photo} from "../library/catalog";
-import {albumPhotoGroups} from "./browse";
+import {albumPhotoGroups, type AlbumPhotoGroup} from "./browse";
 import {albumOriginalFiles, type AlbumAccess} from "./service";
 
 export const TRIP_MEMORY_LIMIT = 128 * 1024 * 1024;
@@ -15,6 +16,23 @@ export interface TripDownloadSink {
   write: (chunk: Uint8Array) => Promise<void>;
   finish: (filename: string) => Promise<File>;
   dispose: () => Promise<void>;
+}
+async function groupOriginalFiles(access: AlbumAccess, group: AlbumPhotoGroup, signal: AbortSignal, check: () => void) {
+  for (let index = 0; index < group.copies.length; index++) {
+    check();
+    try {return await albumOriginalFiles(access, group.copies[index], signal);}
+    catch (error) {
+      check();
+      // Only unavailable or damaged media can fall back to another authenticated
+      // copy of the same digest, byte count and media type. Access failures stop.
+      const recoverable = error instanceof ApiError ? ["NOT_FOUND", "HTTP_404"].includes(error.code)
+        : error instanceof CryptoError ? ["TRUNCATED", "INVALID_RECORD_LENGTH", "AUTHENTICATION_FAILED", "INVALID_TAG", "TRAILING_DATA"].includes(error.code)
+        : error instanceof Error && ["CIPHERTEXT_MISMATCH", "ORIGINAL_DIGEST_MISMATCH", "INVALID_LIVE_PHOTO", "LIVE_PHOTO_DIGEST_MISMATCH", "INVALID_ORIGINAL_FILENAME"].includes(error.message);
+      if (!recoverable || index + 1 === group.copies.length) throw error;
+      await access.assertAccess(); check();
+    }
+  }
+  throw new Error("TRIP_INVALID_ORIGINAL");
 }
 export function tripFilename(value: string) {
   let basename = value.split(/[\\/]/).at(-1)!.normalize("NFC").replace(/[\u0000-\u001f\u007f<>:"|?*]/g, "_").replace(/[. ]+$/g, "");
@@ -161,7 +179,7 @@ async function prepare(access: AlbumAccess, signal: AbortSignal, progress: (valu
     let duplicates = photos.length - groups.length, exported = 0, resources = 0;
     for (let index = 0; index < groups.length; index++) {
       check(); progress({phase: "preparing", completed: index, total: groups.length});
-      const files = await albumOriginalFiles(access, groups[index].photo, signal); check();
+      const files = await groupOriginalFiles(access, groups[index], signal, check); check();
       try {
         if (!files.length || files.length > 2) throw new Error("TRIP_INVALID_ORIGINAL");
         const fingerprint = await resourceFingerprint(files, check); check();

@@ -53,6 +53,9 @@ struct NativeAlbumResumeState {
   @MainActor mutating func deliberateNavigation(in model: NativeAlbumService) {
     intent = nil; model.discardOpenedAlbum()
   }
+  @MainActor mutating func useAnotherAccount(services: AppServices, model: NativeAlbumService) {
+    intent = nil; model.clear(); services.lockAccount()
+  }
   @MainActor func reopen(in model: NativeAlbumService, services: AppServices) async throws -> NativeAlbumSearchFilter? {
     guard let intent else { return nil }
     return try await intent.reopen(in: model, services: services)
@@ -119,6 +122,8 @@ struct NativeAlbumView: View {
   @State private var ending = false
   @State private var link: URL?
   @State private var invitationPrepared = false
+  @State private var invitationUnavailable = false
+  @State private var enterAnotherAccount = false
   @State private var resumeState = NativeAlbumResumeState()
   @State private var downloadToken = UUID()
   @State private var downloadProgress: NativeTripDownloadProgress?
@@ -155,7 +160,7 @@ struct NativeAlbumView: View {
         if services.photoAccountAccess == nil {
           VStack(alignment: .leading) {
             if incoming != nil { Text("Open the Fotoro invited to this trip.").font(.headline).padding() }
-            AccountView(services: services, onAuthenticationTask: { authenticationTask = $0 })
+            AccountView(services: services, enterPassword: enterAnotherAccount, onAuthenticationTask: { authenticationTask = $0 })
           }
         } else {
           albumContent
@@ -195,8 +200,9 @@ struct NativeAlbumView: View {
       }
       .task(id: binding) {
         guard scenePhase != .background else { suspendAlbum(); return }
-        stop(); model.clear(); invitationPrepared = false; title = ""; memberIDs = []; feedback = nil; familyFilter = NativeAlbumSearchFilter()
+        stop(); model.clear(); invitationPrepared = false; invitationUnavailable = false; title = ""; memberIDs = []; feedback = nil; familyFilter = NativeAlbumSearchFilter()
         guard services.photoAccountAccess != nil else { resumeState.intent = nil; return }
+        enterAnotherAccount = false
         do {
           try await refreshAlbums()
         }
@@ -291,6 +297,14 @@ struct NativeAlbumView: View {
           }
         }
         if let feedback { Text(feedback).foregroundStyle(.secondary).accessibilityIdentifier("albums.feedback") }
+        if invitationUnavailable {
+          Button("Use another account") {
+            stop(); authenticationTask?.cancel(); authenticationTask = nil
+            enterAnotherAccount = true
+            resumeState.useAnotherAccount(services: services, model: model)
+          }.buttonStyle(.bordered).disabled(busy || services.busy)
+            .accessibilityIdentifier("albums.useAnotherAccount")
+        }
         if let opened = model.opened { detail(opened) }
         else { inbox }
       }.padding()
@@ -560,9 +574,11 @@ struct NativeAlbumView: View {
   }
   private func prepareInvitation() async throws {
     guard let incoming, !invitationPrepared else { return }
+    invitationUnavailable = false
     guard let album = model.albums.first(where: { $0.id == incoming.albumId }),
       album.definition.ownerAccountId == incoming.ownerCard.accountId,
       album.definition.members.first(where: { $0.card.accountId == incoming.ownerCard.accountId })?.card == incoming.ownerCard else {
+      invitationUnavailable = true
       throw FotoroError("This trip invitation is unavailable for this account.")
     }
     invitationPrepared = true

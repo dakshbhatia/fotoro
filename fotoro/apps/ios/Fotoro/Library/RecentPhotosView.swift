@@ -341,6 +341,8 @@ struct RecentPhotosView: View {
 #endif
   @State private var selectedPhotos: [String: SelectedRecentPhoto] = [:]
   @State private var homeVisible = false
+  @State private var browseInteractionActive = false
+  @State private var galleryRestorationGeneration: UInt64?
   @State private var selecting = false
   @State private var scope = PhotoHomeScope.photos
   @State private var browseFilter = PhotoBrowseFilter.all
@@ -486,9 +488,9 @@ struct RecentPhotosView: View {
   private var selected: Set<String> { Set(selectedPhotos.keys) }
   private var selectedCount: Int {
     #if FOTORO_LOCAL_PREVIEW
-      selected.count
+      selectedPhotos.count
     #else
-      selected.count + selectedSavedPhotos.count
+      selectedPhotos.count + selectedSavedPhotos.count
     #endif
   }
   private var searchPhotos: [RecentPhoto] {
@@ -623,8 +625,8 @@ struct RecentPhotosView: View {
           }
         }.id(savedFavoritesOnly).scrollDismissesKeyboard(.interactively)
           .defaultScrollAnchor(.top, for: .initialOffset).scrollBounceBehavior(.basedOnSize)
-          .onScrollPhaseChange { _, phase in store.setBrowseInteractionActive(phase != .idle) }
-          .onDisappear { store.setBrowseInteractionActive(false) }
+          .onScrollPhaseChange { _, phase in setBrowseInteractionActive(phase != .idle) }
+          .onDisappear { setBrowseInteractionActive(false) }
           .refreshable { await savedRefresh.refresh(services) }
           .task(id: SavedLibraryReadPresentation(services, isActive: scenePhase == .active)) {
             guard !Task.isCancelled else { return }
@@ -819,7 +821,9 @@ struct RecentPhotosView: View {
           savedResults = [:]
           services?.kickAutomaticPhotoSync(sourcesChanged: true)
 #endif
-          store.refresh()
+          if galleryRestorationGeneration == search.libraryGeneration {
+            galleryRestorationGeneration = nil
+          } else { store.refresh() }
         }
         .onChange(of: scenePhase) { handleScenePhaseChange(scenePhase) }
   }
@@ -827,7 +831,7 @@ struct RecentPhotosView: View {
     homeEvents
         .onAppear {
           homeVisible = true
-          store.setAutomaticAnalysisActive(scenePhase == .active)
+          updateAutomaticAnalysisAdmission()
         }
         .task {
           restorePhotos()
@@ -836,6 +840,7 @@ struct RecentPhotosView: View {
             if services == nil { services = try AppServices() }
             services?.bindLocalSearch(search)
             services?.bindRecentPhotos(store)
+            updateAutomaticAnalysisAdmission()
             updatePhotoSyncForeground(scenePhase)
             await services?.resumeSavedAccount(initialRestoration: true)
           } catch { store.error = error.localizedDescription }
@@ -843,7 +848,7 @@ struct RecentPhotosView: View {
         }
         .onDisappear {
           homeVisible = false
-          store.setAutomaticAnalysisActive(false)
+          updateAutomaticAnalysisAdmission()
           cancelBestShots()
           shareTask?.cancel(); cleanupShare()
           #if !FOTORO_LOCAL_PREVIEW
@@ -854,6 +859,28 @@ struct RecentPhotosView: View {
           Button("OK") { store.error = nil }
         } message: { Text(store.error ?? "") }
   }
+  private func updateAutomaticAnalysisAdmission() {
+    let active = homeVisible && scenePhase == .active
+    // Picks clears its transient scroll flag on suspension; restore it before admission.
+    store.setBrowseInteractionActive(browseInteractionActive)
+    search.setBrowseInteractionActive(browseInteractionActive)
+    #if !FOTORO_LOCAL_PREVIEW
+      services?.setSavedSemanticBrowseInteractionActive(browseInteractionActive)
+    #endif
+    store.setAutomaticAnalysisActive(active)
+    search.setAutomaticAnalysisActive(active)
+    #if !FOTORO_LOCAL_PREVIEW
+      services?.setSavedSemanticAnalysisActive(active)
+    #endif
+  }
+  private func setBrowseInteractionActive(_ active: Bool) {
+    browseInteractionActive = active
+    store.setBrowseInteractionActive(active)
+    search.setBrowseInteractionActive(active)
+    #if !FOTORO_LOCAL_PREVIEW
+      services?.setSavedSemanticBrowseInteractionActive(active)
+    #endif
+  }
 #if !FOTORO_LOCAL_PREVIEW
   private func updatePhotoSyncForeground(_ phase: ScenePhase) {
     let active: Bool = phase == ScenePhase.active
@@ -863,14 +890,14 @@ struct RecentPhotosView: View {
 #endif
   private func handleScenePhaseChange(_ phase: ScenePhase) {
     if phase == .active {
-      store.setAutomaticAnalysisActive(homeVisible)
-      restorePhotos()
+      updateAutomaticAnalysisAdmission()
+      if homeVisible { restorePhotos() }
 #if !FOTORO_LOCAL_PREVIEW
       services?.setPhotoSyncForeground(true)
       if let services { Task { await services.resumeSavedAccount() } }
 #endif
     } else {
-      store.setAutomaticAnalysisActive(false)
+      updateAutomaticAnalysisAdmission()
       cancelBestShots()
 #if !FOTORO_LOCAL_PREVIEW
       updatePhotoSyncForeground(phase)
@@ -992,8 +1019,8 @@ struct RecentPhotosView: View {
       }
       .id(browseViewportKey).scrollDismissesKeyboard(.interactively)
       .defaultScrollAnchor(.top, for: .initialOffset).scrollBounceBehavior(.basedOnSize)
-      .onScrollPhaseChange { _, phase in store.setBrowseInteractionActive(phase != .idle) }
-      .onDisappear { store.setBrowseInteractionActive(false) }
+      .onScrollPhaseChange { _, phase in setBrowseInteractionActive(phase != .idle) }
+      .onDisappear { setBrowseInteractionActive(false) }
       #if !FOTORO_LOCAL_PREVIEW
         .refreshable {
           if allPhotos, let services { await savedRefresh.refresh(services) }
@@ -1095,7 +1122,7 @@ struct RecentPhotosView: View {
     guard !recommendations.isEmpty else { return }
     let revisions = Dictionary(recommendations.map { ($0.id, $0.sourceRevision) }, uniquingKeysWith: { _, last in last })
     queryFocused = false
-    for photo in searchPhotos where revisions["device:" + photo.id] == photo.sourceRevision && !selected.contains(photo.id) {
+    for photo in searchPhotos where revisions["device:" + photo.id] == photo.sourceRevision && selectedPhotos[photo.id] == nil {
       toggleSelection(photo)
     }
     #if !FOTORO_LOCAL_PREVIEW
@@ -1331,7 +1358,7 @@ struct RecentPhotosView: View {
       #else
       let id = source.id
       #endif
-      guard !selected.contains(id), let photo = device[id], photo.sourceRevision == source.revision,
+      guard selectedPhotos[id] == nil, let photo = device[id], photo.sourceRevision == source.revision,
         store.validatePresentation(viewer: [], selection: [RecentPhotoSource(photo)], share: []).selectedIDs.contains(id)
       else { continue }
       toggleSelection(photo)
@@ -1345,7 +1372,7 @@ struct RecentPhotosView: View {
     return date.formatted(date: .abbreviated, time: .omitted)
   }
   private func deviceCell(_ photo: RecentPhoto) -> RecentPhotoCell {
-    var cell = RecentPhotoCell(photo: photo, store: store, selected: selected.contains(photo.id), open: {
+    var cell = RecentPhotoCell(photo: photo, store: store, selected: selectedPhotos[photo.id] != nil, open: {
       if selecting { toggleSelection(photo) } else { openViewer(photo) }
     }, toggle: { toggleSelection(photo) })
     #if !FOTORO_LOCAL_PREVIEW
@@ -1436,7 +1463,7 @@ struct RecentPhotosView: View {
               Color.clear
               if source.id.hasPrefix("device:"), let photo = device[String(source.id.dropFirst("device:".count))],
                 photo.sourceRevision == source.revision {
-                RecentPhotoCell(photo: photo, store: store, selected: selected.contains(photo.id), open: {
+                RecentPhotoCell(photo: photo, store: store, selected: selectedPhotos[photo.id] != nil, open: {
                   if selecting { toggleSelection(photo) } else { openViewer(photo) }
                 }, toggle: { toggleSelection(photo) }, services: services)
               } else if let photo = saved[source.id],
@@ -1819,6 +1846,8 @@ struct RecentPhotosView: View {
 #endif
     if RecentPhotosPolicy.canRead(store.status) { search.open(status: store.status) }
     else { search.auditAuthorization() }
+    // The gallery was just validated; this search generation need not fetch it again.
+    galleryRestorationGeneration = search.libraryGeneration
   }
 #if !FOTORO_LOCAL_PREVIEW
   private func validateSavedPresentation() {

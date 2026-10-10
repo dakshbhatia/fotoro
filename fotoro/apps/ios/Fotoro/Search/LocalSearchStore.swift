@@ -60,6 +60,17 @@ enum SearchMetadataIntake {
   @ObservationIgnored private var opened = false
   @ObservationIgnored private var ready = false
   @ObservationIgnored private var refreshTask: Task<Void, Never>?
+  @ObservationIgnored private var automaticAnalysisTask: Task<Void, Never>?
+  @ObservationIgnored private var automaticAnalysisRestartRequested = false
+  @ObservationIgnored private var automaticAnalysisID = UUID()
+  @ObservationIgnored private var idleAnalysisTask: Task<Void, Never>?
+  @ObservationIgnored private var automaticAnalysisActive = true
+  @ObservationIgnored private var browseInteractionActive = false
+  @ObservationIgnored private var automaticRetryFailed = false
+  #if DEBUG
+    private(set) var automaticAnalysisWorkerStarts = 0
+    @ObservationIgnored var analysisPreview: (@MainActor (PHAsset) async -> SearchPreview?)?
+  #endif
   @ObservationIgnored private var queryTask: Task<Void, Never>?
   @ObservationIgnored private var work = SearchWorkFence()
   @ObservationIgnored private var queryGeneration: UInt64 = 0
@@ -69,6 +80,7 @@ enum SearchMetadataIntake {
   @ObservationIgnored private let processor = VisionTextProcessor()
   @ObservationIgnored private var imageRequest: SearchImageRequest?
   @ObservationIgnored private var queryExecutor: QueryExecutor = { index, value, scope, accepted, previous, generation in
+    try Task.checkCancellation()
     let lexical = try await Task.detached(priority: .userInitiated) {
       try index.search(value, scope: scope, acceptedMeaningID: accepted, previous: previous, generation: generation)
     }.value
@@ -125,6 +137,7 @@ enum SearchMetadataIntake {
     }
   }
   func pause() {
+    cancelAutomaticAnalysis()
     work.invalidate()
     queryGeneration &+= 1
     do { try index?.setWorkGeneration(work.generation) } catch {
@@ -138,6 +151,63 @@ enum SearchMetadataIntake {
     searching = false
     analysisProgress = nil
     analysisRemaining = 0; analysisScope = nil; analysisCursor = nil; analysisUnavailableIDs = []
+  }
+  func setAutomaticAnalysisActive(_ active: Bool) {
+    guard automaticAnalysisActive != active else { return }
+    automaticAnalysisActive = active
+    if active { scheduleAutomaticAnalysis() } else { cancelAutomaticAnalysis() }
+  }
+  func setBrowseInteractionActive(_ active: Bool) {
+    guard browseInteractionActive != active else { return }
+    browseInteractionActive = active
+    if active { cancelAutomaticAnalysis() } else { scheduleAutomaticAnalysis() }
+  }
+  private var automaticAnalysisAdmitted: Bool { automaticAnalysisActive && !browseInteractionActive }
+  private func cancelAutomaticAnalysis() {
+    idleAnalysisTask?.cancel(); idleAnalysisTask = nil
+    automaticAnalysisRestartRequested = false
+    if let task = automaticAnalysisTask, !task.isCancelled {
+      task.cancel()
+      imageRequest?.cancel(); imageRequest = nil
+      indexing = false; analysisProgress = nil
+    }
+  }
+  private func scheduleAutomaticAnalysis() {
+    guard ready, index != nil, automaticAnalysisAdmitted, !indexing,
+      (automaticAnalysisTask == nil || automaticAnalysisTask?.isCancelled == true), idleAnalysisTask == nil else { return }
+    idleAnalysisTask = Task { [weak self] in
+      do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
+      guard let self, !Task.isCancelled else { return }
+      idleAnalysisTask = nil
+      automaticAnalysisRestartRequested = true
+      startAutomaticAnalysis()
+    }
+  }
+  private func startAutomaticAnalysis() {
+    guard ready, index != nil, automaticAnalysisAdmitted, !indexing, automaticAnalysisTask == nil else { return }
+    let id = UUID(), token = work.generation
+    automaticAnalysisRestartRequested = false
+    automaticAnalysisID = id
+    #if DEBUG
+      automaticAnalysisWorkerStarts += 1
+    #endif
+    automaticAnalysisTask = Task { [weak self] in
+      guard let self else { return }
+      defer {
+        if automaticAnalysisID == id {
+          automaticAnalysisTask = nil
+          // Withdrawal already cleared this worker's presentation. An explicit
+          // analysis may now own it while waiting for this worker to drain.
+          if !Task.isCancelled { indexing = false; analysisProgress = nil }
+          if automaticAnalysisRestartRequested { startAutomaticAnalysis() }
+        }
+      }
+      guard !Task.isCancelled, automaticAnalysisID == id, automaticAnalysisAdmitted,
+        ready, token == work.generation else { return }
+      indexing = true
+      await runScopedAnalysis(scope: PhotoAnalysisScope(query: query, people: peopleSelection), after: nil,
+        retryFailed: automaticRetryFailed, token: token, explicit: false)
+    }
   }
   func refresh(status: PHAuthorizationStatus, retryFailedOCR: Bool = true) {
     guard opened else { return }
@@ -232,11 +302,11 @@ enum SearchMetadataIntake {
       #endif
       completePermittedSnapshotRefresh(photos: scanned.photos)
       try onSnapshotReady?()
-      await runScopedAnalysis(scope: PhotoAnalysisScope(query: query, people: peopleSelection), after: nil, retryFailed: retryFailedOCR, token: token, explicit: false)
+      automaticRetryFailed = retryFailedOCR
     } catch is CancellationError {} catch {
       if token == work.generation { self.error = error.localizedDescription }
     }
-    if token == work.generation { indexing = false; analysisProgress = nil }
+    if token == work.generation { indexing = false; analysisProgress = nil; scheduleAutomaticAnalysis() }
   }
   private func analysisSourceCurrent(_ record: SearchRecord) -> Bool {
     guard ready, assets[record.id]?.sourceRevision == record.revision,
@@ -246,7 +316,8 @@ enum SearchMetadataIntake {
     return RecentPhoto.sourceRevision(current) == record.revision
   }
   private func analysisIsCurrent(_ scope: PhotoAnalysisScope, token: UInt64, explicit: Bool) -> Bool {
-    ready && token == work.generation && (!explicit || (query == scope.query && peopleSelection == scope.scope.people))
+    !Task.isCancelled && ready && token == work.generation && (explicit
+      ? query == scope.query && peopleSelection == scope.scope.people : automaticAnalysisAdmitted)
   }
   var canAnalyzeMetadataMatches: Bool { ready }
   func analyzeMetadataMatches(nextBatch: Bool = false) {
@@ -263,7 +334,10 @@ enum SearchMetadataIntake {
     let token = work.generation
     indexing = true
     updateQuery(query)
+    let previousAutomatic = automaticAnalysisTask
     refreshTask = Task {
+      await previousAutomatic?.value
+      guard !Task.isCancelled, token == work.generation else { return }
       await runScopedAnalysis(scope: scope, after: after, retryFailed: true, token: token, explicit: true)
       if token == work.generation { indexing = false; analysisProgress = nil }
     }
@@ -313,7 +387,9 @@ enum SearchMetadataIntake {
         #endif
       }
       #if !FOTORO_LOCAL_PREVIEW
-        let semanticPreparation = Task { try? await PhotoSemanticProcessor.shared.prepare() }
+        let needsSemantic = try pending.contains { try localIndex.needsSemantic(photoID: $0.id, revision: $0.revision) }
+        let semanticPreparation = Task { if needsSemantic { try? await PhotoSemanticProcessor.shared.prepare() } }
+        defer { semanticPreparation.cancel() }
       #endif
       analysisProgress = pending.isEmpty ? nil : SearchAnalysisProgress(processed: 0, total: pending.count)
       for record in pending {
@@ -476,6 +552,9 @@ enum SearchMetadataIntake {
     updateQuery(query)
   }
   private func loadPreview(_ asset: PHAsset) async -> SearchPreview? {
+    #if DEBUG
+      if let analysisPreview { return await analysisPreview(asset) }
+    #endif
     let options = PHImageRequestOptions()
     options.isNetworkAccessAllowed = false
     options.deliveryMode = .highQualityFormat
@@ -541,6 +620,7 @@ enum SearchMetadataIntake {
   }
   // Uses the same ranking and accepted meaning without recording a new choice or query history.
   func consumerResults(_ value: String) async throws -> [SearchHit] {
+    try Task.checkCancellation()
     guard ready, let index else { return [] }
     let token = work.generation
     let library = libraryGeneration
@@ -607,6 +687,8 @@ enum SearchMetadataIntake {
     let scope = SearchScope(people: peopleSelection)
     queryTask = Task {
       do {
+        try Task.checkCancellation()
+        guard generation == queryGeneration else { return }
         let next = try await execute(index, value, scope, accepted, previous, generation)
         guard generation == queryGeneration, !Task.isCancelled else { return }
         if accepted != nil, next.meaning?.id != accepted { acceptedMeaningID = nil }

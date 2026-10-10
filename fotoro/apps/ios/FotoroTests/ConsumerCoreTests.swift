@@ -106,8 +106,8 @@ final class ConsumerCoreTests: XCTestCase {
       try services.reload()
       var vector = [Float](repeating: 0, count: 512); vector[0] = 1
       services.savedVisualEmbedding = { _ in vector }
-      services.setPhotoSyncForeground(true)
-      defer { services.setPhotoSyncForeground(false) }
+      services.setSavedSemanticAnalysisActive(true)
+      defer { services.setSavedSemanticAnalysisActive(false) }
       let catalog = services.consumerCatalogGeneration
       let evidence = services.consumerSavedEvidenceGeneration
       let browseChanges = SavedSemanticObservationCounter(), evidenceChanges = SavedSemanticObservationCounter()
@@ -134,6 +134,127 @@ final class ConsumerCoreTests: XCTestCase {
     }
   }
 
+  @MainActor func testSavedSemanticAdmissionCancelsHeldWriteAndResumesCachedPendingRecordsAfterIdle() async throws {
+    try await withSavedLibrary { services, _ in
+      var photo = try self.samplePhoto()
+      photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+      let preview = try Data(contentsOf: XCTUnwrap(Bundle(for: Self.self).url(forResource: "neutral-a", withExtension: "png")))
+      photo.previewURL = try services.store.write(preview, name: "semantic-admission-preview.png")
+      try services.store.put(photo); try services.reload()
+      let started = self.expectation(description: "First embedding held")
+      let gate = SavedSemanticEmbeddingGate()
+      var calls = 0
+      var vector = [Float](repeating: 0, count: 512); vector[0] = 1
+      services.savedVisualEmbedding = { _ in
+        calls += 1
+        if calls == 1 { started.fulfill(); await gate.wait() }
+        return vector
+      }
+      services.setPhotoSyncForeground(true)
+      defer { services.setSavedSemanticAnalysisActive(false); services.setPhotoSyncForeground(false); gate.open() }
+      let catalog = services.consumerCatalogGeneration, evidence = services.consumerSavedEvidenceGeneration
+      _ = try await services.consumerSearch("semantic scene", local: LocalSearchStore(index: try SearchIndex()))
+      await services.waitForSavedVisualEvidence()
+      XCTAssertEqual(calls, 0, "Foreground uploads alone must not admit automatic semantic analysis")
+      services.setSavedSemanticAnalysisActive(true)
+      await self.fulfillment(of: [started], timeout: 3)
+      services.setSavedSemanticBrowseInteractionActive(true)
+      gate.open()
+      await services.waitForSavedVisualEvidence()
+      let index = try SearchIndex(root: services.store.root.appendingPathComponent("VisualSearch"))
+      XCTAssertTrue(try index.needsSemantic(photoID: photo.id, revision: photo.metadata.originalSha256))
+      XCTAssertEqual(services.consumerSavedEvidenceGeneration, evidence)
+      services.setSavedSemanticBrowseInteractionActive(false)
+      XCTAssertEqual(calls, 1, "Ending interaction must wait for idle rather than start immediately")
+      await services.waitForSavedVisualEvidence()
+      XCTAssertEqual(calls, 2, "Idle admission must resume the cached pending record without another search")
+      XCTAssertFalse(try index.needsSemantic(photoID: photo.id, revision: photo.metadata.originalSha256))
+      XCTAssertEqual(services.consumerSavedEvidenceGeneration, evidence + 1)
+      XCTAssertEqual(services.consumerCatalogGeneration, catalog)
+      services.setSavedSemanticAnalysisActive(false)
+      services.setSavedSemanticAnalysisActive(true)
+      await services.waitForSavedVisualEvidence()
+      XCTAssertEqual(calls, 2, "Persisted vectors must survive admission withdrawal")
+    }
+  }
+
+  @MainActor func testSavedSemanticSupersededHeldWorkerProcessesLatestHydratedSnapshotWithoutAnotherTrigger() async throws {
+    try await withSavedLibrary { services, _ in
+      var first = try self.samplePhoto()
+      first.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+      let preview = try Data(contentsOf: XCTUnwrap(Bundle(for: Self.self).url(forResource: "neutral-a", withExtension: "png")))
+      first.previewURL = try services.store.write(preview, name: "semantic-successor-preview.png")
+      try services.store.put(first); try services.reload()
+      let held = self.expectation(description: "Old snapshot embedding held")
+      let gate = SavedSemanticEmbeddingGate()
+      var calls = 0
+      var vector = [Float](repeating: 0, count: 512); vector[0] = 1
+      services.savedVisualEmbedding = { _ in
+        calls += 1
+        if calls == 1 { held.fulfill(); await gate.wait() }
+        return vector
+      }
+      services.setSavedSemanticAnalysisActive(true)
+      defer { services.setSavedSemanticAnalysisActive(false); gate.open() }
+      let local = LocalSearchStore(index: try SearchIndex())
+      let evidence = services.consumerSavedEvidenceGeneration
+      _ = try await services.consumerSearch("semantic scene", local: local)
+      await self.fulfillment(of: [held], timeout: 3)
+      var second = try self.samplePhoto()
+      second.manifest.ownerAccountId = first.manifest.ownerAccountId
+      second.previewURL = first.previewURL
+      try services.store.put(second); try services.reload()
+      let catalog = services.consumerCatalogGeneration
+      _ = try await services.consumerSearch("semantic scene", local: local)
+      XCTAssertEqual(calls, 1, "The latest snapshot must wait for the retained worker to drain")
+      let index = try SearchIndex(root: services.store.root.appendingPathComponent("VisualSearch"))
+      XCTAssertTrue(try index.needsSemantic(photoID: first.id, revision: first.metadata.originalSha256))
+      gate.open()
+      await services.waitForSavedVisualEvidence()
+      XCTAssertEqual(calls, 3, "Discard the held vector, then process both latest-snapshot records without another search")
+      XCTAssertFalse(try index.needsSemantic(photoID: first.id, revision: first.metadata.originalSha256))
+      XCTAssertFalse(try index.needsSemantic(photoID: second.id, revision: second.metadata.originalSha256))
+      XCTAssertEqual(services.consumerSavedEvidenceGeneration, evidence + 1)
+      XCTAssertEqual(services.consumerCatalogGeneration, catalog)
+    }
+  }
+
+  @MainActor func testAutomaticSavedSemanticExcludedDatesNeverFetchMissingPreviewsOrEmbed() async throws {
+    try await withSavedLibrary { services, server in
+      let now = Date()
+      var photos: [LocalPhoto] = []
+      for offset in [-40, 1, 0] {
+        var photo = try self.samplePhoto()
+        photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+        photo.metadata.sourceDate = Wire.date(now.addingTimeInterval(Double(offset) * 86400))
+        if offset == 0 { photo.metadata.dateSource = "upload" }
+        let rep = RepresentationV1(binding: MediaBinding(photoId: photo.id, representationId: Wire.id(), kind: "preview"),
+          objectId: Wire.id(), header: "", ciphertextBytes: 1, ciphertextSha256: Data("preview".utf8).digest)
+        photo.manifest.representations = [rep]
+        photo.metadata.representationKeys[rep.binding.representationId] = Data(repeating: 0, count: 32).b64
+        try services.store.put(photo); photos.append(photo)
+      }
+      try services.reload()
+      var embeddings = 0
+      services.savedVisualEmbedding = { _ in embeddings += 1; return [Float](repeating: 0, count: 512) }
+      services.setSavedSemanticAnalysisActive(true)
+      defer { services.setSavedSemanticAnalysisActive(false) }
+      let requests = server.requests.count
+      let evidence = services.consumerSavedEvidenceGeneration
+      _ = try await services.consumerSearch("semantic scene", local: LocalSearchStore(index: try SearchIndex()))
+      await services.waitForSavedVisualEvidence()
+      XCTAssertEqual(server.requests.count, requests, "Excluded originals with missing previews must never reach ensurePreview's object read")
+      XCTAssertEqual(embeddings, 0)
+      XCTAssertEqual(services.consumerSavedEvidenceGeneration, evidence)
+      let index = try SearchIndex(root: services.store.root.appendingPathComponent("VisualSearch"))
+      XCTAssertEqual(try index.pendingSemanticRecords().count, 3, "All-age metadata remains indexed for search")
+      for photo in photos {
+        XCTAssertNil(try services.consumerSavedPhoto(photo.id)?.previewURL)
+        XCTAssertTrue(try index.needsSemantic(photoID: photo.id, revision: photo.metadata.originalSha256))
+      }
+    }
+  }
+
   @MainActor func testSavedSemanticWorkerRejectsOriginWithdrawalBeforeVectorCommit() async throws {
     try await withSavedLibrary { services, _ in
       var photo = try self.samplePhoto()
@@ -150,8 +271,8 @@ final class ConsumerCoreTests: XCTestCase {
         var vector = [Float](repeating: 0, count: 512); vector[0] = 1
         return vector
       }
-      services.setPhotoSyncForeground(true)
-      defer { services.setPhotoSyncForeground(false); gate.open() }
+      services.setSavedSemanticAnalysisActive(true)
+      defer { services.setSavedSemanticAnalysisActive(false); gate.open() }
       let catalog = services.consumerCatalogGeneration, evidence = services.consumerSavedEvidenceGeneration
       _ = try await services.consumerSearch("semantic scene", local: LocalSearchStore(index: try SearchIndex()))
       await self.fulfillment(of: [started], timeout: 3)

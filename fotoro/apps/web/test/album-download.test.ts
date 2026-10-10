@@ -4,6 +4,7 @@ import {unzipSync} from "fflate";
 import {ready, utf8} from "@fotoro/crypto";
 import {digest, type Photo} from "../src/library/catalog";
 import type {AlbumAccess} from "../src/albums/service";
+import {ApiError} from "../src/exchange/api-errors";
 await ready;
 function photo(filename: string, text: string) {
   const original = new TextEncoder().encode(text);
@@ -41,6 +42,56 @@ function trackingSink(limit = TRIP_MEMORY_LIMIT) {
     dispose: async () => {disposed = true; chunks.length = 0;},
   } as TripDownloadSink & {chunks: Uint8Array[]; disposed: boolean; finished: boolean};
 }
+
+test("full trip ZIP recovers missing or corrupt originals from authenticated exact copies", async () => {
+  for (const failure of ["missing", "corrupt"]) {
+    const primary = photo("primary.jpg", "same original"), copy = photo("copy.jpg", "same original"), other = photo("other.jpg", "distinct original");
+    const access = source([[primary], [copy, other]]), read = access.bytes.bind(access), attempts: string[] = [];
+    access.bytes = async (value, kind, signal) => {
+      attempts.push(value.manifest.photoId);
+      if (value === primary) {
+        if (failure === "missing") throw new ApiError("HTTP_404", false, undefined, undefined, 404);
+        return new TextEncoder().encode("corrupt bytes");
+      }
+      return read(value, kind, signal);
+    };
+    const result = await prepareTripDownload(access, new AbortController().signal, () => {});
+    const files = unzipSync(new Uint8Array(await result.file.arrayBuffer()));
+    assert.deepEqual(attempts, [primary.manifest.photoId, copy.manifest.photoId, other.manifest.photoId]);
+    assert.deepEqual(Object.values(files).map(bytes => new TextDecoder().decode(bytes)), ["same original", "distinct original"]);
+    assert.equal(result.photos, 2); assert.equal(result.duplicates, 1);
+    await result.dispose();
+  }
+});
+
+test("exact-copy recovery stops on cancellation, access withdrawal or authorization failure", async () => {
+  for (const change of ["cancel", "account", "origin", "access", "unauthorized"]) {
+    const primary = photo("primary.jpg", "same original"), copy = photo("copy.jpg", "same original");
+    const access = source([[primary, copy]]), sink = trackingSink(), controller = new AbortController();
+    let attempts = 0, withdrawn = false;
+    const assertAccess = access.assertAccess.bind(access);
+    access.assertAccess = async () => {if (withdrawn) throw new Error("ALBUM_ACCESS_ENDED"); return assertAccess();};
+    access.bytes = async () => {
+      attempts++;
+      if (change === "cancel") controller.abort();
+      else if (change === "account" || change === "origin") access.dispose();
+      else if (change === "access") withdrawn = true;
+      if (change === "unauthorized") throw new ApiError("AUTHENTICATION_FAILED", false, undefined, undefined, 401);
+      return new TextEncoder().encode("corrupt bytes");
+    };
+    await assert.rejects(prepareTripDownload(access, controller.signal, () => {}, async () => sink));
+    assert.equal(attempts, 1, change + " must not read the alternate copy");
+    assert.equal(sink.finished, false); assert.equal(sink.disposed, true); assert.equal(access.disposed, true);
+  }
+});
+
+test("damaged copies cannot produce a partial trip ZIP", async () => {
+  const valid = photo("valid.jpg", "valid original"), primary = photo("primary.jpg", "same original"), copy = photo("copy.jpg", "same original");
+  const access = source([[valid, primary, copy]]), sink = trackingSink(), read = access.bytes.bind(access);
+  access.bytes = async (value, kind, signal) => value === valid ? read(value, kind, signal) : new TextEncoder().encode("corrupt bytes");
+  await assert.rejects(prepareTripDownload(access, new AbortController().signal, () => {}, async () => sink), /ORIGINAL_DIGEST_MISMATCH/);
+  assert.equal(sink.finished, false); assert.equal(sink.disposed, true);
+});
 
 test("memory and ZIP32 limits reject before any original reads and discard output", async () => {
   for (const size of [TRIP_MEMORY_LIMIT, 50 * 1024 * 1024]) {

@@ -106,8 +106,23 @@ enum ReviewedPhotosBackupPolicy {
   @ObservationIgnored private var savedVisualRoot: URL?
   @ObservationIgnored private var savedVisualTask: Task<Void, Never>?
   @ObservationIgnored private var savedVisualWork = UUID()
+  private struct SavedSemanticSnapshot: Equatable {
+    let access: PhotoAccountAccess
+    let origin: String?
+    let catalogGeneration: UInt64
+    let index: ObjectIdentifier
+  }
+  @ObservationIgnored private var savedVisualRunningSnapshot: SavedSemanticSnapshot?
+  @ObservationIgnored private var savedVisualSuccessorForWork: UUID?
   @ObservationIgnored private var savedVisualCatalogGeneration: UInt64?
+  @ObservationIgnored private var savedVisualSnapshotAccess: PhotoAccountAccess?
+  @ObservationIgnored private var savedVisualSnapshotOrigin: String?
+  @ObservationIgnored private var savedVisualSnapshotCatalog: ObjectIdentifier?
+  @ObservationIgnored private var savedVisualUnpublishedIndex: ObjectIdentifier?
   @ObservationIgnored private var savedVisualFence: UInt64 = 0
+  @ObservationIgnored private var savedSemanticAnalysisActive = false
+  @ObservationIgnored private var savedSemanticBrowseInteractionActive = false
+  @ObservationIgnored private var savedSemanticIdleTask: Task<Void, Never>?
   let storageRoot: URL
   var photos: [LocalPhoto] = []
   var received: [LocalPhoto] = []
@@ -123,7 +138,14 @@ enum ReviewedPhotosBackupPolicy {
     @ObservationIgnored var consumerShareDidWrite: ((URL) -> Void)?
     @ObservationIgnored var catalogSearchWillRead: (@Sendable () -> Void)?
     @ObservationIgnored var savedVisualEmbedding: (@MainActor (SearchPreview) async throws -> [Float])?
-    func waitForSavedVisualEvidence() async { await savedVisualTask?.value }
+    func waitForSavedVisualEvidence() async {
+      await savedSemanticIdleTask?.value
+      while let task = savedVisualTask {
+        let work = savedVisualWork
+        await task.value
+        if savedVisualWork == work { break }
+      }
+    }
     @ObservationIgnored var photosBackupSnapshot: ((Date) throws -> [BackupCandidate])?
     @ObservationIgnored var automaticPhotosAuthorization: (() -> PHAuthorizationStatus)?
   #endif
@@ -221,7 +243,8 @@ enum ReviewedPhotosBackupPolicy {
     }
     guard let index = savedVisualIndex else { return [] }
     let catalogSnapshotGeneration = consumerCatalogGeneration
-    if savedVisualCatalogGeneration != catalogSnapshotGeneration {
+    if savedVisualCatalogGeneration != catalogSnapshotGeneration || savedVisualSnapshotAccess != photoAccountAccess
+      || savedVisualSnapshotOrigin != origin || savedVisualSnapshotCatalog != ObjectIdentifier(catalog) {
       let candidates = try await searchCatalog("").filter { ["committed", "saved"].contains($0.transferState) }
       try Task.checkCancellation()
       guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account,
@@ -246,64 +269,11 @@ enum ReviewedPhotosBackupPolicy {
         throw CancellationError()
       }
       savedVisualCatalogGeneration = catalogSnapshotGeneration
+      savedVisualSnapshotAccess = photoAccountAccess
+      savedVisualSnapshotOrigin = origin
+      savedVisualSnapshotCatalog = ObjectIdentifier(catalog)
     }
-    if savedVisualTask == nil, photoSyncForeground {
-      let work = UUID(); savedVisualWork = work
-      savedVisualFence &+= 1
-      let fence = savedVisualFence
-      try index.setWorkGeneration(fence)
-      savedVisualTask = Task { [weak self] in
-        guard let self else { return }
-        defer { if savedVisualWork == work { savedVisualTask = nil } }
-        @MainActor func current() -> Bool {
-          !Task.isCancelled && savedVisualWork == work && vault.isUnlocked && vault.generation == generation
-            && store === catalog && session.accountId == account && photoSyncForeground
-            && BackgroundUploadPolicy.origin(api.baseURL) == origin
-        }
-        @MainActor func notifyProgress() {
-          consumerSavedEvidenceGeneration &+= 1
-        }
-        do {
-          #if DEBUG
-            if savedVisualEmbedding == nil { try await PhotoSemanticProcessor.shared.prepare() }
-          #else
-            try await PhotoSemanticProcessor.shared.prepare()
-          #endif
-          guard current() else { return }
-          let pending = try await Task.detached { try index.pendingSemanticRecords() }.value
-          var completed = 0
-          for record in pending {
-            guard current(), let photo = try consumerSavedPhoto(record.id),
-              photo.metadata.originalSha256 == record.revision else { continue }
-            do {
-              try await ensurePreview(photo)
-              guard current(), let updated = try consumerSavedPhoto(photo.id),
-                updated.metadata == photo.metadata, updated.manifest == photo.manifest,
-                let url = updated.previewURL,
-                let preview = try await Self.semanticPreview(url) else { continue }
-              guard current() else { return }
-              let vector: [Float]
-              #if DEBUG
-                if let savedVisualEmbedding { vector = try await savedVisualEmbedding(preview) }
-                else { vector = try await PhotoSemanticProcessor.shared.image(preview) }
-              #else
-                vector = try await PhotoSemanticProcessor.shared.image(preview)
-              #endif
-              guard current() else { return }
-              let applied = try await Task.detached {
-                try index.applySemantic(vector, photoID: record.id, revision: record.revision, generation: fence)
-              }.value
-              guard current() else { return }
-              guard applied else { continue }
-              completed += 1
-              if completed % 8 == 0 { notifyProgress() }
-            } catch is CancellationError { return } catch { continue }
-            await Task.yield()
-          }
-          if current(), completed > 0 { notifyProgress() }
-        } catch {}
-      }
-    }
+    startSavedSemanticAnalysis()
     guard let vector = try? await PhotoSemanticProcessor.shared.textIfReady(phrase) else { return [] }
     let response = try await Task.detached(priority: .userInitiated) {
       let base = try index.search(query, scope: SearchScope(source: "saved", people: people))
@@ -315,8 +285,133 @@ enum ReviewedPhotosBackupPolicy {
     }
     return try response.results.compactMap { try consumerSavedPhoto($0.id) }
   }
+  // Interaction admission is independent of foreground upload permission.
+  func setSavedSemanticAnalysisActive(_ active: Bool) {
+    guard savedSemanticAnalysisActive != active else { return }
+    savedSemanticAnalysisActive = active
+    if active { startSavedSemanticAnalysis() }
+    else { savedSemanticIdleTask?.cancel(); savedSemanticIdleTask = nil; invalidateSavedVisualSearch() }
+  }
+  func setSavedSemanticBrowseInteractionActive(_ active: Bool) {
+    guard savedSemanticBrowseInteractionActive != active else { return }
+    savedSemanticBrowseInteractionActive = active
+    savedSemanticIdleTask?.cancel(); savedSemanticIdleTask = nil
+    if active { invalidateSavedVisualSearch() }
+    else if savedSemanticAnalysisActive {
+      savedSemanticIdleTask = Task { [weak self] in
+        do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
+        guard let self, !Task.isCancelled else { return }
+        savedSemanticIdleTask = nil
+        startSavedSemanticAnalysis()
+      }
+    }
+  }
+  private func startSavedSemanticAnalysis() {
+    guard savedSemanticAnalysisActive, !savedSemanticBrowseInteractionActive, savedSemanticIdleTask == nil, vault.isUnlocked, let account = session.accountId,
+      let snapshotAccess = photoAccountAccess,
+      let index = savedVisualIndex, savedVisualRoot == store.root.appendingPathComponent("VisualSearch", isDirectory: true),
+      savedVisualCatalogGeneration == consumerCatalogGeneration,
+      savedVisualSnapshotAccess == photoAccountAccess, savedVisualSnapshotCatalog == ObjectIdentifier(store),
+      savedVisualSnapshotOrigin == BackgroundUploadPolicy.origin(api.baseURL) else { return }
+    let catalog = store, generation = vault.generation
+    let origin = BackgroundUploadPolicy.origin(api.baseURL)
+    let catalogSnapshotGeneration = consumerCatalogGeneration
+    let snapshot = SavedSemanticSnapshot(access: snapshotAccess, origin: origin,
+      catalogGeneration: catalogSnapshotGeneration, index: ObjectIdentifier(index))
+    if savedVisualTask != nil {
+      // Only a changed hydrated snapshot requests another pass. Ordinary queries
+      // cannot turn unavailable originals into a perpetual automatic retry loop.
+      if savedVisualRunningSnapshot != snapshot { savedVisualSuccessorForWork = savedVisualWork }
+      return
+    }
+    if savedVisualUnpublishedIndex == ObjectIdentifier(index) {
+      consumerSavedEvidenceGeneration &+= 1
+      savedVisualUnpublishedIndex = nil
+    }
+    if savedVisualTask == nil {
+      let work = UUID(); savedVisualWork = work
+      savedVisualFence &+= 1
+      let fence = savedVisualFence
+      guard (try? index.setWorkGeneration(fence)) != nil else { return }
+      savedVisualRunningSnapshot = snapshot
+      let automaticScope = PhotoAnalysisScope()
+      savedVisualTask = Task { [weak self] in
+        guard let self else { return }
+        defer {
+          if savedVisualWork == work {
+            let successorRequested = savedVisualSuccessorForWork == work
+            savedVisualSuccessorForWork = nil
+            savedVisualRunningSnapshot = nil
+            savedVisualTask = nil
+            // A withdrawn or superseded worker drains before its successor starts.
+            if Task.isCancelled || successorRequested { startSavedSemanticAnalysis() }
+          }
+        }
+        @MainActor func current() -> Bool {
+          !Task.isCancelled && savedVisualWork == work && vault.isUnlocked && vault.generation == generation
+            && store === catalog && session.accountId == account && savedSemanticAnalysisActive && !savedSemanticBrowseInteractionActive
+            && consumerCatalogGeneration == catalogSnapshotGeneration
+            && BackgroundUploadPolicy.origin(api.baseURL) == origin
+        }
+        @MainActor func notifyProgress() {
+          consumerSavedEvidenceGeneration &+= 1
+          savedVisualUnpublishedIndex = nil
+        }
+        do {
+          guard current() else { return }
+          #if DEBUG
+            if savedVisualEmbedding == nil { try await PhotoSemanticProcessor.shared.prepare() }
+          #else
+            try await PhotoSemanticProcessor.shared.prepare()
+          #endif
+          guard current() else { return }
+          var completed = 0
+          var after: String?
+          while current() {
+            let cursor = after
+            let pending = try await Task.detached(priority: .utility) {
+              try index.pendingSemanticRecords(after: cursor, limit: 64, scope: automaticScope)
+            }.value
+            guard current(), !pending.isEmpty else { break }
+            after = pending.last?.id
+            for record in pending {
+              guard current(), let photo = try consumerSavedPhoto(record.id),
+                photo.metadata.originalSha256 == record.revision else { continue }
+              do {
+                try await ensurePreview(photo)
+                guard current(), let updated = try consumerSavedPhoto(photo.id),
+                  updated.metadata == photo.metadata, updated.manifest == photo.manifest,
+                  let url = updated.previewURL,
+                  let preview = try await Self.semanticPreview(url) else { continue }
+                guard current() else { return }
+                let vector: [Float]
+                #if DEBUG
+                  if let savedVisualEmbedding { vector = try await savedVisualEmbedding(preview) }
+                  else { vector = try await PhotoSemanticProcessor.shared.image(preview) }
+                #else
+                  vector = try await PhotoSemanticProcessor.shared.image(preview)
+                #endif
+                guard current(), let latest = try consumerSavedPhoto(photo.id),
+                  latest.metadata == photo.metadata, latest.manifest == photo.manifest else { return }
+                let applied = try await Task.detached(priority: .utility) {
+                  try index.applySemantic(vector, photoID: record.id, revision: record.revision, generation: fence)
+                }.value
+                if applied { savedVisualUnpublishedIndex = ObjectIdentifier(index) }
+                guard current() else { return }
+                guard applied else { continue }
+                completed += 1
+                if completed % 8 == 0 { notifyProgress() }
+              } catch is CancellationError { return } catch { continue }
+              await Task.yield()
+            }
+          }
+          if current(), savedVisualUnpublishedIndex == ObjectIdentifier(index) { notifyProgress() }
+        } catch {}
+      }
+    }
+  }
   private func invalidateSavedVisualSearch() {
-    savedVisualWork = UUID(); savedVisualTask?.cancel(); savedVisualTask = nil
+    savedVisualTask?.cancel()
     savedVisualFence &+= 1
     try? savedVisualIndex?.setWorkGeneration(savedVisualFence)
     Task { await PhotoSemanticProcessor.shared.clearQueryCache() }

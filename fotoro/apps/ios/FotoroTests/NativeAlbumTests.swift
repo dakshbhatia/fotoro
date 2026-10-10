@@ -757,6 +757,32 @@ final class NativeAlbumTests: XCTestCase {
     })
     XCTAssertEqual(selectionReads, 1, "Explicit contributions still validate the selected Saved sources")
   }
+  @MainActor func testInvitationAccountRecoveryLocksWithoutDiscardingSavedWorkOrReopeningOldTrip() async throws {
+    try await withAlbum(owner: true) { services, server, model in
+      try services.store.put(server.source); try services.reload()
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let account = try XCTUnwrap(services.session.accountId)
+      let incoming = FotoroAlbumInvitation(albumId: Wire.id(), ownerCard: server.cards[0])
+      let presentation = NativeAlbumPresentation.opening(incoming: incoming) { [] }
+      var resume = NativeAlbumResumeState(intent: try XCTUnwrap(
+        NativeAlbumReturnIntent.capture(from: model, filter: NativeAlbumSearchFilter())))
+      let oldGeneration = services.vault.generation
+      defer { UserDefaults.standard.removeObject(forKey: "fotoro.manualLock." + account) }
+
+      resume.useAnotherAccount(services: services, model: model)
+
+      XCTAssertNil(services.photoAccountAccess)
+      XCTAssertFalse(services.vault.isUnlocked)
+      XCTAssertNotEqual(services.vault.generation, oldGeneration)
+      XCTAssertEqual(services.session.accountId, account, "Account recovery must not destructively sign out")
+      XCTAssertEqual(try services.store.ownedPhotos(accountId: account).count, 1)
+      XCTAssertNil(resume.intent)
+      XCTAssertNil(model.opened); XCTAssertTrue(model.items.isEmpty); XCTAssertTrue(model.albums.isEmpty)
+      XCTAssertEqual(presentation.incoming, incoming, "Authentication retains the incoming invitation")
+      let reopened = try await resume.reopen(in: model, services: services)
+      XCTAssertNil(reopened)
+    }
+  }
   func testPublicAlbumLinkMatchesBrowserAndRejectsHiddenFieldsAndForeignOrigin() throws {
     let fixture = try fixture(FixtureAccounts.self, "accounts")
     let invitation = FotoroAlbumInvitation(albumId: "11111111-1111-4111-8111-111111111111", ownerCard: fixture.accounts[0])
