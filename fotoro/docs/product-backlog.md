@@ -19,7 +19,7 @@ Cloudflare proposals become tasks here only when a consumer need admits them.
 
 | Order | Foundation and current implementation | Still needed to call it complete |
 | --- | --- | --- |
-| 1 | First photos and access: local photos before an account; password/passkey entry continues a chosen Save, Sync or invitation. Native welcome directly offers new-account, passkey and password choices. A matching returning browser can sign in and unlock in one PRF request; fresh-browser discovery retains its second request. | Fresh iPhone → allow Photos → browse → opt in once → open the same Saved photos in Safari. Qualify real PRF passkeys on iPhone, Safari and Mac; Sign in with Apple and a consumer device-approval interface are not implemented. |
+| 1 | First photos and access: local photos before an account; password/passkey entry continues a chosen Save, Sync or invitation. Native welcome directly offers new-account, passkey and password choices. A matching returning browser can sign in and unlock in one PRF request; fresh-browser discovery retains its second request. Both clients offer reviewed trusted-device approval with an explicit public request exchange. | Fresh iPhone → allow Photos → browse → opt in once → open the same Saved photos in Safari. Qualify real PRF passkeys and device approval on iPhone, Safari and Mac. Sign in with Apple is not implemented; device approval still requires copying the public request. |
 | 2 | Sync intake: durable last-30-days initial scope, explicit expansion, Pause, retry and account/source fences. Existing 10-day anchors retain their exclusions until explicit expansion. | Physical background, relaunch, offline reconnect, changed permissions and edited/iCloud assets. Already scheduled ciphertext may finish in the background; new preparation needs the open, unlocked app. |
 | 3 | Original recovery: encrypted JPEG/PNG/HEIC, supported video and complete Live Photo resources, bounded staging and byte verification. | Cross-device physical restore after an interrupted transfer and relaunch. Keep the 50 MiB logical-original limit until larger-original recovery is qualified. |
 | 4 | Photo evidence: OCR, EXIF/Photos dates, observed locations, supplied labels and current revision bindings. iOS Info groups observed photo/camera fields, keeps capture details collapsed and shows provenance. Cheap metadata scopes heavy work before previews; native startup processes one bounded recent batch. | Personal-library OCR/metadata coverage, correction and location acceptance. No invented date or location for missing evidence; old Saved originals do not acquire trusted capture details retroactively. |
@@ -121,10 +121,10 @@ same encrypted account on another device. A returning browser can use one system
 request when its cached account, selected credential, public keys and wrapper
 salt match fresh server data. Fresh-browser discovery needs two system passkey
 requests to discover the account and then evaluate its wrapper salt.
-Providers without usable PRF retain the password path. Native welcome exposes
-passkey access directly. Device approval has API/crypto support but no consumer
-interface; it requires same-account authentication before transferring a sealed
-bundle. Sign in with Apple is not delivered. System sharing is the main original-file
+Providers without usable PRF retain the password and trusted-device approval paths.
+Native welcome exposes passkey access directly. Both clients expose reviewed
+device approval; it requires same-account authentication and an explicit public
+request exchange before transferring a sealed bundle. Sign in with Apple is not delivered. System sharing is the main original-file
 route; private invitations require accepted contacts. Approved contact identities and names now use an encrypted same-account journal
 with durable retries and explicit conflict review; cross-device physical acceptance
 remains open. Global family Find and a native Mac client remain open; album filters do not establish shared person identity across contributors.

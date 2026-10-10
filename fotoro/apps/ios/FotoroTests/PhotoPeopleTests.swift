@@ -166,11 +166,9 @@ final class PhotoPeopleTests: XCTestCase {
     try index.replacePermitted([SearchRecord(id: "first", revision: "changed")], generation: 1)
     XCTAssertTrue(try index.search("", scope: scope).results.isEmpty)
   }
-  func testSelectFilteredResultsReplacesEarlierHiddenSelectionWithExactReferences() {
-    var selected: Set<ConsumerPhotoReference> = [.device("earlier-family"), .saved("earlier-place")]
+  func testSelectFilteredResultsReturnsOnlyCurrentEligibleReferences() {
     let hits = [ConsumerSearchHit(photo: .device("current-family")), ConsumerSearchHit(photo: .saved("current-trip"))]
-    selected = ConsumerSearchBinding.selectionForResults(hits)
-    XCTAssertEqual(selected, [.device("current-family"), .saved("current-trip")])
+    XCTAssertEqual(ConsumerSearchBinding.selectionForResults(hits), [.device("current-family"), .saved("current-trip")])
     XCTAssertEqual(ConsumerSearchBinding.selectionForResults(hits, reviewedIDs: ["saved:current-trip"]), [.saved("current-trip")])
   }
   private func vector(_ offset: Int = 0) -> [Float] {

@@ -117,6 +117,7 @@ struct NativeAlbumView: View {
   @State private var showPicker = false
   @State private var savingDevicePhotos = false
   @State private var showCreation = false
+  @State private var showCreationContacts = false
   @State private var showDetails = false
   @State private var trustCandidate: NativeAlbumSummary?
   @State private var ending = false
@@ -240,6 +241,9 @@ struct NativeAlbumView: View {
           ScrollView { create.padding() }.navigationTitle("New trip").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { showCreation = false }.disabled(busy) } }
             .interactiveDismissDisabled(busy)
+        }
+        .sheet(isPresented: $showCreationContacts) {
+          ExchangeView(services: services, selected: [], contactsOnly: true)
         }
       }
       .sheet(isPresented: $showDetails) {
@@ -391,7 +395,8 @@ struct NativeAlbumView: View {
       }
       TextField("Trip name", text: $title).textFieldStyle(.roundedBorder).accessibilityIdentifier("albums.name")
       Text("Invite up to 11 contacts. Each person must join to see or add photos.").font(.footnote).foregroundStyle(.secondary)
-      if contacts.isEmpty { Text("Add a contact in Shared photos first.").foregroundStyle(.secondary) }
+      Button("Add contact", systemImage: "person.badge.plus") { showCreationContacts = true }
+        .disabled(busy || services.busy).accessibilityIdentifier("albums.addContact")
       ForEach(contacts, id: \.accountId) { card in
         Toggle(services.contactName(card.accountId), isOn: Binding(get: { memberIDs.contains(card.accountId) }, set: { enabled in
           if enabled { memberIDs.insert(card.accountId) } else { memberIDs.remove(card.accountId) }
@@ -675,7 +680,7 @@ struct NativeAlbumView: View {
       }
     }
   }
-  private func stop() { searchTask?.cancel(); searchTask = nil; searchTaskID = nil; searchError = nil; cleanupTripDownload(); operation?.cancel(); operation = nil; operationID = nil; viewer = nil; showPicker = false; link = nil; familyFilter = NativeAlbumSearchFilter(); showFamilyFilters = false; showTripPicks = false; showCreation = false; showDetails = false; trustCandidate = nil }
+  private func stop() { searchTask?.cancel(); searchTask = nil; searchTaskID = nil; searchError = nil; cleanupTripDownload(); operation?.cancel(); operation = nil; operationID = nil; viewer = nil; showPicker = false; link = nil; familyFilter = NativeAlbumSearchFilter(); showFamilyFilters = false; showTripPicks = false; showCreation = false; showCreationContacts = false; showDetails = false; trustCandidate = nil }
   private func run(navigating: Bool = false, _ action: @escaping @MainActor () async throws -> Void) {
     if navigating { resumeState.deliberateNavigation(in: model) }
     let pendingSearch = searchTask

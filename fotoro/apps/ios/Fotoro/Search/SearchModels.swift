@@ -263,3 +263,16 @@ enum SearchNormalization {
     .lowercased().split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
   }
 }
+
+// Every word must be supported by this photo, even when its evidence spans fields.
+struct PhotoEvidenceQuery: Sendable {
+  private let words: [String]
+  init(_ query: String) { words = SearchNormalization.text(query).split(separator: " ").map(String.init) }
+  func matches(terms: [String], scenes: [String]) -> Bool {
+    guard !words.isEmpty else { return true }
+    let text = terms.map(SearchNormalization.text), labels = scenes.map(SearchNormalization.text)
+    return words.allSatisfy { word in
+      text.contains { $0.contains(word) } || labels.contains { $0.hasPrefix(word) }
+    }
+  }
+}

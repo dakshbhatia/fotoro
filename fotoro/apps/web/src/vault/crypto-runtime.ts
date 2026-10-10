@@ -11,3 +11,4 @@ export {
   signPayload,
 } from "@fotoro/crypto";
 export { api, ApiError, ApiTransportError } from "../exchange/api";
+export {validateWire} from "@fotoro/contracts/validate";
