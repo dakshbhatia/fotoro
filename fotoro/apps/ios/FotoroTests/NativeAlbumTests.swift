@@ -515,6 +515,127 @@ final class NativeAlbumTests: XCTestCase {
       XCTAssertTrue(model.sharedFacts.isEmpty); XCTAssertTrue(model.items.isEmpty); XCTAssertNil(model.opened)
     }
   }
+  @MainActor func testOptionalFirstSharedDetailsFailureRetainsAdmittedPhotosAndExplicitRetryLoadsFacts() async throws {
+    for status in [0, 503] {
+      try await withAlbum { _, server, model in
+        server.factsCapabilityStatus = 200
+        server.accessStatusAfterFactsCapability = status
+        try server.setFacts(server.source, people: ["Mom"])
+        try await model.refresh(); try await model.open(server.definition.albumId)
+        XCTAssertEqual(model.items.map(\.id), [server.source.id])
+        XCTAssertNotNil(model.opened); XCTAssertNotNil(model.factsError)
+        XCTAssertTrue(model.sharedFacts.isEmpty); XCTAssertFalse(model.factsPageLoaded)
+        let coverage = model.searchCoverageID
+        server.accessStatus = nil
+        try await model.loadNextSearchMetadataPage(expectedID: coverage)
+        XCTAssertEqual(model.items.map(\.id), [server.source.id])
+        XCTAssertEqual(model.sharedFacts[server.source.id]?.people, ["Mom"])
+        XCTAssertNil(model.factsError); XCTAssertTrue(model.factsPageLoaded)
+        XCTAssertEqual(model.searchCoverageID, coverage)
+        let reads = server.factsPageReads
+        try await model.loadNextSearchMetadataPage(expectedID: coverage)
+        XCTAssertEqual(server.factsPageReads, reads, "Completed optional details cannot publish twice")
+      }
+    }
+  }
+
+  @MainActor func testOptionalFirstSharedDetailsRevocationStillClearsAdmittedPhotoPage() async throws {
+    try await withAlbum { _, server, model in
+      server.factsCapabilityStatus = 200
+      server.accessStatusAfterFactsCapability = 403
+      try server.setFacts(server.source, people: ["Mom"])
+      try await model.refresh()
+      do { try await model.open(server.definition.albumId); XCTFail("Revoked membership cannot retain admitted photos") } catch {}
+      XCTAssertNil(model.opened); XCTAssertTrue(model.items.isEmpty); XCTAssertTrue(model.sharedFacts.isEmpty)
+    }
+  }
+
+  @MainActor func testManualTripContinuationRetainsFirstPageAndPeopleContextOnTransientAccessFailure() async throws {
+    try await withAlbum { _, server, model in
+      server.factsCapabilityStatus = 200
+      let extras = try server.extraOwnedPhotos(count: 108)
+      try server.contribute(extras)
+      for photo in [server.source] + extras { try server.setFacts(photo, people: ["Mom"]) }
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let ids = model.items.map(\.id), facts = model.sharedFacts
+      let cursor = try XCTUnwrap(model.nextCursor), factsCursor = try XCTUnwrap(model.factsNextCursor)
+      let coverage = model.searchCoverageID
+      let person = NativeAlbumPersonChoice(contributor: server.source.manifest.ownerAccountId, name: "Mom")
+      let filter = NativeAlbumSearchFilter(people: [person.id])
+      let matches = model.browse(filter: filter, groupDuplicates: false).items.map(\.id)
+      XCTAssertEqual(ids.count, 100); XCTAssertEqual(matches.count, 100)
+      for status in [0, 503] {
+        server.accessStatus = status
+        do { try await model.loadMore(); XCTFail("Failed membership must not publish a continuation") } catch {}
+        XCTAssertNotNil(model.opened); XCTAssertEqual(model.items.map(\.id), ids)
+        XCTAssertEqual(model.sharedFacts, facts); XCTAssertEqual(model.nextCursor, cursor)
+        XCTAssertEqual(model.factsNextCursor, factsCursor); XCTAssertEqual(model.searchCoverageID, coverage)
+        XCTAssertEqual(model.browse(filter: filter, groupDuplicates: false).items.map(\.id), matches)
+      }
+      server.accessStatus = nil
+      try await model.loadMore()
+      XCTAssertEqual(model.items.count, 109); XCTAssertEqual(Set(model.items.map(\.id)).count, 109)
+      XCTAssertNil(model.nextCursor); XCTAssertEqual(model.searchCoverageID, coverage)
+      try await model.loadMore()
+      XCTAssertEqual(model.items.count, 109, "Repeated continuation cannot append the completed page twice")
+    }
+  }
+
+  @MainActor func testManualSharedDetailsContinuationRetainsWindowOnTransientFailureAndRetriesOnce() async throws {
+    try await withAlbum { _, server, model in
+      server.factsCapabilityStatus = 200
+      let extras = try server.extraOwnedPhotos(count: 108)
+      try server.contribute(extras)
+      for photo in [server.source] + extras { try server.setFacts(photo, people: ["Mom"]) }
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let ids = model.items.map(\.id), facts = model.sharedFacts
+      let cursor = try XCTUnwrap(model.nextCursor), factsCursor = try XCTUnwrap(model.factsNextCursor)
+      let coverage = model.searchCoverageID
+      let person = NativeAlbumPersonChoice(contributor: server.source.manifest.ownerAccountId, name: "Mom")
+      let filter = NativeAlbumSearchFilter(people: [person.id])
+      let matches = model.browse(filter: filter, groupDuplicates: false).items.map(\.id)
+      for status in [0, 503] {
+        server.accessStatus = status
+        do { try await model.loadMoreSharedDetails(); XCTFail("Failed membership must not publish shared details") } catch {}
+        XCTAssertNotNil(model.opened); XCTAssertEqual(model.items.map(\.id), ids)
+        XCTAssertEqual(model.sharedFacts, facts); XCTAssertEqual(model.nextCursor, cursor)
+        XCTAssertEqual(model.factsNextCursor, factsCursor); XCTAssertEqual(model.searchCoverageID, coverage)
+        XCTAssertEqual(model.browse(filter: filter, groupDuplicates: false).items.map(\.id), matches)
+        XCTAssertNotNil(model.factsError)
+      }
+      server.accessStatus = nil
+      let reads = server.factsPageReads
+      try await model.loadMoreSharedDetails()
+      XCTAssertNil(model.factsNextCursor); XCTAssertNil(model.factsError)
+      XCTAssertEqual(server.factsPageReads, reads + 1)
+      try await model.loadMoreSharedDetails()
+      XCTAssertEqual(server.factsPageReads, reads + 1, "A completed shared-details page must not load twice")
+      try await model.loadMore()
+      XCTAssertEqual(model.sharedFacts.count, 109, "Deferred details bind after the matching photo continuation succeeds")
+      XCTAssertEqual(model.browse(filter: filter, groupDuplicates: false).items.count, 109)
+    }
+  }
+
+  @MainActor func testManualTripAndSharedDetailsContinuationsStillClearRevokedAccess() async throws {
+    for sharedDetails in [false, true] {
+      try await withAlbum { _, server, model in
+        server.factsCapabilityStatus = 200
+        let extras = try server.extraOwnedPhotos(count: 100)
+        try server.contribute(extras)
+        for photo in [server.source] + extras { try server.setFacts(photo, people: ["Mom"]) }
+        try await model.refresh(); try await model.open(server.definition.albumId)
+        XCTAssertEqual(model.items.count, 100); XCTAssertEqual(model.sharedFacts.count, 100)
+        server.accessStatus = 403
+        do {
+          if sharedDetails { try await model.loadMoreSharedDetails() } else { try await model.loadMore() }
+          XCTFail("Revoked membership must reject either continuation")
+        } catch {}
+        XCTAssertNil(model.opened); XCTAssertTrue(model.items.isEmpty); XCTAssertTrue(model.sharedFacts.isEmpty)
+        XCTAssertNil(model.nextCursor); XCTAssertNil(model.factsNextCursor)
+      }
+    }
+  }
+
   @MainActor func testLateMetadataFailureKeepsAlbumPageAndFactsRetryable() async throws {
     try await withAlbum { _, server, model in
       server.factsCapabilityStatus = 200
@@ -1778,6 +1899,7 @@ private final class AlbumTestServer: @unchecked Sendable {
   var accessGate: AlbumFactsRequestGate?
   var accountMismatchCount = 0; var authAccountHeader: String?
   var factsCapabilityStatus = 404
+  var accessStatusAfterFactsCapability: Int?
   var endOnFacts = false
   var factsPageReads = 0; var factsIndividualReads = 0
   var factsWriteBodies: [Data] = []
@@ -1874,6 +1996,9 @@ private final class AlbumTestServer: @unchecked Sendable {
     let all = (included ? [(entry, manifest)] : []) + contributions
     let overview = AlbumOverviewV1(definition: signed, membership: accepted ? "accepted" : "invited", endedAt: ended ? NativeAlbumWire.date() : nil, photoCount: all.count)
     if path == "/v1/album-photo-facts/capabilities" {
+      if let next = accessStatusAfterFactsCapability {
+        accessStatus = next; accessStatusAfterFactsCapability = nil
+      }
       return factsCapabilityStatus == 200 ? (200, try Wire.encode(AlbumFactsCapabilitiesV1(version: 1, albumFactsVersion: 1))) : (factsCapabilityStatus, Data())
     }
     if path.contains("/photo-facts") {

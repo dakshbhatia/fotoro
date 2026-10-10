@@ -7,7 +7,7 @@ import { configureVault, unlockVault, lockVault, requireVault, encryptPrivate } 
 import { atomic, clearAccount, get } from "../src/exchange/cache";
 import { queueAnnotations, pendingAnnotations } from "../src/exchange/annotations";
 import { pendingImports } from "../src/exchange/journal";
-import { cachedSync, refreshSync, saveSync } from "../src/exchange/sync";
+import { cachedSync, refreshSync, saveSync, saveChosenImports } from "../src/exchange/sync";
 import {saveQueuedAnnotations} from "../src/library/consumer-annotation-save";
 import {loadUploadPause, saveUploadPause} from "../src/library/consumer-preferences";
 
@@ -96,6 +96,51 @@ test("read refresh and explicit Save serialize their catalog cursor work without
   assert.deepEqual(calls.map(call => call.method), ["GET", "GET", "PUT"]);
   assert.equal(result.annotations.length, 0);
 }));
+
+test("Trip chosen retry waits for global Save and snapshots its selected IDs", async () => scoped(async () => {
+  const session = await open();
+  let release!: (value: Response) => void;
+  const calls: string[] = [];
+  globalThis.fetch = (async path => {
+    calls.push(String(path));
+    if (String(path).startsWith("/v1/changes?")) return new Promise<Response>(resolve => {release = resolve;});
+    assert.equal(path, "/v1/uploads/reserve");
+    return response({version: 1, code: "UNAVAILABLE"}, 503);
+  }) as typeof fetch;
+  const saving = saveSync(session);
+  while (!release) await new Promise(resolve => setTimeout(resolve, 0));
+  const queued = await stageQueuedOriginal(), ids = [queued.pending.photoId];
+  const chosen = saveChosenImports(session, ids);
+  ids.length = 0;
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(calls.length, 1, "Trip must not write the journal while global Save is still active");
+  release(response(page()));
+  await saving; await chosen;
+  assert.equal(calls.filter(path => path === "/v1/uploads/reserve").length, 1);
+  assert.equal(calls.filter(path => path.startsWith("/v1/changes?")).length, 1, "Chosen retry adds no catalog sync");
+}));
+
+for (const cancellation of ["scope", "signal"] as const) {
+  test(`queued Trip choice cancelled by ${cancellation} sends nothing after global Save`, async () => scoped(async () => {
+    const session = await open();
+    let release!: (value: Response) => void, current = true;
+    const controller = new AbortController();
+    globalThis.fetch = (async path => {
+      assert.match(String(path), /^\/v1\/changes\?/, "Cancelled Trip must not send an upload");
+      return new Promise<Response>(resolve => {release = resolve;});
+    }) as typeof fetch;
+    const saving = saveSync(session);
+    while (!release) await new Promise(resolve => setTimeout(resolve, 0));
+    const queued = await stageQueuedOriginal();
+    const chosen = saveChosenImports(session, [queued.pending.photoId], controller.signal, () => current);
+    const rejected = assert.rejects(chosen, {name: "AbortError"});
+    if (cancellation === "scope") current = false;
+    else controller.abort();
+    release(response(page()));
+    await saving; await rejected;
+    assert.deepEqual(await pendingImports(), [queued.pending], "Cancelled queue task leaves chosen encrypted staging untouched");
+  }));
+}
 
 test("a delayed read refresh cannot publish into or close a newer account", async () => scoped(async () => {
   const session = await open();

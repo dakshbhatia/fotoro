@@ -31,13 +31,15 @@ import {joinAlbumInvitation, loadAlbumEntry, reviewAlbumOwner, unsupportedAlbumC
 import {subscribeAlbumLifetime} from "./entry";
 import {copyAlbumInvitation} from "./invitation";
 import {PendingAlbumContribution} from "./pending-contribution";
+import {TripImportChoice} from "./import";
 
 const AlbumContacts = lazy(() => import("../exchange/Exchange").then(module => ({default: module.Exchange})));
 
 function readableError(error: unknown) {
   const code = error instanceof Error ? error.message : "";
   if (code === "TRIP_CHOOSE_1_TO_100_FILES") return "Choose 1 to 100 device photos at a time.";
-  if (code === "TRIP_SAVE_INCOMPLETE") return "Saving has not finished. Check Saved and retry before adding these photos to the trip.";
+  if (code === "TRIP_SAVE_INCOMPLETE") return "Saving has not finished. Retry saving your chosen photos.";
+  if (code === "TRIP_SOURCE_CHANGED") return "A chosen Saved source changed. Choose your photos again.";
   if (/SUPPORTED_ORIGINALS|SOURCE_FORMAT|SOURCE_DIMENSIONS|EMPTY_ORIGINAL|ORIGINAL_EXCEEDS/.test(code)) return "Choose JPEG, PNG or HEIC photos up to 50 MiB each.";
   if (code === "TRIP_MEMORY_LIMIT") return "This trip is too large for this browser’s 128 MiB download limit. Try a browser with temporary disk storage.";
   if (code === "TRIP_ZIP_LIMIT") return "This trip is too large for one ZIP download. Download individual originals instead.";
@@ -78,7 +80,7 @@ function AlbumImage({access, photo, preview = false, onOpen}: {access: AlbumAcce
 export function AlbumContributionActions({albumId, chosen, busy, onChoosePhotos, onAdd, showSaved = true}: {showSaved?: boolean; albumId: string; chosen: number; busy: boolean; onChoosePhotos: (albumId: string) => void; onAdd: () => void}) {
   return <>{showSaved && <button disabled={busy} title="Choose photos already in Saved" onClick={() => onChoosePhotos(albumId)}>From Saved</button>}{chosen > 0 && <button className="primary-action" disabled={busy} onClick={onAdd}>Add {chosen} {chosen === 1 ? "photo" : "photos"}</button>}</>;
 }
-export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incoming, onRetryAccount, currentOwnedPhotos, onLoadOwnedPhoto, onImportPhotos, initialAlbumId}: {selection: readonly Photo[]; initialAlbumId?: string; onImportPhotos?: (files: readonly File[], signal: AbortSignal, current: () => boolean) => Promise<Photo[]>; currentPhotos: () => readonly Photo[]; onClose: () => void; onChoosePhotos: (albumId: string) => void; incoming?: IncomingAlbumIntent; onRetryAccount?: () => void; currentOwnedPhotos?: () => OwnedPhotoSnapshot | null; onLoadOwnedPhoto?: (photo: Photo, signal: AbortSignal) => Promise<void>}) {
+export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incoming, onRetryAccount, currentOwnedPhotos, onLoadOwnedPhoto, onImportPhotos, initialAlbumId}: {selection: readonly Photo[]; initialAlbumId?: string; onImportPhotos?: (choice: TripImportChoice, signal: AbortSignal, current: () => boolean) => Promise<Photo[]>; currentPhotos: () => readonly Photo[]; onClose: () => void; onChoosePhotos: (albumId: string) => void; incoming?: IncomingAlbumIntent; onRetryAccount?: () => void; currentOwnedPhotos?: () => OwnedPhotoSnapshot | null; onLoadOwnedPhoto?: (photo: Photo, signal: AbortSignal) => Promise<void>}) {
   const [session] = useState(requireVault), [controller] = useState(() => new AbortController());
   const [chosenSnapshot] = useState(() => new ShareSelection([...selection]));
   const creationDraft = useRef<AlbumCreationDraft>({});
@@ -104,6 +106,9 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   const pendingContribution = useRef<PendingAlbumContribution | null>(null);
   const [retryContribution, setRetryContribution] = useState(false);
   const clearContribution = () => {pendingContribution.current?.cancel(); pendingContribution.current = null; setRetryContribution(false);};
+  const pendingImport = useRef<TripImportChoice | null>(null);
+  const [retryImport, setRetryImport] = useState(false);
+  const clearImport = () => {pendingImport.current?.cancel(); pendingImport.current = null; setRetryImport(false);};
   const preparedDownload = useRef<{access: AlbumAccess; photo: Photo; controller: AbortController} | null>(null);
   const tripDownload = useRef<{controller: AbortController; access?: AlbumAccess; lease?: TripDownloadLease} | null>(null);
   const [downloadStarted, setDownloadStarted] = useState(false);
@@ -116,7 +121,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   };
   const clearDownload = () => {preparedDownload.current?.controller.abort(); preparedDownload.current = null;};
   const scope: ShareScope = {signal: controller.signal, current: () => alive.current && sameVault(session) && (!incoming || incoming.current(session))};
-  const closeAlbum = () => {clearContribution(); clearTripDownload(); clearDownload(); const previous = accessRef.current; accessRef.current = null; previous?.dispose(); setAccess(null); setPhotos([]); publishPage({hasMore: false, photoCount: 0}); setPreview(null); setQuery(""); setFiltersOpen(false); setShowTripPicks(false); setSearchFailed(false); setConfirmEnd(false); setFacts(new Map()); setFactsState("loading"); setPeopleFilter(emptyPeopleFilter()); setFrom(""); setThrough(""); setDetailDraft(null);};
+  const closeAlbum = () => {clearImport(); clearContribution(); clearTripDownload(); clearDownload(); const previous = accessRef.current; accessRef.current = null; previous?.dispose(); setAccess(null); setPhotos([]); publishPage({hasMore: false, photoCount: 0}); setPreview(null); setQuery(""); setFiltersOpen(false); setShowTripPicks(false); setSearchFailed(false); setConfirmEnd(false); setFacts(new Map()); setFactsState("loading"); setPeopleFilter(emptyPeopleFilter()); setFrom(""); setThrough(""); setDetailDraft(null);};
   const close = () => {alive.current = false; controller.abort(); closeAlbum(); onClose();};
   useDialogFocus(panel, () => preview ? setPreview(null) : close(), !showContacts);
   useEffect(() => {setDetailDraft(null); if (preview) previewPanel.current?.focus({preventScroll: true});}, [preview]);
@@ -125,7 +130,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     return () => clearDownload();
   }, [access, preview]);
   useEffect(() => subscribeAlbumLifetime(window, document, () => {
-    alive.current = false; controller.abort(); clearContribution(); clearTripDownload(); accessRef.current?.dispose(); chosenSnapshot.dispose();
+    alive.current = false; controller.abort(); clearImport(); clearContribution(); clearTripDownload(); accessRef.current?.dispose(); chosenSnapshot.dispose();
   }, close), []);
   const [actions] = useState(() => new AlbumActionQueue(() => alive.current && sameVault(session)
     && (!incoming || incoming.current(session)), value => {if (alive.current && sameVault(session)) setBusy(value);}));
@@ -160,11 +165,11 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     if (scope.current?.()) setTitles(decrypted);
     return list;
   }
-  async function readFacts(opened: AlbumAccess, background = false, searching = false) {
+  async function readFacts(opened: AlbumAccess, background = false) {
     if (!scope.current?.() || accessRef.current !== opened) return;
     if (!background) {setFacts(new Map()); setFactsState("loading");}
     try {
-      const result = await opened.loadFacts({preserveTransientFailure: background || searching});
+      const result = await opened.loadFacts({preserveTransientFailure: true});
       if (scope.current?.() && accessRef.current === opened && opened.current()) {setFacts(result.facts); setFactsState(!result.supported ? "legacy" : result.unmatched ? "partial" : "ready");}
     } catch (failure) {
       if (scope.current?.() && accessRef.current === opened) {
@@ -174,11 +179,11 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     }
   }
   async function loadPage(opened: AlbumAccess, cursor?: string, searching = false) {
-    const loaded = await opened.loadPhotoPage(cursor, {preserveTransientFailure: searching});
+    const loaded = await opened.loadPhotoPage(cursor, {preserveTransientFailure: searching || cursor !== undefined});
     if (!scope.current?.() || accessRef.current !== opened || !opened.current()) return;
     setPhotos(previous => cursor ? [...previous, ...loaded.photos] : loaded.photos);
     publishPage({hasMore: loaded.hasMore, nextCursor: loaded.nextCursor, photoCount: loaded.photoCount});
-    await readFacts(opened, !!cursor, searching);
+    await readFacts(opened, !!cursor);
   }
   async function open(overview: AlbumOverviewV1) {
     closeAlbum(); const opened = await AlbumAccess.open(overview, scope);
@@ -304,6 +309,24 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     const list = await loadInbox(), updated = list?.find(item => item.definition.body === opened.overview.definition.body);
     if (updated) await refreshOpened(opened, updated);
   }
+  async function saveDeviceChoice(opened: AlbumAccess, choice: TripImportChoice) {
+    if (pendingImport.current !== choice || !choice.current || !onImportPhotos) return;
+    const origin = location.origin;
+    const current = () => !!scope.current?.() && accessRef.current === opened && opened.current() && location.origin === origin;
+    const signal = AbortSignal.any([controller.signal, opened.signal]);
+    setNotice("Saving chosen photos before adding…");
+    let saved: Photo[];
+    try {saved = await onImportPhotos(choice, signal, current);}
+    catch (failure) {if (scope.current?.()) {setNotice(""); setRetryImport(choice.current);} throw failure;}
+    if (!current() || !choice.current) throw new DOMException("Trip closed", "AbortError");
+    clearImport();
+    const contribution = new PendingAlbumContribution(saved, selected => {
+      if (!current()) return false;
+      try {albumOwnedSelection(selected, session, currentPhotos()); return true;} catch {return false;}
+    });
+    pendingContribution.current = contribution;
+    await addSavedChoice(opened, contribution);
+  }
   const memberIDs = access?.definition.members.map(member => member.card.accountId) ?? [];
   const photoCount = access?.overview.membership === "accepted" ? page.photoCount : access?.overview.photoCount ?? 0;
   const previewDate = preview && albumDateTag(preview.metadata), previewNavigation = albumPreviewNavigation(groups, preview);
@@ -408,25 +431,18 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
                 const files = Array.from(event.target.files ?? []); event.target.value = "";
                 if (!files.length) return;
                 void action(async () => {
-                  clearContribution(); clearTripDownload(); clearDownload();
+                  clearImport(); clearContribution(); clearTripDownload(); clearDownload();
                   const opened = access;
-                  const current = () => !!scope.current?.() && accessRef.current === opened && opened.current();
-                  const signal = AbortSignal.any([controller.signal, opened.signal]);
-                  setNotice("Saving chosen photos before adding…");
-                  let saved: Photo[];
-                  try {saved = await onImportPhotos(files, signal, current);} catch (failure) {if (scope.current?.()) setNotice(""); throw failure;}
-                  if (!current()) throw new DOMException("Trip closed", "AbortError");
-                  const choice = new PendingAlbumContribution(saved, selected => {
-                    if (!current()) return false;
-                    try {albumOwnedSelection(selected, session, currentPhotos()); return true;} catch {return false;}
-                  });
-                  pendingContribution.current = choice;
-                  await addSavedChoice(opened, choice);
+                  const origin = location.origin;
+                  const choice = new TripImportChoice(files, () => !!scope.current?.() && accessRef.current === opened && opened.current() && location.origin === origin);
+                  pendingImport.current = choice;
+                  await saveDeviceChoice(opened, choice);
                 });
               }} /></>}
               <AlbumContributionActions showSaved={!onImportPhotos} albumId={access.albumId} chosen={chosen} busy={busy} onChoosePhotos={onChoosePhotos} onAdd={() => void action(async () => {const added = await access.add(chosenSnapshot.photos, currentPhotos); const list = await loadInbox(); const updated = list?.find(item => item.definition.body === access.overview.definition.body); if (updated) await refreshOpened(access, updated); setNotice(added ? `${added} ${added === 1 ? "photo added" : "photos added"}.` : "Already in this album.");})} />
               <button disabled={busy || !photoCount || downloadStarted} onClick={() => void downloadTrip()}>Download trip</button>
               </div>
+              {retryImport && pendingImport.current?.current && <div className="hint"><p>Your {pendingImport.current.count} chosen {pendingImport.current.count === 1 ? "photo is" : "photos are"} still selected. Finish saving before adding to this trip.</p><button disabled={busy} onClick={() => {const choice = pendingImport.current, opened = access; if (choice?.current) void action(() => saveDeviceChoice(opened, choice));}}>Retry adding photos</button><button disabled={busy} onClick={clearImport}>Cancel saving</button></div>}
               {retryContribution && pendingContribution.current?.current && <div className="hint"><p>Saved photos are ready. Retry adding your {pendingContribution.current.count} chosen {pendingContribution.current.count === 1 ? "photo" : "photos"} to this trip.</p><button disabled={busy} onClick={() => {const choice = pendingContribution.current, opened = access; if (choice?.current) void action(() => addSavedChoice(opened, choice));}}>Retry adding photos</button><button disabled={busy} onClick={clearContribution}>Cancel adding</button></div>}
               <div className="album-search-row"><div className="album-search"><input ref={searchInput} type="search" aria-label="Search trip people, places, filenames or capture dates" placeholder="Search this trip" value={query} onChange={event => setQuery(event.target.value)} />{query && <button className="album-icon-button" aria-label="Clear trip search" onClick={() => {setQuery(""); searchInput.current?.focus();}}><Icon kind="close" /></button>}</div>
             <details className="album-filters" open={filtersOpen} onToggle={event => {if (event.target === event.currentTarget) setFiltersOpen(event.currentTarget.open);}} onKeyDown={event => {
@@ -455,7 +471,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
               <button onClick={() => {clearTripDownload(); setNotice("Trip download cancelled.");}}>Cancel download</button>
             </div>}
 
-            {factsState === "error" && <p className="hint" role="status">Shared details could not refresh. Search may be incomplete. <button disabled={busy} onClick={() => void action(() => readFacts(access, true, searching))}>Retry details</button></p>}
+            {factsState === "error" && <p className="hint" role="status">Shared details could not refresh. Search may be incomplete. <button disabled={busy} onClick={() => void action(() => readFacts(access, true))}>Retry details</button></p>}
             {factsState === "partial" && !page.hasMore && <p className="hint" role="status">New photo details are available. <button disabled={busy} onClick={() => void refresh()}>Refresh photos</button></p>}
             {busy && !photos.length && <p className="hint" role="status">Loading photos…</p>}
             {searching && !page.hasMore && factsState === "loading" && <p className="hint" role="status">Checking shared details…</p>}

@@ -178,3 +178,122 @@ test("committing a GPS original queues account-private location without placing 
     assert.equal(value?.facts?.[0], "Newest supplied fact");
   } finally {globalThis.fetch = old; lockVault(); await clearAccount(owner);}
 });
+
+function uploadedPending(bytes: Uint8Array): PendingImport {
+  const pending = reselect(bytes);
+  pending.parts = (["original", "metadata"] as const).map(kind => {
+    const uploadId = crypto.randomUUID(), representationId = crypto.randomUUID();
+    return {binding: {version: 1 as const, photoId: pending.photoId, representationId, kind}, header: b64(bytes.subarray(0, 24)),
+      ciphertextBytes: bytes.length, ciphertextSha256: digest(bytes), uploadOperation: crypto.randomUUID(),
+      reservation: {version: 1 as const, uploadId, photoId: pending.photoId, representationId, stagingUrl: "https://fotoro.cloud/v1/uploads/" + uploadId + "/staging?cap=public-fixture", expiresAt: "2099-01-01T00:00:00Z"},
+      commit: {version: 1 as const, uploadId, objectId: crypto.randomUUID(), ciphertextBytes: bytes.length, ciphertextSha256: digest(bytes)}};
+  });
+  return pending;
+}
+
+test("chosen Trip save replays a partial commit with exact IDs and leaves unrelated journal entries unsent", async () => {
+  const old = globalThis.fetch; await clearAccount(owner); await open();
+  try {
+    const {TripImportChoice, saveTripFiles} = await import("../src/albums/import");
+    const bytesA = new Uint8Array(64).fill(1), bytesB = new Uint8Array(64).fill(2);
+    const files = [new File([bytesA], "chosen-a.jpg"), new File([bytesB], "chosen-b.jpg")];
+    const chosen = [uploadedPending(bytesA), uploadedPending(bytesB)], unrelated = uploadedPending(new Uint8Array(64).fill(3));
+    unrelated.state = "queued";
+    await put("journal", owner + ":" + unrelated.operationId, encryptPrivate(unrelated));
+    const publications: string[] = []; let failB = true, stages = 0;
+    globalThis.fetch = (async (path, init) => {
+      assert.equal(path, "/v1/photos", "Already uploaded originals must reuse verified commit receipts");
+      const manifest = new TextDecoder().decode(unb64(JSON.parse(init!.body as string).body)), id = JSON.parse(manifest).photoId;
+      assert.notEqual(id, unrelated.photoId, "Adding to a Trip does not authorize an unrelated queued original");
+      publications.push(id);
+      if (id === chosen[1].photoId && failB) return new Response(JSON.stringify({code: "HTTP_503"}), {status: 503});
+      return new Response(manifest);
+    }) as typeof fetch;
+    await resumePendingImports(undefined, undefined, []); assert.deepEqual(publications, []);
+    const choice = new TripImportChoice(files, () => true), options = {
+      signal: new AbortController().signal, current: () => true,
+      stage: async (file: File) => {
+        assert.equal(file, files[stages]); const pending = chosen[stages++];
+        await put("journal", owner + ":" + pending.operationId, encryptPrivate(pending));
+        return {photoId: pending.photoId, sourceDigest: pending.sourceDigest};
+      },
+      drain: async (ids: readonly string[]) => resumePendingImports(undefined, undefined, [...ids, ...ids]),
+      unresolved: async (ids: readonly string[]) => {const records = await pendingImports(); return ids.some(id => !records.some(item => item.photoId === id && item.state === "committed"));},
+      load: async (ids: readonly string[]) => {const records = await pendingImports(); return ids.map(id => {const pending = records.find(item => item.photoId === id)!; assert.equal(pending.state, "committed"); return {manifest: pending.manifest!, metadata: {originalSha256: pending.sourceDigest}} as import("../src/library/catalog").Photo;});},
+    };
+    await assert.rejects(saveTripFiles(choice, options), /TRIP_SAVE_INCOMPLETE/);
+    const partial = await pendingImports();
+    assert.equal(partial.find(item => item.photoId === chosen[0].photoId)?.state, "committed");
+    assert.equal(partial.find(item => item.photoId === chosen[1].photoId)?.state, "failed");
+    failB = false;
+    const saved = await saveTripFiles(choice, options);
+    assert.deepEqual(saved.map(photo => photo.manifest.photoId), chosen.map(item => item.photoId));
+    assert.equal(stages, 2, "Retry must not reimport either chosen original");
+    assert.deepEqual(publications, [chosen[0].photoId, chosen[1].photoId, chosen[1].photoId]);
+    assert.equal((await pendingImports()).find(item => item.photoId === unrelated.photoId)?.state, "queued", "Unrelated queued journal entry remains untouched");
+    choice.cancel();
+  } finally {globalThis.fetch = old; lockVault(); await clearAccount(owner);}
+});
+
+test("withdrawing a chosen import during multipart upload stops before commit or photo publication", async () => {
+  const oldFetch = globalThis.fetch, oldLocation = globalThis.location;
+  await clearAccount(owner); await open();
+  try {
+    Object.defineProperty(globalThis, "location", {configurable: true, value: {origin: "https://fotoro.cloud"}});
+    const bytes = new Uint8Array(64), pending = uploadedPending(bytes);
+    pending.parts[0].commit = undefined;
+    await atomic([{store: "staging", key: pending.stagingKeys[0], value: bytes}, {store: "journal", key: owner + ":" + pending.operationId, value: encryptPrivate(pending)}]);
+    let current = true, puts = 0, commits = 0;
+    globalThis.fetch = (async (path, init) => {
+      if (String(path).endsWith("/commit")) {
+        commits++; assert.equal(commits, 1, "Only the prior incomplete commit probe may run");
+        return new Response(JSON.stringify({code: "UPLOAD_INCOMPLETE"}), {status: 409});
+      }
+      assert.equal(init?.method, "PUT"); puts++; current = false;
+      return new Response(null, {status: 200});
+    }) as typeof fetch;
+    await assert.rejects(resumePendingImports(undefined, undefined, [pending.photoId], () => current), {name: "AbortError"});
+    assert.equal(puts, 1); assert.equal(commits, 1);
+    const retained = (await pendingImports())[0];
+    assert.notEqual(retained.state, "committed"); assert.equal(retained.parts[0].commit, undefined);
+    assert.deepEqual(await get("staging", pending.stagingKeys[0]), bytes, "Encrypted staging survives cancellation for Saved recovery");
+  } finally {globalThis.fetch = oldFetch; Object.defineProperty(globalThis, "location", {configurable: true, value: oldLocation}); lockVault(); await clearAccount(owner);}
+});
+
+for (const phase of ["invalid receipt", "uploaded part"] as const) {
+  test(`withdrawing a chosen import during ${phase} journal persistence stops the next commit`, async () => {
+    const oldFetch = globalThis.fetch, oldLocation = globalThis.location, originalPut = IDBObjectStore.prototype.put;
+    await clearAccount(owner); await open();
+    try {
+      Object.defineProperty(globalThis, "location", {configurable: true, value: {origin: "https://fotoro.cloud"}});
+      const bytes = new Uint8Array(64), pending = uploadedPending(bytes);
+      if (phase === "invalid receipt") pending.parts[0].commit!.ciphertextSha256 = digest(new Uint8Array([1]));
+      else pending.parts[0].commit = undefined;
+      await atomic([{store: "staging", key: pending.stagingKeys[0], value: bytes}, {store: "journal", key: owner + ":" + pending.operationId, value: encryptPrivate(pending)}]);
+      let current = true, armed = phase === "invalid receipt", writes = 0, commits = 0, uploads = 0;
+      IDBObjectStore.prototype.put = function (value: any, key?: IDBValidKey) {
+        const request = originalPut.call(this, value, key);
+        if (this.name === "journal" && armed) request.addEventListener("success", () => {writes++; current = false;});
+        return request;
+      } as any;
+      globalThis.fetch = (async (path, init) => {
+        if (String(path).endsWith("/commit")) {
+          commits++; assert.equal(phase, "uploaded part", "A withdrawn receipt repair cannot start a commit probe");
+          assert.equal(commits, 1, "Only the prior incomplete commit probe may run");
+          return new Response(JSON.stringify({code: "UPLOAD_INCOMPLETE"}), {status: 409});
+        }
+        assert.equal(init?.method, "PUT"); uploads++; armed = true;
+        return new Response(null, {status: 200});
+      }) as typeof fetch;
+      await assert.rejects(resumePendingImports(undefined, undefined, [pending.photoId], () => current), {name: "AbortError"});
+      assert.equal(writes, 1); assert.equal(commits, phase === "uploaded part" ? 1 : 0);
+      assert.equal(uploads, phase === "uploaded part" ? 1 : 0);
+      assert.notEqual((await pendingImports())[0].state, "committed");
+      assert.deepEqual(await get("staging", pending.stagingKeys[0]), bytes);
+    } finally {
+      IDBObjectStore.prototype.put = originalPut; globalThis.fetch = oldFetch;
+      Object.defineProperty(globalThis, "location", {configurable: true, value: oldLocation});
+      lockVault(); await clearAccount(owner);
+    }
+  });
+}
