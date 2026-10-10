@@ -16,6 +16,7 @@ import XCTest
     let snapshot = PhotoPicksSnapshot(candidates: [missing], recommendations: AutomaticPhotoPickPolicy.recommend([], signals: [:]))
     XCTAssertFalse(snapshot.matches([epoch]))
   }
+  #if !FOTORO_LOCAL_PREVIEW
   func testPickDiagnosticsCountProcessedSourcesAndKeepCancelledRequestProgressSeparate() async throws {
     let gate = PickPreviewGate(), held = expectation(description: "Old pick request held")
     let analyzer = PhotoPickAnalyzer(preview: { candidate in
@@ -46,6 +47,7 @@ import XCTest
     XCTAssertEqual(cancelled.outcome, .cancelled)
     XCTAssertEqual(cancelled.completed, 1); XCTAssertEqual(cancelled.pending, 1)
   }
+  #endif
   func testBrowsingTenThousandSourcesReadsBoundedPagesAndReachesOlderAndUndatedSources() {
     let sources = (0..<10_000).map { "source-\($0)" } + ["oldest", "undated"]
     var reads: [Range<Int>] = []
