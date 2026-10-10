@@ -10,4 +10,4 @@ export {
   verifyPayload,
   signPayload,
 } from "@fotoro/crypto";
-export { api } from "../exchange/api";
+export { api, ApiError, ApiTransportError } from "../exchange/api";

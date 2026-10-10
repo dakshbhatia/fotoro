@@ -6,7 +6,7 @@ import {renderToStaticMarkup} from "react-dom/server";
 import accounts from "../../../fixtures/accounts.json";
 import {ready, b64, unb64, utf8, wrapKey, unwrapKey, verifyPayload} from "@fotoro/crypto";
 import {addPasskey, passkeyLogin} from "../src/vault/session";
-import {configureVault, unlockVault, lockVault, requireVault} from "../src/vault/vault";
+import {configureVault, unlockVault, lockVault, requireVault, authenticatedApprovalAccount} from "../src/vault/vault";
 import {atomic, get, put} from "../src/exchange/cache";
 import {AccountAccess} from "../src/vault/AccountAccess";
 
@@ -328,6 +328,8 @@ test("authentication without PRF keeps Saved locked and offers password recovery
   globalThis.fetch = async path => response(path === "/v1/auth/login/options" ? options() : path === "/v1/auth/login/verify" ? session() : vault(0, false));
   await assert.rejects(passkeyLogin(), /PRF_UNAVAILABLE_USE_RECOVERY/);
   assert.throws(requireVault, /VAULT_LOCKED/); assert.equal(await get("settings", "last-account"), undefined);
+  assert.equal(authenticatedApprovalAccount(), accounts.accounts[0].accountId, "The authenticated account can explicitly request trusted-device unlock without caching keys");
+  lockVault(); assert.equal(authenticatedApprovalAccount(), undefined);
 }));
 
 test("a replaced server cookie cannot bind another account's vault to the selected passkey", async () => scoped(async credentials => {

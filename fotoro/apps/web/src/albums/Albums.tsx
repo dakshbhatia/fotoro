@@ -1,4 +1,4 @@
-import {albumDetailsSelection} from "./detail-selection";
+import {albumDetailsSelection, retainAlbumDetailsDraft} from "./detail-selection";
 import {AlbumActionQueue, bindAlbumAction} from "./action-queue";
 import {loadAlbumSearchPages} from "./search-loading";
 import {VirtualAlbumGrid} from "./VirtualAlbumGrid";
@@ -22,7 +22,7 @@ import type {IncomingAlbumIntent} from "./intent";
 import type {AlbumPhotoFactsContentV1} from "@fotoro/contracts/album-photo-facts";
 import type {OwnedPhotoSnapshot} from "../library/consumer-search";
 import {emptyPeopleFilter} from "../people/filter";
-import {albumPhotoGroups} from "./browse";
+import {albumPhotoGroups, albumPreviewNavigation} from "./browse";
 import {ownedAlbumDetails, type OwnedAlbumDetails} from "./details";
 import {albumReviewedPeople, sharedAlbumDetails, searchAlbumPhotos} from "./search";
 import {albumDateTag, albumMemberLabel} from "./presentation";
@@ -187,8 +187,9 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
       let next = await opened.loadPhotoPage(); loaded.push(...next.photos);
       while (next.hasMore && loaded.length < target) {next = await opened.loadPhotoPage(next.nextCursor); loaded.push(...next.photos);}
       if (!scope.current?.() || accessRef.current !== previous || !opened.current()) {opened.dispose(); return;}
-      clearDownload(); setDetailDraft(null);
+      clearDownload();
       const retained = previous.adoptRefresh(opened, loaded); adopted = true;
+      setDetailDraft(current => retainAlbumDetailsDraft(current, retained));
       setPhotos(retained);
       publishPage({hasMore: next.hasMore, nextCursor: next.nextCursor, photoCount: next.photoCount});
       setPreview(current => current ? retained.find(photo => photo.manifest.photoId === current.manifest.photoId) ?? null : null);
@@ -269,8 +270,8 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   });
   const memberIDs = access?.definition.members.map(member => member.card.accountId) ?? [];
   const photoCount = access?.overview.membership === "accepted" ? page.photoCount : access?.overview.photoCount ?? 0;
-  const previewDate = preview && albumDateTag(preview.metadata), previewIndex = preview ? shown.indexOf(preview) : -1;
-  const previewCopies = preview ? groups.find(group => group.copies.some(photo => photo.manifest.photoId === preview.manifest.photoId))?.copies ?? [] : [];
+  const previewDate = preview && albumDateTag(preview.metadata), previewNavigation = albumPreviewNavigation(groups, preview);
+  const previewCopies = previewNavigation.copies;
   const previewOwned = preview && ownedAlbumDetails(preview, currentOwnedPhotos?.() ?? null);
   const downloadTrip = () => action(async () => {
     const opened = accessRef.current; if (!opened || opened.overview.membership !== "accepted") return;
@@ -416,7 +417,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
             {factsState === "partial" && !page.hasMore && <p className="hint" role="status">New photo details are available. <button disabled={busy} onClick={() => void refresh()}>Refresh photos</button></p>}
             {busy && !photos.length && <p className="hint" role="status">Loading photos…</p>}
             {searching && !page.hasMore && factsState === "loading" && <p className="hint" role="status">Checking shared details…</p>}
-            {filtering && shown.length > 0 && !page.hasMore && !["loading", "error", "partial"].includes(factsState) && <p role="status">{shown.length} {shown.length === 1 ? "match" : "matches"}</p>}
+            {filtering && groups.length > 0 && !page.hasMore && !["loading", "error", "partial"].includes(factsState) && <p role="status">{groups.length} {groups.length === 1 ? "match" : "matches"}</p>}
             {searching && page.hasMore && <div className="hint" aria-label="Trip search coverage"><p role="status">{searchFailed ? "Search is incomplete. " : "Searching the whole trip… "}{photos.length} of {page.photoCount} photos checked.</p>{searchFailed && <button disabled={busy} onClick={() => setSearchRetry(value => value + 1)}>Retry search</button>}</div>}
             {showTripPicks && <TripPicks access={access} photos={shown} hasMore={page.hasMore} onClose={() => {setShowTripPicks(false); moreMenu.current?.querySelector("summary")?.focus();}} renderPhoto={photo => <AlbumImage access={access} photo={photo} onOpen={() => setPreview(photo)} />} />}
             <VirtualAlbumGrid groups={groups} resetKey={JSON.stringify([query, [...peopleFilter.ids].sort(), peopleFilter.mode, from, through, groupCopies])}>{group => {const photo = group.photo, shared = sharedAlbumDetails(photo, facts), date = albumDateTag(photo.metadata); return <div className="tile" key={photo.manifest.photoId}><AlbumImage access={access} photo={photo} onOpen={() => setPreview(photo)} /><div className="album-photo-tags" aria-label="Photo information"><span aria-label="Contributor">{contributor(photo.manifest.ownerAccountId)}</span>{date && <span aria-label={date.label}>{date.text}</span>}{shared?.people.length ? <span aria-label="Shared reviewed people">{shared.people.slice(0, 2).join(" · ")}{shared.people.length > 2 ? "…" : ""}</span> : shared?.location?.name && <span aria-label="Shared place">{shared.location.name}</span>}</div></div>;}}</VirtualAlbumGrid>
@@ -438,8 +439,8 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
         </>}
       </>}
     </div>
-    {preview && access && <section ref={previewPanel} className="album-preview" aria-label={preview.metadata.filename} tabIndex={-1} onKeyDown={event => {if (event.key === "ArrowLeft" && previewIndex > 0) {event.preventDefault(); setPreview(shown[previewIndex - 1]);} else if (event.key === "ArrowRight" && previewIndex >= 0 && previewIndex < shown.length - 1) {event.preventDefault(); setPreview(shown[previewIndex + 1]);}}}>
-      <header><button className="album-icon-button" onClick={() => setPreview(null)} aria-label="Back to album"><Icon kind="previous" /></button><p>{previewIndex + 1} of {shown.length}</p><div className="actions"><button className="album-icon-button" aria-label="Previous photo" disabled={previewIndex <= 0} onClick={() => setPreview(shown[previewIndex - 1])}><Icon kind="previous" /></button><button className="album-icon-button" aria-label="Next photo" disabled={previewIndex < 0 || previewIndex >= shown.length - 1} onClick={() => setPreview(shown[previewIndex + 1])}><Icon kind="next" /></button></div></header>
+    {preview && access && <section ref={previewPanel} className="album-preview" aria-label={preview.metadata.filename} tabIndex={-1} onKeyDown={event => {if (event.key === "ArrowLeft" && previewNavigation.previous) {event.preventDefault(); setPreview(previewNavigation.previous);} else if (event.key === "ArrowRight" && previewNavigation.next) {event.preventDefault(); setPreview(previewNavigation.next);}}}>
+      <header><button className="album-icon-button" onClick={() => setPreview(null)} aria-label="Back to album"><Icon kind="previous" /></button><p>{previewNavigation.index >= 0 ? `${previewNavigation.index + 1} of ${previewNavigation.count}` : "Photo outside current filters"}</p><div className="actions"><button className="album-icon-button" aria-label="Previous photo" disabled={!previewNavigation.previous} onClick={() => {if (previewNavigation.previous) setPreview(previewNavigation.previous);}}><Icon kind="previous" /></button><button className="album-icon-button" aria-label="Next photo" disabled={!previewNavigation.next} onClick={() => {if (previewNavigation.next) setPreview(previewNavigation.next);}}><Icon kind="next" /></button></div></header>
       <AlbumImage access={access} photo={preview} preview />
       <div className="album-photo-tags" aria-label="Photo information"><span aria-label="Contributor">{contributor(preview.manifest.ownerAccountId)}</span>{previewDate && <span aria-label={previewDate.label}>{previewDate.text}</span>}</div>
       <div className="album-photo-tags" aria-label="Shared photo details">{sharedAlbumDetails(preview, facts)?.people.map(name => <span key={name} aria-label="Shared reviewed person">{name}</span>)}{sharedAlbumDetails(preview, facts)?.location && <span aria-label="Shared photo location">{sharedAlbumDetails(preview, facts)?.location?.name || "Photo location shared"}</span>}</div>

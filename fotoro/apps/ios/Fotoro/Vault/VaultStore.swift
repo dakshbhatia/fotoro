@@ -32,7 +32,8 @@ enum UnlockMethod {
     self.api = api
     self.storeBundle = storeBundle ?? { bytes, id in try Keychain.write(bytes, id: id) }
   }
-  func unlock(_ method: UnlockMethod) async throws {
+  func unlock(_ method: UnlockMethod, validation: @MainActor () throws -> Void = {}) async throws {
+    try validation()
     guard let id = session.accountId else { throw FotoroError("Authenticate before unlocking") }
     let unlockingGeneration = generation
     var bytes: Data
@@ -88,6 +89,7 @@ enum UnlockMethod {
     guard session.accountId == id, generation == unlockingGeneration else {
       throw CancellationError()
     }
+    try validation()
     try storeBundle(bytes, id)
     generation = UUID()
     bundle = candidate

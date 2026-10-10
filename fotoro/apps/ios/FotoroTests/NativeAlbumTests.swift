@@ -2,6 +2,97 @@ import XCTest
 @testable import Fotoro
 
 final class NativeAlbumTests: XCTestCase {
+  @MainActor func testLiveTripRefreshBoundsSuddenGrowthAndLoadsTheRemainingPageOnDemand() async throws {
+    try await withAlbum { _, server, model in
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let reads = server.objectReads, coverage = model.searchCoverageID
+      try server.contribute(server.extraOwnedPhotos(count: 250))
+      try await model.refreshOpened()
+      XCTAssertEqual(model.items.count, 200, "A formerly complete small trip grows by at most one extra page per refresh")
+      XCTAssertEqual(server.objectReads, reads + 199)
+      XCTAssertEqual(model.opened?.overview.photoCount, 251)
+      XCTAssertNotNil(model.nextCursor); XCTAssertEqual(model.searchCoverageID, coverage)
+      try await model.loadMore()
+      XCTAssertEqual(model.items.count, 251); XCTAssertNil(model.nextCursor)
+      XCTAssertEqual(server.originalReads, 0)
+    }
+  }
+  @MainActor func testLiveTripRefreshRejectsIncompletePagesAndLateCancelledPublication() async throws {
+    for interruption in ["missing", "cursor", "cancel", "lock"] {
+      try await withAlbum { services, server, model in
+        try server.contribute(server.extraOwnedPhotos(count: 100))
+        try await model.refresh(); try await model.open(server.definition.albumId); try await model.loadMore()
+        let ids = model.items.map(\.id), coverage = model.searchCoverageID
+        if interruption == "missing" || interruption == "cursor" {
+          server.omitLastPageItem = interruption == "missing"; server.repeatPageCursor = interruption == "cursor"
+          do { try await model.refreshOpened(); XCTFail("Invalid traversal reported success") } catch {}
+          XCTAssertNil(model.opened); XCTAssertTrue(model.items.isEmpty)
+        } else {
+          let gate = AlbumFactsRequestGate(started: expectation(description: "Held refresh membership"))
+          defer { gate.release.signal() }; server.accessGate = gate
+          let refreshing = Task { try await model.refreshOpened() }
+          await fulfillment(of: [gate.started], timeout: 3)
+          if interruption == "cancel" { refreshing.cancel() } else { services.vault.lock() }
+          gate.release.signal()
+          do { try await refreshing.value; XCTFail("Late refresh reported success") } catch {}
+          if interruption == "cancel" {
+            XCTAssertEqual(model.items.map(\.id), ids); XCTAssertEqual(model.searchCoverageID, coverage)
+          } else { XCTAssertNil(model.opened); XCTAssertTrue(model.items.isEmpty) }
+        }
+        XCTAssertEqual(server.originalReads, 0)
+      }
+    }
+  }
+  @MainActor func testTripBrowseRefreshesReviewedFactsAndClearsOnLock() async throws {
+    try await withAlbum { services, server, model in
+      server.factsCapabilityStatus = 200
+      try server.setFacts(server.source, people: ["Mom"])
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let filter = NativeAlbumSearchFilter(query: "Mom")
+      for _ in 0..<20 { XCTAssertEqual(model.browse(filter: filter, groupDuplicates: true).items.count, 1) }
+      try server.setFacts(server.source, people: ["Dad"])
+      try await model.refresh()
+      XCTAssertTrue(model.browse(filter: filter, groupDuplicates: true).items.isEmpty)
+      services.vault.lock()
+      XCTAssertTrue(model.browse(filter: NativeAlbumSearchFilter(), groupDuplicates: true).items.isEmpty)
+    }
+  }
+  @MainActor func testLiveTripRefreshRetainsLoadedWindowAndCachedPreview() async throws {
+    try await withAlbum { _, server, model in
+      try server.contribute(server.extraOwnedPhotos(count: 120))
+      try await model.refresh(); try await model.open(server.definition.albumId); try await model.loadMore()
+      let priorIDs = model.items.map(\.id), coverage = model.searchCoverageID
+      let first = try XCTUnwrap(model.items.first), preview = try await model.preview(first)
+      let directory = model.directory, reads = server.objectReads
+      try server.contribute(server.extraOwnedPhotos(count: 10))
+      try await model.refresh(); try await model.refreshOpened()
+      XCTAssertEqual(model.items.count, 131)
+      XCTAssertEqual(Array(model.items.prefix(priorIDs.count)).map(\.id), priorIDs)
+      XCTAssertEqual(model.searchCoverageID, coverage)
+      XCTAssertEqual(model.directory, directory)
+      XCTAssertEqual(model.opened?.overview.photoCount, 131)
+      XCTAssertEqual(server.objectReads, reads + 10, "Unchanged metadata stays verified without downloading it again")
+      let retainedPreview = try await model.preview(first)
+      XCTAssertEqual(retainedPreview, preview)
+      XCTAssertEqual(server.objectReads, reads + 10)
+      XCTAssertEqual(server.originalReads, 0)
+    }
+  }
+  @MainActor func testLiveTripRefreshKeepsTransientWindowButClearsRevokedAccess() async throws {
+    try await withAlbum { _, server, model in
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let first = try XCTUnwrap(model.items.first), preview = try await model.preview(first)
+      let ids = model.items.map(\.id), directory = model.directory
+      server.detailStatus = 503
+      do { try await model.refreshOpened(); XCTFail("Transient refresh must remain retryable") } catch {}
+      XCTAssertEqual(model.items.map(\.id), ids); XCTAssertEqual(model.directory, directory)
+      XCTAssertNotNil(model.opened)
+      if let preview { XCTAssertTrue(FileManager.default.fileExists(atPath: preview.path)) }
+      server.detailStatus = nil; server.accessStatus = 403
+      do { try await model.refreshOpened(); XCTFail("Revoked refresh cannot retain media") } catch {}
+      XCTAssertNil(model.opened); XCTAssertNil(model.directory); XCTAssertTrue(model.items.isEmpty)
+    }
+  }
   func testSharedDetailsSelectionPreservesOnlyExistingCurrentDetails() {
     let location = PhotoLocationV1(latitude: 1.3, longitude: 103.8, source: "photos", name: "Singapore", accuracyMeters: 5)
     let newShare = NativeAlbumFactsSelection(people: ["Mom", "Dad"], location: location, shared: nil)
@@ -740,7 +831,7 @@ final class NativeAlbumTests: XCTestCase {
     }
   }
   @MainActor func testLateSharedDetailsReadCannotPublishAfterAccountLockOriginOrCancellation() async throws {
-    for change in ["account", "lock", "origin", "cancel"] {
+    for change in ["account", "lock", "origin", "endpoint", "cancel"] {
       let gate = AlbumFactsRequestGate(started: expectation(description: "Shared facts read " + change))
       defer { gate.release.signal() }
       try await withAlbum { services, server, model in
@@ -755,6 +846,7 @@ final class NativeAlbumTests: XCTestCase {
         }
         else if change == "lock" { services.vault.lock() }
         else if change == "origin" { services.api.baseURL = URL(string: "http://localhost:8798")! }
+        else if change == "endpoint" { services.api.baseURL = URL(string: "http://127.0.0.1:8798/changed")! }
         else { opening.cancel() }
         gate.release.signal()
         do { try await opening.value; XCTFail("Late shared details survived " + change) } catch {}
@@ -1270,7 +1362,8 @@ final class NativeAlbumTests: XCTestCase {
       XCTAssertEqual(requests.map { $0.entries.count }, [100, 1])
       let submitted = try requests.flatMap { try $0.entries.map { try NativeAlbumWire.signedBody(AlbumPhotoV1.self, $0, kind: "album-photo-v1").photoId } }
       XCTAssertEqual(Set(submitted), Set(photos.map(\.id)))
-      XCTAssertEqual(model.items.count, 100); try await model.loadMore(); XCTAssertEqual(model.items.count, 101)
+      XCTAssertEqual(model.items.count, 101, "Adding another batch preserves the already loaded window")
+      XCTAssertNil(model.nextCursor)
       XCTAssertFalse(model.hasPendingAddition)
     }
   }
@@ -1609,7 +1702,8 @@ private func factsAccess(_ server: AlbumTestServer) throws -> NativeAlbumAccess 
   let (_, key, _) = try NativeAlbumCrypto().open(server.signed, expectedID: server.definition.albumId,
     trustedOwner: server.cards[0], recipient: server.cards[0], bundle: server.bundles[0], trusted: [:])
   let context = NativeAlbumContext(photo: PhotoAccountAccess(account: server.cards[0].accountId, vault: UUID(), catalog: ObjectIdentifier(server)),
-    origin: "http://127.0.0.1:8798", apiOrigin: "http://localhost:4310", cards: Dictionary(uniqueKeysWithValues: server.cards.map { ($0.accountId, $0) }),
+    origin: "http://127.0.0.1:8798", apiOrigin: "http://localhost:4310", endpoint: "http://127.0.0.1:8798",
+    cards: Dictionary(uniqueKeysWithValues: server.cards.map { ($0.accountId, $0) }),
     token: nil, fixture: true, epoch: UUID())
   return NativeAlbumAccess(context: context, albumID: server.definition.albumId, signedDefinition: server.signed, definition: server.definition, key: key)
 }
@@ -1641,6 +1735,7 @@ private final class AlbumTestServer: @unchecked Sendable {
   var extraInbox: [AlbumOverviewV1] = []
   var hideInboxAlbum = false
   var accessStatus: Int?
+  var detailStatus: Int?
   var accessGate: AlbumFactsRequestGate?
   var accountMismatchCount = 0; var authAccountHeader: String?
   var factsCapabilityStatus = 404
@@ -1820,6 +1915,7 @@ private final class AlbumTestServer: @unchecked Sendable {
       return (extraObjects[request.url!.lastPathComponent] ?? objects[request.url!.lastPathComponent]).map { (200, $0) } ?? (404, Data())
     }
     if path == "/v1/albums/" + definition.albumId {
+      if let detailStatus { return (detailStatus, Data()) }
       let cursor = Int(URLComponents(url: request.url!, resolvingAgainstBaseURL: true)?.queryItems?.first(where: { $0.name == "cursor" })?.value ?? "0") ?? 0
       var slice = accepted && !ended ? Array(all.dropFirst(cursor).prefix(100)) : []
       if omitLastPageItem, cursor + slice.count == all.count, !slice.isEmpty { slice.removeLast() }

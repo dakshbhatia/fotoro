@@ -1,5 +1,12 @@
 import type {AlbumPhotoFactsContentV1} from "@fotoro/contracts/album-photo-facts";
 import type {OwnedAlbumDetails} from "./details";
+import type {Photo} from "../library/catalog";
+
+// Refresh admits the same Photo object only when its signed source is unchanged.
+// Unsaved choices survive new contributions, never a replaced source or private edit.
+export function retainAlbumDetailsDraft<T extends {photo: Photo; source: OwnedAlbumDetails}>(draft: T | null, retained: readonly Photo[]): T | null {
+  return draft && retained.includes(draft.photo) && draft.source.current() ? draft : null;
+}
 
 // Retain only details the contributor already shared and still owns unchanged.
 // New names, renamed labels and changed coordinates require an explicit choice.

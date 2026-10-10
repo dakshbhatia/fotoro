@@ -204,6 +204,8 @@ struct PhotoSyncView: View {
                   }
                 }
                 if !services.session.fixture {
+                  DeviceApprovalView(services: services, requesting: false,
+                    onAuthenticationTask: { authenticationTask = $0 })
                   DisclosureGroup("Passkey") {
                     Button("Add a passkey", systemImage: "person.badge.key") {
                       let operation = UUID()

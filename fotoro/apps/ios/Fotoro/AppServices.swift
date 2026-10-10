@@ -766,7 +766,7 @@ enum ReviewedPhotosBackupPolicy {
       self?.selectedGrant = nil
       self?.auth.pending = nil
       self?.auth.cancelStart()
-      self?.deviceTrust.pending = nil
+      self?.deviceTrust.cancel()
       ImageCache.shared.removeAll()
     }
     resetConsumerSyncObservation()
@@ -1899,6 +1899,7 @@ enum ReviewedPhotosBackupPolicy {
     var value = try annotations.ledger.current(photo: photo, bundle: bundle, card: card) ?? PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
     let priorPeopleFacts = (value.facts ?? []).filter(PhotoPeopleFacts.isReserved)
     let priorFavorite = value.favorite
+    let priorLocation = value.location
     var hasCompletedDerivedResult = false
     if value.location == nil, RecentPhotosPolicy.canRead(automaticPhotosPermission),
       source.originalSha256 == photo.metadata.originalSha256,
@@ -1951,7 +1952,7 @@ enum ReviewedPhotosBackupPolicy {
     guard !derivedOnly || hasCompletedDerivedResult else { return }
     try annotations.ledger.edit(value, photo: photo, bundle: bundle, card: card)
     photoAnnotations[photo.id] = value
-    if priorFavorite != value.favorite
+    if priorFavorite != value.favorite || priorLocation != value.location
       || (labelsChanged && priorPeopleFacts != (value.facts ?? []).filter(PhotoPeopleFacts.isReserved)) {
       consumerCatalogGeneration &+= 1
     }

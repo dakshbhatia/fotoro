@@ -144,11 +144,14 @@ struct NativeAlbumView: View {
       + String(scenePhase == .background)
   }
   private var wantsWholeTripSearch: Bool { familyFilter.hasFilters || showFamilyFilters }
+  private var browseSnapshot: NativeAlbumSearchSnapshot {
+    model.browse(filter: familyFilter, groupDuplicates: groupDuplicates)
+  }
   private var filteredItems: [NativeAlbumItem] {
-    model.items.filter { familyFilter.includes($0, facts: model.sharedFacts[$0.id]) }
+    browseSnapshot.items
   }
   private var photoGroups: [NativeAlbumDuplicateGroup] {
-    groupDuplicates ? NativeAlbumSearch.groups(filteredItems) : filteredItems.map { NativeAlbumDuplicateGroup(copies: [$0]) }
+    browseSnapshot.groups
   }
   private var contacts: [AccountCardV1] {
     services.session.pinnedCards.values.filter { $0.accountId != services.session.accountId }
@@ -216,7 +219,7 @@ struct NativeAlbumView: View {
             try await refreshAlbums()
             if let openedID, model.opened?.id == openedID,
               let fresh = model.albums.first(where: { $0.id == openedID }), fresh.overview.photoCount != count {
-              try await model.open(openedID)
+              try await model.refreshOpened()
             }
           }
         }
@@ -643,7 +646,7 @@ struct NativeAlbumView: View {
       else { resumeState.intent = nil; try await prepareInvitation() }
       resumeState.intent = nil
     } else {
-      if let openedID { try await model.open(openedID) }
+      if let openedID, model.opened?.id == openedID { try await model.refreshOpened() }
       try await prepareInvitation()
     }
   }

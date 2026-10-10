@@ -45,6 +45,7 @@ struct AccountView: View {
   @State private var password = ""
   @State private var page: AccountEntryPage
   @State private var passwordExpanded = false
+  @State private var trustedDeviceHandoff = false
   @State private var apiURL = ""
   @FocusState private var passwordFocused: Bool
   init(services: AppServices, enterPassword: Bool = false, reauthenticate: Bool = false,
@@ -86,6 +87,14 @@ struct AccountView: View {
             }.padding(.top, 12)
           }.font(.body)
           backButton { services.auth.cancelStart(); services.error = nil; page = defaultPage }
+        } else if trustedDeviceHandoff || (services.session.isSignedIn && !services.session.fixture && !services.vault.isUnlocked
+          && !services.vault.canUnlockLocally && defaultPage != .remembered && page != .password) {
+          Text("Open your Fotoro").font(.largeTitle.weight(.semibold))
+          AccountIdentityView(session: services.session, unlocked: false)
+          DeviceApprovalView(services: services, requesting: true,
+            onReady: { try await finishSignIn() }, onAuthenticationTask: onAuthenticationTask,
+            onCompletionChange: { trustedDeviceHandoff = $0 })
+          secondaryAction("Use Fotoro password", identifier: "account.choosePassword", action: choosePassword)
         } else if page == .remembered && defaultPage == .remembered {
           Text("Welcome back").font(.largeTitle.weight(.semibold))
           primaryAction("Open Fotoro", identifier: "account.unlock") {
@@ -265,5 +274,134 @@ struct FotoroPasswordView: View {
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         .onChange(of: password.id) { copied = false }
     }
+  }
+}
+
+// Requests contain a public one-time box key; the receiving private key stays in memory.
+struct DeviceApprovalView: View {
+  @Bindable var services: AppServices
+  let requesting: Bool
+  var onReady: @MainActor () async throws -> Void = {}
+  var onAuthenticationTask: (Task<Void, Never>?) -> Void = { _ in }
+  var onCompletionChange: (Bool) -> Void = { _ in }
+  @Environment(\.scenePhase) private var scenePhase
+  @State private var completedHandoff: DeviceTrustAccess?
+  @State private var input = ""
+  @State private var reviewed: DeviceChallengeV1?
+  @State private var confirming = false
+  @State private var status = ""
+  @State private var task: Task<Void, Never>?
+  @State private var action = UUID()
+  private var disabled: Bool { services.busy || services.deviceTrust.inProgress }
+  var body: some View {
+    DisclosureGroup(requesting ? "Use another device" : "Approve another device") {
+      VStack(alignment: .leading, spacing: 16) {
+        if requesting {
+          Text("Request approval, then copy the public request to a device where this same Fotoro is open. Requests expire after five minutes.")
+            .font(.footnote).foregroundStyle(.secondary)
+          if let json = services.deviceTrust.challengeJSON, let pending = services.deviceTrust.pending {
+            Text("Expires \(Wire.parseDate(pending.challenge.expiresAt)!, style: .time)")
+              .font(.footnote).foregroundStyle(.secondary)
+            Button("Copy public request", systemImage: "doc.on.doc") { UIPasteboard.general.string = json }
+              .accessibilityIdentifier("account.copyDeviceRequest")
+            Button("I've approved this device", systemImage: "checkmark.shield") {
+              perform {
+                onCompletionChange(true)
+                defer { onCompletionChange(false) }
+                try await services.deviceTrust.complete()
+                try Task.checkCancellation()
+                guard let account = services.session.accountId, let device = services.session.deviceId,
+                  let token = services.session.bearerToken else { throw CancellationError() }
+                completedHandoff = DeviceTrustAccess(account: account, device: device, token: token,
+                  expires: services.session.expiresAt, vault: services.vault.generation, unlocked: true,
+                  origin: services.api.origin, server: services.api.baseURL)
+                try await onReady()
+              }
+            }.disabled(disabled).accessibilityIdentifier("account.completeDeviceApproval")
+            Button("Cancel request", role: .cancel) { cancel() }
+              .accessibilityIdentifier("account.cancelDeviceApproval")
+          } else {
+            Button("Request approval", systemImage: "laptopcomputer.and.iphone") {
+              perform { try await services.deviceTrust.begin() }
+            }.disabled(disabled).accessibilityIdentifier("account.requestDeviceApproval")
+          }
+        } else {
+          Text("Paste the public request from your other device. Approve only a request you just created for this Fotoro.")
+            .font(.footnote).foregroundStyle(.secondary)
+          TextField("Public approval request", text: $input, axis: .vertical)
+            .textInputAutocapitalization(.never).autocorrectionDisabled()
+            .lineLimit(3...6).disabled(disabled).accessibilityIdentifier("account.deviceRequest")
+          Button("Review request") {
+            do { reviewed = try services.deviceTrust.review(input); status = "" }
+            catch { reviewed = nil; services.error = "This request is expired or does not match your Fotoro." }
+          }.disabled(disabled || input.isEmpty).accessibilityIdentifier("account.reviewDeviceRequest")
+          if let reviewed {
+            Text("Device \(reviewed.deviceId)").font(.footnote.monospaced()).textSelection(.enabled)
+            Text("Expires \(Wire.parseDate(reviewed.expiresAt)!, style: .time)").font(.footnote)
+            Button("Approve this device", systemImage: "checkmark.shield") { confirming = true }
+              .disabled(disabled).accessibilityIdentifier("account.approveDevice")
+          }
+          if !status.isEmpty { Text(status).font(.footnote).foregroundStyle(.secondary) }
+        }
+      }.padding(.top, 12)
+    }
+    .confirmationDialog("Allow this device to open your saved photos?", isPresented: $confirming, titleVisibility: .visible) {
+      Button("Approve this device") {
+        guard let reviewed, let json = try? String(data: Wire.encode(reviewed), encoding: .utf8) else { return }
+        perform {
+          try await services.deviceTrust.approve(json)
+          input = ""; self.reviewed = nil
+          status = "Approved. On your other device, finish opening Fotoro."
+        }
+      }
+      Button("Cancel", role: .cancel) {}
+    }
+    .onChange(of: input) { reviewed = nil; confirming = false; if !input.isEmpty { status = "" } }
+    .onChange(of: services.session.accountId) { cancel() }
+    .onChange(of: services.session.deviceId) { cancel() }
+    .onChange(of: services.session.fixture) { cancel() }
+    .onChange(of: services.session.expiresAt) { cancel() }
+    .onChange(of: services.session.bearerToken) { cancel() }
+    .onChange(of: services.api.baseURL) { cancel() }
+    .onChange(of: services.vault.generation) {
+      // Completion changes generation before its onReady callback; let that action finish.
+      if !services.vault.isUnlocked || task == nil { cancel() }
+    }
+    .task(id: reviewed?.enrollmentId) {
+      guard let reviewed, let expiry = Wire.parseDate(reviewed.expiresAt) else { return }
+      do { try await Task.sleep(for: .seconds(max(0, expiry.timeIntervalSinceNow))) } catch { return }
+      self.reviewed = nil; confirming = false
+    }
+    .onChange(of: scenePhase) { if scenePhase == .background { cancel() } }
+    .onDisappear {
+      // Parent keeps this view mounted through unlock. A successful same-context
+      // onReady handoff may then dismiss it without cancelling its own task.
+      if !handoffIsCurrent { cancel() }
+    }
+  }
+  private var handoffIsCurrent: Bool {
+    guard requesting, let expected = completedHandoff, task?.isCancelled == false,
+      scenePhase != .background, services.session.isSignedIn, !services.session.fixture else { return false }
+    return services.session.accountId == expected.account && services.session.deviceId == expected.device
+      && services.session.bearerToken == expected.token && services.session.expiresAt == expected.expires
+      && services.vault.isUnlocked && services.vault.generation == expected.vault
+      && services.api.origin == expected.origin && services.api.baseURL == expected.server
+  }
+  private func perform(_ operation: @escaping @MainActor () async throws -> Void) {
+    guard !disabled else { return }
+    let id = UUID(); action = id; completedHandoff = nil
+    task = services.run(phase: .auth) {
+      defer {
+        if action == id { task = nil; onAuthenticationTask(nil) }
+      }
+      try await operation()
+    }
+    onAuthenticationTask(task)
+  }
+  private func cancel() {
+    action = UUID(); completedHandoff = nil
+    task?.cancel(); task = nil; onAuthenticationTask(nil)
+    services.deviceTrust.cancel()
+    input = ""; reviewed = nil; confirming = false; status = ""
   }
 }
