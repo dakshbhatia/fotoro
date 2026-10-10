@@ -982,6 +982,9 @@ private struct NativeAlbumPhotoView: View {
   let model: NativeAlbumService
   let item: NativeAlbumItem
   @State private var preview: URL?
+  @State private var previewUnavailable = false
+  @State private var previewRetry = 0
+  @State private var loadedPreviewIdentity: PreviewIdentity?
   @State private var player: AVPlayer?
   @State private var motionExports: [URL] = []
   @State private var exports: [URL] = []
@@ -993,18 +996,40 @@ private struct NativeAlbumPhotoView: View {
   @State private var showDetailsEditor = false
   @Environment(\.scenePhase) private var scenePhase
   @Environment(\.dismiss) private var dismiss
+  private struct PreviewIdentity: Equatable {
+    let id: String
+    let signature: String
+    let access: PhotoAccountAccess?
+    let retry: Int
+    let foreground: Bool
+  }
+  private var previewIdentity: PreviewIdentity {
+    PreviewIdentity(id: item.id, signature: item.signedManifest.signature,
+      access: model.currentOpenedPhotoAccess, retry: previewRetry, foreground: scenePhase != .background)
+  }
   private var originalIdentity: String {
     item.photo.metadata.originalSha256 + "|\(item.photo.metadata.originalBytes)|" + item.photo.metadata.mediaType
   }
   var body: some View {
+    let current = previewIdentity
     NavigationStack {
       VStack {
         if let feedback { Text(feedback).foregroundStyle(.secondary) }
-        if let player { VideoPlayer(player: player) }
+        if current.access != nil, let player { VideoPlayer(player: player) }
         else {
-          LazyImage(url: preview) { state in
-            if let image = state.image { image.resizable().scaledToFit() }
-            else { ProgressView() }
+          LazyImage(url: loadedPreviewIdentity == current && current.access != nil ? preview : nil) { state in
+            if loadedPreviewIdentity == current, current.access != nil, let image = state.image {
+              image.resizable().scaledToFit()
+            } else if current.access == nil || (loadedPreviewIdentity == current && (previewUnavailable || state.error != nil)) {
+              VStack(spacing: 12) {
+                Label("Preview unavailable", systemImage: "icloud.slash")
+                Button("Try again") {
+                  guard current.access != nil, current.foreground, previewIdentity == current else { return }
+                  feedback = nil; previewRetry += 1
+                }.frame(minHeight: 44).disabled(current.access == nil || !current.foreground)
+                  .accessibilityIdentifier("albums.photo.preview.retry")
+              }.accessibilityIdentifier("albums.photo.preview.unavailable")
+            } else { ProgressView() }
           }.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         if let date = Wire.parseDate(item.photo.metadata.sourceDate) {
@@ -1023,24 +1048,40 @@ private struct NativeAlbumPhotoView: View {
         }
         if CameraMedia.isMotion(item.photo.metadata.mediaType) {
           ToolbarItem(placement: .bottomBar) { Button(item.photo.metadata.mediaType == CameraMedia.liveType ? "Play Live Photo" : "Play video", systemImage: "play.fill") {
-            operation?.cancel(); loading = true
+            guard let access = model.currentOpenedPhotoAccess else { return }
+            operation?.cancel(); cleanupMotion(); loading = true
             operation = Task {
-              defer { loading = false; operation = nil }
+              var pending: [URL] = []
+              defer { removeExports(pending); loading = false; operation = nil }
               do {
-                let urls = try await model.export(item); try Task.checkCancellation()
-                motionExports = urls
-                let movie = item.photo.metadata.mediaType == CameraMedia.liveType ? urls[1] : urls[0]
+                pending = try await model.export(item); try Task.checkCancellation()
+                guard scenePhase == .active, model.currentOpenedPhotoAccess == access,
+                  pending.count == (item.photo.metadata.mediaType == CameraMedia.liveType ? 2 : 1) else { throw CancellationError() }
+                motionExports = pending; pending = []
+                let movie = item.photo.metadata.mediaType == CameraMedia.liveType ? motionExports[1] : motionExports[0]
                 player = AVPlayer(url: movie); player?.play()
-              } catch is CancellationError {} catch { feedback = error.localizedDescription }
+              } catch is CancellationError {} catch {
+                guard !Task.isCancelled, scenePhase == .active, model.currentOpenedPhotoAccess == access else { return }
+                feedback = error.localizedDescription
+              }
             }
           }.disabled(loading) }
         }
         ToolbarItem(placement: .bottomBar) { Button("Share original", systemImage: "square.and.arrow.up") {
+          guard let access = model.currentOpenedPhotoAccess else { return }
           operation?.cancel(); loading = true
           operation = Task {
-            defer { loading = false; operation = nil }
-            do { exports = try await model.export(item); try Task.checkCancellation(); showShare = true }
-            catch is CancellationError {} catch { feedback = error.localizedDescription }
+            var pending: [URL] = []
+            defer { removeExports(pending); loading = false; operation = nil }
+            do {
+              pending = try await model.export(item); try Task.checkCancellation()
+              guard scenePhase == .active, model.currentOpenedPhotoAccess == access else { throw CancellationError() }
+              cleanup(); exports = pending; pending = []; showShare = true
+            }
+            catch is CancellationError {} catch {
+              guard !Task.isCancelled, scenePhase == .active, model.currentOpenedPhotoAccess == access else { return }
+              feedback = error.localizedDescription
+            }
           }
         }.disabled(loading) }
         ToolbarItem(placement: .bottomBar) {
@@ -1061,24 +1102,47 @@ private struct NativeAlbumPhotoView: View {
             .accessibilityIdentifier("albums.photo.saveToPhotos")
         }
       }
-      .task(id: item.id) { do { preview = try await model.preview(item) } catch is CancellationError {} catch { feedback = error.localizedDescription } }
+      .task(id: current) {
+        preview = nil; previewUnavailable = false; loadedPreviewIdentity = current
+        guard current.access != nil, current.foreground else { return }
+        do {
+          let loaded = try await model.preview(item, reload: current.retry > 0)
+          try Task.checkCancellation()
+          guard previewIdentity == current else { return }
+          preview = loaded; previewUnavailable = loaded == nil
+        } catch is CancellationError {
+          guard !Task.isCancelled, previewIdentity == current else { return }
+          previewUnavailable = true
+        } catch {
+          guard !Task.isCancelled, previewIdentity == current else { return }
+          previewUnavailable = true; feedback = error.localizedDescription
+        }
+      }
       .sheet(isPresented: $showShare, onDismiss: cleanup) { OriginalShareSheet(urls: exports) { _ in cleanup() } }
       .sheet(isPresented: $showDetailsEditor) { NativeAlbumSharedDetailsEditor(model: model, item: item) }
+      .onChange(of: model.currentOpenedPhotoAccess) { _, access in
+        if access == nil { operation?.cancel(); cleanup(); cleanupMotion(); preview = nil }
+      }
       .onChange(of: scenePhase) { _, phase in
         if phase == .inactive { player?.pause() }
         if phase == .background { operation?.cancel(); cleanup(); cleanupMotion(); preview = nil; dismiss() }
       }
-      .onDisappear { operation?.cancel(); cleanup(); cleanupMotion(); preview = nil }
+      .onDisappear { operation?.cancel(); cleanup(); cleanupMotion(); preview = nil; loadedPreviewIdentity = nil }
     }
   }
   private func cleanupMotion() {
     player?.pause(); player = nil
-    for url in motionExports { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    removeExports(motionExports)
     motionExports = []
   }
   private func cleanup() {
-    for url in exports { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    removeExports(exports)
     exports = []; showShare = false
+  }
+  private func removeExports(_ urls: [URL]) {
+    for directory in Set(urls.map { $0.deletingLastPathComponent() }) {
+      try? FileManager.default.removeItem(at: directory)
+    }
   }
 }
 

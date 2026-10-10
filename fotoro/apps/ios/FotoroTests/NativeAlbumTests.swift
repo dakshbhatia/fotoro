@@ -51,6 +51,42 @@ final class NativeAlbumTests: XCTestCase {
       XCTAssertNil(model.opened); XCTAssertNil(model.directory)
     }
   }
+  @MainActor func testTripPreviewRetryReplacesCorruptCacheAndPreservesTransientAccess() async throws {
+    try await withAlbum { _, server, model in
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let item = try XCTUnwrap(model.items.first)
+      let preview = try await model.preview(item)
+      let cached = try XCTUnwrap(preview)
+      let expected = try Data(contentsOf: cached), reads = server.objectReads
+      try Data("corrupt local preview".utf8).write(to: cached)
+      server.accessStatus = 503
+      do { _ = try await model.preview(item, reload: true); XCTFail("Offline retry cannot publish a preview") } catch {}
+      XCTAssertNotNil(model.opened)
+      XCTAssertEqual(server.objectReads, reads)
+      XCTAssertTrue(FileManager.default.fileExists(atPath: cached.path), "Failed admission cannot evict cached resources")
+      server.accessStatus = nil
+      let reloaded = try await model.preview(item, reload: true)
+      let refreshed = try XCTUnwrap(reloaded)
+      XCTAssertEqual(try Data(contentsOf: refreshed), expected)
+      XCTAssertEqual(server.objectReads, reads + 1)
+      XCTAssertEqual(server.originalReads, 0)
+      server.accessStatus = 403
+      do { _ = try await model.preview(item, reload: true); XCTFail("Revoked preview cannot be retried") } catch {}
+      XCTAssertNil(model.opened); XCTAssertNil(model.directory)
+    }
+  }
+  @MainActor func testTripExportFailureRemovesIncompleteResourceDirectory() async throws {
+    try await withAlbum { _, server, model in
+      server.included = false
+      try server.contribute(server.extraOwnedPhotos(count: 1, originalBytes: Data("invalid live archive".utf8),
+        mediaType: CameraMedia.liveType))
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let item = try XCTUnwrap(model.items.first)
+      do { _ = try await model.export(item); XCTFail("Incomplete live resources cannot be exported") } catch {}
+      let directory = try XCTUnwrap(model.directory)
+      XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: directory.path).contains { $0.hasPrefix("original-") })
+    }
+  }
   func testTripPickScopeFiltersMotionAndDuplicatesBeforeBoundingUniqueImages() throws {
     let server = try AlbumTestServer()
     func item(_ index: Int, type: String = "image/jpeg", digest: String? = nil) -> NativeAlbumItem {
@@ -848,6 +884,7 @@ final class NativeAlbumTests: XCTestCase {
         var accessReadsAtPrompt = server.accessReads
         var exports: [URL] = [], permissionRequests = 0, creations = 0
         try await model.saveToPhotos(item, requestAccess: {
+          XCTAssertEqual(server.originalReads, 0, "Permission must precede original download")
           permissionRequests += 1; accessReadsAtPrompt = server.accessReads; return .authorized
         },
           restore: { urls, metadata in
@@ -922,6 +959,7 @@ final class NativeAlbumTests: XCTestCase {
           XCTFail("Withdrawn \(withdrawal) cannot admit PhotoKit creation")
         } catch {}
         XCTAssertEqual(creations, 0)
+        XCTAssertEqual(server.originalReads, 0, "Rejected \(withdrawal) must not download an original")
         let after = Set(try FileManager.default.contentsOfDirectory(atPath: temporary.path).filter { $0.hasPrefix("fotoro-share-") })
         XCTAssertEqual(after, before, "Rejected \(withdrawal) must clean its protected export")
       }

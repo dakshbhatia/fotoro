@@ -142,6 +142,46 @@ final class CameraMediaTests: XCTestCase {
   private func resource(_ name: String, _ ext: String) throws -> Data {
     try Data(contentsOf: XCTUnwrap(Bundle(for: Self.self).url(forResource: name, withExtension: ext)))
   }
+  @MainActor func testOriginalRestoreDoesNotAcquireOriginalWhenPermissionIsDenied() async throws {
+    let bytes = try resource("neutral-a", "png")
+    let metadata = PhotoMetadataV1(filename: "original.png", mediaType: "image/png", sourceDate: Wire.date(),
+      dateSource: "photos", originalBytes: bytes.count, originalSha256: bytes.digest, representationKeys: [:])
+    var reads = 0
+    do {
+      try await CameraMedia.restoreOriginalToPhotos(metadata: metadata, check: {}, requestAccess: { .denied },
+        original: { reads += 1; throw FotoroError("Unexpected original read") },
+        restore: { _, _ in XCTFail("Denied permission cannot create a Photos asset") })
+      XCTFail("Denied permission cannot succeed")
+    } catch {}
+    XCTAssertEqual(reads, 0)
+  }
+  @MainActor func testOriginalRestoreCancellationKeepsResourcesUntilCreationSettles() async throws {
+    let bytes = try resource("neutral-a", "png")
+    let metadata = PhotoMetadataV1(filename: "original.png", mediaType: "image/png", sourceDate: Wire.date(),
+      dateSource: "photos", originalBytes: bytes.count, originalSha256: bytes.digest, representationKeys: [:])
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("fotoro-share-" + Wire.id())
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let url = folder.appendingPathComponent("original")
+    try bytes.write(to: url)
+    let gate = MediaReadGate()
+    var exports: [URL] = []
+    let task = Task {
+      try await CameraMedia.restoreOriginalToPhotos(metadata: metadata, check: { try Task.checkCancellation() },
+        requestAccess: { .authorized }, original: { url }, restore: { urls, _ in
+          exports = urls
+          await gate.wait()
+          XCTAssertEqual(try urls.map { try Data(contentsOf: $0) }, [bytes], "PhotoKit owns resources until completion")
+        })
+    }
+    while !(await gate.entered) { await Task.yield() }
+    task.cancel()
+    XCTAssertFalse(exports.isEmpty)
+    XCTAssertTrue(exports.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+    await gate.revokeAndOpen()
+    do { try await task.value; XCTFail("Canceled creation cannot publish success") } catch is CancellationError {}
+    XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))
+  }
   func testCrossLanguageArchivePreservesBothCompleteResourcesAndRejectsCorruption() throws {
     let archive = try resource("camera-live", "fotoro-live")
     let pair = try CameraMedia.decodeLivePhoto(archive)

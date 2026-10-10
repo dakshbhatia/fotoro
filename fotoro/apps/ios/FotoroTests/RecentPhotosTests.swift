@@ -6,6 +6,78 @@ import XCTest
 @testable import Fotoro
 
 final class RecentPhotosTests: XCTestCase {
+  @MainActor func testThumbnailPublicationValidatesOnlyItsSourceAndRejectsWithdrawalBeforeRefresh() {
+    var permission = PHAuthorizationStatus.authorized
+    let source = RecentPhotoSource(id: "visible", revision: "current")
+    var revision: String? = source.revision
+    var reads: [[String]] = []
+    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in [] },
+      sourceRevisions: { ids in reads.append(ids); return revision.map { [source.id: $0] } ?? [:] })
+    defer { store.pauseAnalysis() }
+    let generation = store.thumbnailGeneration
+    XCTAssertTrue(store.canPublishThumbnail(source: source, generation: generation))
+    XCTAssertEqual(reads, [[source.id]], "Publication fetches exactly one current source, not the gallery")
+    revision = "edited"
+    XCTAssertFalse(store.canPublishThumbnail(source: source, generation: generation), "Edits must reject callbacks before an observer refresh")
+    revision = nil
+    XCTAssertFalse(store.canPublishThumbnail(source: source, generation: generation), "Removed or narrowed-out sources must reject callbacks")
+    let readCount = reads.count
+    permission = .denied
+    XCTAssertFalse(store.canPublishThumbnail(source: source, generation: generation))
+    XCTAssertEqual(reads.count, readCount, "Denied callbacks must not fetch Photos metadata")
+    permission = .authorized; revision = source.revision
+    XCTAssertFalse(store.canPublishThumbnail(source: source, generation: generation), "Returning access cannot revive the old request generation")
+    XCTAssertEqual(reads.count, readCount, "Stale generations must not fetch source metadata")
+    XCTAssertTrue(store.canPublishThumbnail(source: source, generation: store.thumbnailGeneration))
+    permission = .limited
+    let fullAccessGeneration = store.thumbnailGeneration
+    XCTAssertFalse(store.canPublishThumbnail(source: source, generation: fullAccessGeneration))
+    XCTAssertTrue(store.canPublishThumbnail(source: source, generation: store.thumbnailGeneration), "A fresh limited-access request can publish an included source")
+  }
+  @MainActor func testThumbnailAuthorizationInvalidationIsIdempotentAcrossDeniedAndRestrictedReads() {
+    var permission = PHAuthorizationStatus.authorized
+    let source = RecentPhotoSource(id: "visible", revision: "current")
+    var sourceReads = 0
+    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in [] },
+      sourceRevisions: { _ in sourceReads += 1; return [source.id: source.revision] })
+    defer { store.pauseAnalysis() }
+    let target = CGSize(width: 384, height: 384)
+    XCTAssertTrue(store.canPublishThumbnail(source: source, generation: store.thumbnailGeneration))
+    var previous = store.thumbnailGeneration
+    for next in [PHAuthorizationStatus.denied, .restricted] {
+      permission = next
+      XCTAssertFalse(store.canPublishThumbnail(source: source, generation: previous))
+      let withdrawn = store.thumbnailGeneration
+      XCTAssertNotEqual(withdrawn, previous)
+      for _ in 0..<50 {
+        XCTAssertFalse(store.canPublishThumbnail(source: source, generation: withdrawn))
+        XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true))
+        XCTAssertEqual(store.thumbnailGeneration, withdrawn, "Repeated unreadable checks must not restart image tasks")
+      }
+      previous = withdrawn
+    }
+    XCTAssertEqual(sourceReads, 1, "Unreadable transitions must not fetch source revisions")
+    permission = .authorized
+    XCTAssertFalse(store.canPublishThumbnail(source: source, generation: previous))
+    let restored = store.thumbnailGeneration
+    XCTAssertNotEqual(restored, previous)
+    XCTAssertTrue(store.canPublishThumbnail(source: source, generation: restored))
+    XCTAssertTrue(store.canPublishThumbnail(source: source, generation: restored))
+    XCTAssertEqual(store.thumbnailGeneration, restored)
+  }
+  @MainActor func testThumbnailPublicationRejectsAuthorizationChangedDuringSourceValidation() {
+    var permission = PHAuthorizationStatus.authorized
+    let source = RecentPhotoSource(id: "visible", revision: "current")
+    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in [] },
+      sourceRevisions: { _ in permission = .limited; return [source.id: source.revision] })
+    defer { store.pauseAnalysis() }
+    let generation = store.thumbnailGeneration
+    XCTAssertFalse(store.canPublishThumbnail(source: source, generation: generation))
+    XCTAssertNotEqual(store.thumbnailGeneration, generation, "A permission transition during validation must fence every old callback")
+    let limited = store.thumbnailGeneration
+    XCTAssertFalse(store.canPublishThumbnail(source: source, generation: generation))
+    XCTAssertEqual(store.thumbnailGeneration, limited, "The lookup transition is recorded rather than invalidated again")
+  }
   @MainActor func testThumbnailCacheReusesOnlyMatchingPreviewAndRejectsWithdrawnAccessAndOldCallbacks() {
     var permission = PHAuthorizationStatus.authorized
     let source = RecentPhotoSource(id: "photo", revision: "current")

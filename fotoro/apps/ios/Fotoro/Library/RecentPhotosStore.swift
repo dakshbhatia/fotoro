@@ -221,7 +221,7 @@ struct PhotoPreviewProgress {
   @ObservationIgnored private var browseInteractionActive = false
   @ObservationIgnored private var idleAnalysisTask: Task<Void, Never>?
   @ObservationIgnored private var explicitAnalysisRequests: Set<UUID> = []
-  @ObservationIgnored private(set) var thumbnailGeneration = UUID()
+  private(set) var thumbnailGeneration = UUID()
   @ObservationIgnored private var thumbnailAuthorization: PHAuthorizationStatus?
   @ObservationIgnored private var thumbnailSources: [NSString: RecentPhotoSource] = [:]
   @ObservationIgnored private let thumbnails: NSCache<NSString, UIImage> = {
@@ -556,6 +556,20 @@ struct PhotoPreviewProgress {
       let image = thumbnails.object(forKey: key), thumbnailSources[key] == source else { return nil }
     return image
   }
+  // Validate at publication, including withdrawal before a Photos change observer refreshes.
+  func canPublishThumbnail(source: RecentPhotoSource, generation: UUID) -> Bool {
+    guard thumbnailAccessAllowed(), generation == thumbnailGeneration else { return false }
+    let permission = authorization()
+    guard permission == thumbnailAuthorization, RecentPhotosPolicy.canRead(permission) else {
+      _ = recordThumbnailAuthorization(permission); return false
+    }
+    let revision = sourceRevisions([source.id])[source.id]
+    let afterValidation = authorization()
+    guard afterValidation == permission else {
+      _ = recordThumbnailAuthorization(afterValidation); return false
+    }
+    return thumbnailAccessAllowed() && generation == thumbnailGeneration && revision == source.revision
+  }
   // Call only for a completed, nondegraded thumbnail, using the generation captured before its request.
   func cacheThumbnail(_ image: UIImage, for source: RecentPhotoSource, targetSize: CGSize,
     networkAllowed: Bool, generation: UUID) {
@@ -579,11 +593,17 @@ struct PhotoPreviewProgress {
     return "\(source.id.utf8.count):\(source.id)\(source.revision.utf8.count):\(source.revision)|\(target.width)|\(target.height)|\(networkAllowed)" as NSString
   }
   private func thumbnailAccessAllowed() -> Bool {
-    let permission = authorization()
-    guard RecentPhotosPolicy.canRead(permission) else { clearThumbnails(); return false }
-    if let previous = thumbnailAuthorization, previous != permission { clearThumbnails() }
+    recordThumbnailAuthorization(authorization())
+  }
+  private func recordThumbnailAuthorization(_ permission: PHAuthorizationStatus) -> Bool {
+    let readable = RecentPhotosPolicy.canRead(permission)
+    if let previous = thumbnailAuthorization {
+      if previous != permission { clearThumbnails() }
+    } else if !readable { clearThumbnails() }
+    // Retain denied/restricted status so repeated callbacks or cache reads do
+    // not advance the observable request generation and restart denied work.
     thumbnailAuthorization = permission
-    return true
+    return readable
   }
   private func refreshThumbnails() {
     // Refreshes fence in-flight requests without discarding unchanged warm tiles.
@@ -591,7 +611,11 @@ struct PhotoPreviewProgress {
     guard thumbnailAccessAllowed(), !thumbnailSources.isEmpty else { return }
     let permission = authorization()
     let revisions = sourceRevisions(Array(Set(thumbnailSources.values.map(\.id))))
-    guard authorization() == permission, thumbnailAccessAllowed() else { clearThumbnails(); return }
+    let afterValidation = authorization()
+    guard afterValidation == permission else {
+      _ = recordThumbnailAuthorization(afterValidation); return
+    }
+    guard thumbnailAccessAllowed() else { return }
     for (key, source) in thumbnailSources {
       if revisions[source.id] != source.revision || thumbnails.object(forKey: key) == nil {
         thumbnails.removeObject(forKey: key)

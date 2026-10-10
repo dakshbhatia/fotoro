@@ -265,17 +265,36 @@ enum CameraMedia {
     restore: @MainActor ([URL], PhotoMetadataV1) async throws -> Void = {
       try await restoreToPhotos($0, mediaType: $1.mediaType, creationDate: captureDate($1))
     }) async throws {
-    // PhotoKit owns these resources until performChanges finishes, including cancellation.
+    // This caller already owns the file, including when permission is denied.
     defer { ConsumerShareExports.remove([url]) }
-    try check()
-    let urls = try await exportOriginalFile(url, metadata: metadata)
+    try await restoreOriginalToPhotos(metadata: metadata, check: check, requestAccess: requestAccess,
+      original: { url }, restore: restore)
+  }
+  @MainActor static func restoreOriginalToPhotos(metadata: PhotoMetadataV1,
+    check: @MainActor () throws -> Void,
+    requestAccess: @MainActor () async -> PHAuthorizationStatus = { await PHPhotoLibrary.requestAuthorization(for: .addOnly) },
+    original: @MainActor () async throws -> URL,
+    restore: @MainActor ([URL], PhotoMetadataV1) async throws -> Void = {
+      try await restoreToPhotos($0, mediaType: $1.mediaType, creationDate: captureDate($1))
+    }) async throws {
+    try Task.checkCancellation()
     try check()
     let permission = await requestAccess()
+    try Task.checkCancellation()
     try check()
     guard permission == .authorized || permission == .limited else {
       throw FotoroError("Allow adding originals to Photos in Settings and retry")
     }
+    let url = try await original()
+    // PhotoKit owns these resources until performChanges finishes, including cancellation.
+    defer { ConsumerShareExports.remove([url]) }
+    try Task.checkCancellation()
+    try check()
+    let urls = try await exportOriginalFile(url, metadata: metadata)
+    try Task.checkCancellation()
+    try check()
     try await restore(urls, metadata)
+    try Task.checkCancellation()
     try check()
   }
   static func restoreToPhotos(_ urls: [URL], mediaType: String, creationDate: Date? = nil) async throws {

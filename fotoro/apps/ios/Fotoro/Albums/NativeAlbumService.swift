@@ -538,16 +538,24 @@ struct NativeAlbumAccess {
     let bytes = try await object(rep, key: Data(b64: encoded), access: reading, preservingTransientFailure: preservingTransientFailure)
     return try write(bytes, name: name, access: reading)
   }
-  func preview(_ item: NativeAlbumItem) async throws -> URL? {
+  func preview(_ item: NativeAlbumItem, reload: Bool = false) async throws -> URL? {
     guard let reading = access, items.contains(where: { $0.id == item.id && $0.entry == item.entry && $0.signedManifest == item.signedManifest }) else { throw CancellationError() }
-    try await membership(reading)
+    try await membership(reading, preservingTransientFailure: true)
+    try check(reading.context)
+    if reload, let directory {
+      let prefix = item.id + "-" + Data(item.signedManifest.signature.utf8).digest
+      for kind in ["preview", "thumbnail"] {
+        let cached = directory.appendingPathComponent(prefix + "-" + kind + ".jpg")
+        if FileManager.default.fileExists(atPath: cached.path) { try FileManager.default.removeItem(at: cached) }
+      }
+    }
     if let rep = item.photo.manifest.representations.first(where: { $0.binding.kind == "preview" }), let encoded = item.photo.metadata.representationKeys[rep.binding.representationId] {
       let name = item.id + "-" + Data(item.signedManifest.signature.utf8).digest + "-preview.jpg"
       if let cached = directory?.appendingPathComponent(name), FileManager.default.fileExists(atPath: cached.path) { return cached }
-      let bytes = try await object(rep, key: Data(b64: encoded), access: reading)
+      let bytes = try await object(rep, key: Data(b64: encoded), access: reading, preservingTransientFailure: true)
       return try write(bytes, name: name, access: reading)
     }
-    return try await thumbnail(item)
+    return try await thumbnail(item, preservingTransientFailure: true)
   }
   func export(_ item: NativeAlbumItem) async throws -> [URL] {
     guard let reading = access, items.contains(where: { $0.id == item.id && $0.entry == item.entry && $0.signedManifest == item.signedManifest }),
@@ -558,8 +566,12 @@ struct NativeAlbumAccess {
     try await membership(reading)
     _ = try write(Data(), name: "export-marker", access: reading)
     let output = directory!.appendingPathComponent("original-" + Wire.id())
+    var transferred = false
+    defer { if !transferred { try? FileManager.default.removeItem(at: output) } }
     let urls = try CameraMedia.exportOriginals(bytes, metadata: item.photo.metadata, directory: output)
-    try check(reading.context); return urls
+    try check(reading.context)
+    transferred = true
+    return urls
   }
   func saveToPhotos(_ item: NativeAlbumItem,
     requestAccess: @MainActor () async -> PHAuthorizationStatus = { await PHPhotoLibrary.requestAuthorization(for: .addOnly) },
@@ -579,28 +591,32 @@ struct NativeAlbumAccess {
       let encoded = item.photo.metadata.representationKeys[rep.binding.representationId] else {
       throw FotoroError("A complete trip original is unavailable. Try again.")
     }
-    let bytes = try await object(rep, key: Data(b64: encoded), access: reading)
-    try current()
-    guard bytes.count == item.photo.metadata.originalBytes, bytes.digest == item.photo.metadata.originalSha256 else {
-      throw FotoroError("Album original verification failed.")
-    }
-    try await membership(reading)
-    try current()
-    // Separate ownership keeps PhotoKit resources alive if album access clears its cache.
-    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("fotoro-share-" + Wire.id())
-    let url = folder.appendingPathComponent("original")
-    defer { ConsumerShareExports.remove([url]) }
-    let writing = Task.detached(priority: .userInitiated) {
-      try Task.checkCancellation()
-      try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false,
-        attributes: [.protectionKey: FileProtectionType.complete, .posixPermissions: 0o700])
-      try bytes.write(to: url, options: [.atomic, .completeFileProtection])
-      try Task.checkCancellation()
-    }
-    try await withTaskCancellationHandler { try await writing.value } onCancel: { writing.cancel() }
-    try current()
-    try await CameraMedia.restoreOriginalToPhotos(url, metadata: item.photo.metadata, check: current,
-      requestAccess: requestAccess, restore: { urls, metadata in
+    try await CameraMedia.restoreOriginalToPhotos(metadata: item.photo.metadata, check: current,
+      requestAccess: requestAccess, original: {
+        let bytes = try await self.object(rep, key: Data(b64: encoded), access: reading)
+        try current()
+        guard bytes.count == item.photo.metadata.originalBytes, bytes.digest == item.photo.metadata.originalSha256 else {
+          throw FotoroError("Album original verification failed.")
+        }
+        try await self.membership(reading)
+        try current()
+        // Separate ownership keeps PhotoKit resources alive if album access clears its cache.
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("fotoro-share-" + Wire.id())
+        let url = folder.appendingPathComponent("original")
+        var transferred = false
+        defer { if !transferred { ConsumerShareExports.remove([url]) } }
+        let writing = Task.detached(priority: .userInitiated) {
+          try Task.checkCancellation()
+          try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false,
+            attributes: [.protectionKey: FileProtectionType.complete, .posixPermissions: 0o700])
+          try bytes.write(to: url, options: [.atomic, .completeFileProtection])
+          try Task.checkCancellation()
+        }
+        try await withTaskCancellationHandler { try await writing.value } onCancel: { writing.cancel() }
+        try current()
+        transferred = true
+        return url
+      }, restore: { urls, metadata in
         try await self.membership(reading)
         try current()
         try await restore(urls, metadata)
