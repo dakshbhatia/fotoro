@@ -36,7 +36,6 @@ import {ExpiredSavedSelection, IncomingShareIntent, grantState, ShareSelection} 
 import {ReceivedAccessRefresh} from "./exchange/received-access";
 import {
   stageImport,
-  resumePendingImports,
   pendingImports,
   type PendingImport,
 } from "./exchange/journal";
@@ -44,6 +43,7 @@ import {
   refreshSync,
   cachedSync,
   saveSync,
+  saveChosenImports,
   syncStatus,
   sameVault,
   readableSyncError,
@@ -1444,7 +1444,7 @@ export default function CloudApp({
             drain: async photoIds => {
               check(); const pending = await pendingImports(); check();
               if (choice.sources.some(source => !pending.some(item => item.photoId === source.photoId && item.sourceDigest === source.sourceDigest))) throw new Error("TRIP_SOURCE_CHANGED");
-              await resumePendingImports(signal, undefined, photoIds, () => current() && choice.current && sameVault(session) && activeRef.current && location.origin === origin); check();
+              await saveChosenImports(session, photoIds, signal, () => current() && choice.current && sameVault(session) && activeRef.current && location.origin === origin); check();
             },
             unresolved: async photoIds => {const pending = await pendingImports(); check(); return photoIds.some(id => !pending.some(item => item.photoId === id && item.state === "committed"));},
             load: async photoIds => {

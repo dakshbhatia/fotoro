@@ -172,6 +172,17 @@ export function refreshSync(session = requireVault(), browse?: CatalogBrowse) {
   const window = browse ? {limit: browse.limit, retainPhotoIds: [...(browse.retainPhotoIds ?? [])]} : undefined;
   return readFlight.run(session, () => serializeSync(session, () => diagnose("catalog", context => performRefresh(session, undefined, context, window), "refresh")), window && JSON.stringify(window));
 }
+export function saveChosenImports(session: UnlockedVault, photoIds: readonly string[], signal?: AbortSignal, current?: () => boolean) {
+  const chosen = [...photoIds];
+  return serializeSync(session, async () => {
+    signal?.throwIfAborted();
+    if (current?.() === false) throw new DOMException("Import choice withdrawn", "AbortError");
+    await resumePendingImports(signal, undefined, chosen, current);
+    assertVault(session);
+    signal?.throwIfAborted();
+    if (current?.() === false) throw new DOMException("Import choice withdrawn", "AbortError");
+  });
+}
 export function saveSync(session = requireVault(), signal?: AbortSignal, diagnostic?: DiagnosticContext) {
   signal?.throwIfAborted();
   return saveFlight.run(session, () => {
