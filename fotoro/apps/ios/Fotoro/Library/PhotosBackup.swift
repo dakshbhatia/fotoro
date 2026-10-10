@@ -210,7 +210,7 @@ struct PhotoSyncProgress: Equatable {
       total: totalKnown ? batchSources.count : nil,
       skipped: batchSources.filter { $0.phase == .skipped }.count,
       failed: batchSources.filter {
-        $0.phase == .failed || ($0.phase == .queued && $0.message != nil) || failedPhotoIDs.contains($0.photoId)
+        $0.phase == .failed || (($0.phase == .queued || $0.phase == .committed) && $0.message != nil) || failedPhotoIDs.contains($0.photoId)
       }.count)
     for id in pendingPhotoIDs {
       value.itemsByPhotoID[id] = PhotoSyncItemStatus(photoID: id,
@@ -302,7 +302,7 @@ struct BackupStatus: Codable {
     status.completed = sources.filter { $0.phase == .committed }.count
     status.pending = sources.filter { $0.phase == .pending || $0.phase == .queued }.count
     status.failed =
-      sources.filter { $0.phase == .failed || ($0.phase == .queued && $0.message != nil) }.count
+      sources.filter { $0.phase == .failed || (($0.phase == .queued || $0.phase == .committed) && $0.message != nil) }.count
     status.skipped = sources.filter { $0.phase == .skipped }.count
     try persist()
   }

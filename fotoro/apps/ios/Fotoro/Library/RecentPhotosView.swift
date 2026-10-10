@@ -339,6 +339,7 @@ struct RecentPhotosView: View {
   @State private var deviceLookup = RecentPhotoLookup()
   #if !FOTORO_LOCAL_PREVIEW
   @State private var timelineProjection = PhotoBrowseProjection()
+  @State private var savedCatalogProjection = PhotoBrowseValueProjection<SavedPhotoCatalogProjectionID, SavedPhotoCatalogSnapshot>()
   @State private var savedProjection = PhotoBrowseValueProjection<SavedPhotoBrowseProjectionID, SavedPhotoBrowseSnapshot>()
   #endif
   @State private var viewer: RecentPhotoViewerPresentation?
@@ -486,10 +487,13 @@ struct RecentPhotosView: View {
       return SavedPhotoBrowseSnapshot(photos: photos, days: days)
     }
   }
-  private var allOwnedPhotos: [LocalPhoto] {
-    guard let services, services.photoAccountAccess != nil else { return [] }
-    return services.photos.filter {
-      $0.manifest.ownerAccountId == services.session.accountId && ["committed", "saved"].contains($0.transferState)
+  private var allOwnedPhotos: [LocalPhoto] { savedCatalogSnapshot.photos }
+  private var savedCatalogSnapshot: SavedPhotoCatalogSnapshot {
+    let identity = SavedPhotoCatalogProjectionID(binding: services.map(SavedLibraryOpenBinding.init),
+      permitted: services?.photoAccountAccess != nil, catalog: services?.consumerCatalogGeneration ?? 0)
+    return savedCatalogProjection.value(for: identity) {
+      guard let services, identity.permitted else { return SavedPhotoCatalogSnapshot() }
+      return SavedPhotoCatalogSnapshot(photos: services.photos, account: services.session.accountId)
     }
   }
   private var timelineGroups: [PhotoBrowseGroup] {
@@ -1284,7 +1288,7 @@ struct RecentPhotosView: View {
 #if !FOTORO_LOCAL_PREVIEW
   private var timelineGallery: some View {
     let device = homePhotoLookup
-    let saved = Dictionary(allOwnedPhotos.map { (ConsumerPhotoReference.saved($0.id).id, $0) }, uniquingKeysWith: { _, last in last })
+    let saved = savedCatalogSnapshot.lookup
     return LazyVGrid(columns: photoColumns, spacing: 3, pinnedViews: [.sectionHeaders]) {
       ForEach(timelineGroups) { group in
         Section {

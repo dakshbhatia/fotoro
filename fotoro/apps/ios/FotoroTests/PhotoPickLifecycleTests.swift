@@ -40,12 +40,140 @@ import XCTest
     gate.open()
     do { _ = try await old.value; XCTFail("Replaced request reported success") } catch is CancellationError {}
     let events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: NativeDiagnostics.shared.exportJSON())
-    let replacement = try XCTUnwrap(events.last { $0.phase == .picks && $0.traceId == replacementTrace.id })
+    let replacement = try XCTUnwrap(events.last { $0.phase == .picks && $0.parentTraceId == replacementTrace.id && $0.step == .action && $0.outcome == .completed })
     XCTAssertEqual(replacement.outcome, .completed)
     XCTAssertEqual(replacement.completed, 3); XCTAssertEqual(replacement.pending, 0)
-    let cancelled = try XCTUnwrap(events.last { $0.phase == .picks && $0.traceId == oldTrace.id })
+    let cancelled = try XCTUnwrap(events.last { $0.phase == .picks && $0.parentTraceId == oldTrace.id && $0.step == .action && $0.outcome == .cancelled })
     XCTAssertEqual(cancelled.outcome, .cancelled)
     XCTAssertEqual(cancelled.completed, 1); XCTAssertEqual(cancelled.pending, 1)
+  }
+  #endif
+  func testPickValidationFencesAreBoundedAndNilResultsStayUncached() async throws {
+    var validations = 0, previews = 0
+    let analyzer = PhotoPickAnalyzer(preview: { source in
+      previews += 1
+      return source.id == "missing" ? nil : self.signal
+    }, isCurrent: { _ in validations += 1; return true })
+    let sources = [candidate("usable"), candidate("missing")]
+    let first = try await analyzer.snapshot(sources)
+    XCTAssertEqual(validations, 6, "One batch start/end, one precheck and one post-await check per miss")
+    XCTAssertEqual(previews, 2)
+    XCTAssertEqual(first.recommendations.unassessed, 1)
+    validations = 0
+    _ = try await analyzer.snapshot(sources)
+    XCTAssertEqual(validations, 5, "A cached source needs only its precheck; the nil result must be retried")
+    XCTAssertEqual(previews, 3)
+  }
+  #if !FOTORO_LOCAL_PREVIEW
+  func testPhotoSyncSettlementWaitAndRecoverableFailureRestoreTheParentStage() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let diagnostics = NativeDiagnostics(fileURL: nil, emitSystemLog: false)
+    let services = try AppServices(root: root, diagnostics: diagnostics)
+    let gate = PickPreviewGate(), held = expectation(description: "Prior run settlement held")
+    defer { gate.open() }
+    let trace = NativeDiagnosticTrace(.sync)
+    let waiting = Task {
+      try await NativeDiagnosticTrace.$current.withValue(trace) {
+        try await services.withPhotoSyncStep(.settlePrevious) {
+          held.fulfill(); await gate.wait()
+        }
+      }
+    }
+    await fulfillment(of: [held], timeout: 1)
+    var events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: diagnostics.exportJSON())
+    let start = try XCTUnwrap(events.last { $0.traceId == trace.id && $0.step == .settlePrevious })
+    XCTAssertEqual(start.outcome, .started); XCTAssertEqual(start.currentStep, .settlePrevious)
+    gate.open()
+    try await waiting.value
+    XCTAssertNil(trace.currentStep)
+    try await NativeDiagnosticTrace.$current.withValue(trace) {
+      // A per-source error is handled by its caller; the next source must own its own stage.
+      do {
+        try await services.withPhotoSyncStep(.prepare) { throw FotoroError("Private source failure") }
+        XCTFail("Preparation should throw")
+      } catch {}
+      XCTAssertNil(trace.currentStep, "Recoverable preparation cannot leave a stale parent stage")
+      try await services.withPhotoSyncStep(.prepare) { () }
+      XCTAssertNil(trace.currentStep, "The successful neighbor cannot restore the failed stage")
+      trace.entering(.scan)
+      do { try await services.withPhotoSyncStep(.verify) { throw FotoroError("Private verify failure") } } catch {}
+      XCTAssertEqual(trace.currentStep, .scan, "Nested failure restores its enclosing stage")
+      trace.entering(nil)
+    }
+    events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: diagnostics.exportJSON())
+    let failed = try XCTUnwrap(events.last { $0.traceId == trace.id && $0.step == .prepare && $0.outcome == .failed })
+    XCTAssertEqual(failed.currentStep, .prepare, "The failure record retains the interrupted stage before restoration")
+    let completed = try XCTUnwrap(events.last { $0.traceId == trace.id && $0.step == .prepare && $0.outcome == .completed })
+    XCTAssertNil(completed.currentStep)
+    XCTAssertEqual(completed.lastCompletedStep, .prepare)
+    XCTAssertFalse(String(decoding: diagnostics.exportJSON(), as: UTF8.self).contains("Private"))
+  }
+  func testPickTraceShowsHeldPreviewAndOwnsItsTerminalAndCounters() async throws {
+    let parent = NativeDiagnosticTrace(.sync)
+    let gate = PickPreviewGate(), held = expectation(description: "Preview is held")
+    var reads = 0
+    let analyzer = PhotoPickAnalyzer(preview: { source in
+      reads += 1
+      if source.id == "held" { held.fulfill(); await gate.wait() }
+      return source.id == "missing" ? nil : self.signal
+    }, isCurrent: { _ in true }, permissionAvailable: { true })
+    defer { gate.open() }
+    var screenshot = candidate("skip", screenshot: true)
+    screenshot.favorite = false
+    let sources = [screenshot, candidate("usable"), candidate("missing"), candidate("held")]
+    let work = Task {
+      try await NativeDiagnosticTrace.$current.withValue(parent) { try await analyzer.snapshot(sources) }
+    }
+    await fulfillment(of: [held], timeout: 1)
+    var events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: NativeDiagnostics.shared.exportJSON())
+    let start = try XCTUnwrap(events.last { $0.parentTraceId == parent.id && $0.outcome == .started })
+    XCTAssertEqual(start.operation, .picks)
+    XCTAssertEqual(start.step, .action)
+    XCTAssertEqual(start.currentStep, .prepare)
+    XCTAssertNotEqual(start.traceId, parent.id)
+    XCTAssertFalse(events.contains { $0.traceId == start.traceId && $0.step == .action && $0.outcome == .completed })
+    gate.open()
+    _ = try await work.value
+    events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: NativeDiagnostics.shared.exportJSON())
+    let terminal = try XCTUnwrap(events.last { $0.traceId == start.traceId && $0.step == .action && $0.outcome == .completed })
+    XCTAssertEqual(terminal.completed, 4); XCTAssertEqual(terminal.pending, 0)
+    XCTAssertEqual(terminal.skipped, 1); XCTAssertEqual(terminal.unavailable, 1); XCTAssertEqual(terminal.cacheHits, 0)
+    XCTAssertEqual(terminal.lastCompletedStep, .analysis)
+    let nextParent = NativeDiagnosticTrace(.sync)
+    _ = try await NativeDiagnosticTrace.$current.withValue(nextParent) {
+      try await analyzer.snapshot([screenshot, self.candidate("usable"), self.candidate("missing")])
+    }
+    events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: NativeDiagnostics.shared.exportJSON())
+    let cached = try XCTUnwrap(events.last { $0.parentTraceId == nextParent.id && $0.outcome == .completed })
+    XCTAssertEqual(cached.cacheHits, 1); XCTAssertEqual(cached.skipped, 1); XCTAssertEqual(cached.unavailable, 1)
+    XCTAssertEqual(reads, 4)
+  }
+  func testPickDiagnosticCancellationReasonsPreserveNilAwaitFence() async throws {
+    for mode in 0..<4 {
+      let parent = NativeDiagnosticTrace(.sync)
+      let gate = PickPreviewGate(), held = expectation(description: "Nil preview held")
+      var current = true
+      let analyzer = PhotoPickAnalyzer(preview: { _ in held.fulfill(); await gate.wait(); return nil },
+        isCurrent: { _ in current }, permissionAvailable: { mode != 3 })
+      defer { gate.open() }
+      let work = Task {
+        try await NativeDiagnosticTrace.$current.withValue(parent) { try await analyzer.snapshot([self.candidate("source")]) }
+      }
+      await fulfillment(of: [held], timeout: 1)
+      if mode == 0 { work.cancel() }
+      else if mode == 1 { analyzer.invalidate() }
+      else { current = false }
+      gate.open()
+      do { _ = try await work.value; XCTFail("An interrupted nil result cannot complete") } catch is CancellationError {}
+      let events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: NativeDiagnostics.shared.exportJSON())
+      let terminal = try XCTUnwrap(events.last { $0.parentTraceId == parent.id && $0.outcome == .cancelled })
+      let reasons: [NativeDiagnosticReason] = [.cancelled, .contextChanged, .sourceUnavailable, .permissionRequired]
+      XCTAssertEqual(terminal.reason, reasons[mode])
+      XCTAssertEqual(terminal.completed, 0); XCTAssertEqual(terminal.pending, 1)
+      XCTAssertEqual(terminal.unavailable, 0, "Invalidated nil results cannot count as assessed sources")
+      XCTAssertEqual(events.filter { $0.traceId == terminal.traceId && $0.step == .action && $0.outcome == .cancelled }.count, 1)
+    }
   }
   #endif
   func testBrowsingTenThousandSourcesReadsBoundedPagesAndReachesOlderAndUndatedSources() {
