@@ -23,6 +23,20 @@ private struct SharingOperationAccess {
   var account: String { photo.account }
 }
 
+private struct CatalogSyncBinding: Equatable {
+  let photo: PhotoAccountAccess
+  let origin: String?
+  let token: String?
+  let fixture: Bool
+  let cards: [String: AccountCardV1]
+  var cursor: String?
+}
+private struct CatalogSyncRead {
+  var binding: CatalogSyncBinding
+  let task: Task<Void, Error>
+  var waiters: Set<UUID>
+}
+
 enum PhotoPicksBackupPolicy {
   static func select(_ candidates: [BackupCandidate], snapshot: PhotoPicksSnapshot?) -> [BackupCandidate] {
     guard let snapshot else { return [] }
@@ -104,6 +118,7 @@ enum ReviewedPhotosBackupPolicy {
   var fixtureAccounts: FixtureAccounts?
   var selectedGrant: GrantV1?
   @ObservationIgnored private var sharedInboxRead: (id: UUID, access: SharingOperationAccess, task: Task<GrantInboxV1, Error>)?
+  @ObservationIgnored private var catalogSyncReads: [UUID: CatalogSyncRead] = [:]
   #if DEBUG
     @ObservationIgnored var consumerShareDidWrite: ((URL) -> Void)?
     @ObservationIgnored var catalogSearchWillRead: (@Sendable () -> Void)?
@@ -126,6 +141,7 @@ enum ReviewedPhotosBackupPolicy {
   private var automaticSyncPreference = AutomaticPhotoSyncPreference()
   private var automaticSyncIntake: AutomaticPhotoSyncIntake?
   private var photoSyncForeground = false
+  private var photoSyncSuspensionReason: NativeDiagnosticReason = .background
   private var automaticSyncFailure: String?
   private var automaticSyncTask: Task<Void, Never>?
   @ObservationIgnored private var automaticSyncSettling: Task<Void, Never>?
@@ -448,14 +464,13 @@ enum ReviewedPhotosBackupPolicy {
     }
     let previous = consumerSyncSummary.state
     var reason: NativeDiagnosticReason = .current
+    var pendingTransfers: Int?
     defer {
       if consumerSyncSummary.state != previous || diagnosticSyncReason != reason {
         diagnosticSyncReason = reason
         diagnostics.record(NativeDiagnosticEvent(phase: .sync, outcome: .changed,
           state: consumerSyncSummary.state, completed: consumerSyncSummary.completedPhotos,
-          pending: consumerSyncSummary.totalPhotos.flatMap { total in
-            consumerSyncSummary.completedPhotos.map { max(0, total - $0 - consumerSyncSummary.skippedPhotos) }
-          }, step: .transfer, reason: reason))
+          pending: pendingTransfers, step: .transfer, reason: reason))
       }
     }
     guard session.isSignedIn, vault.isUnlocked, let account = session.accountId, store.root.lastPathComponent == account else {
@@ -503,6 +518,7 @@ enum ReviewedPhotosBackupPolicy {
       facts.completed = completed
       facts.total = backup.status.sourceTotal == nil ? nil : completed + pendingIDs.count + unpreparedIDs.count + skipped
       facts.pending = pendingIDs.count
+      pendingTransfers = facts.pending
       facts.unprepared = unpreparedIDs.count
       facts.failed = backup.status.failed + journal.errors.filter { !automatic || !retainedIDs.contains($0.key) }.count
         + annotations.errors.count + (consumerFailure == nil ? 0 : 1)
@@ -521,7 +537,11 @@ enum ReviewedPhotosBackupPolicy {
       case .paused: reason = .paused
       case .offline: reason = .offline
       case .preparing, .uploading, .checking: reason = .waiting
-      case .needsAttention: reason = facts.failed > 0 ? .retryRequired : .pendingTransfers
+      case .needsAttention:
+        if facts.failed > 0 { reason = .retryRequired }
+        else if facts.pending > 0 { reason = .pendingTransfers }
+        else if facts.unprepared > 0 { reason = .unpreparedSources }
+        else if facts.skipped > 0 { reason = .skippedSources }
       case .notStarted, .upToDate: reason = facts.annotationsPending > 0 ? .pendingAnnotations : .current
       }
       if automaticPhotoSync.phase == .permissionRequired { reason = .permissionRequired }
@@ -779,7 +799,8 @@ enum ReviewedPhotosBackupPolicy {
     automaticSyncFailure = nil
     refreshConsumerSyncSummary()
   }
-  func setPhotoSyncForeground(_ active: Bool) {
+  func setPhotoSyncForeground(_ active: Bool, reason: NativeDiagnosticReason = .background) {
+    if !active { photoSyncSuspensionReason = reason == .inactive ? .inactive : .background }
     contactSyncEngine?.foreground(active)
     guard photoSyncForeground != active else {
       if active { kickAutomaticPhotoSync() }
@@ -789,14 +810,14 @@ enum ReviewedPhotosBackupPolicy {
     if active { kickAutomaticPhotoSync() }
     else {
       invalidateSavedVisualSearch()
-      suspendAutomaticPhotoSync(reason: .background)
+      suspendAutomaticPhotoSync(reason: photoSyncSuspensionReason)
       backup.pause()
       journal.pause()
     }
   }
   private var automaticSyncStopReason: NativeDiagnosticReason {
     if automaticSyncPreference.paused || !automaticSyncPreference.enabled { return .paused }
-    if !photoSyncForeground { return .background }
+    if !photoSyncForeground { return photoSyncSuspensionReason }
     if !session.isSignedIn { return .signedOut }
     if !vault.isUnlocked { return .locked }
     if !RecentPhotosPolicy.canRead(automaticPhotosPermission) { return .permissionRequired }
@@ -1424,30 +1445,81 @@ enum ReviewedPhotosBackupPolicy {
     try reloadAnnotations()
   }
   func sync() async throws {
-    try await withDiagnosticAction(.sync) { try await self.syncTraced() }
+    try Task.checkCancellation()
+    guard let access = photoAccountAccess else { throw FotoroError("Open Fotoro before loading saved photos.") }
+    let binding = CatalogSyncBinding(photo: access, origin: BackgroundUploadPolicy.origin(api.baseURL), token: session.bearerToken,
+      fixture: session.fixture, cards: session.pinnedCards, cursor: try store.cursor())
+    let waiter = UUID()
+    let id: UUID
+    let task: Task<Void, Error>
+    if let current = catalogSyncReads.first(where: { $0.value.binding == binding && !$0.value.task.isCancelled }) {
+      id = current.key; task = current.value.task
+      catalogSyncReads[id]?.waiters.insert(waiter)
+    } else {
+      id = UUID()
+      task = Task {
+        defer { self.finishCatalogSyncRead(id) }
+        try await self.withDiagnosticAction(.sync) {
+          try Task.checkCancellation()
+          guard self.photoAccountAccess == binding.photo, BackgroundUploadPolicy.origin(self.api.baseURL) == binding.origin,
+            self.session.bearerToken == binding.token, self.session.fixture == binding.fixture,
+            self.session.pinnedCards == binding.cards else { throw CancellationError() }
+          try await self.syncTraced(read: id, cursor: binding.cursor)
+        }
+      }
+      catalogSyncReads[id] = CatalogSyncRead(binding: binding, task: task, waiters: [waiter])
+      updateCatalogChecking()
+    }
+    defer { releaseCatalogSyncWaiter(waiter, read: id) }
+    try await withTaskCancellationHandler {
+      try await task.value
+      try Task.checkCancellation()
+      guard photoAccountAccess == binding.photo, BackgroundUploadPolicy.origin(api.baseURL) == binding.origin,
+        session.bearerToken == binding.token, session.fixture == binding.fixture,
+        session.pinnedCards == binding.cards else { throw CancellationError() }
+    } onCancel: {
+      Task { @MainActor in self.releaseCatalogSyncWaiter(waiter, read: id) }
+    }
   }
-  private func syncTraced() async throws {
-    guard photoAccountAccess != nil else { throw FotoroError("Open Fotoro before loading saved photos.") }
+  private func releaseCatalogSyncWaiter(_ waiter: UUID, read id: UUID) {
+    guard var reading = catalogSyncReads[id] else { return }
+    reading.waiters.remove(waiter)
+    if reading.waiters.isEmpty {
+      reading.task.cancel()
+      finishCatalogSyncRead(id)
+    } else { catalogSyncReads[id] = reading }
+  }
+  private func finishCatalogSyncRead(_ id: UUID) {
+    catalogSyncReads.removeValue(forKey: id)
+    updateCatalogChecking()
+  }
+  private func updateCatalogChecking() {
+    consumerChecking = catalogSyncReads.values.contains {
+      $0.binding.photo == photoAccountAccess && $0.binding.origin == BackgroundUploadPolicy.origin(api.baseURL)
+        && $0.binding.token == session.bearerToken && $0.binding.fixture == session.fixture
+        && $0.binding.cards == session.pinnedCards
+    }
+    refreshConsumerSyncSummary()
+  }
+  private func syncTraced(read id: UUID, cursor initialCursor: String?) async throws {
+    guard let authorizedAccess = photoAccountAccess else { throw FotoroError("Open Fotoro before loading saved photos.") }
     let bundle = try vault.requireBundle()
     let authorizedAccount = session.accountId
     let generation = vault.generation
     let catalog = store
-    let authorizedOrigin = api.origin
-    let authorizedCard = authorizedAccount.flatMap { session.pinnedCards[$0] }
+    let authorizedOrigin = BackgroundUploadPolicy.origin(api.baseURL)
+    let authorizedCards = session.pinnedCards
+    let authorizedToken = session.bearerToken
+    let authorizedFixture = session.fixture
+    var expectedCursor = initialCursor
     func fence() throws {
       try Task.checkCancellation()
-      guard vault.isUnlocked, vault.generation == generation,
-        session.accountId == authorizedAccount, store === catalog, api.origin == authorizedOrigin,
-        authorizedAccount.flatMap({ session.pinnedCards[$0] }) == authorizedCard
+      guard photoAccountAccess == authorizedAccess, vault.isUnlocked, vault.generation == generation,
+        session.accountId == authorizedAccount, store === catalog, BackgroundUploadPolicy.origin(api.baseURL) == authorizedOrigin,
+        session.pinnedCards == authorizedCards,
+        session.bearerToken == authorizedToken, session.fixture == authorizedFixture,
+        try catalog.cursor() == expectedCursor
       else { throw CancellationError() }
-    }
-    consumerChecking = true
-    refreshConsumerSyncSummary()
-    defer {
-      if vault.generation == generation, store === catalog, session.accountId == authorizedAccount {
-        consumerChecking = false
-        refreshConsumerSyncSummary()
-      }
     }
     do {
     var more = true
@@ -1489,6 +1561,8 @@ enum ReviewedPhotosBackupPolicy {
         try annotations.ledger.receive(signed, photo: photo, bundle: bundle, card: session.requireCard(signed.accountId))
       }
       try catalog.apply(ownedPage, verified: verified)
+      expectedCursor = try catalog.cursor()
+      catalogSyncReads[id]?.binding.cursor = expectedCursor
       NativeDiagnosticTrace.current?.completed(.persist)
       more = page.hasMore
     }
@@ -1503,6 +1577,7 @@ enum ReviewedPhotosBackupPolicy {
     consumerFailure = nil
     NativeDiagnosticTrace.current?.completed(.catalog)
     } catch {
+      try fence()
       if vault.generation == generation, store === catalog, session.accountId == authorizedAccount { recordConsumerSyncFailure(error) }
       throw error
     }

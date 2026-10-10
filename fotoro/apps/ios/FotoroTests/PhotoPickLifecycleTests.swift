@@ -16,6 +16,38 @@ import XCTest
     let snapshot = PhotoPicksSnapshot(candidates: [missing], recommendations: AutomaticPhotoPickPolicy.recommend([], signals: [:]))
     XCTAssertFalse(snapshot.matches([epoch]))
   }
+  #if !FOTORO_LOCAL_PREVIEW
+  func testPickDiagnosticsCountProcessedSourcesAndKeepCancelledRequestProgressSeparate() async throws {
+    let gate = PickPreviewGate(), held = expectation(description: "Old pick request held")
+    let analyzer = PhotoPickAnalyzer(preview: { candidate in
+      if candidate.id == "held" { held.fulfill(); await gate.wait() }
+      return candidate.id == "missing" ? nil : self.signal
+    }, isCurrent: { _ in true })
+    defer { gate.open() }
+    let oldTrace = NativeDiagnosticTrace(.sync), replacementTrace = NativeDiagnosticTrace(.sync)
+    let old = Task {
+      try await NativeDiagnosticTrace.$current.withValue(oldTrace) {
+        try await analyzer.snapshot([self.candidate("first"), self.candidate("held")])
+      }
+    }
+    await fulfillment(of: [held], timeout: 1)
+    var screenshot = candidate("screenshot", screenshot: true)
+    screenshot.favorite = false
+    let result = try await NativeDiagnosticTrace.$current.withValue(replacementTrace) {
+      try await analyzer.snapshot([screenshot, candidate("missing"), candidate("usable")])
+    }
+    XCTAssertEqual(result.recommendations.unassessed, 1, "A processed source can still lack usable pick signals")
+    gate.open()
+    do { _ = try await old.value; XCTFail("Replaced request reported success") } catch is CancellationError {}
+    let events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: NativeDiagnostics.shared.exportJSON())
+    let replacement = try XCTUnwrap(events.last { $0.phase == .picks && $0.traceId == replacementTrace.id })
+    XCTAssertEqual(replacement.outcome, .completed)
+    XCTAssertEqual(replacement.completed, 3); XCTAssertEqual(replacement.pending, 0)
+    let cancelled = try XCTUnwrap(events.last { $0.phase == .picks && $0.traceId == oldTrace.id })
+    XCTAssertEqual(cancelled.outcome, .cancelled)
+    XCTAssertEqual(cancelled.completed, 1); XCTAssertEqual(cancelled.pending, 1)
+  }
+  #endif
   func testBrowsingTenThousandSourcesReadsBoundedPagesAndReachesOlderAndUndatedSources() {
     let sources = (0..<10_000).map { "source-\($0)" } + ["oldest", "undated"]
     var reads: [Range<Int>] = []
@@ -291,7 +323,7 @@ import XCTest
       XCTAssertEqual(store.photos.map(\.id), [photo.id])
     }
   }
-  func testCompletedPicksWaitsForTheSuccessorAfterARefreshReplacesItsTask() async throws {
+  func testCompletedPicksWaitsForTheSuccessorAfterExplicitRestartReplacesItsTask() async throws {
     let permission = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     guard RecentPhotosPolicy.canRead(permission) else {
       throw XCTSkip("Permit the public Simulator Photos library to verify pick refresh ordering.")
@@ -328,7 +360,7 @@ import XCTest
       return try await store.completedPicks()
     }
     await fulfillment(of: [initialStarted, waiterStarted], timeout: 1)
-    store.refresh(now: now)
+    store.restartAnalysis()
     initialGate.open()
     await fulfillment(of: [successorStarted], timeout: 1)
     await fulfillment(of: [returnedWhileBlocked], timeout: 0.05)
@@ -336,6 +368,40 @@ import XCTest
     successorGate.open()
     let result = try await waiting.value
     XCTAssertEqual(reads, 2)
+    XCTAssertEqual(result.recommendations.ids, [photo.id])
+    XCTAssertEqual(result.recommendations.unassessed, 0)
+  }
+  func testUnchangedRefreshKeepsInFlightPickAnalysis() async throws {
+    let permission = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+    guard RecentPhotosPolicy.canRead(permission) else {
+      throw XCTSkip("Permit the public Simulator Photos library to verify in-flight picks.")
+    }
+    var asset: PHAsset?
+    PHAsset.fetchAssets(with: .image, options: nil).enumerateObjects { candidate, _, stop in
+      if !candidate.isHidden, !candidate.mediaSubtypes.contains(.photoScreenshot) {
+        asset = candidate; stop.pointee = true
+      }
+    }
+    let photo = RecentPhoto(asset: try XCTUnwrap(asset))
+    let now = try XCTUnwrap(photo.capturedAt), gate = PickPreviewGate()
+    let started = expectation(description: "Current pick preview held")
+    var reads = 0
+    let analyzer = PhotoPickAnalyzer(preview: { _ in
+      reads += 1
+      if reads == 1 { started.fulfill(); await gate.wait() }
+      return self.signal
+    })
+    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in [photo] }, picks: analyzer)
+    defer { store.pauseAnalysis(); gate.open() }
+    store.restoreAccess(now: now)
+    PHPhotoLibrary.shared().unregisterChangeObserver(store)
+    await fulfillment(of: [started], timeout: 1)
+    store.restoreAccess(now: now)
+    store.refresh(now: now)
+    store.setBrowseDates(.all, now: now)
+    gate.open()
+    let result = try await store.completedPicks()
+    XCTAssertEqual(reads, 1, "Unchanged metadata and date-scope refreshes keep the held preview")
     XCTAssertEqual(result.recommendations.ids, [photo.id])
     XCTAssertEqual(result.recommendations.unassessed, 0)
   }

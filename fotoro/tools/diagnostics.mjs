@@ -8,7 +8,7 @@ const values = {
   step: "action request response decode credential unlock catalog verify persist transfer annotation scan analysis export".split(" "),
   action: "passkey password enrollment refresh save create accept end add receive contribute prepare".split(" "),
   outcome: "started completed succeeded failed cancelled changed".split(" "),
-  reason: "none cancelled contextChanged network http decode validation unknown signedOut locked permissionRequired paused offline retryRequired waiting pendingTransfers pendingAnnotations sourceUnavailable current invalid_wire account_changed source_changed quota unavailable verification".split(" "),
+  reason: "none cancelled contextChanged inactive background network http decode validation unknown signedOut locked permissionRequired paused offline retryRequired waiting pendingTransfers unpreparedSources skippedSources pendingAnnotations sourceUnavailable current invalid_wire account_changed source_changed quota unavailable verification".split(" "),
   state: "notStarted preparing uploading checking upToDate paused offline needsAttention".split(" "),
   area: "auth account sync catalog albums sharing media intelligence other".split(" "),
   phase: "request upload.staging upload.commit".split(" "),

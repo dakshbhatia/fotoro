@@ -12,7 +12,10 @@ struct PhotoPicksSnapshot: Sendable {
     candidates.first { $0.id == id && recommendations.ids.contains(id) }?.sourceRevision
   }
   func matches(_ current: [AutomaticPhotoPickCandidate]) -> Bool {
-    candidates.map(Self.identity) == current.map(Self.identity)
+    Self.matches(candidates, current)
+  }
+  static func matches(_ candidates: [AutomaticPhotoPickCandidate], _ current: [AutomaticPhotoPickCandidate]) -> Bool {
+    candidates.map(identity) == current.map(identity)
   }
   private static func identity(_ value: AutomaticPhotoPickCandidate) -> String {
     "\(value.id)|\(value.sourceRevision)|\(value.capturedAt.map { String($0.timeIntervalSince1970) } ?? "nil")|\(value.width)x\(value.height)|\(value.favorite)|\(value.isScreenshot)"
@@ -37,6 +40,7 @@ struct PhotoPicksSnapshot: Sendable {
   func invalidate() { generation = UUID(); analyzing = false }
   func snapshot(_ candidates: [AutomaticPhotoPickCandidate], valid: @escaping @MainActor () -> Bool = { true }) async throws -> PhotoPicksSnapshot {
     var signals: [String: AutomaticPhotoPickSignals] = [:]
+    var processed = 0
     #if !FOTORO_LOCAL_PREVIEW
       let started = ProcessInfo.processInfo.systemUptime
       var outcome = NativeDiagnosticOutcome.failed
@@ -44,7 +48,7 @@ struct PhotoPicksSnapshot: Sendable {
         NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .picks,
           outcome: outcome,
           elapsed: ProcessInfo.processInfo.systemUptime - started,
-          completed: signals.count, pending: candidates.count - signals.count))
+          completed: processed, pending: candidates.count - processed))
       }
     #endif
     do {
@@ -65,7 +69,8 @@ struct PhotoPicksSnapshot: Sendable {
     for candidate in candidates {
       try check([candidate])
       if candidate.isScreenshot && !candidate.favorite {
-        completed += 1
+        processed += 1
+        completed = processed
         await Task.yield()
         continue
       }
@@ -77,7 +82,8 @@ struct PhotoPicksSnapshot: Sendable {
         cache[key] = value
       }
       try check([candidate])
-      completed += 1
+      processed += 1
+      completed = processed
       await Task.yield()
     }
     try check(candidates)
