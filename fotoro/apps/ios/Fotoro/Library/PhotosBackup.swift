@@ -327,7 +327,8 @@ struct BackupStatus: Codable {
     upload: @escaping (BackupSource) async throws -> Void,
     checkCatalog: @escaping () async throws -> Void,
     checkCatalogOnlyAfterWork: Bool = false,
-    restrictQueuedToSnapshot: Bool = false
+    restrictQueuedToSnapshot: Bool = false,
+    reconcile: ((BackupSource, BackupCandidate) async throws -> Bool)? = nil
   ) {
     guard task == nil else { return }
     task = Task {
@@ -383,26 +384,49 @@ struct BackupStatus: Codable {
         let selectedIDs = Set(candidates.map { $0.id })
         let permitted = Dictionary(candidates.filter { $0.skipReason == nil }.map { ($0.id, $0) },
           uniquingKeysWith: { first, _ in first })
+        // Verification belongs to the same per-source lifetime as preparation.
+        // Snapshot scanning never needs to download every changed original first.
+        let verificationIDs = Set(existing.values.filter { source in
+          guard reconcile != nil, let candidate = permitted[source.id],
+            source.phase == .committed || (restrictQueuedToSnapshot && source.phase == .queued) else { return false }
+          return source.sourceRevision != candidate.sourceRevision || source.originalSha256 == nil
+        }.map(\.id))
         let work = try store.backupSources().filter {
-          ($0.phase == .queued && (!restrictQueuedToSnapshot
+          verificationIDs.contains($0.id)
+            || ($0.phase == .queued && (!restrictQueuedToSnapshot
             || (permitted[$0.id] != nil && permitted[$0.id]?.sourceRevision == $0.sourceRevision)))
             || (($0.phase == .pending || $0.phase == .failed) && selectedIDs.contains($0.id))
         }.sorted { ($0.phase == .queued ? 0 : 1) < ($1.phase == .queued ? 0 : 1) }
         status.sourceTotal = try countedSources().count
         status.phase = .running
         try refreshCounts()
+        var performedTransferWork = false
         for var source in work {
           try fence()
           activeSource = source
           defer { activeSource = nil }
           do {
+            if verificationIDs.contains(source.id), let candidate = permitted[source.id], let reconcile {
+              let available = try await reconcile(source, candidate)
+              try fence()
+              source = try store.backupSource(source.id)
+              activeSource = source
+              if !available || source.phase == .committed || source.phase == .skipped {
+                try refreshCounts()
+                continue
+              }
+            }
             if source.phase != .queued {
+              performedTransferWork = true
               try await stage(source, dates[source.id])
               try fence()
               source = try store.backupSource(source.id)
               activeSource = source
             }
-            if source.phase != .committed { try await upload(source) }
+            if source.phase != .committed {
+              performedTransferWork = true
+              try await upload(source)
+            }
             try fence()
             source.phase = .committed
             source.message = nil
@@ -410,10 +434,22 @@ struct BackupStatus: Codable {
             try store.putBackupSource(source)
           } catch {
             try fence()
-            if error is CancellationError, source.phase == .queued { throw error }
+            if (verificationIDs.contains(source.id)
+              && NativeDiagnosticOutcome.failure(for: error, taskCancelled: Task.isCancelled) == .cancelled)
+              || (error is CancellationError && source.phase == .queued) {
+              throw CancellationError()
+            }
+            // Reconciliation may have replaced the checkpoint before staging failed.
+            source = try store.backupSource(source.id)
+            if source.phase == .committed {
+              // A failed verification/rebind cannot relabel earlier bytes as current.
+              source.message = error.localizedDescription
+              try store.putBackupSource(source)
+              try refreshCounts()
+              continue
+            }
             // Stop at the first unresolved staged upload so Pending holds at most one new source.
-            if (try store.backupSource(source.id)).phase == .queued {
-              source = try store.backupSource(source.id)
+            if source.phase == .queued {
               source.message = error.localizedDescription
               try store.putBackupSource(source)
               throw error
@@ -425,7 +461,7 @@ struct BackupStatus: Codable {
           }
           try refreshCounts()
         }
-        if !checkCatalogOnlyAfterWork || !work.isEmpty { try await checkCatalog() }
+        if !checkCatalogOnlyAfterWork || performedTransferWork { try await checkCatalog() }
         try fence()
         status.lastChecked = Date()
         try refreshCounts()

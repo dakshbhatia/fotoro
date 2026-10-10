@@ -150,34 +150,72 @@ actor PhotoImport {
 
     }
   }
-  func sourceDigest(_ id: String) async throws -> String {
-    let bytes = try await read(SelectedResource(id: id, origin: .photos, resourceIdentifier: id, fileURL: nil)).0
+  // One caller-owned preparation attempt; never retained as an importer cache.
+  struct BackupOriginal: Sendable {
+    let sourceID: String
+    let revision: String?
+    let bytes: Data
+    let filename: String
+    let digest: String
+
+    fileprivate init(sourceID: String, revision: String?, bytes: Data, filename: String, digest: String) {
+      self.sourceID = sourceID; self.revision = revision
+      self.bytes = bytes; self.filename = filename; self.digest = digest
+    }
+  }
+  func prepareBackupOriginal(
+    _ source: BackupSource, valid: @escaping @Sendable () async -> Bool = { true }
+  ) async throws -> BackupOriginal {
+    try Task.checkCancellation()
+    guard await valid() else { throw CancellationError() }
+    try Task.checkCancellation()
+    try checkBackupRevision(source)
+    let selection = SelectedResource(id: source.id, origin: .photos, resourceIdentifier: source.id, fileURL: nil)
+    let (bytes, filename, _) = try await read(selection)
+    try Task.checkCancellation()
+    guard await valid() else { throw CancellationError() }
+    try checkBackupRevision(source)
     try CameraMedia.validateSize(bytes.count)
-    return bytes.digest
+    let digest = bytes.digest
+    try Task.checkCancellation()
+    return BackupOriginal(sourceID: source.id, revision: source.sourceRevision, bytes: bytes, filename: filename, digest: digest)
+  }
+  private func checkBackupRevision(_ source: BackupSource) throws {
+    guard let expected = source.sourceRevision else { return }
+    guard sourceRevision(source.id) == expected else { throw FotoroError("Photo changed during sync. Try again.") }
   }
   func stageBackup(
     _ source: BackupSource, accountId: String, bundle: AccountBundle, capturedAt: Date? = nil,
-    valid: @escaping @Sendable () async -> Bool = { true }
+    valid: @escaping @Sendable () async -> Bool = { true }, preparedOriginal: BackupOriginal? = nil
   ) async throws -> LocalPhoto {
     try Task.checkCancellation()
     guard await valid() else { throw CancellationError() }
+    try Task.checkCancellation()
     func checkRevision() throws {
-      guard let expected = source.sourceRevision else { return }
-      guard sourceRevision(source.id) == expected else { throw FotoroError("Photo changed during sync. Try again.") }
+      try checkBackupRevision(source)
     }
     try checkRevision()
+    if let preparedOriginal {
+      guard preparedOriginal.sourceID == source.id, preparedOriginal.revision == source.sourceRevision else {
+        throw FotoroError("Prepared original does not match this Photos source")
+      }
+    }
     if let existing = try store.backupPhoto(source.photoId) { return existing }
+    let original: BackupOriginal
+    if let preparedOriginal { original = preparedOriginal }
+    else { original = try await prepareBackupOriginal(source, valid: valid) }
+    let bytes = original.bytes, filename = original.filename
     try Task.checkCancellation()
-    let selection = SelectedResource(
-      id: source.id, origin: .photos, resourceIdentifier: source.id, fileURL: nil)
-    let (bytes, filename, _) = try await read(selection)
     guard await valid() else { throw CancellationError() }
     try checkRevision()
     try Task.checkCancellation()
     let location = sourceLocation(source.id)
     let capture = (sourceCaptureMetadata(source.id) ?? PhotoCaptureMetadata()).merging(Self.capture(bytes))
+    try Task.checkCancellation()
+    guard await valid() else { throw CancellationError() }
+    try Task.checkCancellation()
     try checkRevision()
-    if let reused = try store.ownedOriginal(digest: bytes.digest, accountId: accountId) {
+    if let reused = try store.ownedOriginal(digest: original.digest, accountId: accountId) {
       var checkpoint = source
       checkpoint.photoId = reused.photoId
       checkpoint.originalSha256 = reused.metadata.originalSha256
@@ -193,7 +231,7 @@ actor PhotoImport {
     }
     let photo = try await buildMedia(
       bytes: bytes, filename: filename, accountId: accountId, bundle: bundle,
-      photoId: source.photoId, backup: true, capturedAt: capturedAt, permitOriginalCaptureDate: false)
+      photoId: source.photoId, backup: true, capturedAt: capturedAt, permitOriginalCaptureDate: false, originalDigest: original.digest)
     do {
       try checkRevision()
       try Task.checkCancellation()
@@ -230,6 +268,15 @@ actor PhotoImport {
     photoId: String = Wire.id(), backup: Bool = false, capturedAt: Date? = nil, permitOriginalCaptureDate: Bool = true
   ) async throws -> LocalPhoto {
     try CameraMedia.validateSize(bytes.count)
+    return try await buildMedia(bytes: bytes, filename: filename, accountId: accountId, bundle: bundle,
+      photoId: photoId, backup: backup, capturedAt: capturedAt, permitOriginalCaptureDate: permitOriginalCaptureDate,
+      originalDigest: bytes.digest)
+  }
+  private func buildMedia(
+    bytes: Data, filename: String, accountId: String, bundle: AccountBundle,
+    photoId: String, backup: Bool, capturedAt: Date?, permitOriginalCaptureDate: Bool, originalDigest: String
+  ) async throws -> LocalPhoto {
+    try CameraMedia.validateSize(bytes.count)
     let ext = URL(fileURLWithPath: filename).pathExtension.lowercased()
     if ext == "fotoro-live" {
       let pair = try CameraMedia.decodeLivePhoto(bytes)
@@ -240,16 +287,17 @@ actor PhotoImport {
       _ = try await CameraMedia.videoPoster(bytes: pair.motion.bytes, filename: pair.motion.filename)
       return try buildOriginal(bytes: bytes, filename: filename, accountId: accountId, bundle: bundle,
         photoId: photoId, backup: backup, capturedAt: capturedAt, permitOriginalCaptureDate: permitOriginalCaptureDate,
-        mediaType: CameraMedia.liveType, posterBytes: pair.still.bytes)
+        mediaType: CameraMedia.liveType, originalDigest: originalDigest, posterBytes: pair.still.bytes)
     }
     if ["mov", "mp4", "m4v"].contains(ext) {
       let media = try CameraMedia.videoType(filename: filename, bytes: bytes)
       let poster = try await CameraMedia.videoPoster(bytes: bytes, filename: filename)
       return try buildOriginal(bytes: bytes, filename: filename, accountId: accountId, bundle: bundle,
-        photoId: photoId, backup: backup, capturedAt: capturedAt, permitOriginalCaptureDate: permitOriginalCaptureDate, mediaType: media, posterBytes: poster)
+        photoId: photoId, backup: backup, capturedAt: capturedAt, permitOriginalCaptureDate: permitOriginalCaptureDate, mediaType: media, originalDigest: originalDigest, posterBytes: poster)
     }
-    return try build(bytes: bytes, filename: filename, accountId: accountId, bundle: bundle,
-      photoId: photoId, backup: backup, capturedAt: capturedAt, permitOriginalCaptureDate: permitOriginalCaptureDate)
+    return try buildOriginal(bytes: bytes, filename: filename, accountId: accountId, bundle: bundle,
+      photoId: photoId, backup: backup, capturedAt: capturedAt, permitOriginalCaptureDate: permitOriginalCaptureDate,
+      mediaType: Self.validate(bytes, filename: filename), originalDigest: originalDigest)
   }
   func build(
     bytes: Data, filename: String, accountId: String, bundle: AccountBundle,
@@ -257,12 +305,12 @@ actor PhotoImport {
   ) throws -> LocalPhoto {
     try buildOriginal(bytes: bytes, filename: filename, accountId: accountId, bundle: bundle,
       photoId: photoId, backup: backup, capturedAt: capturedAt, permitOriginalCaptureDate: permitOriginalCaptureDate,
-      mediaType: Self.validate(bytes, filename: filename))
+      mediaType: Self.validate(bytes, filename: filename), originalDigest: bytes.digest)
   }
   private func buildOriginal(
     bytes: Data, filename: String, accountId: String, bundle: AccountBundle,
     photoId: String, backup: Bool, capturedAt: Date?, permitOriginalCaptureDate: Bool,
-    mediaType: String, posterBytes: Data? = nil
+    mediaType: String, originalDigest: String, posterBytes: Data? = nil
   ) throws -> LocalPhoto {
     let media = mediaType
     let metadataKey = crypto.randomKey()
@@ -317,7 +365,7 @@ actor PhotoImport {
     }
     let metadata = PhotoMetadataV1(
       filename: filename, mediaType: media, sourceDate: sourceDate, dateSource: provenance,
-      originalBytes: bytes.count, originalSha256: bytes.digest, representationKeys: keys)
+      originalBytes: bytes.count, originalSha256: originalDigest, representationKeys: keys)
     let binding = MediaBinding(photoId: photoId, representationId: Wire.id(), kind: "metadata")
     let cipher = try crypto.encrypt(Wire.encode(metadata), key: metadataKey, binding: binding)
     staged[binding.representationId] = try store.write(

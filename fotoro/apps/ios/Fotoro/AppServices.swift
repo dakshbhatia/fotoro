@@ -1020,77 +1020,125 @@ enum ReviewedPhotosBackupPolicy {
       #endif
       return current
     }
-    @MainActor func reconcile(_ candidates: [BackupCandidate]) async throws -> [BackupCandidate] {
-      var unavailable = Set<String>()
-      return try await self.withPhotoSyncStep(.verify, failures: { unavailable.count }) {
-        let existing = Dictionary(try catalog.backupSources().map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        for (index, candidate) in candidates.enumerated() where candidate.skipReason == nil {
-          if index.isMultiple(of: 128) { await Task.yield(); try Task.checkCancellation() }
-          guard var source = existing[candidate.id] else { continue }
-            if source.phase == .committed || (automatic && source.phase == .queued),
-              source.sourceRevision != candidate.sourceRevision || source.originalSha256 == nil,
-              let photo = try catalog.backupPhoto(source.photoId) {
-              var digest: String?
-              var oversized: CameraMediaAdmissionError?
-              do { digest = try await importWorker.sourceDigest(candidate.id) }
-              catch let error as CameraMediaAdmissionError { oversized = error }
-              catch {
-                // A changed original can be temporarily unavailable without blocking its neighbors.
-                // Keep its verified earlier binding until a later pass can compare the new bytes.
-                try Task.checkCancellation()
-                guard self.session.isSignedIn, self.vault.isUnlocked, self.vault.generation == generation,
-                  self.session.accountId == account, RecentPhotosPolicy.canRead(self.automaticPhotosPermission),
-                  self.store === catalog, BackgroundUploadPolicy.origin(self.api.baseURL) == origin,
-                  self.session.pinnedCards[account] == trustedCard,
-                  !automatic || self.automaticPhotoSyncAdmitted else { throw CancellationError() }
-                if NativeDiagnosticOutcome.failure(for: error, taskCancelled: Task.isCancelled) == .cancelled {
-                  throw CancellationError()
-                }
-                guard candidateCurrent(candidate) else { throw CancellationError() }
-                source.message = error.localizedDescription
-                try catalog.putBackupSource(source)
-                unavailable.insert(candidate.id)
-                continue
+    @MainActor func stageSource(_ source: BackupSource, _ date: Date?, original: PhotoImport.BackupOriginal? = nil) async throws {
+      stagedSources += 1
+      try await self.withPhotoSyncStep(.prepare,
+        record: stagedSources == 1 || stagedSources.isMultiple(of: 32), completed: stagedSources - 1) {
+        _ = try await importWorker.stageBackup(
+          source, accountId: account, bundle: bundle, capturedAt: date,
+          valid: { @MainActor [weak self] in
+            guard let self, self.session.isSignedIn, self.vault.isUnlocked, self.vault.generation == generation,
+              self.session.accountId == account, self.store === catalog,
+              self.session.pinnedCards[account] == trustedCard,
+              BackgroundUploadPolicy.origin(self.api.baseURL) == origin,
+              !automatic || self.automaticPhotoSyncAdmitted,
+              (try? catalog.uploadsPaused()) == false else { return false }
+            #if DEBUG
+              if let snapshot = self.photosBackupSnapshot {
+                if automatic { return sourceCurrent(source) }
+                guard let selection else { return true }
+                guard let selected = selection.first(where: { $0.id == source.id }),
+                  selected.revision == source.sourceRevision else { return false }
+                return (try? ReviewedPhotosBackupPolicy.select(snapshot(RecentPhotosPolicy.cutoff(now: Date())), selection: [selected])) != nil
               }
-              try Task.checkCancellation()
-              guard self.vault.generation == generation, self.session.accountId == account,
-                self.store === catalog, BackgroundUploadPolicy.origin(self.api.baseURL) == origin,
-                self.session.pinnedCards[account] == trustedCard,
-                !automatic || self.automaticPhotoSyncAdmitted else { throw CancellationError() }
-              guard candidateCurrent(candidate) else { throw FotoroError("Photo changed during sync. Try again.") }
-              if let oversized {
-                if source.phase == .queued { source = try catalog.retainQueuedBackup(source, currentRevision: candidate.sourceRevision) }
-                else { source.photoId = Wire.id() }
-                source.phase = .skipped
-                source.sourceRevision = candidate.sourceRevision
-                source.originalSha256 = nil
-                source.skipProcessor = "camera-original-v1"
-                source.message = oversized.localizedDescription
-                try catalog.putBackupSource(source)
-                continue
-              }
-              guard let digest else { throw FotoroError("Original could not be verified") }
-              if digest == photo.metadata.originalSha256 {
-                source.sourceRevision = candidate.sourceRevision
-                source.originalSha256 = digest
-                source.message = nil
-              } else {
-                if automatic && source.phase == .queued {
-                  _ = try catalog.retainQueuedBackup(source, currentRevision: candidate.sourceRevision)
-                  continue
-                }
-                source.sourceRevision = automatic ? candidate.sourceRevision : nil
-                source.message = "This Photos original changed. Its earlier backup is kept separately."
-                if automatic {
-                  source.photoId = Wire.id()
-                  source.phase = .pending
-                  source.originalSha256 = nil
-                }
-              }
-              try catalog.putBackupSource(source)
+            #endif
+            if automatic {
+              return sourceCurrent(source)
             }
+            if let selection {
+              guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+                let selected = selection.first(where: { $0.id == source.id }),
+                selected.revision == source.sourceRevision,
+                let asset = PHAsset.fetchAssets(withLocalIdentifiers: [source.id], options: nil).firstObject,
+                !asset.isHidden, CameraMedia.sourceSkipReason(asset) == nil else { return false }
+              return RecentPhoto.sourceRevision(asset) == selected.revision
+            }
+            guard let picks = acceptedPicks, let recent = self.recentPhotos,
+              picks.matches(recent.pickCandidates),
+              let candidate = picks.candidates.first(where: { $0.id == source.id }),
+              picks.revision(for: source.id) == source.sourceRevision else { return false }
+            return PhotoPickAnalyzer.isCurrent([candidate])
+          }, preparedOriginal: original)
+      }
+    }
+    @MainActor func verificationCurrent(_ candidate: BackupCandidate) -> Bool {
+      self.session.isSignedIn && self.vault.isUnlocked && self.vault.generation == generation
+        && self.session.accountId == account && self.store === catalog
+        && BackgroundUploadPolicy.origin(self.api.baseURL) == origin
+        && self.session.pinnedCards[account] == trustedCard
+        && (!automatic || self.automaticPhotoSyncAdmitted)
+        && RecentPhotosPolicy.canRead(self.automaticPhotosPermission)
+        && (try? catalog.uploadsPaused()) == false
+        && candidateCurrent(candidate)
+    }
+    var verifiedSources = 0
+    @MainActor func reconcile(_ earlier: BackupSource, _ candidate: BackupCandidate) async throws -> Bool {
+      verifiedSources += 1
+      var unavailable = false
+      return try await self.withPhotoSyncStep(.verify,
+        record: verifiedSources == 1 || verifiedSources.isMultiple(of: 32), failures: { unavailable ? 1 : 0 }) {
+        guard let photo = try catalog.backupPhoto(earlier.photoId) else { return true }
+        var source = earlier
+        var current = source
+        current.sourceRevision = candidate.sourceRevision
+        var original: PhotoImport.BackupOriginal?
+        var oversized: CameraMediaAdmissionError?
+        do {
+          original = try await importWorker.prepareBackupOriginal(current, valid: { @MainActor in
+            verificationCurrent(candidate)
+          })
+        } catch let error as CameraMediaAdmissionError {
+          oversized = error
+        } catch {
+          try Task.checkCancellation()
+          guard verificationCurrent(candidate), RecentPhotosPolicy.canRead(self.automaticPhotosPermission),
+            NativeDiagnosticOutcome.failure(for: error, taskCancelled: Task.isCancelled) != .cancelled else {
+            throw CancellationError()
           }
-        return candidates.filter { !unavailable.contains($0.id) }
+          // An unavailable current original cannot erase its verified earlier copy.
+          source.message = error.localizedDescription
+          try catalog.putBackupSource(source)
+          unavailable = true
+          return false
+        }
+        try Task.checkCancellation()
+        guard verificationCurrent(candidate) else { throw CancellationError() }
+        if let oversized {
+          if source.phase == .queued { source = try catalog.retainQueuedBackup(source, currentRevision: candidate.sourceRevision) }
+          else { source.photoId = Wire.id() }
+          source.phase = .skipped
+          source.sourceRevision = candidate.sourceRevision
+          source.originalSha256 = nil
+          source.skipProcessor = "camera-original-v1"
+          source.message = oversized.localizedDescription
+          try catalog.putBackupSource(source)
+          return false
+        }
+        guard let original else { throw FotoroError("Original could not be verified") }
+        if original.digest == photo.metadata.originalSha256 {
+          source.sourceRevision = candidate.sourceRevision
+          source.originalSha256 = original.digest
+          source.message = nil
+          try catalog.putBackupSource(source)
+          return true
+        }
+        if automatic && source.phase == .queued {
+          source = try catalog.retainQueuedBackup(source, currentRevision: candidate.sourceRevision)
+        } else {
+          source.sourceRevision = automatic ? candidate.sourceRevision : nil
+          source.message = "This Photos original changed. Its earlier backup is kept separately."
+          if automatic {
+            source.photoId = Wire.id()
+            source.phase = .pending
+            source.originalSha256 = nil
+          }
+          try catalog.putBackupSource(source)
+        }
+        if automatic {
+          // Reuse this source's bytes immediately; no batch-wide original cache.
+          try await stageSource(source, candidate.capturedAt, original: original)
+        }
+        return true
       }
     }
     backup.start(
@@ -1110,8 +1158,8 @@ enum ReviewedPhotosBackupPolicy {
           #if DEBUG
             if let snapshot = self.photosBackupSnapshot {
               let candidates = try snapshot(automatic ? .distantPast : RecentPhotosPolicy.cutoff(now: Date()))
-              if let selection { return try await reconcile(ReviewedPhotosBackupPolicy.select(candidates, selection: selection)) }
-              return try await reconcile(intakeCandidates(candidates))
+              if let selection { return try ReviewedPhotosBackupPolicy.select(candidates, selection: selection) }
+              return try intakeCandidates(candidates)
             }
           #endif
           let permission = PHPhotoLibrary.authorizationStatus(for: .readWrite)
@@ -1163,7 +1211,7 @@ enum ReviewedPhotosBackupPolicy {
           }
           if let selection { candidates = try ReviewedPhotosBackupPolicy.select(candidates, selection: selection) }
           else if !automatic { candidates = PhotoPicksBackupPolicy.select(candidates, snapshot: acceptedPicks) }
-          return try await reconcile(intakeCandidates(candidates))
+          return try intakeCandidates(candidates)
         }
       },
       valid: { [weak self] in
@@ -1174,47 +1222,8 @@ enum ReviewedPhotosBackupPolicy {
           && BackgroundUploadPolicy.origin(self.api.baseURL) == origin
           && (!automatic || self.automaticPhotoSyncAdmitted)
       },
-      stage: { [weak self] source, date in
-        guard let self else { throw CancellationError() }
-        stagedSources += 1
-        try await self.withPhotoSyncStep(.prepare,
-          record: stagedSources == 1 || stagedSources.isMultiple(of: 32), completed: stagedSources - 1) {
-          _ = try await importWorker.stageBackup(
-            source, accountId: account, bundle: bundle, capturedAt: date,
-            valid: { @MainActor [weak self] in
-              guard let self, self.session.isSignedIn, self.vault.isUnlocked, self.vault.generation == generation,
-                self.session.accountId == account, self.store === catalog,
-                self.session.pinnedCards[account] == trustedCard,
-                BackgroundUploadPolicy.origin(self.api.baseURL) == origin,
-                !automatic || self.automaticPhotoSyncAdmitted,
-                (try? catalog.uploadsPaused()) == false else { return false }
-              #if DEBUG
-                if let snapshot = self.photosBackupSnapshot {
-                  if automatic { return sourceCurrent(source) }
-                  guard let selection else { return true }
-                  guard let selected = selection.first(where: { $0.id == source.id }),
-                    selected.revision == source.sourceRevision else { return false }
-                  return (try? ReviewedPhotosBackupPolicy.select(snapshot(RecentPhotosPolicy.cutoff(now: Date())), selection: [selected])) != nil
-                }
-              #endif
-              if automatic {
-                return sourceCurrent(source)
-              }
-              if let selection {
-                guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
-                  let selected = selection.first(where: { $0.id == source.id }),
-                  selected.revision == source.sourceRevision,
-                  let asset = PHAsset.fetchAssets(withLocalIdentifiers: [source.id], options: nil).firstObject,
-                  !asset.isHidden, CameraMedia.sourceSkipReason(asset) == nil else { return false }
-                return RecentPhoto.sourceRevision(asset) == selected.revision
-              }
-              guard let picks = acceptedPicks, let recent = self.recentPhotos,
-                picks.matches(recent.pickCandidates),
-                let candidate = picks.candidates.first(where: { $0.id == source.id }),
-                picks.revision(for: source.id) == source.sourceRevision else { return false }
-              return PhotoPickAnalyzer.isCurrent([candidate])
-            })
-        }
+      stage: { source, date in
+        try await stageSource(source, date)
       },
       upload: { source in
         uploadedSources += 1
@@ -1241,7 +1250,7 @@ enum ReviewedPhotosBackupPolicy {
           await self.syncAnnotations()
         }
         try await self.sync()
-      }, checkCatalogOnlyAfterWork: automatic, restrictQueuedToSnapshot: automatic)
+      }, checkCatalogOnlyAfterWork: automatic, restrictQueuedToSnapshot: automatic, reconcile: reconcile)
   }
   func resumeSavedAccount(initialRestoration: Bool = false) async {
     guard !session.fixture, let account = session.accountId else { return }
