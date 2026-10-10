@@ -254,10 +254,35 @@ enum CameraMedia {
     }
     return try await withTaskCancellationHandler { try await work.value } onCancel: { work.cancel() }
   }
-  static func restoreToPhotos(_ urls: [URL], mediaType: String) async throws {
+  static func captureDate(_ metadata: PhotoMetadataV1) -> Date? {
+    guard ["photos", "exif"].contains(metadata.dateSource), let date = Wire.parseDate(metadata.sourceDate),
+      date.timeIntervalSince1970.isFinite else { return nil }
+    return date
+  }
+  @MainActor static func restoreOriginalToPhotos(_ url: URL, metadata: PhotoMetadataV1,
+    check: @MainActor () throws -> Void,
+    requestAccess: @MainActor () async -> PHAuthorizationStatus = { await PHPhotoLibrary.requestAuthorization(for: .addOnly) },
+    restore: @MainActor ([URL], PhotoMetadataV1) async throws -> Void = {
+      try await restoreToPhotos($0, mediaType: $1.mediaType, creationDate: captureDate($1))
+    }) async throws {
+    // PhotoKit owns these resources until performChanges finishes, including cancellation.
+    defer { ConsumerShareExports.remove([url]) }
+    try check()
+    let urls = try await exportOriginalFile(url, metadata: metadata)
+    try check()
+    let permission = await requestAccess()
+    try check()
+    guard permission == .authorized || permission == .limited else {
+      throw FotoroError("Allow adding originals to Photos in Settings and retry")
+    }
+    try await restore(urls, metadata)
+    try check()
+  }
+  static func restoreToPhotos(_ urls: [URL], mediaType: String, creationDate: Date? = nil) async throws {
     guard !urls.isEmpty, urls.count == (mediaType == liveType ? 2 : 1) else { throw FotoroError("Complete original resources are required") }
     try await PHPhotoLibrary.shared().performChanges {
       let request = PHAssetCreationRequest.forAsset()
+      request.creationDate = creationDate
       for (index, url) in urls.enumerated() {
         let type: PHAssetResourceType = mediaType == liveType ? (index == 0 ? .photo : .pairedVideo)
           : (isMotion(mediaType) ? .video : .photo)

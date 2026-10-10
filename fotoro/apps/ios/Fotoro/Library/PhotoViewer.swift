@@ -86,7 +86,12 @@ struct PhotoViewer: View {
             }
             ToolbarItem(placement: .bottomBar) {
               Button(current.map { savedReceivedIDs.contains($0.id) } == true ? "Saved" : "Save", systemImage: "icloud.and.arrow.up", action: saveReceived)
-                .disabled(services.busy || current == nil || current.map { savedReceivedIDs.contains($0.id) } == true)
+                .disabled(services.busy || preparingShare || current == nil || current.map { savedReceivedIDs.contains($0.id) } == true)
+            }
+            ToolbarItem(placement: .bottomBar) {
+              Button("Save to Photos", systemImage: "square.and.arrow.down", action: restoreOriginal)
+                .disabled(preparingShare || saveTask != nil || current == nil)
+                .accessibilityIdentifier("viewer.saveToPhotos")
             }
           } else {
             ToolbarItem(placement: .bottomBar) {
@@ -191,36 +196,38 @@ struct PhotoViewer: View {
     }
   }
   private func restoreOriginal() {
-    guard let photo = current, receivedGrant == nil, !preparingShare else { return }
+    guard let photo = current, !preparingShare, saveTask == nil else { return }
     let account = services.session.accountId, generation = services.vault.generation, catalog = services.store
+    let origin = BackgroundUploadPolicy.origin(services.api.baseURL), cards = services.session.pinnedCards
+    let grant = receivedGrant
     preparingShare = true
     shareTask = Task {
-      var exported: [URL] = []
-      defer { ConsumerShareExports.remove(exported); preparingShare = false; shareTask = nil }
+      defer { preparingShare = false; shareTask = nil }
       @MainActor func check() throws {
         try Task.checkCancellation()
         guard services.vault.isUnlocked, services.vault.generation == generation,
           services.session.accountId == account, services.store === catalog,
-          let current = try services.consumerSavedPhoto(photo.id),
-          current.metadata == photo.metadata, current.manifest == photo.manifest else { throw CancellationError() }
+          BackgroundUploadPolicy.origin(services.api.baseURL) == origin,
+          services.session.pinnedCards == cards else { throw CancellationError() }
+        if let grant {
+          guard receivedCards == cards, services.isReceivedGrantCurrent(grant), services.received.contains(where: {
+            $0.id == photo.id && $0.metadata == photo.metadata && $0.manifest == photo.manifest
+          }) else { throw CancellationError() }
+        } else {
+          guard let current = try services.consumerSavedPhoto(photo.id),
+            current.metadata == photo.metadata, current.manifest == photo.manifest else { throw CancellationError() }
+        }
       }
       do {
-        let url = try await services.consumerShareOriginal(photo)
-        exported = [url]
         try check()
-        exported = try await CameraMedia.exportOriginalFile(url, metadata: photo.metadata)
-        try check()
-        let permission = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-        try check()
-        guard permission == .authorized || permission == .limited else { throw FotoroError("Allow adding originals to Photos in Settings and retry") }
-        try await CameraMedia.restoreToPhotos(exported, mediaType: photo.metadata.mediaType)
-        try check()
+        let url = try await services.consumerMediaOriginal(photo, grant: grant)
+        try await CameraMedia.restoreOriginalToPhotos(url, metadata: photo.metadata, check: check)
         feedback = "Original saved to Photos."
       } catch is CancellationError {} catch { services.error = error.localizedDescription }
     }
   }
   private func saveReceived() {
-    guard let photo = current, let receivedGrant, services.isReceivedGrantCurrent(receivedGrant), saveTask == nil else { return }
+    guard let photo = current, let receivedGrant, services.isReceivedGrantCurrent(receivedGrant), saveTask == nil, !preparingShare else { return }
     saveTask = services.run(phase: .share) {
       defer {
         saveTask = nil

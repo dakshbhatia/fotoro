@@ -381,6 +381,7 @@ final class SearchIndex: @unchecked Sendable {
           try db.execute(
             sql: "INSERT INTO permittedSearchIDs(id) VALUES(?)", arguments: [incoming.id])
           var r = incoming
+          var unchanged = false
           if let old = try Row.fetchOne(
             db, sql: "SELECT value FROM searchRecords WHERE id=?", arguments: [r.id]
           ).map(decode) {
@@ -409,8 +410,11 @@ final class SearchIndex: @unchecked Sendable {
               r.visualStatus = old.visualStatus
               r.previewAvailable = r.previewAvailable || old.previewAvailable
             }
+            // Compare after restoring cached analysis and owner evidence. Even
+            // same-revision Photos metadata changes must rebuild searchable terms.
+            unchanged = r == old
           }
-          try put(r, db: db)
+          if !unchanged { try put(r, db: db) }
           progress?(offset + 1)
         }
         guard acceptsGeneration(generation) else { throw CancellationError() }

@@ -805,6 +805,102 @@ final class NativeAlbumTests: XCTestCase {
     XCTAssertThrowsError(try c.action(server.signed, albumId: server.definition.albumId, card: server.cards[1], bundle: server.bundles[1], ending: true))
     XCTAssertThrowsError(try c.action(server.signed, albumId: Wire.id(), card: server.cards[0], bundle: server.bundles[0], ending: true))
   }
+  @MainActor func testTripSaveToPhotosExportsVerifiedOriginalsAndCleansTemporaryResources() async throws {
+    let archive = try Data(contentsOf: XCTUnwrap(Bundle(for: Self.self).url(forResource: "camera-live", withExtension: "fotoro-live")))
+    let pair = try CameraMedia.decodeLivePhoto(archive)
+    let jpeg = try Data(contentsOf: XCTUnwrap(Bundle(for: Self.self).url(forResource: "semantic-fireworks", withExtension: "jpg")))
+    for (type, bytes, expected) in [
+      ("image/jpeg", jpeg, [jpeg]),
+      ("video/quicktime", pair.motion.bytes, [pair.motion.bytes]),
+      (CameraMedia.liveType, archive, [pair.still.bytes, pair.motion.bytes]),
+    ] {
+      try await withAlbum { services, server, model in
+        server.included = false
+        try server.contribute(server.extraOwnedPhotos(count: 1, originalBytes: bytes, filename: "original", mediaType: type))
+        try await model.refresh(); try await model.open(server.definition.albumId)
+        let item = try XCTUnwrap(model.items.first)
+        var accessReadsAtPrompt = server.accessReads
+        var exports: [URL] = [], permissionRequests = 0, creations = 0
+        try await model.saveToPhotos(item, requestAccess: {
+          permissionRequests += 1; accessReadsAtPrompt = server.accessReads; return .authorized
+        },
+          restore: { urls, metadata in
+            exports = urls; creations += 1
+            XCTAssertGreaterThan(server.accessReads, accessReadsAtPrompt, "Fresh membership after permission must precede PhotoKit admission")
+            XCTAssertEqual(metadata, item.photo.metadata)
+            XCTAssertEqual(try urls.map { try Data(contentsOf: $0) }, expected)
+            XCTAssertTrue(urls.allSatisfy { $0.path.contains("/fotoro-share-") })
+            await Task.yield()
+            XCTAssertTrue(urls.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+          })
+        XCTAssertEqual(permissionRequests, 1); XCTAssertEqual(creations, 1)
+        XCTAssertEqual(server.originalReads, 1)
+        XCTAssertTrue(exports.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
+        XCTAssertNil(try services.consumerSavedPhoto(item.id), "Photos export must not manufacture an owned Fotoro copy")
+      }
+    }
+  }
+  @MainActor func testTripSaveToPhotosKeepsResourcesAliveWhenAlbumClearsDuringCreation() async throws {
+    try await withAlbum { _, server, model in
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let item = try XCTUnwrap(model.items.first)
+      var exports: [URL] = []
+      do {
+        try await model.saveToPhotos(item, requestAccess: { .authorized }, restore: { urls, _ in
+          exports = urls
+          model.clear()
+          await Task.yield()
+          XCTAssertEqual(try Data(contentsOf: urls[0]).digest, item.photo.metadata.originalSha256,
+            "Album cache withdrawal cannot remove resources while PhotoKit owns them")
+        })
+        XCTFail("Cleared access must not publish success")
+      } catch is CancellationError {}
+      XCTAssertFalse(exports.isEmpty)
+      XCTAssertTrue(exports.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
+    }
+  }
+  @MainActor func testTripSaveToPhotosRejectsChangedCapturedSourceBeforeReadingOriginal() async throws {
+    try await withAlbum { _, server, model in
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let item = try XCTUnwrap(model.items.first)
+      var changed = item.photo
+      changed.metadata.filename = "changed.jpg"
+      let stale = NativeAlbumItem(entry: item.entry, signedManifest: item.signedManifest, photo: changed)
+      do {
+        try await model.saveToPhotos(stale, requestAccess: {
+          XCTFail("Changed metadata cannot request Photos permission"); return .authorized
+        }, restore: { _, _ in XCTFail("Changed metadata cannot reach PhotoKit") })
+        XCTFail("Changed captured source must be rejected")
+      } catch is CancellationError {}
+      XCTAssertEqual(server.originalReads, 0)
+    }
+  }
+  @MainActor func testTripSaveToPhotosRejectsWithdrawalAfterPermissionPromptBeforeCreation() async throws {
+    for withdrawal in ["origin", "membership", "source", "permission"] {
+      try await withAlbum { services, server, model in
+        try await model.refresh(); try await model.open(server.definition.albumId)
+        let item = try XCTUnwrap(model.items.first)
+        let temporary = FileManager.default.temporaryDirectory
+        let before = Set(try FileManager.default.contentsOfDirectory(atPath: temporary.path).filter { $0.hasPrefix("fotoro-share-") })
+        var creations = 0
+        do {
+          try await model.saveToPhotos(item, requestAccess: {
+            switch withdrawal {
+            case "origin": services.api.baseURL = URL(string: "https://withdrawn-trip.test")!
+            case "membership": server.accepted = false
+            case "source": model.clear()
+            default: return .denied
+            }
+            return .authorized
+          }, restore: { _, _ in creations += 1 })
+          XCTFail("Withdrawn \(withdrawal) cannot admit PhotoKit creation")
+        } catch {}
+        XCTAssertEqual(creations, 0)
+        let after = Set(try FileManager.default.contentsOfDirectory(atPath: temporary.path).filter { $0.hasPrefix("fotoro-share-") })
+        XCTAssertEqual(after, before, "Rejected \(withdrawal) must clean its protected export")
+      }
+    }
+  }
   @MainActor func testAcceptedMemberReadsContributionWithoutCreatingOwnedSavedPhotoAndClearsCaches() async throws {
     try await withAlbum { services, server, model in
       try await model.refresh(); try await model.open(server.definition.albumId)

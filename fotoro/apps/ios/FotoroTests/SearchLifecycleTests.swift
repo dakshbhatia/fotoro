@@ -1,3 +1,4 @@
+import GRDB
 import Photos
 import UIKit
 import XCTest
@@ -5,6 +6,81 @@ import XCTest
 @testable import Fotoro
 
 final class SearchLifecycleTests: XCTestCase {
+  func testUnchangedMetadataIntakeRetainsSearchableAnalysisWithoutRebuildingPostings() throws {
+    let index = try SearchIndex()
+    var incoming = SearchRecord(id: "kept")
+    incoming.filename = "gallery.jpg"
+    incoming.keywords = ["Exhibition"]
+    try index.replacePermitted([incoming, SearchRecord(id: "withdrawn")])
+    XCTAssertTrue(try index.setLabels(["Museum"], photoID: incoming.id))
+    XCTAssertTrue(try index.applyOCR(SearchOCRResult(text: "admission ticket", confidence: 0.9),
+      status: .complete, photoID: incoming.id, revision: incoming.revision))
+    try index.database.write { db in
+      try db.execute(sql: """
+        CREATE TEMP TABLE intakeWrites(kind TEXT);
+        CREATE TEMP TRIGGER countIntakeUpdates AFTER UPDATE ON searchRecords
+          WHEN NEW.id='kept' BEGIN INSERT INTO intakeWrites VALUES('record'); END;
+        CREATE TEMP TRIGGER countIntakePostingDeletes AFTER DELETE ON searchPostings
+          WHEN OLD.photo='kept' BEGIN INSERT INTO intakeWrites VALUES('posting'); END;
+        """)
+    }
+    try index.setWorkGeneration(2)
+    XCTAssertTrue(try index.replacePermitted([incoming], generation: 2))
+    let writes = try index.database.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM intakeWrites") }
+    XCTAssertEqual(writes, 0, "Unchanged merged records must leave their postings and FTS untouched")
+    XCTAssertEqual(try index.search("Exhibition").leading?.id, incoming.id)
+    XCTAssertEqual(try index.search("Museum").leading?.id, incoming.id)
+    XCTAssertEqual(try index.search("admission ticket").leading?.id, incoming.id)
+    XCTAssertEqual(try index.record(incoming.id)?.ocrStatus, .complete)
+    XCTAssertNil(try index.record("withdrawn"), "Skipping unchanged writes must still prune withdrawn sources")
+  }
+  func testChangedMetadataOnSameRevisionRebuildsTermsAndPreservesCachedOCR() throws {
+    let index = try SearchIndex()
+    var incoming = SearchRecord(id: "edited")
+    incoming.filename = "seaside.jpg"
+    incoming.keywords = ["Coast"]
+    try index.replacePermitted([incoming])
+    XCTAssertTrue(try index.applyOCR(SearchOCRResult(text: "admission ticket", confidence: 0.9),
+      status: .complete, photoID: incoming.id, revision: incoming.revision))
+    incoming.filename = "mountain.jpg"
+    incoming.keywords = ["Summit"]
+    incoming.favorite = true
+    XCTAssertTrue(try index.replacePermitted([incoming]))
+    XCTAssertNil(try index.search("seaside").leading)
+    XCTAssertNil(try index.search("Coast").leading)
+    XCTAssertEqual(try index.search("mountain").leading?.id, incoming.id)
+    XCTAssertEqual(try index.search("Summit").leading?.id, incoming.id)
+    XCTAssertEqual(try index.search("favorite").leading?.id, incoming.id)
+    XCTAssertEqual(try index.search("admission ticket").leading?.id, incoming.id)
+    XCTAssertEqual(try index.record(incoming.id)?.revision, incoming.revision)
+    XCTAssertEqual(try index.record(incoming.id)?.ocrStatus, .complete)
+  }
+  func testObsoleteMetadataScanCancellationStopsWithinCurrentBatch() async throws {
+    let index = try SearchIndex()
+    try index.setWorkGeneration(1)
+    XCTAssertTrue(try index.replacePermitted([SearchRecord(id: "kept")], generation: 1))
+    let began = expectation(description: "metadata scanner entered its first batch")
+    let probe = MetadataIntakeProbe(began: began)
+    let parent = Task {
+      try await SearchMetadataIntake.run {
+        try await SearchMetadataIntake.forEach(count: 10_000) { _ in probe.visit() }
+        return try index.replacePermitted([SearchRecord(id: "obsolete")], generation: 1)
+      }
+    }
+    await fulfillment(of: [began], timeout: 10)
+    parent.cancel()
+    probe.resume.signal()
+    do {
+      _ = try await parent.value
+      XCTFail("An obsolete scan cannot return a publishable metadata snapshot")
+    } catch is CancellationError {}
+    XCTAssertGreaterThan(probe.count, 0)
+    XCTAssertLessThanOrEqual(probe.count, 100, "Canceling the parent must stop its detached scanner within one batch")
+    XCTAssertNotNil(try index.record("kept"))
+    XCTAssertNil(try index.record("obsolete"))
+    XCTAssertTrue(try index.replacePermitted([SearchRecord(id: "current")], generation: 1),
+      "Worker cancellation must not change database generation acceptance")
+  }
   #if !FOTORO_LOCAL_PREVIEW
   func testReplacingSyncedOCRRemovesObsoleteTextAndRestoresOnlyLocalEvidence() throws {
     for replacement in [nil, PhotoAnnotationsV1.OCR(text: "unsupported text", confidence: 1, processor: "future-ocr")] {
@@ -258,5 +334,28 @@ final class SearchLifecycleTests: XCTestCase {
       "Frozen native retrieval: \(passed)/\(covered) covered completed-word first results; 10 absent/uncovered cases checked"
     )
     XCTAssertEqual(covered, 20)
+  }
+}
+
+private final class MetadataIntakeProbe: @unchecked Sendable {
+  let resume = DispatchSemaphore(value: 0)
+  private let began: XCTestExpectation
+  private let lock = NSLock()
+  private var visited = 0
+  init(began: XCTestExpectation) { self.began = began }
+  var count: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return visited
+  }
+  func visit() {
+    lock.lock()
+    visited += 1
+    let first = visited == 1
+    lock.unlock()
+    if first {
+      began.fulfill()
+      _ = resume.wait(timeout: .now() + 10)
+    }
   }
 }
