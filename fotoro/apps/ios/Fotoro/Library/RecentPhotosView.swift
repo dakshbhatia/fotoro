@@ -21,15 +21,16 @@ struct PhotosImage: View {
   @State private var retry = 0
   @State private var displayedSource: RecentPhotoSource?
   @Environment(\.displayScale) private var displayScale
+  @Environment(\.scenePhase) private var scenePhase
   private var targetSize: CGSize {
     if large { return CGSize(width: 1600, height: 1600) }
     let pixels = min(1024, max(64, ceil(thumbnailSide * displayScale / 64) * 64))
     return CGSize(width: pixels, height: pixels)
   }
   var body: some View {
+    let thumbnailGeneration = store.thumbnailGeneration
     Group {
-      if let image = image ?? (!large ? store.cachedThumbnail(for: RecentPhotoSource(photo),
-        targetSize: targetSize, networkAllowed: networkAllowed) : nil) {
+      if scenePhase != .background, let image {
         Image(uiImage: image).resizable()
       } else {
         Rectangle().fill(.quaternary).overlay {
@@ -50,11 +51,18 @@ struct PhotosImage: View {
         }.padding(8).background(.regularMaterial, in: .rect(cornerRadius: 12)).padding(large ? 16 : 4)
       }
     }
-    .task(id: photo.id + "|" + photo.sourceRevision + "|\(retry)|\(targetSize.width)|\(networkAllowed)") {
-      if let request { store.images.cancelImageRequest(request) }
+    .task(id: photo.id + "|" + photo.sourceRevision + "|\(retry)|\(targetSize.width)|\(networkAllowed)|\(thumbnailGeneration)|\(scenePhase != .background)") {
+      guard !Task.isCancelled else { return }
+      stop()
       let source = RecentPhotoSource(photo)
       if displayedSource != source { image = nil; displayedSource = source }
       progress = PhotoPreviewProgress()
+      guard scenePhase != .background,
+        store.canPublishThumbnail(source: source, generation: thumbnailGeneration) else {
+        image = nil
+        _ = progress.receive(hasImage: false, degraded: false)
+        return
+      }
       let token = UUID()
       generation = token
       active = true
@@ -64,7 +72,6 @@ struct PhotosImage: View {
         _ = progress.receive(hasImage: true, degraded: false)
         return
       }
-      let thumbnailGeneration = store.thumbnailGeneration
       let options = PHImageRequestOptions()
       options.isNetworkAccessAllowed = networkAllowed
       options.deliveryMode = .opportunistic
@@ -78,6 +85,12 @@ struct PhotosImage: View {
         let failed = info?[PHImageErrorKey] != nil
         Task { @MainActor in
           guard active, generation == token else { return }
+          guard scenePhase != .background,
+            store.canPublishThumbnail(source: source, generation: thumbnailGeneration) else {
+            stop(); image = nil
+            _ = progress.receive(hasImage: false, degraded: false)
+            return
+          }
           let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) == true
           if progress.receive(hasImage: value != nil, degraded: degraded, cancelled: cancelled, failed: failed) {
             image = value
@@ -89,13 +102,15 @@ struct PhotosImage: View {
         }
       }
     }
-    .onDisappear {
-      active = false
-      generation = UUID()
-      if let request { store.images.cancelImageRequest(request) }
-      image = nil
-    }
+    .onChange(of: scenePhase) { _, phase in if phase == .background { stop(); image = nil } }
+    .onDisappear { stop(); image = nil }
     .accessibilityLabel(photo.capturedAt?.formatted(date: .complete, time: .shortened) ?? "Photo")
+  }
+  private func stop() {
+    active = false
+    generation = UUID()
+    if let request { store.images.cancelImageRequest(request) }
+    request = nil
   }
 }
 

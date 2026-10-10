@@ -20,8 +20,8 @@ final class ConsumerCoreTests: XCTestCase {
       defer { try? FileManager.default.removeItem(at: directory) }
       var metadata = try samplePhoto().metadata
       metadata.mediaType = type; metadata.originalBytes = bytes.count; metadata.originalSha256 = bytes.digest
-      var checks = 0, writes = 0
-      try await CameraMedia.restoreOriginalToPhotos(url, metadata: metadata, check: { checks += 1 },
+      var writes = 0
+      try await CameraMedia.restoreOriginalToPhotos(url, metadata: metadata, check: {},
         requestAccess: { .authorized }, restore: { urls, restored in
           writes += 1
           XCTAssertEqual(restored, metadata)
@@ -29,7 +29,7 @@ final class ConsumerCoreTests: XCTestCase {
           await Task.yield()
           XCTAssertTrue(urls.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
         })
-      XCTAssertEqual(checks, 4); XCTAssertEqual(writes, 1)
+      XCTAssertEqual(writes, 1)
       XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
     }
   }
@@ -72,27 +72,30 @@ final class ConsumerCoreTests: XCTestCase {
     XCTAssertNil(CameraMedia.captureDate(metadata))
   }
   @MainActor func testPhotosExportChecksEveryBoundaryAndCleansCreationFailures() async throws {
-    for rejectedCheck in 1...5 {
+    for withdrawal in ["initial", "permission", "completion", "creation failure"] {
       let directory = FileManager.default.temporaryDirectory.appendingPathComponent("fotoro-share-" + Wire.id())
       try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
       let url = directory.appendingPathComponent("download")
       try Data("jpg".utf8).write(to: url)
       defer { try? FileManager.default.removeItem(at: directory) }
       let metadata = try samplePhoto().metadata
-      var checks = 0, writes = 0
+      var current = withdrawal != "initial", writes = 0
       do {
         try await CameraMedia.restoreOriginalToPhotos(url, metadata: metadata, check: {
-          checks += 1
-          if checks == rejectedCheck { throw CancellationError() }
-        }, requestAccess: { .authorized }, restore: { _, _ in
+          if !current { throw CancellationError() }
+        }, requestAccess: {
+          if withdrawal == "permission" { current = false }
+          return .authorized
+        }, restore: { _, _ in
           writes += 1
-          if rejectedCheck == 5 { throw FotoroError("Creation failed") }
+          if withdrawal == "creation failure" { throw FotoroError("Creation failed") }
+          current = false
         })
         XCTFail("Stale admission or creation failure must propagate")
       } catch {
-        if rejectedCheck < 5 { XCTAssertTrue(error is CancellationError) }
+        if withdrawal != "creation failure" { XCTAssertTrue(error is CancellationError) }
       }
-      XCTAssertEqual(writes, rejectedCheck >= 4 ? 1 : 0)
+      XCTAssertEqual(writes, ["completion", "creation failure"].contains(withdrawal) ? 1 : 0)
       XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
     }
   }

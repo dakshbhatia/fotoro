@@ -26,6 +26,7 @@ struct PhotoViewer: View {
   @State private var controlsVisible = true
   @State private var saveTask: Task<Void, Never>?
   @State private var savedReceivedIDs: Set<String> = []
+  @State private var restoredOriginals: Set<String> = []
   @State private var feedback: String?
   @Environment(\.scenePhase) private var scenePhase
   @Environment(\.dismiss) private var dismiss
@@ -40,12 +41,18 @@ struct PhotoViewer: View {
   private var receivedUnavailable: Bool { receivedGrant.map { !services.isReceivedGrantCurrent($0) } ?? false }
   private var photos: [LocalPhoto] { receivedUnavailable ? [] : displayedPhotos ?? (receivedGrant == nil ? services.photos : services.received) }
   private var current: LocalPhoto? { photos.first { $0.id == (selected.isEmpty ? initialID : selected) } }
+  private var currentOriginalRestored: Bool {
+    current.map { restoredOriginals.contains(SavedPhotoViewerPagePolicy.originalIdentity($0.metadata)) } ?? false
+  }
   var body: some View {
+    let pagePhotos = photos
+    let loadedIDs = SavedPhotoViewerPagePolicy.loadedIDs(pagePhotos.map(\.id),
+      selected: selected.isEmpty ? initialID : selected)
     NavigationStack {
       TabView(selection: $selected) {
-        ForEach(photos) { photo in
+        ForEach(pagePhotos) { photo in
           Group {
-            if shouldLoad(photo) {
+            if loadedIDs.contains(photo.id) {
               if CameraMedia.isMotion(photo.metadata.mediaType) {
                 SavedPhotoPage(services: services, photo: photo, receivedGrant: receivedGrant, receivedCards: receivedCards,
                   isCurrent: photo.id == selected)
@@ -89,15 +96,15 @@ struct PhotoViewer: View {
                 .disabled(services.busy || preparingShare || current == nil || current.map { savedReceivedIDs.contains($0.id) } == true)
             }
             ToolbarItem(placement: .bottomBar) {
-              Button("Save to Photos", systemImage: "square.and.arrow.down", action: restoreOriginal)
-                .disabled(preparingShare || saveTask != nil || current == nil)
+              Button(currentOriginalRestored ? "Saved to Photos" : "Save to Photos", systemImage: "square.and.arrow.down", action: restoreOriginal)
+                .disabled(preparingShare || saveTask != nil || current == nil || currentOriginalRestored)
                 .accessibilityIdentifier("viewer.saveToPhotos")
             }
           } else {
             ToolbarItem(placement: .bottomBar) {
-              Button("Save to Photos", systemImage: "square.and.arrow.down", action: restoreOriginal)
-                .disabled(preparingShare || current == nil)
-                .accessibilityLabel("Save to Photos")
+              Button(currentOriginalRestored ? "Saved to Photos" : "Save to Photos", systemImage: "square.and.arrow.down", action: restoreOriginal)
+                .disabled(preparingShare || current == nil || currentOriginalRestored)
+                .accessibilityLabel(currentOriginalRestored ? "Saved to Photos" : "Save to Photos")
                 .accessibilityIdentifier("viewer.saveToPhotos")
             }
             ToolbarItem(placement: .bottomBar) {
@@ -154,11 +161,6 @@ struct PhotoViewer: View {
         } message: { Text(services.error ?? "") }
     }.preferredColorScheme(.dark)
   }
-  private func shouldLoad(_ photo: LocalPhoto) -> Bool {
-    guard let index = photos.firstIndex(where: { $0.id == photo.id }),
-      let current = photos.firstIndex(where: { $0.id == (selected.isEmpty ? initialID : selected) }) else { return false }
-    return RecentPhotosPolicy.shouldLoadPage(index, current: current)
-  }
   private func movePage(forward: Bool) {
     if let id = RecentPhotosPolicy.adjacentPhotoID(photos.map(\.id), current: selected, forward: forward) { selected = id }
   }
@@ -197,6 +199,8 @@ struct PhotoViewer: View {
   }
   private func restoreOriginal() {
     guard let photo = current, !preparingShare, saveTask == nil else { return }
+    let originalIdentity = SavedPhotoViewerPagePolicy.originalIdentity(photo.metadata)
+    guard !restoredOriginals.contains(originalIdentity) else { return }
     let account = services.session.accountId, generation = services.vault.generation, catalog = services.store
     let origin = BackgroundUploadPolicy.origin(services.api.baseURL), cards = services.session.pinnedCards
     let grant = receivedGrant
@@ -220,8 +224,9 @@ struct PhotoViewer: View {
       }
       do {
         try check()
-        let url = try await services.consumerMediaOriginal(photo, grant: grant)
-        try await CameraMedia.restoreOriginalToPhotos(url, metadata: photo.metadata, check: check)
+        try await CameraMedia.restoreOriginalToPhotos(metadata: photo.metadata, check: check,
+          original: { try await services.consumerMediaOriginal(photo, grant: grant) })
+        restoredOriginals.insert(originalIdentity)
         feedback = "Original saved to Photos."
       } catch is CancellationError {} catch { services.error = error.localizedDescription }
     }
@@ -252,6 +257,16 @@ struct PhotoViewer: View {
     ConsumerShareExports.remove(originalExports)
     originalExports = []
     sharedOriginal = nil
+  }
+}
+
+enum SavedPhotoViewerPagePolicy {
+  static func loadedIDs(_ ids: [String], selected: String) -> Set<String> {
+    guard let current = ids.firstIndex(of: selected) else { return [] }
+    return Set(ids[max(ids.startIndex, current - 1)...min(ids.endIndex - 1, current + 1)])
+  }
+  static func originalIdentity(_ metadata: PhotoMetadataV1) -> String {
+    metadata.originalSha256 + "|\(metadata.originalBytes)|" + metadata.mediaType
   }
 }
 
