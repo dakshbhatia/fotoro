@@ -32,7 +32,7 @@ enum PhotoPlaceScale: String, Sendable {
     switch self { case .regions: return "Regions"; case .cities: return "City areas"; case .spots: return "Spots"; case .photos: return "Photos" }
   }
   var areaLabel: String {
-    switch self { case .regions: return "Area"; case .cities: return "Area"; case .spots: return "Spot"; case .photos: return "Photos" }
+    switch self { case .regions: return "Area"; case .cities: return "City area"; case .spots: return "Spot"; case .photos: return "Spot" }
   }
 }
 struct PhotoPlaceCluster: Equatable, Identifiable, Sendable {

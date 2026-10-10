@@ -112,6 +112,7 @@ enum PhotoPlacesPolicy {
 struct PhotoPlacesView: View {
   @Environment(\.dismiss) private var dismiss
   @Environment(\.scenePhase) private var scenePhase
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   let store: RecentPhotosStore
   var search: LocalSearchStore? = nil
   #if !FOTORO_LOCAL_PREVIEW
@@ -130,6 +131,7 @@ struct PhotoPlacesView: View {
   @State private var points: [PhotoPlacePoint] = []
   @State private var snapshot = PhotoPlaceMapSnapshot.empty
   @State private var visibleRows: [PhotoPlaceItem] = []
+  @State private var areaCovers: [String: PhotoPlaceItem] = [:]
   @State private var focusedPhotoIDs: Set<String>?
   @State private var rowLimit = 80
   @State private var sourceToken = UUID()
@@ -179,25 +181,38 @@ struct PhotoPlacesView: View {
               let next = PhotoPlaceViewport(center: PhotoPlaceCoordinate(latitude: context.region.center.latitude, longitude: PhotoPlaceGeometry.longitude(context.region.center.longitude)),
                 latitudeSpan: min(180, context.region.span.latitudeDelta), longitudeSpan: min(360, context.region.span.longitudeDelta))
               guard next.isValid else { return }
-              viewport = next; focusedPhotoIDs = nil; rowLimit = 80; selectedID = nil; updateMap()
+              if camera.positionedByUser { focusedPhotoIDs = nil; rowLimit = 80 }
+              viewport = next; selectedID = nil; updateMap()
             }
             .accessibilityIdentifier("places.map")
         }
         List {
-          if sourceCurrent, !snapshot.clusters.isEmpty {
+          if sourceCurrent, !snapshot.clusters.isEmpty, focusedPhotoIDs == nil {
             Section {
+              ForEach(snapshot.clusters) { cluster in
+                Button { zoom(to: cluster) } label: {
+                  HStack(spacing: 12) {
+                    if let cover = areaCovers[cluster.id] {
+                      thumbnail(cover, side: 76)
+                        .id(cover.id + "|" + cover.revision)
+                        .frame(width: 76, height: 76).clipped()
+                        .clipShape(.rect(cornerRadius: 12)).accessibilityHidden(true)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                      Text(areaName(cluster)).font(.headline).foregroundStyle(.primary)
+                      Text(photoCount(cluster.count)).font(.subheadline).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+                  }.padding(.vertical, 4)
+                }.buttonStyle(.plain)
+                  .accessibilityHint("Show photos in this area")
+              }
               if placeNames.loading { ProgressView("Finding area names…") }
-              else {
-                Button("Look up area names", systemImage: "map") { lookupAreaNames() }
-              }
-              ForEach(snapshot.clusters.filter { placeNames.name(for: $0) != nil }) { cluster in
-                if let name = placeNames.name(for: cluster) {
-                  Button { zoom(to: cluster) } label: {
-                    Label(name, systemImage: "mappin.and.ellipse")
-                  }.accessibilityHint("Zoom to this photo area")
-                }
-              }
+              else { Button("Look up area names", systemImage: "map") { lookupAreaNames() } }
               if placeNames.failed { Text("Some area names are unavailable. Try again.").font(.footnote).foregroundStyle(.secondary) }
+            } header: {
+              Text("\(snapshot.scale.title) · \(photoCount(snapshot.visibleCount)) in map")
             } footer: {
               Text("Look up up to 8 map areas with Apple Maps. Only marker coordinates are sent. Names describe the area around each marker.")
             }
@@ -210,7 +225,7 @@ struct PhotoPlacesView: View {
               ForEach(visibleRows) { item in
                 Button { openPhoto(item) } label: {
                   HStack(spacing: 12) {
-                    thumbnail(item).frame(width: 60, height: 60).clipped().clipShape(.rect(cornerRadius: 8)).accessibilityHidden(true)
+                    thumbnail(item, side: 60).frame(width: 60, height: 60).clipped().clipShape(.rect(cornerRadius: 8)).accessibilityHidden(true)
                     PhotoPlaceRow(item: item)
                   }
                 }.buttonStyle(.plain).accessibilityHint("Open photo")
@@ -219,7 +234,7 @@ struct PhotoPlacesView: View {
                 Button("Show more nearby photos") { rowLimit += 80; updateRows() }
               }
             } header: {
-              Text(focusedPhotoIDs == nil ? "\(snapshot.scale.title) · \(photoCount(snapshot.visibleCount)) in map" : "\(photoCount(displayedCount)) at this spot")
+              Text("Nearby photos · \(photoCount(displayedCount))")
             } footer: {
               Text("\(items.count) photo location\(items.count == 1 ? "" : "s") available. \(coverageDescription)")
             }
@@ -279,13 +294,15 @@ struct PhotoPlacesView: View {
     MKCoordinateRegion(center: coordinate(value.center), span: MKCoordinateSpan(latitudeDelta: value.latitudeSpan, longitudeDelta: value.longitudeSpan))
   }
   private func clusterLabel(_ cluster: PhotoPlaceCluster) -> String {
-    let label = cluster.name ?? placeNames.name(for: cluster).map { "Near " + $0 } ?? (cluster.count == 1 ? "Photo" : snapshot.scale.areaLabel)
-    return cluster.count == 1 ? label : "\(label) · \(cluster.count) photos"
+    "\(areaName(cluster)) · \(photoCount(cluster.count))"
+  }
+  private func areaName(_ cluster: PhotoPlaceCluster) -> String {
+    cluster.name ?? placeNames.name(for: cluster).map { "Near " + $0 } ?? snapshot.scale.areaLabel
   }
   private func clearPlaces() {
     nameLookup?.cancel(); nameLookup = nil; placeNames.clear()
     projection?.cancel(); projection = nil; sourceToken = UUID(); selectedID = nil
-    items = []; byID = [:]; devicePhotos = [:]; points = []; snapshot = .empty; visibleRows = []; focusedPhotoIDs = nil
+    items = []; byID = [:]; devicePhotos = [:]; points = []; snapshot = .empty; visibleRows = []; areaCovers = [:]; focusedPhotoIDs = nil
     #if !FOTORO_LOCAL_PREVIEW
     savedPhotos = [:]
     #endif
@@ -294,7 +311,7 @@ struct PhotoPlacesView: View {
   private func refreshSources(recenter: Bool = false) {
     nameLookup?.cancel(); nameLookup = nil; placeNames.clear()
     guard scenePhase == .active else { clearPlaces(); return }
-    projection?.cancel(); sourceToken = UUID(); selectedID = nil; focusedPhotoIDs = nil; snapshot = .empty; visibleRows = []; rowLimit = 80
+    projection?.cancel(); sourceToken = UUID(); selectedID = nil; focusedPhotoIDs = nil; snapshot = .empty; visibleRows = []; areaCovers = [:]; rowLimit = 80
     let page = store.browsePage, status = store.status
     let library = search?.libraryGeneration, assetCount = search?.assets.count
     // The index already holds permitted metadata; using it does not request originals or inference.
@@ -347,13 +364,23 @@ struct PhotoPlacesView: View {
   private func updateMap() {
     nameLookup?.cancel(); nameLookup = nil; placeNames.clear()
     projection?.cancel()
-    guard sourceCurrent, let viewport else { snapshot = .empty; visibleRows = []; return }
+    guard sourceCurrent, let viewport else { snapshot = .empty; visibleRows = []; areaCovers = [:]; return }
     let input = points, token = sourceToken
     projection = Task { @MainActor in
-      let worker = Task.detached(priority: .userInitiated) { PhotoPlaceGeometry.snapshot(input, viewport: viewport) }
+      let worker = Task.detached(priority: .userInitiated) {
+        let value = PhotoPlaceGeometry.snapshot(input, viewport: viewport)
+        // The snapshot orders valid capture dates newest first; derive covers once per projection.
+        let rank = Dictionary(value.visiblePhotoIDs.enumerated().map { ($0.element, $0.offset) }, uniquingKeysWith: { first, _ in first })
+        let covers = Dictionary(value.clusters.compactMap { cluster -> (String, String)? in
+          guard let id = cluster.photoIDs.min(by: { (rank[$0] ?? Int.max) < (rank[$1] ?? Int.max) }) else { return nil }
+          return (cluster.id, id)
+        }, uniquingKeysWith: { first, _ in first })
+        return (snapshot: value, covers: covers)
+      }
       let value = await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
       guard !Task.isCancelled, sourceToken == token, sourceCurrent, self.viewport == viewport else { return }
-      snapshot = value; updateRows()
+      areaCovers = value.covers.compactMapValues { byID[$0] }
+      snapshot = value.snapshot; updateRows()
     }
   }
   private func updateRows() {
@@ -364,12 +391,7 @@ struct PhotoPlacesView: View {
   private func selectMarker() {
     guard sourceCurrent, let selectedID, let cluster = snapshot.clusters.first(where: { $0.id == selectedID }) else { return }
     self.selectedID = nil
-    if cluster.count == 1, let item = byID[cluster.photoIDs[0]] { openPhoto(item); return }
-    focusedPhotoIDs = Set(cluster.photoIDs); rowLimit = 80; updateRows()
-    let target = cluster.bounds.padded(1.4, minimum: 0.002)
-    if viewport.map({ $0.latitudeSpan > target.latitudeSpan * 1.2 || $0.longitudeSpan > target.longitudeSpan * 1.2 }) ?? true {
-      withAnimation { camera = .region(region(target)) }
-    }
+    zoom(to: cluster)
   }
   private func lookupAreaNames() {
     guard sourceCurrent, !placeNames.loading else { return }
@@ -382,7 +404,11 @@ struct PhotoPlacesView: View {
   }
   private func zoom(to cluster: PhotoPlaceCluster) {
     guard sourceCurrent, snapshot.clusters.contains(cluster) else { return }
-    withAnimation { camera = .region(region(cluster.bounds.padded(1.4, minimum: 0.002))) }
+    focusedPhotoIDs = Set(cluster.photoIDs); rowLimit = 80; updateRows()
+    let target = cluster.bounds.padded(1.4, minimum: 0.002)
+    viewport = target
+    withAnimation(reduceMotion ? nil : .default) { camera = .region(region(target)) }
+    updateMap()
   }
   private func openPhoto(_ item: PhotoPlaceItem) {
     guard sourceCurrent, byID[item.id] == item else { return }
@@ -422,12 +448,12 @@ struct PhotoPlacesView: View {
     #endif
     loading = false; refreshSources()
   }
-  @ViewBuilder private func thumbnail(_ item: PhotoPlaceItem) -> some View {
+  @ViewBuilder private func thumbnail(_ item: PhotoPlaceItem, side: CGFloat) -> some View {
     if sourceCurrent {
       switch item.reference {
       case .device(let id):
         if let photo = devicePhotos[id], photo.sourceRevision == item.revision {
-          PhotosImage(photo: photo, store: store, networkAllowed: false).scaledToFill()
+          PhotosImage(photo: photo, store: store, networkAllowed: false, thumbnailSide: side).scaledToFill()
         } else { Image(systemName: "photo").foregroundStyle(.secondary) }
       case .saved(let id):
         #if !FOTORO_LOCAL_PREVIEW
