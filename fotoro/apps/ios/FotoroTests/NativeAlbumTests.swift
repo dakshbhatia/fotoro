@@ -1288,6 +1288,45 @@ final class NativeAlbumTests: XCTestCase {
       XCTAssertNil(model.opened); XCTAssertNil(model.currentOpenedPhotoAccess)
     }
   }
+  @MainActor func testChosenSavedTripActionRetriesSameSignedContributionAfterLostResponse() async throws {
+    try await withAlbum(owner: true) { services, server, model in
+      server.included = false; server.loseAppendResponse = true
+      try services.store.put(server.source); try services.reload()
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let selected = [server.source], sourceManifest = server.source.manifest
+      do { try await model.addChosen(selected); XCTFail("Lost response reported success") } catch {}
+      XCTAssertTrue(model.hasPendingAddition)
+      XCTAssertEqual(server.appendBodies.count, 1)
+      let first = try XCTUnwrap(server.appendBodies.first)
+      try await model.addChosen(selected)
+      XCTAssertEqual(server.appendBodies, [first, first], "The visible chosen-photo retry must reuse its original signed request")
+      XCTAssertFalse(model.hasPendingAddition)
+      XCTAssertEqual(model.items.map(\.id), [server.source.id], "An already committed contribution must not be duplicated")
+      XCTAssertEqual(try services.consumerSavedPhoto(server.source.id)?.manifest, sourceManifest)
+      XCTAssertEqual(try NativeAlbumWire.decode(AlbumAppendV1.self, first).manifests, [server.manifest])
+    }
+  }
+  @MainActor func testChosenTripRetryFinishesMultiBatchSelectionAndRejectsUnrelatedChoices() async throws {
+    try await withAlbum(owner: true) { services, server, model in
+      server.included = false; server.loseAppendResponse = true
+      let photos = try server.extraOwnedPhotos(count: 150)
+      for photo in photos { try services.store.put(photo) }
+      try services.reload(); try await model.refresh(); try await model.open(server.definition.albumId)
+      do { try await model.addChosen(photos); XCTFail("Lost first batch response reported success") } catch {}
+      XCTAssertTrue(model.hasPendingAddition)
+      XCTAssertEqual(server.appendBodies.count, 1)
+      let first = try XCTUnwrap(server.appendBodies.first)
+      do { try await model.addChosen(Array(photos.suffix(50))); XCTFail("Unrelated selection replayed another chosen batch") } catch {}
+      XCTAssertEqual(server.appendBodies, [first]); XCTAssertTrue(model.hasPendingAddition)
+      try await model.addChosen(photos)
+      let requests = try server.appendBodies.map { try NativeAlbumWire.decode(AlbumAppendV1.self, $0) }
+      XCTAssertEqual(requests.map { $0.entries.count }, [100, 100, 50])
+      XCTAssertEqual(server.appendBodies[1], first, "Replay must finish the durable first batch with identical signed bytes")
+      XCTAssertEqual(Set(model.items.map(\.id)), Set(photos.map(\.id)))
+      XCTAssertEqual(model.items.count, 150); XCTAssertFalse(model.hasPendingAddition)
+      for photo in photos { XCTAssertEqual(try services.consumerSavedPhoto(photo.id)?.manifest, photo.manifest) }
+    }
+  }
   @MainActor func testLostAppendResponseRetriesDurableExactBodyAndOriginalBrowserSignature() async throws {
     try await withAlbum(owner: true) { services, server, model in
       server.included = false; server.loseAppendResponse = true
