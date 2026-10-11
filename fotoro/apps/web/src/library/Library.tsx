@@ -1,10 +1,10 @@
-import { useRef, useState, useEffect, useLayoutEffect, useMemo } from "react";
+import { useRef, useState, useEffect, useMemo } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { type Photo } from "./catalog";
 import {requireVault} from "../vault/vault";
 import {sameVault} from "../vault/scope";
 import {leaseSavedRaster, savedRasterSource} from "./saved-raster";
-import {usePhotoNavigation} from "./photo-navigation";
+import {usePhotoGridAnchorRestoration, usePhotoNavigation} from "./photo-navigation";
 export function PhotoSelectionButton({filename, selected, disabled = false, onSelect}: {filename: string; selected: boolean; disabled?: boolean; onSelect: () => void}) {
   return <button className="select" aria-label={"Select " + filename} aria-pressed={selected} disabled={disabled}
     onClick={() => {if (!disabled) onSelect();}}>{selected ? "✓" : ""}</button>;
@@ -145,16 +145,7 @@ export function Library({
   const navigationRows = useMemo(() => rows.map(row => row.photos.map(photo => photo.manifest.photoId)),[rows]);
   const navigate = usePhotoNavigation(parent,navigationRows,index => virtual.scrollToIndex(index,{align: "auto"}),
     Math.max(1,Math.floor((parent.current?.clientHeight ?? width)/Math.max(1,width/columns))),active);
-  useLayoutEffect(() => {
-    if (active && anchor.current && parent.current) {
-      const index = rows.findIndex((row) =>
-        row.photos.some((photo) => photo.manifest.photoId === anchor.current!.id),
-      );
-      const offset =
-        index >= 0 ? virtual.getOffsetForIndex(index, "start") : undefined;
-      if (offset) virtual.scrollToOffset(offset[0] + anchor.current.offset);
-    }
-  }, [rows, width, virtual, active]);
+  usePhotoGridAnchorRestoration(virtual, navigationRows, anchor, width, columns, active);
   return (
     <div
       className="canvas"

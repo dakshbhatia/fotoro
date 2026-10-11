@@ -317,6 +317,69 @@ final class ConsumerCoreTests: XCTestCase {
         "Repeated end-of-list callbacks must settle without a generation feedback loop")
     }
   }
+  @MainActor func testSavedRefreshRetainsLoadedWindowAndResetsOnOriginOrCatalogChange() async throws {
+    try await withSavedLibrary { services, _ in
+      var template = try self.samplePhoto()
+      template.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+      template.metadata.sourceDate = "2026-10-08T12:00:00.000Z"
+      try services.store.database.write { db in
+        for index in 0..<1005 {
+          var photo = template
+          photo.photoId = String(format: "00000000-0000-4000-8000-%012d", index)
+          photo.manifest.photoId = photo.photoId
+          try services.store.put(photo, db: db)
+        }
+        var peer = template
+        peer.photoId = Wire.id(); peer.manifest.photoId = peer.photoId
+        peer.manifest.ownerAccountId = Wire.id()
+        peer.metadata.sourceDate = "2026-10-09T12:00:00.000Z"
+        try services.store.put(peer, db: db)
+      }
+      try services.reload()
+      XCTAssertEqual(services.photos.count, 1000)
+      try services.loadMore()
+      let loaded = services.photos.map(\.id), generation = services.consumerCatalogGeneration
+      XCTAssertEqual(loaded.count, 1005)
+      try services.reload()
+      XCTAssertEqual(services.photos.map(\.id), loaded,
+        "Read-only refresh must not discard already admitted older pages")
+      XCTAssertEqual(services.consumerCatalogGeneration, generation + 1)
+      XCTAssertTrue(services.photos.allSatisfy { $0.manifest.ownerAccountId == services.session.accountId })
+      try services.loadMore()
+      XCTAssertEqual(services.photos.map(\.id), loaded, "Retained last-page cursor must remain usable")
+
+      try services.store.database.write { db in
+        for _ in 0..<5 {
+          var newer = template
+          newer.photoId = Wire.id(); newer.manifest.photoId = newer.photoId
+          newer.metadata.sourceDate = "2026-10-09T12:00:00.000Z"
+          try services.store.put(newer, db: db)
+        }
+        var unvisited = template
+        unvisited.photoId = Wire.id(); unvisited.manifest.photoId = unvisited.photoId
+        unvisited.metadata.sourceDate = "2026-10-07T12:00:00.000Z"
+        try services.store.put(unvisited, db: db)
+      }
+      try services.reload()
+      XCTAssertEqual(services.photos.count, 1010)
+      XCTAssertEqual(Array(services.photos.suffix(1005)).map(\.id), loaded,
+        "Newer arrivals cannot push a previously visible older photo out of the window")
+
+      services.api.baseURL = URL(string: "https://different-origin.test")!
+      try services.reload()
+      XCTAssertEqual(services.photos.count, 1000, "A new endpoint cannot inherit another scope's loaded window")
+      try services.loadMore()
+      XCTAssertEqual(services.photos.count, 1011)
+      try services.activateAccount()
+      XCTAssertEqual(services.photos.count, 1000, "A replaced catalog must start with its own bounded window")
+      try services.loadMore()
+      XCTAssertEqual(services.photos.count, 1011)
+      services.vault.lock()
+      XCTAssertTrue(services.photos.isEmpty, "Lock still withdraws every admitted photo")
+      try services.reload()
+      XCTAssertTrue(services.photos.isEmpty)
+    }
+  }
   @MainActor func testMixedOriginalShareKeepsEverySelectedSourceAndSeparateResourceNames() async throws {
     let deviceDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()).appendingPathComponent(Wire.id())
     let savedDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("fotoro-share-" + Wire.id())

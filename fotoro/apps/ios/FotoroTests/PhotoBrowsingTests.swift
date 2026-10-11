@@ -4,6 +4,22 @@ import XCTest
 @testable import Fotoro
 
 final class PhotoBrowsingTests: XCTestCase {
+  func testViewportChangesForNewNonemptySearchChoicesAndPreservesEquivalentChoices() {
+    let first = "aaaaaaaa-1111-4111-8111-111111111111"
+    let second = "bbbbbbbb-2222-4222-8222-222222222222"
+    func viewport(_ query: String, people: PeopleSearchSelection = PeopleSearchSelection(), meaning: String? = nil) -> PhotoBrowseViewportID {
+      PhotoBrowseViewportID(browsingChoices: "photos|all|recent", query: query, people: people, acceptedMeaning: meaning)
+    }
+    XCTAssertNotEqual(viewport("beach"), viewport("fireworks"), "Replacing a nonempty query must reset the previous result offset")
+    XCTAssertEqual(viewport(" Beach "), viewport("beach"), "Equivalent search text must preserve the viewport")
+    let any = PeopleSearchSelection(personIDs: [first, second])
+    let equivalent = PeopleSearchSelection(personIDs: [second.uppercased(), first.uppercased()])
+    XCTAssertEqual(viewport("", people: any), viewport("", people: equivalent))
+    XCTAssertNotEqual(viewport("", people: any), viewport("", people: PeopleSearchSelection(personIDs: [first])))
+    XCTAssertNotEqual(viewport("", people: any), viewport("", people: PeopleSearchSelection(personIDs: [first, second], match: .everyone)))
+    XCTAssertNotEqual(viewport("Mom", meaning: "people:mom"), viewport("Mom", meaning: "text:mom"))
+    XCTAssertEqual(viewport("", meaning: "stale-meaning"), viewport(""), "No-search gallery identity cannot inherit an old search choice")
+  }
   func testOverviewUsesDeduplicatedCurrentSourcesAndNewestCovers() {
     let groups = PhotoBrowsing.groups([
       photo("edited", at: date(10, 2), revision: "old"),

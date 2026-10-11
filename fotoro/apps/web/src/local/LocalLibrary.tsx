@@ -1,11 +1,11 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { type LocalPhoto, LocalResources } from "./resources";
 import {captureGroup} from "./capture-groups";
 import {PhotoTable} from "./PhotoTable";
 import type {PhotoColumn} from "./photo-table";
 import {useLocalThumbnail} from "./useLocalThumbnail";
-import {usePhotoNavigation} from "../library/photo-navigation";
+import {usePhotoGridAnchorRestoration, usePhotoNavigation} from "../library/photo-navigation";
 export interface PickSelection {
   ids: ReadonlySet<string>;
   reasons?: ReadonlyMap<string, string[]>;
@@ -131,15 +131,7 @@ function LocalGrid({
   const navigationRows = useMemo(() => rows.map(row => row.photos.map(photo => photo.id)),[rows]);
   const navigate = usePhotoNavigation(parent,navigationRows,index => virtual.scrollToIndex(index,{align: "auto"}),
     Math.max(1,Math.floor((parent.current?.clientHeight ?? width)/Math.max(1,width/columns))),active);
-  useLayoutEffect(() => {
-    if (!active || !anchor.current) return;
-    const index = rows.findIndex((row) =>
-      row.photos.some((photo) => photo.id === anchor.current!.id),
-    );
-    const offset =
-      index >= 0 ? virtual.getOffsetForIndex(index, "start") : undefined;
-    if (offset) virtual.scrollToOffset(offset[0] + anchor.current.offset);
-  }, [rows, width, virtual, active]);
+  usePhotoGridAnchorRestoration(virtual, navigationRows, anchor, width, columns, active);
   return (
     <div
       className="canvas"
