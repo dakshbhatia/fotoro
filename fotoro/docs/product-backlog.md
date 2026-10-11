@@ -28,7 +28,9 @@ Cloudflare proposals become tasks here only when a consumer need admits them.
    completed OCR/classification/vectors; due work resumes through one admitted
    wakeup and model readiness releases only model-deferred vectors. Metadata
    comes first; heavier preparation starts with 30 days and expands deliberately.
-   Durable browser inference and broader physical acceptance remain open.
+   Opt-in browser vectors and per-photo retry deadlines now reopen from existing
+   encrypted storage, bound to current source/digest/processor and account.
+   Clear/opt-out removes that evidence. Broader physical acceptance remains open.
    Queries retrieve completed evidence rather than restarting inference.
 3. Protect scrolling while work progresses. Move metadata discovery off-main;
    checkpoint each fully attempted photo and reuse one derivative when the model
@@ -36,8 +38,11 @@ Cloudflare proposals become tasks here only when a consumer need admits them.
    schedules one missing-vector pass at readiness. Keep stable tile sources,
    separate transfer status from verified-copy timeline identity, and avoid
    catalog publication for acknowledgment-only changes.
-   Remaining large-inventory filtering/reconciliation and per-photo publication
-   need measured frame, CPU and memory budgets before claiming smoothness.
+   Date-only filtering keeps warm thumbnails and requests. Sync counts use
+   transactional SQL aggregates instead of decoding every checkpoint per photo;
+   annotation eligibility uses an indexed photo lookup, and unchanged analysis
+   does not republish overlays. Inventory scans still need measured frame, CPU
+   and memory budgets before claiming smoothness.
 4. Qualify retrieval before replacing models. Current iOS Vision OCR/classification,
    TinyCLIP CoreML retrieval and local face models already provide AI. Measure
    date/place/person/text/visual queries, correction behavior, cold/warm latency,
@@ -45,14 +50,17 @@ Cloudflare proposals become tasks here only when a consumer need admits them.
    separate experiment; it must improve a specific task within those budgets.
 5. Complete the installed family journey. Two accounts open one Trip, add chosen
    photos, find them by reviewed people/place/date, download the verified deduped
-   bundle, interrupt work and return. Check sync plus scrolling on the installed
+   bundle, interrupt work and return. Trip detail retries retain the exact signed
+   request across unchanged refreshes; ZIP publication checks freshly received
+   inventory counts before downloading. Check sync plus scrolling on the installed
    phone, cross-device restoration and accessibility. Source tests and a browser
    release do not establish installed-device acceptance.
 
 Use existing account/owner IDs, photo IDs, original digests and source revisions
 for joins. Native records, vectors, terms, postings, feedback and People tables
-already exist; do not add a parallel photo database. Browser inference still needs
-persistent local job/vector storage independent of React component lifetimes.
+already exist; do not add a parallel photo database. Browser inference now reuses
+the existing opt-in encrypted retention and account cache across React lifetimes.
+This preserves query-triggered inference; it does not add an always-running worker.
 iOS background processing is scheduled by the system: work must resume durably,
 without promising a permanently running process while the app is suspended.
 

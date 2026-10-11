@@ -120,6 +120,24 @@ struct BackupSource: Codable, Identifiable, Equatable {
 }
 
 extension LibraryStore {
+  static let backupCountsQuery = """
+    WITH selected(id) AS MATERIALIZED (SELECT value FROM json_each(?))
+    SELECT
+      COALESCE(SUM(json_extract(CAST(b.value AS TEXT),'$.phase')='committed'),0) AS completed,
+      COALESCE(SUM(json_extract(CAST(b.value AS TEXT),'$.phase') IN ('pending','queued')),0) AS pending,
+      COALESCE(SUM(json_extract(CAST(b.value AS TEXT),'$.phase')='failed' OR
+        (json_extract(CAST(b.value AS TEXT),'$.phase') IN ('queued','committed') AND
+         json_extract(CAST(b.value AS TEXT),'$.message') IS NOT NULL)),0) AS failed,
+      COALESCE(SUM(json_extract(CAST(b.value AS TEXT),'$.phase')='skipped'),0) AS skipped
+    FROM backupSources b LEFT JOIN selected ON selected.id=b.id
+    WHERE substr(b.id,1,25) != 'fotoro-retained-original:'
+      AND (? OR selected.id IS NOT NULL OR json_extract(CAST(b.value AS TEXT),'$.phase') IN ('queued','committed'))
+    """
+  func backupSourceCounts(selectionIDs: Set<String>?, db: Database) throws -> (completed: Int, pending: Int, failed: Int, skipped: Int) {
+    let selected = String(decoding: try Wire.encode(Array(selectionIDs ?? [])), as: UTF8.self)
+    let row = try Row.fetchOne(db, sql: Self.backupCountsQuery, arguments: [selected, selectionIDs == nil])!
+    return (row["completed"], row["pending"], row["failed"], row["skipped"])
+  }
   func syncEnabled() throws -> Bool {
     try database.read { try String.fetchOne($0, sql: "SELECT value FROM state WHERE key='syncEnabled'") == "1" }
   }
@@ -392,9 +410,16 @@ struct BackupStatus: Codable {
     if [.running, .scanning].contains(status.phase) { status.phase = .paused }
     try refreshCounts()
   }
-  private func persist() throws {
-    let encoded = try Wire.encode(status).base64EncodedString()
-    try store.database.write { db in
+  private func persist(refreshCounts: Bool = false) throws {
+    let persisted = try store.database.write { db -> BackupStatus in
+      var next = status
+      if refreshCounts {
+        let counts = try store.backupSourceCounts(selectionIDs: selectionIDs, db: db)
+        next.completed = counts.completed
+        next.pending = counts.pending
+        next.failed = counts.failed
+        next.skipped = counts.skipped
+      }
       if selectionDirty, let selectionIDs {
         try db.execute(
           sql: "INSERT INTO state(key,value) VALUES('backupSelection',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -403,18 +428,14 @@ struct BackupStatus: Codable {
       try db.execute(
         sql:
           "INSERT INTO state(key,value) VALUES('backupStatus',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        arguments: [encoded])
+        arguments: [try Wire.encode(next).base64EncodedString()])
+      return next
     }
+    status = persisted
     selectionDirty = false
   }
   func refreshCounts() throws {
-    let sources = try countedSources()
-    status.completed = sources.filter { $0.phase == .committed }.count
-    status.pending = sources.filter { $0.phase == .pending || $0.phase == .queued }.count
-    status.failed =
-      sources.filter { $0.phase == .failed || (($0.phase == .queued || $0.phase == .committed) && $0.message != nil) }.count
-    status.skipped = sources.filter { $0.phase == .skipped }.count
-    try persist()
+    try persist(refreshCounts: true)
   }
   private func countedSources() throws -> [BackupSource] {
     countedSources(from: try store.backupSources())

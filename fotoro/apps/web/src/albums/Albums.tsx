@@ -383,9 +383,9 @@ export function Albums({selection, currentPhotos, onClose, onSuspend, onChoosePh
       if (!current()) {attempt.access.dispose(); return;}
       const result = await prepareTripDownload(attempt.access, signal, value => {if (current()) setTripProgress(value);});
       attempt.lease = new TripDownloadLease(result);
-      await opened.assertAccess(); signal.throwIfAborted();
+      const latest = await opened.assertAccess(); signal.throwIfAborted();
       if (!current()) return;
-      attempt.lease.publish(current); published = true;
+      attempt.lease.publish(current, latest.photoCount); published = true;
       if (!current()) return;
       setTripProgress(null); setDownloadStarted(true);
       setNotice(`Download started. Keep this trip open until it finishes. ${result.photos} unique ${result.photos === 1 ? "photo" : "photos"}${result.duplicates ? ` · ${result.duplicates} exact ${result.duplicates === 1 ? "copy" : "copies"} skipped` : ""}.`);

@@ -5,6 +5,33 @@ import Photos
 @testable import Fotoro
 
 final class ConsumerCoreTests: XCTestCase {
+  func testAnnotationSourceLookupUsesPhotoIndexWithoutDecodingUnrelatedInventory() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try LibraryStore(root: root)
+    let photoId = Wire.id()
+    let first = BackupSource(id: "a-current", photoId: photoId, sourceRevision: "current")
+    let later = BackupSource(id: "z-retained", photoId: photoId, sourceRevision: "older")
+    try store.putBackupSource(later)
+    try store.putBackupSource(first)
+    try store.database.write { db in
+      for n in 0..<10_000 {
+        try db.execute(sql: "INSERT INTO backupSources(id,value) VALUES(?,?)",
+          arguments: ["unrelated-\(n)", Data("not-json".utf8)])
+      }
+    }
+    for _ in 0..<200 { XCTAssertEqual(try store.backupSourceForPhoto(photoId), first) }
+    XCTAssertNil(try store.backupSourceForPhoto("missing"))
+    let reopened = try LibraryStore(root: root)
+    XCTAssertEqual(try reopened.backupSourceForPhoto(photoId), first)
+    let plan = try reopened.database.read { db in
+      try Row.fetchAll(db, sql: "EXPLAIN QUERY PLAN " + LibraryStore.backupSourcePhotoQuery,
+        arguments: [photoId]).map { (row: Row) -> String in row["detail"] }
+    }
+    XCTAssertTrue(plan.contains { $0.contains("backup_sources_photo") && $0.uppercased().contains("SEARCH") },
+      "Repeated eligibility checks must use the photo index: \(plan)")
+  }
+
   @MainActor func testTransferStatusUpdatesDoNotRegroupTimelineButVerifiedCopiesStillDo() async throws {
     try await withSavedLibrary { services, _ in
       var source = BackupSource(id: "permitted-source", photoId: Wire.id(), sourceRevision: "current",

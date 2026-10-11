@@ -6,6 +6,7 @@ import {photoColumns, type PhotoColumn} from "./photo-table";
 import { LocalViewer } from "./LocalViewer";
 import { LocalSearch } from "./LocalSearch";
 import { LocalRetention } from "./retention";
+import {clearSemanticInference} from "./semantic-persistence";
 import { PhotoSearchIndex, emptyFeedback, normalizeSearch, type SearchMeaning, type SearchResult } from "./search";
 import { OCR_PROCESSOR, hasCurrentLocalOcr, localTextSearchStatus } from "./ocr";
 import { useLocalOcr, type LocalOcrPhoto } from "./useLocalOcr";
@@ -326,11 +327,11 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
     if (enabled) {retainedRef.current = true; setRetained(true); return;}
     setRetentionBusy(true); bump(); retainedRef.current = false; setRetained(false); saveVersion.current++; resources.clear(); setViewer(null);
     setPhotos(current => current.filter(photo => photo.file).map(photo => ({...photo, preview: undefined, previewLoader: undefined, previewAvailable: undefined, previewSize: undefined})));
-    try {await retention.clear(); setSaving(""); setStatus("Saved search removed. Selected originals stay in this session.");}
+    try {await Promise.all([retention.clear(), clearSemanticInference()]); setSaving(""); setStatus("Saved search removed. Selected originals stay in this session.");}
     catch (error) {setStatus(`Local storage could not be cleared: ${(error as Error).message}`);}
     finally {if (alive.current) setRetentionBusy(false);}
   };
-  const clear = async () => {reset(); try {await retention.clear();} catch (error) {setStatus(`Local storage could not be cleared: ${(error as Error).message}`);}};
+  const clear = async () => {reset(); try {await Promise.all([retention.clear(), clearSemanticInference()]);} catch (error) {setStatus(`Local storage could not be cleared: ${(error as Error).message}`);}};
   const shareSelection = () => {
     if (originalShareAttempt.pending || originalContext.current || chosenSaved.length || !reviewedPhotos.length) return;
     const chosen = [...reviewedPhotos], token = generation.current;

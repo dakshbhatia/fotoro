@@ -46,6 +46,12 @@ final class LibraryStore: @unchecked Sendable {
         CREATE INDEX IF NOT EXISTS photos_owned_browse ON photos(
           json_extract(CAST(value AS TEXT),'$.manifest.ownerAccountId'), sourceDate DESC, id)
         """)
+      // Source eligibility is checked repeatedly while annotations drain. Keep
+      // that exact-photo lookup indexed without decoding the library each time.
+      try db.execute(sql: """
+        CREATE INDEX IF NOT EXISTS backup_sources_photo ON backupSources(
+          CASE WHEN json_valid(CAST(value AS TEXT)) THEN json_extract(CAST(value AS TEXT),'$.photoId') END, id)
+        """)
       // Legacy change feeds hid unsupported media while advancing the same cursor.
       // Re-read once with this reader's capability; the marker and cursor reset commit together.
       if try String.fetchOne(db, sql: "SELECT value FROM state WHERE key='mediaCatalogVersion'") != "1" {
@@ -99,6 +105,17 @@ final class LibraryStore: @unchecked Sendable {
     value.previewURL = owned(photo.previewURL, folder: "Media")
     value.staged = photo.staged.mapValues { owned($0, folder: "Pending")! }
     return value
+  }
+  static let backupSourcePhotoQuery = """
+    SELECT value FROM backupSources
+    WHERE CASE WHEN json_valid(CAST(value AS TEXT)) THEN json_extract(CAST(value AS TEXT),'$.photoId') END = ?
+    ORDER BY id LIMIT 1
+    """
+  func backupSourceForPhoto(_ photoId: String) throws -> BackupSource? {
+    try database.read { db in
+      try Data.fetchOne(db, sql: Self.backupSourcePhotoQuery, arguments: [photoId])
+        .map { try Wire.decode(BackupSource.self, $0) }
+    }
   }
   func put(_ photo: LocalPhoto) throws { try database.write { db in try put(photo, db: db) } }
   func put(_ photo: LocalPhoto, db: Database) throws {

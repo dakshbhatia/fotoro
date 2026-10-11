@@ -807,3 +807,61 @@ test("one-step original download publishes nothing after preview, account, or me
     assert.equal(published, 0); assert.ok(bytes.every(byte => byte === 0));
   }
 });
+
+test("a committed photo-details retry survives an unchanged Trip refresh with its exact signed request", () => scoped(async () => {
+  const data = await fixture(); let committed: unknown, writes = 0;
+  globalThis.fetch = async (path, init) => {
+    if (init?.method === "PUT") {
+      const request = JSON.parse(String(init.body)); writes++;
+      if (!committed) {committed = request; throw new TypeError("Committed details response lost");}
+      if (JSON.stringify(request) !== JSON.stringify(committed)) return response({code: "VERSION_CONFLICT", retryable: false}, 409);
+      return response({version: 1, facts: request.facts});
+    }
+    if (String(path).endsWith("/access")) return response(overview(data));
+    if (String(path).startsWith("/v1/albums/")) return response({...overview(data), version: 1, entries: [data.entry], manifests: [data.signed], nextCursor: null, hasMore: false});
+    return new Response(new Uint8Array(data.objects.get(String(path).split("/").at(-1)!)!));
+  };
+  const access = await AlbumAccess.open(overview(data), {}), [photo] = (await access.loadPhotoPage()).photos;
+  const details = {photoId: photo.manifest.photoId, ownerAccountId: data.owner.accountId, originalSha256: photo.metadata.originalSha256, people: ["Mom"], current: () => access.current() && photo.metadataKey.some(byte => byte !== 0)};
+  await assert.rejects(access.shareDetails(photo, details, {people: ["Mom"], location: false}, 1), /Committed details response lost/);
+  const refreshed = await AlbumAccess.open(overview(data), {}), loaded = await refreshed.loadPhotoPage();
+  assert.equal(access.adoptRefresh(refreshed, loaded.photos)[0], photo);
+  const result = await access.shareDetails(photo, details, {people: ["Mom"], location: false}, 1);
+  assert.deepEqual(result.people, ["Mom"]); assert.equal(result.revision, 1); assert.equal(writes, 2);
+  access.dispose();
+}));
+
+test("a replaced Trip source cannot reuse its pending reviewed-details request", () => scoped(async () => {
+  const data = await fixture(); let entry = data.entry, signed = data.signed;
+  const requests: unknown[] = [];
+  globalThis.fetch = async (path, init) => {
+    if (init?.method === "PUT") {
+      const request = JSON.parse(String(init.body)); requests.push(request);
+      if (requests.length === 1) throw new TypeError("Details save interrupted before commit");
+      return response({version: 1, facts: request.facts});
+    }
+    if (String(path).endsWith("/access")) return response(overview(data));
+    if (String(path).startsWith("/v1/albums/")) return response({...overview(data), version: 1, entries: [entry], manifests: [signed], nextCursor: null, hasMore: false});
+    return new Response(new Uint8Array(data.objects.get(String(path).split("/").at(-1)!)!));
+  };
+  const access = await AlbumAccess.open(overview(data), {}), [photo] = (await access.loadPhotoPage()).photos;
+  const details = {photoId: photo.manifest.photoId, ownerAccountId: data.owner.accountId, originalSha256: photo.metadata.originalSha256, people: ["Mom"], current: () => access.current() && photo.metadataKey.some(byte => byte !== 0)};
+  await assert.rejects(access.shareDetails(photo, details, {people: ["Mom"], location: false}, 1), /Details save interrupted/);
+  const binding = {...photo.manifest.metadataRepresentation.binding, representationId: crypto.randomUUID()};
+  const encrypted = await collect(encryptMedia(source(utf8({...photo.metadata, filename: "revised.jpg"})), data.photo.metadataKey, binding));
+  const objectId = crypto.randomUUID(); data.objects.set(objectId, encrypted);
+  const manifest = {...photo.manifest, metadataRepresentation: {binding, objectId, header: b64(encrypted.subarray(0, 24)), ciphertextBytes: encrypted.length, ciphertextSha256: digest(encrypted)}};
+  signed = signPayload("photo-manifest", data.owner.accountId, utf8(manifest), data.owner.signingSecretKey);
+  const opened = openAlbumDefinition({signed: data.made.signed, trustedOwner: data.owner.card, recipientCard: data.owner.card, recipientSecretKey: data.owner.boxSecretKey, expectedAlbumId: data.made.definition.albumId});
+  try {entry = makeAlbumPhoto({definition: opened.definition, manifest: signed, metadataKey: data.photo.metadataKey, albumKey: opened.albumKey, signingSecretKey: data.owner.signingSecretKey});}
+  finally {opened.albumKey.fill(0);}
+  const refreshed = await AlbumAccess.open(overview(data), {}), loaded = await refreshed.loadPhotoPage();
+  const [replacement] = access.adoptRefresh(refreshed, loaded.photos);
+  assert.notEqual(replacement, photo); assert.ok(photo.metadataKey.every(byte => byte === 0));
+  await assert.rejects(access.shareDetails(photo, details, {people: ["Mom"], location: false}, 1), /ALBUM_SELECTION_CHANGED|ALBUM_PHOTO_CHANGED/);
+  assert.equal(requests.length, 1, "withdrawn reviewed source cannot send another request");
+  const reviewed = {...details, current: () => access.current() && replacement.metadataKey.some(byte => byte !== 0)};
+  assert.deepEqual((await access.shareDetails(replacement, reviewed, {people: ["Mom"], location: false}, 1)).people, ["Mom"]);
+  assert.notDeepEqual(requests[1], requests[0], "explicitly reviewing a changed source creates a new request");
+  access.dispose();
+}));
