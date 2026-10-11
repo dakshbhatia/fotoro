@@ -96,7 +96,8 @@ enum TransferResumeOutcome: Equatable { case idle, finished, cancelled }
       }
     }
   }
-  @discardableResult func resumePending(only allowedPhotoIDs: Set<String>? = nil) async -> TransferResumeOutcome {
+  @discardableResult func resumePending(only allowedPhotoIDs: Set<String>? = nil,
+    stillAuthorized authorization: (() -> Bool)? = nil) async -> TransferResumeOutcome {
     guard vault.isUnlocked, !running else { return .idle }
     running = true
     defer {
@@ -112,7 +113,7 @@ enum TransferResumeOutcome: Equatable { case idle, finished, cancelled }
       accountId: account, fixture: api.session.fixture)
     func stillAuthorized() -> Bool {
       api.session.isSignedIn && vault.isUnlocked && vault.generation == generation && api.session.accountId == account
-        && foregroundGeneration == foreground
+        && foregroundGeneration == foreground && (authorization?() ?? true)
     }
     func fence() throws {
       try Task.checkCancellation()

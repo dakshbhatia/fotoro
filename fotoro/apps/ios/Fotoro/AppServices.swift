@@ -163,6 +163,7 @@ enum ReviewedPhotosBackupPolicy {
       }
     }
     @ObservationIgnored var photosBackupSnapshot: ((Date) throws -> [BackupCandidate])?
+    @ObservationIgnored var photosBackupSourceCandidate: ((String) throws -> BackupCandidate?)?
     @ObservationIgnored var automaticPhotosAuthorization: (() -> PHAuthorizationStatus)?
   #endif
   private(set) var consumerSyncSummary = ConsumerSyncSummary()
@@ -186,10 +187,12 @@ enum ReviewedPhotosBackupPolicy {
   private var photoSyncSuspensionReason: NativeDiagnosticReason = .background
   private var automaticSyncFailure: String?
   private var automaticSyncTask: Task<Void, Never>?
+  private(set) var automaticPhotoSyncBusy = false
   @ObservationIgnored private var automaticSyncSettling: Task<Void, Never>?
   @ObservationIgnored private var automaticSyncGeneration = UUID()
   @ObservationIgnored private var automaticSyncCancellationReasons: [UUID: NativeDiagnosticReason] = [:]
   @ObservationIgnored private var automaticSyncNeedsScan = false
+  @ObservationIgnored private var automaticPrioritySource: BackupSource?
   @ObservationIgnored private var automaticSyncObserver: AutomaticPhotoSyncObserver?
   private var consumerChecking = false
   private var consumerOffline = false
@@ -972,6 +975,7 @@ enum ReviewedPhotosBackupPolicy {
   private func suspendAutomaticPhotoSync(cancelBackground: Bool = false, reason: NativeDiagnosticReason = .contextChanged) {
     if automaticSyncTask != nil { automaticSyncCancellationReasons[automaticSyncGeneration] = reason }
     automaticSyncGeneration = UUID()
+    automaticPhotoSyncBusy = false
     automaticSyncNeedsScan = false
     automaticSyncObserver = nil
     if let task = automaticSyncTask {
@@ -987,7 +991,7 @@ enum ReviewedPhotosBackupPolicy {
   func kickAutomaticPhotoSync(sourcesChanged: Bool = false) {
     // Unrelated PhotoKit notifications request another metadata scan, without
     // discarding a download/encryption already in progress for a current source.
-    if sourcesChanged, let active = backup.activeSource, !automaticLocationSourceCurrent(active) {
+    if sourcesChanged, let active = backup.activeSource ?? automaticPrioritySource, !automaticLocationSourceCurrent(active) {
       suspendAutomaticPhotoSync(reason: .sourceUnavailable)
     }
     guard automaticPhotoSyncAdmitted else {
@@ -1010,6 +1014,7 @@ enum ReviewedPhotosBackupPolicy {
     guard automaticSyncTask == nil else { return }
     let token = UUID()
     automaticSyncGeneration = token
+    automaticPhotoSyncBusy = true
     let catalog = store
     let account = session.accountId
     let card = account.flatMap { session.pinnedCards[$0] }
@@ -1040,6 +1045,7 @@ enum ReviewedPhotosBackupPolicy {
       defer {
         if self.automaticSyncGeneration == token {
           self.automaticSyncTask = nil
+          self.automaticPhotoSyncBusy = false
           self.refreshConsumerSyncSummary()
         }
       }
@@ -1111,6 +1117,7 @@ enum ReviewedPhotosBackupPolicy {
     refreshConsumerSyncSummary()
     let generation = vault.generation
     let origin = BackgroundUploadPolicy.origin(api.baseURL)
+    let baseURL = api.baseURL
     let catalog = store
     let importWorker = importer
     let uploadJournal = journal
@@ -1123,7 +1130,7 @@ enum ReviewedPhotosBackupPolicy {
       try Task.checkCancellation()
       guard self.automaticPhotoSyncAdmitted, self.store === catalog,
         self.vault.generation == generation, self.session.accountId == account,
-        BackgroundUploadPolicy.origin(self.api.baseURL) == origin else { throw CancellationError() }
+        self.api.baseURL == baseURL, BackgroundUploadPolicy.origin(self.api.baseURL) == origin else { throw CancellationError() }
       var intake = try catalog.automaticPhotoSyncIntake(origin: origin) ?? AutomaticPhotoSyncIntake()
       let selected = intake.select(candidates, existingSourceIDs: Set(try catalog.backupSources()
         .filter { !$0.isRetainedOriginal }.map(\.id)))
@@ -1137,6 +1144,10 @@ enum ReviewedPhotosBackupPolicy {
       guard automatic else { return true }
       guard self.automaticPhotoSyncAdmitted else { return false }
       #if DEBUG
+        if let lookup = self.photosBackupSourceCandidate {
+          guard let candidate = try? lookup(source.id) else { return false }
+          return candidate.id == source.id && candidate.sourceRevision == source.sourceRevision && candidate.skipReason == nil
+        }
         if let snapshot = self.photosBackupSnapshot {
           return (try? snapshot(.distantPast).contains(where: {
             $0.id == source.id && $0.sourceRevision == source.sourceRevision && $0.skipReason == nil
@@ -1150,7 +1161,10 @@ enum ReviewedPhotosBackupPolicy {
     @MainActor func candidateCurrent(_ candidate: BackupCandidate) -> Bool {
       #if DEBUG
         let current: Bool
-        if let snapshot = self.photosBackupSnapshot {
+        if let lookup = self.photosBackupSourceCandidate {
+          guard let value = try? lookup(candidate.id) else { return false }
+          current = value.id == candidate.id && value.sourceRevision == candidate.sourceRevision && value.skipReason == nil
+        } else if let snapshot = self.photosBackupSnapshot {
           current = (try? snapshot(automatic ? .distantPast : RecentPhotosPolicy.cutoff(now: Date())).contains(where: {
             $0.id == candidate.id && $0.sourceRevision == candidate.sourceRevision && $0.skipReason == nil
           })) == true
@@ -1176,7 +1190,7 @@ enum ReviewedPhotosBackupPolicy {
             guard let self, self.session.isSignedIn, self.vault.isUnlocked, self.vault.generation == generation,
               self.session.accountId == account, self.store === catalog,
               self.session.pinnedCards[account] == trustedCard,
-              BackgroundUploadPolicy.origin(self.api.baseURL) == origin,
+              self.api.baseURL == baseURL, BackgroundUploadPolicy.origin(self.api.baseURL) == origin,
               !automatic || self.automaticPhotoSyncAdmitted,
               (try? catalog.uploadsPaused()) == false else { return false }
             #if DEBUG
@@ -1210,7 +1224,7 @@ enum ReviewedPhotosBackupPolicy {
     @MainActor func verificationCurrent(_ candidate: BackupCandidate) -> Bool {
       self.session.isSignedIn && self.vault.isUnlocked && self.vault.generation == generation
         && self.session.accountId == account && self.store === catalog
-        && BackgroundUploadPolicy.origin(self.api.baseURL) == origin
+        && self.api.baseURL == baseURL && BackgroundUploadPolicy.origin(self.api.baseURL) == origin
         && self.session.pinnedCards[account] == trustedCard
         && (!automatic || self.automaticPhotoSyncAdmitted)
         && RecentPhotosPolicy.canRead(self.automaticPhotosPermission)
@@ -1287,13 +1301,90 @@ enum ReviewedPhotosBackupPolicy {
         return true
       }
     }
+    @MainActor func queuedSource(_ id: String) throws -> BackupSource? {
+      try catalog.database.read { db in
+        guard let bytes = try Data.fetchOne(db, sql: "SELECT value FROM backupSources WHERE id=?", arguments: [id]) else { return nil }
+        return try Wire.decode(BackupSource.self, bytes)
+      }
+    }
+    @MainActor func uploadSource(_ source: BackupSource) async throws {
+      uploadedSources += 1
+      try await self.withPhotoSyncStep(.transfer,
+        record: uploadedSources == 1 || uploadedSources.isMultiple(of: 32), completed: uploadedSources - 1) {
+        guard sourceCurrent(source) else { throw CancellationError() }
+        let outcome = await uploadJournal.resumePending(only: automatic ? [source.photoId] : nil,
+          stillAuthorized: {
+            guard automatic else { return true }
+            guard verificationCurrent(BackupCandidate(id: source.id, sourceRevision: source.sourceRevision)),
+              let current = try? queuedSource(source.id),
+              current.id == source.id, current.photoId == source.photoId, current.sourceRevision == source.sourceRevision,
+              current.originalSha256 == source.originalSha256, current.phase == .queued,
+              let photo = try? catalog.backupPhoto(source.photoId),
+              photo.manifest.ownerAccountId == account,
+              source.originalSha256 != nil, source.originalSha256 == photo.metadata.originalSha256 else { return false }
+            return true
+          })
+        if outcome == .cancelled { throw CancellationError() }
+        try Task.checkCancellation()
+        guard let photo = try catalog.backupPhoto(source.photoId),
+          ["committed", "saved"].contains(photo.transferState)
+        else {
+          throw FotoroError(
+            uploadJournal.errors[source.photoId] ?? "Upload remains pending. Retry while online.")
+        }
+      }
+    }
+    @MainActor func retryCurrentQueuedSources() async throws {
+      // Already admitted ciphertext gets a point lookup, before enumerating Photos.
+      // Changed revisions still use the normal reconcile path below.
+      let queued = try catalog.backupSources().filter { $0.phase == .queued && !$0.isRetainedOriginal }
+      for earlier in queued {
+        try Task.checkCancellation()
+        guard self.automaticPhotoSyncAdmitted, self.store === catalog,
+          self.vault.generation == generation, self.session.accountId == account,
+          self.session.pinnedCards[account] == trustedCard, self.api.baseURL == baseURL,
+          BackgroundUploadPolicy.origin(self.api.baseURL) == origin else { throw CancellationError() }
+        guard let revision = earlier.sourceRevision, !revision.isEmpty,
+          sourceCurrent(earlier), let photo = try catalog.backupPhoto(earlier.photoId),
+          photo.manifest.ownerAccountId == account,
+          earlier.originalSha256 == photo.metadata.originalSha256,
+          earlier.originalSha256 != nil else { continue }
+        self.automaticPrioritySource = earlier
+        defer { self.automaticPrioritySource = nil }
+        do {
+          try await uploadSource(earlier)
+        } catch {
+          try Task.checkCancellation()
+          if NativeDiagnosticOutcome.failure(for: error, taskCancelled: Task.isCancelled) == .cancelled {
+            throw CancellationError()
+          }
+          // Keep the durable job and its per-source error, but do not let an
+          // offline queued transfer block discovery of the rest of Photos.
+          if var current = try queuedSource(earlier.id), current == earlier {
+            current.message = error.localizedDescription
+            try catalog.putBackupSource(current)
+          }
+          self.refreshConsumerSyncSummary()
+          continue
+        }
+        try Task.checkCancellation()
+        guard verificationCurrent(BackupCandidate(id: earlier.id, sourceRevision: revision)),
+          var current = try queuedSource(earlier.id),
+          current == earlier else { throw CancellationError() }
+        current.phase = .committed
+        current.message = nil
+        try catalog.putBackupSource(current)
+        self.refreshConsumerSyncSummary()
+      }
+    }
     backup.start(
       snapshot: {
-        try await self.withPhotoSyncStep(.scan) {
+        if automatic { try await retryCurrentQueuedSources() }
+        return try await self.withPhotoSyncStep(.scan) {
           if !automatic, await uploadJournal.resumePending() == .cancelled { throw CancellationError() }
           try Task.checkCancellation()
           guard self.session.isSignedIn, self.vault.generation == generation, self.session.accountId == account,
-            self.store === catalog, BackgroundUploadPolicy.origin(self.api.baseURL) == origin,
+            self.store === catalog, self.api.baseURL == baseURL, BackgroundUploadPolicy.origin(self.api.baseURL) == origin,
             !automatic || self.automaticPhotoSyncAdmitted else {
             throw CancellationError()
           }
@@ -1301,9 +1392,16 @@ enum ReviewedPhotosBackupPolicy {
             throw FotoroError(
               "An existing upload remains pending. Retry it before syncing more photos.")
           }
+          let now = Date()
+          let scanPlan: AutomaticPhotoSyncScanPlan?
+          if automatic, let origin {
+            let intake = try catalog.automaticPhotoSyncIntake(origin: origin) ?? AutomaticPhotoSyncIntake(now: now)
+            scanPlan = AutomaticPhotoSyncScanPlan(intake: intake, sources: try catalog.backupSources(), now: now)
+          } else { scanPlan = nil }
           #if DEBUG
             if let snapshot = self.photosBackupSnapshot {
-              let candidates = try snapshot(automatic ? .distantPast : RecentPhotosPolicy.cutoff(now: Date()))
+              let raw = try snapshot(automatic ? (scanPlan?.cutoff ?? .distantPast) : RecentPhotosPolicy.cutoff(now: now))
+              let candidates = scanPlan?.select(raw) ?? raw
               if let selection { return try ReviewedPhotosBackupPolicy.select(candidates, selection: selection) }
               return try intakeCandidates(candidates)
             }
@@ -1312,13 +1410,21 @@ enum ReviewedPhotosBackupPolicy {
           guard RecentPhotosPolicy.canRead(permission) else {
             throw FotoroError("Allow Photos access to sync.")
           }
-          let assets: PHFetchResult<PHAsset>
+          let assetResults: [PHFetchResult<PHAsset>]
           if let selection {
-            assets = PHAsset.fetchAssets(withLocalIdentifiers: selection.map(\.id), options: nil)
+            assetResults = [PHAsset.fetchAssets(withLocalIdentifiers: selection.map(\.id), options: nil)]
           } else if automatic {
+            guard let scanPlan else { throw CancellationError() }
             let options = PHFetchOptions()
             options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-            assets = PHAsset.fetchAssets(with: options)
+            if let cutoff = scanPlan.cutoff {
+              options.predicate = NSPredicate(format: "creationDate >= %@ AND creationDate <= %@", cutoff as NSDate, now as NSDate)
+            }
+            var results = [PHAsset.fetchAssets(with: options)]
+            if scanPlan.cutoff != nil, !scanPlan.trackedIDs.isEmpty {
+              results.append(PHAsset.fetchAssets(withLocalIdentifiers: Array(scanPlan.trackedIDs), options: nil))
+            }
+            assetResults = results
           } else {
             guard let recent = self.recentPhotos else {
               throw FotoroError("Open Photos to find your picks before syncing.")
@@ -1335,25 +1441,37 @@ enum ReviewedPhotosBackupPolicy {
               format: "creationDate >= %@ AND creationDate <= %@",
               RecentPhotosPolicy.cutoff(now: now) as NSDate, now as NSDate)
             options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-            assets = PHAsset.fetchAssets(with: options)
+            assetResults = [PHAsset.fetchAssets(with: options)]
           }
           var candidates: [BackupCandidate] = []
-          for index in 0..<assets.count {
-            if index.isMultiple(of: 128) {
-              await Task.yield()
-              try Task.checkCancellation()
-              guard self.vault.generation == generation, self.session.accountId == account,
-                self.store === catalog, BackgroundUploadPolicy.origin(self.api.baseURL) == origin,
-                RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
-                !automatic || self.automaticPhotoSyncAdmitted else { throw CancellationError() }
+          var seen = Set<String>()
+          var examined = 0
+          let total = assetResults.reduce(0) { $0 + $1.count }
+          let scanStarted = ProcessInfo.processInfo.systemUptime
+          for assets in assetResults {
+            for index in 0..<assets.count {
+              if examined.isMultiple(of: 128) {
+                await Task.yield()
+                try Task.checkCancellation()
+                guard self.vault.generation == generation, self.session.accountId == account,
+                  self.store === catalog, self.api.baseURL == baseURL, BackgroundUploadPolicy.origin(self.api.baseURL) == origin,
+                  RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+                  !automatic || self.automaticPhotoSyncAdmitted else { throw CancellationError() }
+              }
+              examined += 1
+              if examined.isMultiple(of: 256) {
+                self.diagnostics.record(NativeDiagnosticEvent(phase: .sync, outcome: .started,
+                  elapsed: ProcessInfo.processInfo.systemUptime - scanStarted,
+                  completed: examined, pending: max(0, total - examined), step: .scan))
+              }
+              let asset = assets.object(at: index)
+              guard seen.insert(asset.localIdentifier).inserted else { continue }
+              if (selection != nil || automatic) && asset.isHidden { continue }
+              let candidate = BackupCandidate(id: asset.localIdentifier, capturedAt: asset.creationDate,
+                skipReason: CameraMedia.sourceSkipReason(asset), sourceRevision: RecentPhoto.sourceRevision(asset))
+              if let scanPlan, !scanPlan.includes(candidate) { continue }
+              candidates.append(candidate)
             }
-            let asset = assets.object(at: index)
-            if (selection != nil || automatic) && asset.isHidden { continue }
-            let skip = CameraMedia.sourceSkipReason(asset)
-            candidates.append(
-              BackupCandidate(
-                id: asset.localIdentifier, capturedAt: asset.creationDate, skipReason: skip,
-                sourceRevision: RecentPhoto.sourceRevision(asset)))
           }
           if let selection { candidates = try ReviewedPhotosBackupPolicy.select(candidates, selection: selection) }
           else if !automatic { candidates = PhotoPicksBackupPolicy.select(candidates, snapshot: acceptedPicks) }
@@ -1365,28 +1483,13 @@ enum ReviewedPhotosBackupPolicy {
         return self.session.isSignedIn && self.vault.isUnlocked && self.vault.generation == generation
           && self.session.accountId == account && self.store === catalog
           && self.session.pinnedCards[account] == trustedCard
-          && BackgroundUploadPolicy.origin(self.api.baseURL) == origin
+          && self.api.baseURL == baseURL && BackgroundUploadPolicy.origin(self.api.baseURL) == origin
           && (!automatic || self.automaticPhotoSyncAdmitted)
       },
       stage: { source, date in
         try await stageSource(source, date)
       },
-      upload: { source in
-        uploadedSources += 1
-        try await self.withPhotoSyncStep(.transfer,
-          record: uploadedSources == 1 || uploadedSources.isMultiple(of: 32), completed: uploadedSources - 1) {
-          guard sourceCurrent(source) else { throw CancellationError() }
-          let outcome = await uploadJournal.resumePending(only: automatic ? [source.photoId] : nil)
-          if outcome == .cancelled { throw CancellationError() }
-          try Task.checkCancellation()
-          guard let photo = try catalog.backupPhoto(source.photoId),
-            ["committed", "saved"].contains(photo.transferState)
-          else {
-            throw FotoroError(
-              uploadJournal.errors[source.photoId] ?? "Upload remains pending. Retry while online.")
-          }
-        }
-      },
+      upload: { source in try await uploadSource(source) },
       checkCatalog: { [weak self] in
         guard let self, self.store === catalog, self.vault.generation == generation else {
           throw CancellationError()
@@ -1901,6 +2004,10 @@ enum ReviewedPhotosBackupPolicy {
   }
   private func automaticLocationSourceCurrent(_ source: BackupSource) -> Bool {
     #if DEBUG
+      if let lookup = photosBackupSourceCandidate {
+        guard RecentPhotosPolicy.canRead(automaticPhotosPermission), let value = try? lookup(source.id) else { return false }
+        return value.id == source.id && value.sourceRevision == source.sourceRevision && value.skipReason == nil
+      }
       if let snapshot = photosBackupSnapshot {
         return (try? snapshot(.distantPast).contains(where: {
           $0.id == source.id && $0.sourceRevision == source.sourceRevision && $0.skipReason == nil
