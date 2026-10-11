@@ -57,6 +57,8 @@ export interface SearchResult {
   photoIds: string[];
   photoId?: string;
   searching?: boolean;
+  current?: () => boolean;
+  metadataIncomplete?: boolean;
   visualStatus?: "unavailable" | "incomplete" | "missing-preview";
   textStatus?: "indexing" | "incomplete";
 }
@@ -169,6 +171,61 @@ export class PhotoSearchIndex {
     }
     this.dictionary = [...terms.values()].sort((a, b) => compare(a.normalized, b.normalized) || compare(a.id, b.id));
   }
+  dispose() {this.records.clear(); this.dictionary = []; this.phrases.clear();}
+  // Account metadata can be much larger than the grid. Build once outside render,
+  // yielding after bounded work, with an explicit transient-memory admission budget.
+  static async build(photos: SearchPhoto[], signal: AbortSignal, current: () => boolean, budgetBytes = 128 * 1024 * 1024) {
+    const index = new PhotoSearchIndex([]), terms = new Map<string, IndexedMeaning>();
+    let bytes = 0, lastYield = performance.now();
+    const check = () => {signal.throwIfAborted(); if (!current()) throw new DOMException("Search source changed", "AbortError");};
+    const yieldWork = async () => {if (performance.now() - lastYield >= 4) {await new Promise<void>(resolve => setTimeout(resolve, 0)); lastYield = performance.now();} check();};
+    const account = (amount: number) => {bytes += amount; if (bytes > budgetBytes) throw new Error("CACHED_SEARCH_BUDGET");};
+    const ordered = async <T>(items: T[], compareItems: (a: T, b: T) => number) => {
+      let sorted = items;
+      for (let width = 1; width < sorted.length; width *= 2) {
+        const next: T[] = [];
+        for (let start = 0; start < sorted.length; start += 2 * width) {
+          let left = start, right = Math.min(start + width, sorted.length);
+          const middle = right, end = Math.min(start + 2 * width, sorted.length);
+          while (left < middle || right < end) {
+            const a = sorted[left], b = sorted[right];
+            if (right >= end || left < middle && compareItems(a, b) <= 0) next.push(sorted[left++]); else next.push(sorted[right++]);
+            if (next.length % 1024 === 0) await yieldWork();
+          }
+        }
+        sorted = next; await yieldWork();
+      }
+      return sorted;
+    };
+    try {
+      check();
+      for (const photo of photos) {
+        account(256 + 2 * JSON.stringify(photo).length); index.records.set(photo.id, photo); await yieldWork();
+      }
+      const rows: SearchPhoto[] = [];
+      for (const photo of index.records.values()) {rows.push(photo); await yieldWork();}
+      for (const photo of await ordered(rows, (a, b) => compare(a.id, b.id))) {
+        check();
+        const row = new PhotoSearchIndex([photo]); index.records.set(photo.id, photo);
+        for (const term of row.dictionary) {
+          const existing = terms.get(term.id);
+          if (existing) for (const [id, evidence] of term.sources) {existing.sources.set(id, evidence); account(80);}
+          else {terms.set(term.id, term); account(160 + 2 * (term.id.length + term.term.length + term.normalized.length) + 80 * term.sources.size);}
+        }
+        for (const [word, positions] of row.phrases) {
+          const existing = index.phrases.get(word);
+          if (existing) for (const position of positions) existing.push(position); else index.phrases.set(word, positions);
+          // Phrase positions share token arrays; this deliberately overcounts tokens for admission.
+          account(160 * positions.length + 2 * word.length);
+        }
+        await yieldWork();
+      }
+      const dictionary: IndexedMeaning[] = [];
+      for (const term of terms.values()) {dictionary.push(term); await yieldWork();}
+      const sorted = await ordered(dictionary, (a, b) => compare(a.normalized, b.normalized) || compare(a.id, b.id));
+      check(); index.dictionary = sorted; return index;
+    } catch (error) {index.dispose(); throw error;}
+  }
   feedback(): SearchFeedback { return structuredClone(this.history); }
   acceptMeaning(id: string, session: string, now = Date.now(), scope = "local:all") {
     this.record(this.history.meanings, meaningKey(scope, id), session, now);
@@ -191,6 +248,46 @@ export class PhotoSearchIndex {
     target[key] = [...events, { at, session }].slice(-64);
   }
   search(query: string, options: { allowedIds?: Set<string>; scope?: string; committedMeaning?: string; previous?: SearchResult; now?: number } = {}): SearchResult {
+    const work = this.query(query, options); let step = work.next();
+    while (!step.done) step = work.next();
+    return step.value;
+  }
+  async searchAsync(query: string, options: { allowedIds?: Set<string>; scope?: string; committedMeaning?: string; previous?: SearchResult; now?: number } = {}, signal?: AbortSignal, current: () => boolean = () => true): Promise<SearchResult> {
+    const work = this.query(query, options); let deadline = performance.now() + 4;
+    const check = () => {if (signal?.aborted || !current()) throw new DOMException("Search cancelled", "AbortError");};
+    try {
+      check(); let step = work.next();
+      while (!step.done) {
+        check();
+        if (performance.now() >= deadline) {await new Promise(resolve => setTimeout(resolve, 0)); check(); deadline = performance.now() + 4;}
+        step = work.next();
+      }
+      check();
+      const result = step.value, sources = new Map<string, SearchPhoto>();
+      for (const candidate of new Set([...result.meanings, ...(result.meaning ? [result.meaning] : [])]))
+        for (const id of candidate.photoIds) {
+          if (this.records.get(id)?.current) sources.set(id, this.records.get(id)!);
+          if (performance.now() >= deadline) {await new Promise(resolve => setTimeout(resolve, 0)); check(); deadline = performance.now() + 4;}
+        }
+      if (sources.size) result.current = () => {for (const [id, record] of sources) if (this.records.get(id) !== record || record.current?.() === false) return false; return true;};
+      check(); if (result.current?.() === false) throw new Error("CACHED_SEARCH_SOURCE_CHANGED"); return result;
+    } finally {work.return(undefined as never);}
+  }
+  private *query(query: string, options: { allowedIds?: Set<string>; scope?: string; committedMeaning?: string; previous?: SearchResult; now?: number }): Generator<void, SearchResult> {
+    function* ordered<T>(values: T[], compare: (a:T,b:T)=>number): Generator<void,T[]> {
+      let source = values, target = new Array<T>(values.length);
+      for (let width = 1; width < source.length; width *= 2) {
+        for (let start = 0; start < source.length; start += width * 2) {
+          let left = start, right = Math.min(start + width, source.length), end = Math.min(start + width * 2, source.length), middle = right;
+          for (let out = start; out < end; out++) {
+            target[out] = left < middle && (right >= end || compare(source[left], source[right]) <= 0) ? source[left++] : source[right++];
+            if (out % 128 === 0) yield;
+          }
+        }
+        [source,target] = [target,source];
+      }
+      return source;
+    }
     const now = options.now ?? Date.now(), scope = options.scope ?? "local:all", dateQuery = parseNaturalDateQuery(query, {now});
     const dated = dateQuery.phrase !== undefined, prefix = dated ? dateQuery.text : normalizeSearch(query);
     const empty: SearchResult = { query, scope, meanings: [], photoIds: [] };
@@ -217,7 +314,7 @@ export class PhotoSearchIndex {
       if (tier(source) > tier(candidate.kind)) candidate.kind = source;
     };
     if (dated && !prefix) {
-      for (const photo of this.records.values()) if (eligible(photo.id)) include("date", dateQuery.phrase!, photo.id, "date");
+      for (const photo of this.records.values()) {yield; if (eligible(photo.id)) include("date", dateQuery.phrase!, photo.id, "date");}
     }
     let low = 0, high = this.dictionary.length;
     while (low < high) {
@@ -230,13 +327,12 @@ export class PhotoSearchIndex {
       if (!term.normalized.startsWith(prefix)) break;
       // Numeric OCR tokens require an exact query, rather than noisy digit completion.
       if (/^\d+$/.test(term.normalized) && term.normalized !== prefix) continue;
-      const ids = [...term.sources.keys()].filter(eligible);
-      if (!ids.length) continue;
-      for (const id of ids) include(term.id, term.term, id, term.sources.get(id)!);
+      for (const [id, source] of term.sources) {yield; if (eligible(id)) include(term.id, term.term, id, source);}
     }
     const tokens = words(prefix);
     if (tokens.length > 1 && tokens.length <= 16) {
       for (const position of this.phrases.get(tokens[0]) ?? []) {
+        yield;
         if (!eligible(position.photoId) || position.start + tokens.length > position.normalized.length) continue;
         if (!tokens.every((token, offset) => offset === tokens.length - 1 && !/^\d+$/.test(token) ? position.normalized[position.start + offset].startsWith(token) : position.normalized[position.start + offset] === token)) continue;
         const term = position.display.slice(position.start, position.start + tokens.length).join(" ");
@@ -246,29 +342,32 @@ export class PhotoSearchIndex {
     // Literal filenames remain available when the user types file-like syntax or digits.
     if (/[._-]|\d/.test(prefix)) {
       for (const photo of this.records.values()) {
-        if (!eligible(photo.id)) continue;
+        yield; if (!eligible(photo.id)) continue;
         const filename = normalizeSearch(photo.filename), stem = filename.replace(/\.[^.]+$/, "");
         if (filename.startsWith(prefix) || stem === prefix || (/^\d+$/.test(prefix) && words(stem).includes(prefix))) {
           include("file:" + filename, photo.filename, photo.id, "filename");
         }
       }
     }
-    candidates.sort((a, b) =>
+    for (const candidate of candidates) for (const id of candidate.photoIds) {yield; if (!eligible(id)) throw new Error("CACHED_SEARCH_SOURCE_CHANGED");}
+    const orderedCandidates = yield* ordered(candidates, (a, b) =>
       Number(normalizeSearch(b.term) === prefix) - Number(normalizeSearch(a.term) === prefix) ||
       count(this.history.meanings[meaningKey(scope, b.id)], now) - count(this.history.meanings[meaningKey(scope, a.id)], now) ||
       tier(b.kind) - tier(a.kind) || compare(a.id, b.id));
-    const meaning = candidates.find(candidate => candidate.id === options.committedMeaning) ?? candidates[0];
-    if (!meaning) return { ...empty, meanings: candidates.slice(0, 6) };
+    const meaning = orderedCandidates.find(candidate => candidate.id === options.committedMeaning) ?? orderedCandidates[0];
+    if (!meaning) return { ...empty, meanings: orderedCandidates.slice(0, 6) };
     const key = meaningKey(scope, meaning.id), pin = this.history.pins[key];
-    const ranks = new Map(meaning.photoIds.map(id => {
+    const ranks = new Map<string, number[]>();
+    for (const id of meaning.photoIds) {
+      yield;
       const photo = this.records.get(id)!, parsed = captured(id);
-      return [id, [
+      ranks.set(id, [
         Number(id === pin), tier(meaning.evidence[id]), count(this.history.photos[photoKey(key, id)], now),
         meaning.evidence[id] === "ocr" ? photo.ocr?.confidence ?? 0 : 0,
         Number(photo.favorite === true), hasCaptureDate(photo) && parsed <= now && Number.isFinite(parsed) ? parsed : 0,
-      ]] as const;
-    }));
-    const sorted = [...meaning.photoIds].sort((a, b) => {
+      ]);
+    }
+    const sorted = yield* ordered(meaning.photoIds.slice(), (a, b) => {
       const left = ranks.get(a)!, right = ranks.get(b)!;
       for (let position = 0; position < left.length; position++) {
         const difference = right[position] - left[position];
@@ -283,6 +382,11 @@ export class PhotoSearchIndex {
       (pin ? pin === previousId : tier(meaning.evidence[previousId]) === bestTier);
     const photoIds = sorted.slice(0, 200);
     if (stable && !photoIds.includes(previousId!)) photoIds.splice(199, 1, previousId!);
-    return { query, scope, meanings: candidates.slice(0, 6), meaning, photoIds, photoId: stable ? previousId : photoIds[0] };
+    // No await/yield may separate this evidence fence from returning the result.
+    // Earlier yielded checks can themselves be crossed by a later source withdrawal.
+    for (const candidate of new Set([...orderedCandidates.slice(0, 6), meaning])) {
+      for (const id of candidate.photoIds) if (!eligible(id)) throw new Error("CACHED_SEARCH_SOURCE_CHANGED");
+    }
+    return { query, scope, meanings: orderedCandidates.slice(0, 6), meaning, photoIds, photoId: stable ? previousId : photoIds[0] };
   }
 }

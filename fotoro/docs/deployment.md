@@ -17,7 +17,16 @@ Hono Worker with D1 and private R2. The upstream Ente application is a reference
   require separate preview consent and explicitly configured provider/work limits;
   that route remains disabled by default.
 
-### October 10 current checkpoint
+### October 11 current browser checkpoint
+
+PR 85 Worker `cf144db8-c338-4661-a5aa-5ab9566726a3` serves 100%,
+deployment `cd4549db-985b-4a58-b3e2-113066e34fd9`. All 47 non-HTML assets
+and 10 routes match the qualified merged tree; all 23 hosted contexts passed or
+intentionally skipped. API script/runtime, eight bindings and schema are unchanged.
+Rollback is PR 82's `7ef7e9a3-2d28-47d6-bd33-ad2174cb3631`. Native installation
+has not changed. See [verification](verification.md).
+
+### October 10 previous checkpoint
 
 PR 82 Worker `7ef7e9a3-2d28-47d6-bd33-ad2174cb3631` serves 100%,
 deployment `84762eae-6ef9-42ee-bfa0-b604191091c0`. Migration 0011 is applied;

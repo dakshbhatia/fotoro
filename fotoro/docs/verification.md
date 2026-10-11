@@ -5,7 +5,55 @@ work; [product](product.md) owns the intended experience. Earlier measurements a
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
 
-## October 11 family Trip recovery — locally qualified
+## October 11 indexing and sync isolation — source reviewed
+
+Recent-photo analysis continues bounded batches independently of Search/People
+queries. Each completed attempt checkpoints its cursor and unavailable state;
+scroll cancellation retains the unfinished source. OCR/classification publish
+without awaiting a cold semantic model download. Readiness starts one missing-
+vector pass; warm inference reuses the derivative. Explicit historical analysis
+retains its own scope/preview through a cancellable wait. Cancelling a model
+consumer leaves shared installation intact.
+A cancellation-aware utility worker enumerates sync metadata and returns only
+value facts, followed by current account/trust/vault/endpoint/Photos checks.
+Acknowledging an own annotation payload updates sync status without republishing
+all browsing overlays. Transfer phase/message updates preserve timeline identity;
+verified-copy, digest and revision changes still update deduplication.
+
+Browser metadata discovery advances serialized four-page foreground slices
+independently of gallery limits and releases the owner between slices for queued
+saves. Verified cached metadata scans reuse unchanged source receipts; builds
+and broad queries yield outside rendering. Matching hydration retains selection,
+rechecks exact receipts and wipes withdrawn keys. Continuous appends do not cancel
+the whole index; changed sources withdraw individually. Cached metadata/search
+budgets and the 200-result cap remain explicit. Public regressions find a target
+beyond the first 100 rows and fresh server photo 225 without fetching originals,
+and stop a held 425-row continuation before later rows/pages.
+
+The 115 affected browser tests and TypeScript/Vite build pass. A reproducible
+20,000-record synthetic Node/Mac benchmark measured yielding index construction
+at 548 ms total / 8 ms longest timer gap (synchronous 301 / 301 ms), and a broad
+query at 67 / 6.3 ms (synchronous 46 / 46 ms). These measure desktop event-loop
+blocking, not browser/iPhone frame pacing, inference throughput or photo quality.
+
+The full core/API/browser check passes, including 129 API and 745 browser tests;
+the pinned public visual-inference smoke passes. Existing native suites add
+partial-batch continuation, cold preparation/cancellation, historical scope,
+status-only grouping, overlapping acknowledgment/newer-edit and off-main
+metadata admission regressions. Native compilation/tests are pending hosted CI;
+no local Xcode or device installation was performed. Physical frame pacing,
+large-inventory actor filtering/reconciliation and durable browser inference
+remain open. The supplied diagnostics contain builds 50/60; their repeated
+pending-transfer/context cancellations are historical evidence, not measurements
+of this source or the currently installed app.
+
+## October 11 family Trip recovery — deployed
+
+PR 85 merge `be4b9f57810e0c3d68d24b5610c5765a18e1c294` is deployed:
+Worker `cf144db8-c338-4661-a5aa-5ab9566726a3` at 100%, deployment
+`cd4549db-985b-4a58-b3e2-113066e34fd9`. All 47 non-HTML assets and 10 routes
+match the qualified merged tree; all 23 hosted contexts passed or intentionally
+skipped. Bindings, API script/runtime and schema are unchanged.
 
 Browser invitations survive switching apps to verify the sender. Private work and
 copied keys stop immediately; returning reloads the same public invitation in the

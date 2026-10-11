@@ -1,8 +1,9 @@
+import {useEffect, useRef, useState} from "react";
 import type {Photo, CatalogCoverage} from "./catalog";
 import {cloudSearchRecords} from "./search";
 import type {LocalPhoto} from "../local/resources";
 import {LocalResources, imageDimensions} from "../local/resources";
-import type {SearchResult, SearchMeaning} from "../local/search";
+import type {SearchResult, SearchMeaning, SearchPhoto, PhotoSearchIndex} from "../local/search";
 import type {PhotoLocationV1} from "@fotoro/contracts";
 import type {PhotoObservationV1} from "@fotoro/contracts/intelligence";
 import type {PeopleAssignment} from "@fotoro/contracts/people";
@@ -28,6 +29,11 @@ export interface OwnedPhotoSnapshot {
   token: object;
   photos: Photo[];
   coverage?: CatalogCoverage;
+  metadataSearchError?: string;
+  metadataSearch?: {token: object; complete: boolean; records: SearchPhoto[]; browseIds: ReadonlySet<string>; current: () => boolean;
+    search: PhotoSearchIndex["search"];
+    searchAsync: PhotoSearchIndex["searchAsync"];
+    hydrate: (ids: readonly string[], signal: AbortSignal, current: () => boolean) => Promise<void>};
   selectionReady?: boolean;
   retainSelection?: (ids: ReadonlySet<string>) => void;
   current: () => boolean;
@@ -36,6 +42,80 @@ export interface OwnedPhotoSnapshot {
   edit?: (photo: Photo, changes: {labels?: string[]; favorite?: boolean; location?: PhotoLocationV1; observation?: PhotoObservationV1; people?: PeopleAssignment[]}) => Promise<void>;
   locate?: (updates: readonly {photo: Photo; location: PhotoLocationV1}[]) => Promise<{applied: number; failed: number; updatedPhotoIDs: string[]}>;
   people?: (updates: readonly {photo: Photo; assignments: PeopleAssignment[]}[]) => Promise<void>;
+}
+export function accountSearchResult(search: PhotoSearchIndex["search"], records: SearchPhoto[], ids: ReadonlyMap<string, string>, query: string, options: Parameters<PhotoSearchIndex["search"]>[1]) {
+  const allowedIds = options?.allowedIds ? new Set(records.filter(record => options.allowedIds!.has(ids.get(record.id) ?? "saved:" + record.id)).map(record => record.id)) : undefined;
+  const result = search(query, {...options, allowedIds});
+  const idFor = (id: string) => ids.get(id) ?? "saved:" + id;
+  const meaning = (value: SearchMeaning) => ({...value, photoIds: [...new Set(value.photoIds.map(idFor))], evidence: Object.fromEntries(Object.entries(value.evidence).map(([id, source]) => [idFor(id), source]))});
+  return {...result, photoIds: [...new Set(result.photoIds.map(idFor))], photoId: result.photoId ? idFor(result.photoId) : undefined,
+    meanings: result.meanings.map(meaning), meaning: result.meaning ? meaning(result.meaning) : undefined};
+}
+export async function accountSearchResultAsync(search: PhotoSearchIndex["searchAsync"], records: SearchPhoto[], ids: ReadonlyMap<string, string>, query: string, options: Parameters<PhotoSearchIndex["search"]>[1], signal: AbortSignal, current: () => boolean) {
+  let deadline = performance.now() + 4;
+  const check = () => {if (signal.aborted || !current()) throw new DOMException("Search cancelled", "AbortError");};
+  const pause = async () => {check(); if (performance.now() >= deadline) {await new Promise(resolve => setTimeout(resolve, 0)); check(); deadline = performance.now() + 4;}};
+  const idFor = (id: string) => ids.get(id) ?? "saved:" + id;
+  const allowedIds = options?.allowedIds ? new Set<string>() : undefined;
+  if (allowedIds) for (const record of records) {if (options!.allowedIds!.has(idFor(record.id))) allowedIds.add(record.id); await pause();}
+  const result = await search(query, {...options, allowedIds}, signal, current);
+  const mapped = new Map<SearchMeaning, SearchMeaning>();
+  for (const value of new Set([...result.meanings, ...(result.meaning ? [result.meaning] : [])])) {
+    const photoIds = new Set<string>(), evidence: SearchMeaning["evidence"] = {};
+    for (const id of value.photoIds) {const display = idFor(id); photoIds.add(display); evidence[display] = value.evidence[id]; await pause();}
+    mapped.set(value, {...value, photoIds: [...photoIds], evidence});
+  }
+  check(); if (result.current?.() === false) throw new Error("CACHED_SEARCH_SOURCE_CHANGED"); return {...result, photoIds: [...new Set(result.photoIds.map(idFor))], photoId: result.photoId ? idFor(result.photoId) : undefined,
+    meanings: result.meanings.map(value => mapped.get(value)!), meaning: result.meaning ? mapped.get(result.meaning) : undefined};
+}
+// A result belongs to one request. Replacement clears it and aborts its work.
+export function useAccountSearch(query: string, scope: string, request: ((signal: AbortSignal, current: () => boolean) => Promise<SearchResult>) | undefined, enabled: boolean) {
+  const latest = useRef(request); latest.current = request;
+  const [visibleEpoch, setVisibleEpoch] = useState(0);
+  const [published, setPublished] = useState<{request: typeof request; result: SearchResult}>();
+  useEffect(() => {
+    setPublished(undefined);
+    if (!request || !enabled) return;
+    const controller = new AbortController();
+    const current = () => !controller.signal.aborted && latest.current === request && document.visibilityState === "visible";
+    const withdraw = () => {controller.abort(); setPublished(undefined);};
+    const visibility = () => {withdraw(); if (document.visibilityState === "visible") setVisibleEpoch(value => value + 1);};
+    document.addEventListener("visibilitychange", visibility); window.addEventListener("fotoro-lock", withdraw); window.addEventListener("pagehide", withdraw);
+    if (current()) void request(controller.signal, current).then(result => {if (current()) {
+        if (result.current?.() === false) throw new Error("CACHED_SEARCH_SOURCE_CHANGED");
+        setPublished({request, result});
+      }}).catch(() => {
+      if (current()) setPublished({request, result: {query, scope, meanings: [], photoIds: [], metadataIncomplete: true}});
+    });
+    return () => {controller.abort(); document.removeEventListener("visibilitychange", visibility); window.removeEventListener("fotoro-lock", withdraw); window.removeEventListener("pagehide", withdraw);};
+  }, [request, enabled, visibleEpoch]);
+  if (published && published.request === request && enabled) return published.result.current?.() === false
+    ? {query, scope, meanings: [], photoIds: [], metadataIncomplete: true} satisfies SearchResult : published.result;
+  return {query, scope, meanings: [], photoIds: [], searching: !!request && enabled} satisfies SearchResult;
+}
+export function savedMetadataRecords(records: SearchPhoto[], local: LocalPhoto[]): SearchPhoto[] {
+  const selected = new Map(local.flatMap(photo => {
+    const digest = comparableDigest(photo);
+    return photo.file instanceof File && digest ? [[digest, photo.id] as const] : [];
+  }));
+  return records.map(record => {
+    const id = record.digest && selected.get(record.digest) || "saved:" + record.id;
+    return {...record, id, observationPhotoId: record.id,
+      ocr: record.ocr ? {...record.ocr, photoID: id} : undefined,
+      visual: record.visual ? {...record.visual, photoID: id} : undefined};
+  });
+}
+export class SavedMetadataProjection {
+  private source?: SearchPhoto[];
+  private binding = "";
+  private records: SearchPhoto[] = [];
+  read(source: SearchPhoto[] | undefined, local: LocalPhoto[]) {
+    if (!source) {this.source = undefined; this.binding = ""; this.records = []; return this.records;}
+    const binding = JSON.stringify(local.filter(photo => photo.file instanceof File && comparableDigest(photo)).map(photo => [photo.id, comparableDigest(photo)]));
+    if (this.source === source && this.binding === binding) return this.records;
+    this.source = source; this.binding = binding;
+    return this.records = savedMetadataRecords(source, local);
+  }
 }
 export class ConsumerSelectionRetention {
   private binding?: {accountId: string; token: object; origin: string; current: () => boolean};
@@ -104,6 +184,19 @@ function comparableDigest(photo: Pick<LocalPhoto, "digest">) {
   return btoa(String.fromCharCode(...digest.match(/../g)!.map(value => parseInt(value, 16)))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 /* This adapter consumes verified owned catalog records. Account records never enter local retention. */
+// Search projection identity is independent of Save availability/progress snapshots.
+export class SavedSearchProjection {
+  private snapshot?: OwnedPhotoSnapshot;
+  private local: LocalPhoto[] = [];
+  private photos: LocalPhoto[] = [];
+  read(snapshot: OwnedPhotoSnapshot | null, local: LocalPhoto[]): LocalPhoto[] {
+    if (!snapshot?.current()) {this.snapshot = undefined; this.local = []; this.photos = []; return this.photos;}
+    if (this.snapshot?.current() && this.snapshot.token === snapshot.token && this.snapshot.accountId === snapshot.accountId
+      && this.snapshot.photos === snapshot.photos && (this.local === local || !this.local.length && !local.length)) return this.photos;
+    this.snapshot = snapshot; this.local = local;
+    return this.photos = savedSearchPhotos(snapshot, local);
+  }
+}
 export function savedSearchPhotos(snapshot: OwnedPhotoSnapshot | null, local: LocalPhoto[]): LocalPhoto[] {
   if (!snapshot?.current()) return [];
   const selected = new Map(local.flatMap(photo => {
@@ -142,5 +235,5 @@ export function combineConsumerSearch(local: SearchResult, saved: SearchResult, 
     ...(saved.meaning?.id === meaning?.id ? saved.photoIds : []),
   ])];
   const photoId = [local.photoId, saved.photoId].find(id => id && photoIds.includes(id)) ?? photoIds[0];
-  return {...local, meanings: [...meanings.values()], meaning: meaning ? {...meaning, photoIds} : undefined, photoIds, photoId};
+  return {...local, searching: local.searching || saved.searching, metadataIncomplete: local.metadataIncomplete || saved.metadataIncomplete, meanings: [...meanings.values()], meaning: meaning ? {...meaning, photoIds} : undefined, photoIds, photoId};
 }

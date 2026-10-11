@@ -22,9 +22,11 @@ import {
   decodeLivePhoto,
 } from "@fotoro/crypto";
 import { api, scopedApi, fetchCipher } from "../exchange/api";
-import { get, all, atomic, cacheCipher, boundedRows } from "../exchange/cache";
+import { get, all, atomic, cacheCipher, boundedRows, cachedMetadataRevision, cachedPhotoRevision } from "../exchange/cache";
 import { requireVault, encryptPrivate, decryptPrivate, type UnlockedVault } from "../vault/vault";
-import {assertVault} from "../vault/scope";
+import {assertVault, sameVault} from "../vault/scope";
+import {PhotoSearchIndex, type SearchPhoto} from "../local/search";
+import {cloudSearchRecords} from "./search";
 import { annotationCacheWrite, readAnnotations, serializeAnnotationWrites, verifyAnnotations, type AnnotationIdentity } from "../exchange/annotations";
 export interface Photo {
   manifest: PhotoManifestV1;
@@ -190,15 +192,17 @@ export async function cacheOwnedPhotoDetails(source: OwnedPhotoDetailsSource, si
 
 export async function applyChanges(
   page: ChangePageV1,
-  session = requireVault(),
+  session = requireVault(), signal?: AbortSignal, current?: () => boolean,
 ) {
+  const check = () => {assertVault(session); signal?.throwIfAborted(); if (current?.() === false) throw new DOMException("Catalog read withdrawn", "AbortError");};
   return serializeAnnotationWrites(session, async () => {
-    validateWire("ChangePageV1", page);
+    check(); validateWire("ChangePageV1", page);
     if (requireVault() !== session) throw new Error("VAULT_LOCKED");
     const v = requireVault();
     const writes: any[] = [];
     const stagedAnnotations = new Map<string, SignedPayloadV1>();
     for (const change of page.changes) {
+      check();
       if (change.entity === "annotation") {
         if (change.deleted) writes.push({store: "settings", key: v.accountId + ":annotation:" + change.entityId});
         else {
@@ -236,20 +240,20 @@ export async function applyChanges(
       value: encryptPrivate(page.nextCursor),
     });
     writes.push({store: "settings", key: v.accountId + ":catalog-has-more", value: encryptPrivate(page.hasMore)});
-    await atomic(writes);
-    if (requireVault() !== session) throw new Error("VAULT_LOCKED");
+    check(); await atomic(writes); check();
   });
 }
-export async function syncCatalog(signal?: AbortSignal, diagnostic?: DiagnosticContext, maxPages = Infinity) {
+export async function syncCatalog(signal?: AbortSignal, diagnostic?: DiagnosticContext, maxPages = Infinity, current?: () => boolean) {
   if (!(maxPages === Infinity || Number.isSafeInteger(maxPages) && maxPages > 0)) throw new Error("INVALID_CATALOG_WINDOW");
   const request = diagnostic ? scopedApi(diagnostic) : api;
   const session = requireVault();
-  const id = session.accountId;
+  const check = () => {assertVault(session); signal?.throwIfAborted(); if (current?.() === false) throw new DOMException("Catalog read withdrawn", "AbortError");};
+  check(); const id = session.accountId;
   const capability = await get<WrappedKeyV1>("settings", id + ":media-reader-v1");
   let cursor = capability ? await get<WrappedKeyV1>("settings", id + ":cursor") : undefined;
   let pages = 0;
   while (true) {
-    if (requireVault() !== session) throw new Error("VAULT_LOCKED");
+    check();
     const page = await request<ChangePageV1>(
       "/v1/changes?limit=100&media=1" +
         (cursor && decryptPrivate<string | null>(cursor)
@@ -260,14 +264,15 @@ export async function syncCatalog(signal?: AbortSignal, diagnostic?: DiagnosticC
       "GET",
       signal,
     );
-    assertVault(session);
+    check();
     if (page.mediaVersion !== 1) throw new Error("MEDIA_READER_UPDATE_REQUIRED");
-    await applyChanges(page, session);
-    if (requireVault() !== session) throw new Error("VAULT_LOCKED");
+    await applyChanges(page, session, signal, current);
+    check();
     await atomic([{store: "settings", key: id + ":media-reader-v1", value: encryptPrivate(true)}]);
-    if (requireVault() !== session) throw new Error("VAULT_LOCKED");
+    check();
     signal?.throwIfAborted();
     if (!page.hasMore || ++pages >= maxPages) return {hasMore: page.hasMore};
+    await new Promise(resolve => setTimeout(resolve, 0)); check();
     cursor = await get("settings", id + ":cursor");
   }
 }
@@ -311,27 +316,29 @@ function rememberHydrated(cache: HydratedCatalog, id: string, entry: HydratedEnt
 export async function cachedCatalog(diagnostic?: DiagnosticContext) {
   return (await cachedCatalogSnapshot(diagnostic)).photos;
 }
-export interface CatalogBrowse {limit: number; retainPhotoIds?: readonly string[]}
+export interface CatalogBrowse {limit: number; retainPhotoIds?: readonly string[]; retainedOnly?: boolean; signal?: AbortSignal; current?: () => boolean}
 export interface CatalogCoverage {loaded: number; cachedTotal: number; hasMore: boolean; hasMoreChanges: boolean | null}
 export async function cachedCatalogSnapshot(diagnostic?: DiagnosticContext, browse?: CatalogBrowse) {
   const v = requireVault(), cache = currentHydratedCatalog(v);
+  const check = () => {assertVault(v); browse?.signal?.throwIfAborted(); if (browse?.current && !browse.current()) throw new DOMException("Catalog source changed", "AbortError");};
+  check();
   const window = browse ? await boundedRows<WrappedKeyV1>("catalog", v.accountId + ":", browse.limit) : undefined;
-  const rows = window?.rows ?? await all<WrappedKeyV1>("catalog", v.accountId + ":");
+  const rows = browse?.retainedOnly ? [] : window?.rows ?? await all<WrappedKeyV1>("catalog", v.accountId + ":");
   if (browse?.retainPhotoIds?.length) {
     const present = new Set(rows.map(([id]) => id));
     for (const photoId of new Set(browse.retainPhotoIds)) {
       const id = v.accountId + ":" + photoId;
       if (present.has(id)) continue;
       const value = await get<WrappedKeyV1>("catalog", id);
-      assertVault(v);
+      check();
       if (value) {rows.push([id, value]); present.add(id);}
     }
   }
-  assertVault(v);
+  check();
   const photos: Photo[] = [], present = new Set<string>();
   try {
     for (const [id, value] of rows) {
-      assertVault(v);
+      check();
       const previous = cache.entries.get(id);
       let photo: Photo, identity: string;
       if (previous && sameWrapped(previous.wrapped, value)) {
@@ -345,18 +352,18 @@ export async function cachedCatalogSnapshot(diagnostic?: DiagnosticContext, brow
         );
         if (signed.accountId !== v.accountId || !["photo-manifest", "photo-media-manifest-v1"].includes(signed.kind) || manifest.ownerAccountId !== v.accountId || id !== v.accountId + ":" + manifest.photoId)
           throw new Error("CATALOG_BINDING_MISMATCH");
-        photo = previous?.signed === identity ? previous.photo : await readPhoto(manifest, undefined, undefined, undefined, diagnostic);
-        try {assertVault(v); if (hydrated !== cache) throw new Error("VAULT_LOCKED");}
+        photo = previous?.signed === identity ? previous.photo : await readPhoto(manifest, undefined, undefined, browse?.signal, diagnostic);
+        try {check(); if (hydrated !== cache) throw new Error("VAULT_LOCKED");}
         catch (error) {if (photo !== previous?.photo) photo.metadataKey.fill(0); throw error;}
       }
       // Read annotations every time. Failed reads never publish a cached or partial annotation result.
       let annotation;
       try {
         annotation = await readAnnotations({ownerAccountId: photo.manifest.ownerAccountId, photoId: photo.manifest.photoId, originalSha256: photo.metadata.originalSha256}, v);
-        assertVault(v);
+        check();
         if (hydrated !== cache) throw new Error("VAULT_LOCKED");
         const current = await get<WrappedKeyV1>("catalog", id);
-        assertVault(v);
+        check();
         if (!current || !sameWrapped(value, current)) throw new Error("CATALOG_SOURCE_CHANGED");
       } catch (error) {if (photo !== previous?.photo) photo.metadataKey.fill(0); throw error;}
       photos.push({...photo, metadataKey: new Uint8Array(photo.metadataKey), ...(annotation ? {annotations: annotation.value, annotationRevision: annotation.revision} : {})});
@@ -371,9 +378,9 @@ export async function cachedCatalogSnapshot(diagnostic?: DiagnosticContext, brow
         if (photo !== previous?.photo) photo.metadataKey.fill(0);
       }
     }
-    if (!window || window.total === rows.length) for (const id of cache.entries.keys()) if (!present.has(id)) forgetHydrated(cache, id);
+    if (!browse?.retainedOnly && (!window || window.total === rows.length)) for (const id of cache.entries.keys()) if (!present.has(id)) forgetHydrated(cache, id);
     const remaining = await get<WrappedKeyV1>("settings", v.accountId + ":catalog-has-more");
-    assertVault(v);
+    check();
     if (hydrated !== cache) throw new Error("VAULT_LOCKED");
     const hasMoreChanges = remaining ? decryptPrivate<boolean>(remaining) : null;
     if (hasMoreChanges !== null && typeof hasMoreChanges !== "boolean") throw new Error("CATALOG_COVERAGE_INVALID");
@@ -383,5 +390,126 @@ export async function cachedCatalogSnapshot(diagnostic?: DiagnosticContext, brow
   } catch (error) {
     for (const photo of photos) photo.metadataKey.fill(0);
     throw error;
+  }
+}
+
+export interface CachedMetadataSource {manifest: string; annotation?: string; revision: number}
+const metadataReceipt = (wrapped: WrappedKeyV1) => digest(new TextEncoder().encode(JSON.stringify([wrapped.version, wrapped.nonce, wrapped.ciphertext])));
+// Metadata-only account traversal. No gallery keys or image representations are retained by the scan.
+export async function scanCachedMetadata(session: UnlockedVault, signal: AbortSignal, current: () => boolean,
+  visit: (photo: Photo, source: CachedMetadataSource) => void,
+  reuse?: (id: string, source: CachedMetadataSource) => boolean) {
+  const check = () => {
+    signal.throwIfAborted(); assertVault(session);
+    if (!current()) throw new DOMException("Metadata source changed", "AbortError");
+  };
+  let after: string | undefined, processed = 0;
+  const yieldPhoto = async () => {if (++processed % 8 === 0) await new Promise<void>(resolve => setTimeout(resolve, 0)); check();};
+  check();
+  for (;;) {
+    const batchRevision = cachedMetadataRevision(session.accountId);
+    const batch = await boundedRows<WrappedKeyV1>("catalog", session.accountId + ":", 64, after); check();
+    const changedBatch = batchRevision !== cachedMetadataRevision(session.accountId);
+    const revisions = new Map(batch.rows.map(([id]) => [id, cachedPhotoRevision(session.accountId, id.slice(session.accountId.length + 1))]));
+    for (const [id, wrapped] of batch.rows) {
+      check();
+      const photoId = id.slice(session.accountId.length + 1);
+      const revision = revisions.get(id)!;
+      const annotation = await get<WrappedKeyV1>("settings", session.accountId + ":annotation:" + photoId); check();
+      if (cachedPhotoRevision(session.accountId, photoId) !== revision) continue;
+      const receipt = {manifest: metadataReceipt(wrapped), annotation: annotation ? metadataReceipt(annotation) : undefined, revision};
+      if (changedBatch && !await cachedMetadataSourceCurrent(session, photoId, receipt)) continue;
+      check(); if (cachedPhotoRevision(session.accountId, photoId) !== revision) continue;
+      if (reuse?.(photoId, receipt)) {
+        await yieldPhoto(); continue;
+      }
+      const signed = validateWire<SignedPayloadV1>("SignedPayloadV1", decryptPrivate<SignedPayloadV1>(wrapped));
+      const manifest = validateWire<PhotoManifestV1>("PhotoManifestV1", JSON.parse(new TextDecoder().decode(verifyPayload(signed, unb64(session.card.signingPublicKey)))));
+      if (signed.accountId !== session.accountId || !["photo-manifest", "photo-media-manifest-v1"].includes(signed.kind) || manifest.ownerAccountId !== session.accountId || id !== session.accountId + ":" + manifest.photoId) throw new Error("CATALOG_BINDING_MISMATCH");
+      const photo = await readPhoto(manifest, undefined, undefined, signal);
+      try {
+        check();
+        const admitted = await readAnnotations({ownerAccountId: session.accountId, photoId: manifest.photoId, originalSha256: photo.metadata.originalSha256}, session); check();
+        if (admitted) {photo.annotations = admitted.value; photo.annotationRevision = admitted.revision;}
+        const source = {manifest: metadataReceipt(wrapped), annotation: annotation ? metadataReceipt(annotation) : undefined, revision};
+        if (!await cachedMetadataSourceCurrent(session, manifest.photoId, source)) continue;
+        if (cachedPhotoRevision(session.accountId, photoId) !== revision) continue;
+        check(); visit(photo, source); check();
+      } finally {photo.metadataKey.fill(0);}
+      await yieldPhoto();
+    }
+    if (batch.rows.length < 64) break;
+    after = batch.rows.at(-1)![0];
+    // Yield between bounded IDB batches, including when ciphertext is already cached.
+    await new Promise<void>(resolve => setTimeout(resolve, 0)); check();
+  }
+  check();
+}
+export async function cachedMetadataSourceCurrent(session: UnlockedVault, id: string, source: CachedMetadataSource) {
+  const manifest = await get<WrappedKeyV1>("catalog", session.accountId + ":" + id); assertVault(session);
+  const annotation = await get<WrappedKeyV1>("settings", session.accountId + ":annotation:" + id); assertVault(session);
+  return cachedPhotoRevision(session.accountId, id) === source.revision && !!manifest && source.manifest === metadataReceipt(manifest) && (!source.annotation && !annotation || !!source.annotation && !!annotation && source.annotation === metadataReceipt(annotation));
+}
+
+// Plain metadata exists only for this unlocked, visible account lifetime. Receipts remain encrypted.
+export class CachedAccountSearch {
+  records: SearchPhoto[] = [];
+  index?: PhotoSearchIndex;
+  private sources = new Map<string, CachedMetadataSource>();
+  private verified = new Map<string, SearchPhoto>();
+  private withdrawn = new Set<string>();
+  private disposed = false;
+  private readonly revision: number;
+  constructor(private session: UnlockedVault, private current: () => boolean, previous?: CachedAccountSearch) {
+    this.revision = cachedMetadataRevision(session.accountId);
+    if (previous && !previous.disposed && previous.session === session && previous.current()) {
+      this.sources = new Map(previous.sources); this.verified = new Map(previous.verified);
+    }
+  }
+  get admitted() {return !this.disposed && sameVault(this.session) && this.current();}
+  get complete() {return this.admitted && !this.withdrawn.size && cachedMetadataRevision(this.session.accountId) === this.revision;}
+  private project(record: SearchPhoto, revision: number) {
+    const id = record.id;
+    return {...record, current: () => this.admitted && !this.withdrawn.has(id) && cachedPhotoRevision(this.session.accountId, id) === revision};
+  }
+  dispose() {this.disposed = true; this.records = []; this.sources.clear(); this.verified.clear(); this.withdrawn.clear(); this.index?.dispose(); this.index = undefined;}
+  async scan(signal: AbortSignal) {
+    let metadataBytes = 0;
+    const admit = (record: SearchPhoto) => {metadataBytes += 512 + 2 * JSON.stringify(record).length; if (metadataBytes > 32 * 1024 * 1024) throw new Error("CACHED_SEARCH_BUDGET");};
+    try {
+      await scanCachedMetadata(this.session, signal, () => this.admitted, (photo, source) => {
+        // Override the gallery closure, so the record cannot retain a temporary Photo/key.
+        const record = cloudSearchRecords([photo])[0];
+        const projected = this.project(record, source.revision);
+        admit(projected); this.records.push(projected); this.verified.set(record.id, projected);
+        this.sources.set(record.id, source);
+      }, (id, source) => {
+        const previous = this.sources.get(id), record = this.verified.get(id);
+        if (!previous || !record || previous.manifest !== source.manifest
+          || previous.revision !== source.revision
+          || !!previous.annotation !== !!source.annotation || previous.annotation && source.annotation && previous.annotation !== source.annotation) return false;
+        const projected = this.project(record, source.revision);
+        admit(projected); this.records.push(projected); this.verified.set(id, projected); return true;
+      });
+      const present = new Set(this.records.map(record => record.id));
+      for (const id of this.sources.keys()) if (!present.has(id)) {this.sources.delete(id); this.verified.delete(id);}
+      this.index = await PhotoSearchIndex.build(this.records, signal, () => this.admitted, 128 * 1024 * 1024 - metadataBytes);
+      return this;
+    } catch (error) {this.records = []; if (!sameVault(this.session) || !this.current() || error instanceof Error && error.message === "CACHED_SEARCH_BUDGET") this.dispose(); throw error;}
+  }
+  async hydrate(ids: readonly string[], signal: AbortSignal) {
+    const chosen = [...new Set(ids)].slice(0, 200);
+    const check = () => {signal.throwIfAborted(); if (!this.admitted) throw new DOMException("Saved search changed", "AbortError");};
+    const verify = async () => {
+      for (const id of chosen) {
+        check(); const source = this.sources.get(id);
+        if (!source || !await cachedMetadataSourceCurrent(this.session, id, source)) {this.withdrawn.add(id); throw new Error("CATALOG_SOURCE_CHANGED");}
+        check();
+      }
+    };
+    await verify(); check();
+    const result = await cachedCatalogSnapshot(undefined, {limit: 1, retainedOnly: true, retainPhotoIds: chosen, signal, current: () => this.admitted});
+    try {await verify(); check(); return result.photos;}
+    catch (error) {for (const photo of result.photos) photo.metadataKey.fill(0); throw error;}
   }
 }

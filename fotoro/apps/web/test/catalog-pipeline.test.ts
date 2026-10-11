@@ -4,14 +4,17 @@ import assert from "node:assert/strict";
 import accounts from "../../../fixtures/accounts.json";
 import {ready, sodium, unb64, b64, encryptMedia, signPayload, utf8, wrapKey} from "@fotoro/crypto";
 import type {MediaBinding, PhotoManifestV1, PhotoMetadataV1, RepresentationV1, SignedPayloadV1} from "@fotoro/contracts";
-import {configureVault, unlockVault, lockVault, encryptPrivate, type UnlockedVault} from "../src/vault/vault";
-import {atomic, clearAccount, get, put} from "../src/exchange/cache";
+import {configureVault, unlockVault, lockVault, encryptPrivate, decryptPrivate, type UnlockedVault} from "../src/vault/vault";
+import {atomic, clearAccount, get, put, db} from "../src/exchange/cache";
 import {cachedCatalog, cachedCatalogSnapshot, collect, digest, source} from "../src/library/catalog";
 import {cachedSync, refreshSync, readableSyncError} from "../src/exchange/sync";
 import {ExpiredSavedSelection} from "../src/exchange/sharing";
 import {PhotoSelectionButton} from "../src/library/Library";
 import {ConsumerSelectionRetention, type OwnedPhotoSnapshot} from "../src/library/consumer-search";
 import {renderToStaticMarkup} from "react-dom/server";
+import {cloudSearchRecords, mergeSearchPhotos} from "../src/library/search";
+import {PhotoSearchIndex} from "../src/local/search";
+import {CachedAccountSearch, scanCachedMetadata} from "../src/library/catalog";
 
 async function open(index: number) {
   const secret = accounts.testSecrets[index];
@@ -195,43 +198,77 @@ test("large cached browse opens a bounded first page, preserves selected sources
   } finally {globalThis.fetch = oldFetch; lockVault(); await clearAccount(session.accountId);}
 });
 
-test("bounded server refresh resumes the committed cursor one page at a time without claiming early completion", {timeout: 15000}, async () => {
+test("fresh server metadata discovery resumes committed cursors and searches beyond the 100-photo gallery", {timeout: 15000}, async () => {
   await ready; const session = await open(0), oldFetch = globalThis.fetch, objects = new Map<string, Uint8Array>();
   await clearAccount(session.accountId);
   const items = [];
   try {
-    for (let n = 0; n < 225; n++) items.push(await fixture(session, objects, `public-${n}.jpg`, orderedID(n)));
+    for (let n = 0; n < 225; n++) items.push(await fixture(session, objects, n === 224 ? "Lighthouse.jpg" : `public-${n}.jpg`, orderedID(n)));
     await atomic(items.map(item => ({store: "catalog" as const, key: session.accountId + ":" + item.manifest.photoId})));
-    const cursors: (string | null)[] = []; let metadataReads = 0, failNext = false;
+    const cursors: (string | null)[] = []; let metadataReads = 0, failNext = true;
+    const metadataObjects = new Set(items.map(item => item.manifest.metadataRepresentation.objectId));
     globalThis.fetch = (async (input: string | URL | Request) => {
       const url = new URL(String(input), "https://public.test");
       if (url.pathname === "/v1/changes") {
         const cursor = url.searchParams.get("cursor"); cursors.push(cursor);
-        if (failNext) {failNext = false; return new Response(JSON.stringify({version: 1, code: "UNAVAILABLE", retryable: true, requestId: crypto.randomUUID()}), {status: 503});}
+        if (cursor === "100" && failNext) {failNext = false; return new Response(JSON.stringify({version: 1, code: "UNAVAILABLE", retryable: true, requestId: crypto.randomUUID()}), {status: 503});}
         const start = cursor ? Number(cursor) : 0, end = Math.min(start + 100, items.length);
         return new Response(JSON.stringify({version: 1, mediaVersion: 1,
           changes: items.slice(start, end).map((item, offset) => ({cursor: String(start + offset + 1), entity: "photo", entityId: item.manifest.photoId, deleted: false, payload: item.signed})),
           nextCursor: String(end), hasMore: end < items.length}));
       }
-      metadataReads++; const bytes = objects.get(url.pathname.split("/").at(-1)!); assert.ok(bytes); return new Response(new Uint8Array(bytes));
+      const objectId = url.pathname.split("/").at(-1)!;
+      assert.ok(metadataObjects.has(objectId), "discovery and search must never fetch image originals");
+      metadataReads++; return new Response(new Uint8Array(objects.get(objectId)!));
     }) as typeof fetch;
-    const first = await refreshSync(session, {limit: 100});
-    assert.deepEqual(cursors, [null]); assert.equal(metadataReads, 100);
-    assert.deepEqual(first.coverage, {loaded: 100, cachedTotal: 100, hasMore: false, hasMoreChanges: true});
-    assert.equal(first.lastSuccessfulSync, null);
-    failNext = true;
-    await assert.rejects(refreshSync(session, {limit: 200}), /UNAVAILABLE/);
-    assert.equal(metadataReads, 100);
+    await assert.rejects(refreshSync(session, {limit: 100}), /UNAVAILABLE/);
+    assert.deepEqual(cursors, [null, "100"]);
     assert.equal((await cachedSync(session, undefined, {limit: 100})).coverage.hasMoreChanges, true);
-    const second = await refreshSync(session, {limit: 200});
-    assert.deepEqual(cursors, [null, "100", "100"]); assert.equal(metadataReads, 200);
-    assert.equal(second.photos.length, 200); assert.equal(second.coverage.hasMoreChanges, true);
-    assert.equal(second.lastSuccessfulSync, null);
-    const third = await refreshSync(session, {limit: 300});
-    assert.deepEqual(cursors, [null, "100", "100", "200"]); assert.equal(metadataReads, 225);
-    assert.deepEqual(third.coverage, {loaded: 225, cachedTotal: 225, hasMore: false, hasMoreChanges: false});
-    assert.ok(third.lastSuccessfulSync);
-    assert.equal(new Set(third.photos.map(photo => photo.manifest.photoId)).size, 225);
+    const beforeRetryReads = metadataReads;
+    const result = await refreshSync(session, {limit: 100});
+    assert.deepEqual(cursors, [null, "100", "100", "200"]);
+    assert.equal(metadataReads, beforeRetryReads, "already verified visible metadata is reused");
+    assert.deepEqual(result.coverage, {loaded: 100, cachedTotal: 225, hasMore: true, hasMoreChanges: false});
+    assert.ok(result.lastSuccessfulSync);
+    assert.equal(result.photos.some(photo => photo.manifest.photoId === items[224].manifest.photoId), false);
+    const corpus = new CachedAccountSearch(session, () => true);
+    await corpus.scan(new AbortController().signal);
+    assert.deepEqual(corpus.index!.search("lighthouse").photoIds, [items[224].manifest.photoId]);
+    const matches = await corpus.hydrate(corpus.index!.search("lighthouse").photoIds, new AbortController().signal);
+    assert.equal(matches.length, 1); assert.equal(matches[0].metadata.filename, "Lighthouse.jpg");
+    for (const photo of [...result.photos, ...matches]) photo.metadataKey.fill(0);
+    corpus.dispose();
+  } finally {globalThis.fetch = oldFetch; lockVault(); await clearAccount(session.accountId);}
+});
+
+test("withdrawing discovery during held metadata stops subsequent rows and feed continuation", {timeout: 15000}, async () => {
+  await ready; const session = await open(0), oldFetch = globalThis.fetch, objects = new Map<string, Uint8Array>();
+  await clearAccount(session.accountId);
+  const items = [];
+  try {
+    for (let n = 0; n < 425; n++) items.push(await fixture(session, objects, `public-${n}.jpg`, orderedID(n)));
+    await atomic(items.map(item => ({store: "catalog" as const, key: session.accountId + ":" + item.manifest.photoId})));
+    const controller = new AbortController(), cursors: (string | null)[] = [];
+    let entered!: () => void, release!: () => void, metadataReads = 0, published = false;
+    const began = new Promise<void>(resolve => {entered = resolve;});
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(String(input), "https://public.test");
+      if (url.pathname === "/v1/changes") {
+        const cursor = url.searchParams.get("cursor"); cursors.push(cursor);
+        const start = cursor ? Number(cursor) : 0, end = Math.min(start + 100, items.length);
+        return new Response(JSON.stringify({version: 1, mediaVersion: 1, changes: items.slice(start, end).map((item, offset) => ({cursor: String(start + offset + 1), entity: "photo", entityId: item.manifest.photoId, deleted: false, payload: item.signed})), nextCursor: String(end), hasMore: end < items.length}));
+      }
+      metadataReads++; entered();
+      await new Promise<void>(resolve => {release = resolve;});
+      return new Response(new Uint8Array(objects.get(url.pathname.split("/").at(-1)!)!));
+    }) as typeof fetch;
+    const pending = refreshSync(session, {limit: 100, signal: controller.signal}).then(() => {published = true;});
+    const rejection = assert.rejects(pending, error => error instanceof DOMException && error.name === "AbortError");
+    await began; controller.abort(); release(); await rejection;
+    assert.equal(published, false); assert.equal(metadataReads, 1);
+    assert.deepEqual(cursors, [null, "100", "200", "300"], "the fifth page cannot begin after withdrawal");
+    assert.equal(decryptPrivate(await get("settings", session.accountId + ":catalog-has-more") as any), true);
+    assert.equal(await get("settings", session.accountId + ":last-checked"), undefined);
   } finally {globalThis.fetch = oldFetch; lockVault(); await clearAccount(session.accountId);}
 });
 
@@ -351,4 +388,149 @@ test("consumer explicit Saved choices survive a shifted bounded page and late ca
     release?.(new Response("{}")); await reading?.catch(() => undefined);
     retention.clear(); globalThis.fetch = oldFetch; lockVault(); for (const card of accounts.accounts) await clearAccount(card.accountId);
   }
+});
+
+test("cached account metadata finds an unloaded source without fetching originals, then hydrates only exact matches and retains selections", async () => {
+  await ready; const session = await open(0), oldFetch = globalThis.fetch, objects = new Map<string, Uint8Array>();
+  await clearAccount(session.accountId);
+  const first = await fixture(session, objects, "window.jpg", "00000000-0000-4000-8000-000000000001");
+  const entries = [first];
+  for (let n = 2; n <= 100; n++) entries.push(await fixture(session, objects, "window-" + n + ".jpg", "00000000-0000-4000-8000-" + String(n).padStart(12, "0")));
+  const hidden = await fixture(session, objects, "unloaded lighthouse.jpg", "00000000-0000-4000-8000-000000000101");
+  entries.push(hidden);
+  const metadataIDs = new Set(entries.map(item => item.manifest.metadataRepresentation.objectId));
+  const requests: string[] = [];
+  globalThis.fetch = (async input => {const id = new URL(String(input), "https://public.test").pathname.split("/").at(-1)!; requests.push(id); assert.ok(metadataIDs.has(id), "Only metadata objects may be fetched during account scanning"); const bytes = objects.get(id); assert.ok(bytes); return new Response(new Uint8Array(bytes));}) as typeof fetch;
+  const corpus = new CachedAccountSearch(session, () => true);
+  try {
+    const browse = await cachedCatalogSnapshot(undefined, {limit: 100});
+    assert.equal(browse.photos.length, 100); assert.ok(!browse.photos.some(photo => photo.manifest.photoId === hidden.manifest.photoId));
+    assert.deepEqual(new PhotoSearchIndex(cloudSearchRecords(browse.photos)).search("lighthouse").photoIds, [], "The original browse-window search cannot find this cached source");
+    await corpus.scan(new AbortController().signal);
+    const result = corpus.index!.search("lighthouse");
+    assert.deepEqual(result.photoIds, [hidden.manifest.photoId]);
+    const scannedRequests = requests.length;
+    const matches = await corpus.hydrate(result.photoIds, new AbortController().signal);
+    assert.deepEqual(matches.map(photo => photo.manifest.photoId), result.photoIds);
+    assert.equal(requests.length, scannedRequests, "Hydration reuses metadata ciphertext; no originals or thumbnails are requested");
+    const joined = mergeSearchPhotos(browse.photos, matches, new Set(), new Set());
+    assert.equal(joined.photos[0], browse.photos[0], "Existing browse source identity survives search publication");
+    const repeatedMatches = await corpus.hydrate(result.photoIds, new AbortController().signal);
+    const repeated = mergeSearchPhotos(joined.photos, repeatedMatches, joined.added, new Set());
+    assert.ok(repeated.photos.every((photo, i) => photo === joined.photos[i]), "Repeated query hydration reaches a fixed point without replacing unselected match sources");
+    assert.ok(repeatedMatches.every(photo => photo.metadataKey.every(byte => byte === 0)), "Unused repeat hydration keys are wiped");
+    const selected = matches[0];
+    const returned = mergeSearchPhotos(joined.photos, [], joined.added, new Set([selected.manifest.photoId]));
+    assert.ok(returned.photos.includes(selected)); assert.ok(selected.metadataKey.some(byte => byte !== 0));
+    const released = mergeSearchPhotos(returned.photos, [], returned.added, new Set());
+    assert.deepEqual(released.photos, browse.photos); assert.ok(selected.metadataKey.every(byte => byte === 0));
+    const changed = await fixture(session, objects, "replacement.jpg", hidden.manifest.photoId);
+    metadataIDs.add(changed.manifest.metadataRepresentation.objectId);
+    await assert.rejects(corpus.hydrate(result.photoIds, new AbortController().signal), /Saved search changed|CATALOG_SOURCE_CHANGED/);
+    assert.notEqual(changed.manifest.metadataRepresentation.objectId, hidden.manifest.metadataRepresentation.objectId);
+    const reused = new CachedAccountSearch(session, () => true, corpus);
+    const instrumentation = spies();
+    try {
+      await reused.scan(new AbortController().signal);
+      assert.equal(instrumentation.counts.crypto_secretstream_xchacha20poly1305_pull, 1, "Only the changed source revisits metadata decryption");
+      assert.equal(instrumentation.counts.crypto_sign_verify_detached, 1, "Unchanged signed receipts reuse previously verified records");
+      const database = await db();
+      // A second tab does not share the in-memory notification generation.
+      await new Promise<void>((resolve, reject) => {
+        const tx = database.transaction("catalog", "readwrite");
+        tx.objectStore("catalog").put(encryptPrivate(hidden.signed), session.accountId + ":" + hidden.manifest.photoId);
+        tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error);
+      });
+      assert.equal(reused.admitted, true);
+      await assert.rejects(reused.hydrate([hidden.manifest.photoId], new AbortController().signal), /CATALOG_SOURCE_CHANGED/);
+    } finally {instrumentation.restore(); reused.dispose();}
+  } finally {corpus.dispose(); globalThis.fetch = oldFetch; lockVault(); await clearAccount(session.accountId);}
+});
+
+test("metadata scan cancellation and visibility withdrawal clear all visited keys and unpublished records", async () => {
+  await ready; const session = await open(0), oldFetch = globalThis.fetch, objects = new Map<string, Uint8Array>();
+  await clearAccount(session.accountId); await fixture(session, objects);
+  globalThis.fetch = (async input => {const id = new URL(String(input), "https://public.test").pathname.split("/").at(-1)!; return new Response(new Uint8Array(objects.get(id)!));}) as typeof fetch;
+  try {
+    for (const withdraw of ["signal", "visibility"] as const) {
+      const controller = new AbortController(); let current = true, key: Uint8Array | undefined;
+      await assert.rejects(scanCachedMetadata(session, controller.signal, () => current, photo => {
+        key = photo.metadataKey;
+        if (withdraw === "signal") controller.abort(); else current = false;
+      }), error => error instanceof DOMException && error.name === "AbortError");
+      assert.ok(key?.every(byte => byte === 0), "Every visited metadata key is wiped even when scope changes in publication");
+    }
+    let visible = true;
+    const corpus = new CachedAccountSearch(session, () => visible);
+    await corpus.scan(new AbortController().signal); assert.equal(corpus.records.length, 1);
+    visible = false; assert.equal(corpus.admitted, false);
+    await assert.rejects(corpus.hydrate([corpus.records[0].id], new AbortController().signal), /Saved search changed/);
+    corpus.dispose(); assert.deepEqual(corpus.records, []);
+  } finally {globalThis.fetch = oldFetch; lockVault(); await clearAccount(session.accountId);}
+});
+
+test("a source replacement or vault lock during metadata await cannot publish search or retain its unwrapped key", async () => {
+  await ready; const oldFetch = globalThis.fetch;
+  try {
+    for (const withdrawal of ["replace", "lock"] as const) {
+      const session = await open(0), objects = new Map<string, Uint8Array>(); await clearAccount(session.accountId);
+      const item = await fixture(session, objects);
+      let release!: (response: Response) => void, began!: () => void;
+      const entered = new Promise<void>(resolve => {began = resolve;});
+      globalThis.fetch = (async () => {began(); return new Promise<Response>(resolve => {release = resolve;});}) as typeof fetch;
+      const original = sodium.crypto_secretbox_open_easy, keys: Uint8Array[] = [];
+      (sodium as any).crypto_secretbox_open_easy = (...args: any[]) => {const value = (original as any)(...args); if (value.length === 32) keys.push(value); return value;};
+      const corpus = new CachedAccountSearch(session, () => true);
+      try {
+        const pending = corpus.scan(new AbortController().signal), rejected = withdrawal === "lock" ? assert.rejects(pending) : pending;
+        await entered;
+        if (withdrawal === "replace") await fixture(session, objects, "changed.jpg", item.manifest.photoId); else lockVault();
+        release(new Response(new Uint8Array(objects.get(item.manifest.metadataRepresentation.objectId)!)));
+        await rejected; assert.deepEqual(corpus.records, []); if (withdrawal === "replace") assert.equal(corpus.complete, false);
+        assert.ok(keys.length > 0); assert.ok(keys.every(key => key.every(byte => byte === 0)));
+      } finally {corpus.dispose(); (sodium as any).crypto_secretbox_open_easy = original;}
+    }
+  } finally {globalThis.fetch = oldFetch; lockVault(); await clearAccount(accounts.accounts[0].accountId);}
+});
+
+
+test("continuous append acknowledgments do not withdraw existing account search or cancel an in-flight scan", {timeout: 10000}, async () => {
+  await ready; const session = await open(0), oldFetch = globalThis.fetch, objects = new Map<string, Uint8Array>();
+  await clearAccount(session.accountId);
+  const stable = await fixture(session, objects, "stable lighthouse.jpg", "00000000-0000-4000-8000-000000000001");
+  const unaffected = await fixture(session, objects, "stable garden.jpg", "00000000-0000-4000-8000-000000000002");
+  for (let n = 3; n <= 100; n++) await fixture(session, objects, "baseline-" + n + ".jpg", "00000000-0000-4000-8000-" + String(n).padStart(12, "0"));
+  const response = (input: string | URL | Request) => {const id = new URL(String(input), "https://public.test").pathname.split("/").at(-1)!; const bytes = objects.get(id); assert.ok(bytes); return new Response(new Uint8Array(bytes));};
+  globalThis.fetch = (async input => response(input)) as typeof fetch;
+  const prior = new CachedAccountSearch(session, () => true);
+  let next: CachedAccountSearch | undefined, final: CachedAccountSearch | undefined;
+  try {
+    await prior.scan(new AbortController().signal);
+    const waiting = await fixture(session, objects, "waiting.jpg", "00000000-0000-4000-8000-000000000101");
+    let release!: (response: Response) => void, enter!: () => void;
+    const entered = new Promise<void>(resolve => {enter = resolve;});
+    globalThis.fetch = (async input => {
+      if (String(input).endsWith(waiting.manifest.metadataRepresentation.objectId)) {enter(); return new Promise<Response>(resolve => {release = resolve;});}
+      return response(input);
+    }) as typeof fetch;
+    next = new CachedAccountSearch(session, () => true, prior);
+    const scanning = next.scan(new AbortController().signal); await entered;
+    for (let n = 102; n <= 103; n++) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      await fixture(session, objects, "append-" + n + ".jpg", "00000000-0000-4000-8000-" + String(n).padStart(12, "0"));
+      assert.equal(prior.admitted, true); assert.equal(prior.complete, false);
+      assert.deepEqual(prior.index!.search("lighthouse").photoIds, [stable.manifest.photoId]);
+      const [match] = await prior.hydrate([stable.manifest.photoId], new AbortController().signal); match.metadataKey.fill(0);
+    }
+    release(response("/" + waiting.manifest.metadataRepresentation.objectId)); await scanning;
+    assert.equal(next.admitted, true); assert.equal(next.complete, false, "A pass spanning newer writes reports updating coverage");
+    assert.deepEqual(next.index!.search("lighthouse").photoIds, [stable.manifest.photoId]);
+    globalThis.fetch = (async input => response(input)) as typeof fetch;
+    final = new CachedAccountSearch(session, () => true, next); await final.scan(new AbortController().signal);
+    assert.equal(final.records.length, 103); assert.equal(final.complete, true);
+    await fixture(session, objects, "replacement.jpg", stable.manifest.photoId);
+    assert.deepEqual(final.index!.search("lighthouse").photoIds, [], "Only the changed source withdraws before refresh");
+    assert.deepEqual(final.index!.search("garden").photoIds, [unaffected.manifest.photoId]);
+    await assert.rejects(final.hydrate([stable.manifest.photoId], new AbortController().signal), /CATALOG_SOURCE_CHANGED/);
+  } finally {prior.dispose(); next?.dispose(); final?.dispose(); globalThis.fetch = oldFetch; lockVault(); await clearAccount(session.accountId);}
 });

@@ -118,24 +118,25 @@ export async function clearSkipped(session: UnlockedVault, file: File) {
   assertVault(session);
 }
 export async function cachedSync(session = requireVault(), diagnostic?: DiagnosticContext, browse?: CatalogBrowse) {
-  assertVault(session);
+  const check = () => {assertVault(session); browse?.signal?.throwIfAborted(); if (browse?.current?.() === false) throw new DOMException("Catalog read withdrawn", "AbortError");};
+  check();
   const {photos, coverage} = await cachedCatalogSnapshot(diagnostic, browse);
   try {
-    assertVault(session);
+    check();
     const pending = await pendingImports();
-    assertVault(session);
+    check();
     const annotations = await pendingAnnotations(session);
-    assertVault(session);
+    check();
     const lastSuccessfulSync = await lastSync(session);
-    assertVault(session);
+    check();
     const skipped = await skippedImports(session);
-    assertVault(session);
+    check();
     return { photos, coverage, pending, annotations, lastSuccessfulSync, skipped };
   } catch (error) {for (const photo of photos) photo.metadataKey.fill(0); throw error;}
 }
 async function performRefresh(session: UnlockedVault, signal?: AbortSignal, diagnostic?: DiagnosticContext, browse?: CatalogBrowse) {
   assertVault(session);
-  const feed = await syncCatalog(signal, diagnostic, browse ? 1 : Infinity);
+  const feed = await syncCatalog(signal, diagnostic, browse ? 4 : Infinity, browse?.current);
   assertVault(session);
   signal?.throwIfAborted();
   if (!feed.hasMore) {
@@ -144,8 +145,11 @@ async function performRefresh(session: UnlockedVault, signal?: AbortSignal, diag
   }
   assertVault(session);
   const result = await cachedSync(session, diagnostic, browse);
-  assertVault(session); signal?.throwIfAborted();
-  return result;
+  try {
+    assertVault(session); signal?.throwIfAborted();
+    if (browse?.current?.() === false) throw new DOMException("Catalog read withdrawn", "AbortError");
+    return result;
+  } catch (error) {for (const photo of result.photos) photo.metadataKey.fill(0); throw error;}
 }
 async function performSave(session: UnlockedVault, signal: AbortSignal, diagnostic?: DiagnosticContext) {
   assertVault(session);
@@ -169,8 +173,40 @@ async function performSave(session: UnlockedVault, signal: AbortSignal, diagnost
 }
 // Viewing the account can read saved photos, but never drains locally queued uploads or edits.
 export function refreshSync(session = requireVault(), browse?: CatalogBrowse) {
-  const window = browse ? {limit: browse.limit, retainPhotoIds: [...(browse.retainPhotoIds ?? [])]} : undefined;
-  return readFlight.run(session, () => serializeSync(session, () => diagnose("catalog", context => performRefresh(session, undefined, context, window), "refresh")), window && JSON.stringify(window));
+  const window = browse ? {...browse, retainPhotoIds: [...(browse.retainPhotoIds ?? [])]} : undefined;
+  const key = window && JSON.stringify([window.limit, window.retainPhotoIds]);
+  const origin = typeof location === "undefined" ? undefined : location.origin;
+  return readFlight.run(session, async () => {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const visibility = () => {if (document.visibilityState !== "visible") abort();};
+    const current = () => !controller.signal.aborted && (window?.current?.() ?? true)
+      && (typeof document === "undefined" || document.visibilityState === "visible")
+      && (origin === undefined || location.origin === origin);
+    const check = () => {assertVault(session); controller.signal.throwIfAborted(); if (!current()) throw new DOMException("Catalog read withdrawn", "AbortError");};
+    window?.signal?.addEventListener("abort", abort, {once: true});
+    if (window?.signal?.aborted) abort();
+    if (typeof globalThis.window !== "undefined") {globalThis.window.addEventListener?.("fotoro-lock", abort); globalThis.window.addEventListener?.("pagehide", abort);}
+    if (typeof document !== "undefined") document.addEventListener?.("visibilitychange", visibility);
+    let result: Awaited<ReturnType<typeof performRefresh>> | undefined;
+    try {
+      do {
+        check();
+        if (result) {for (const photo of result.photos) photo.metadataKey.fill(0); result = undefined;}
+        // Each bounded slice uses the same owner; queued saves can run between continuations.
+        result = await serializeSync(session, () => {check(); return diagnose("catalog", context => performRefresh(session, controller.signal, context, {...window, limit: window?.limit ?? Number.MAX_SAFE_INTEGER, signal: controller.signal, current}), "refresh");});
+        check();
+        if (result.coverage.hasMoreChanges !== true) return result;
+        await new Promise(resolve => setTimeout(resolve, 0));
+      } while (current());
+      check(); throw new DOMException("Catalog read withdrawn", "AbortError");
+    } catch (error) {for (const photo of result?.photos ?? []) photo.metadataKey.fill(0); throw error;}
+    finally {
+      window?.signal?.removeEventListener("abort", abort);
+      if (typeof globalThis.window !== "undefined") {globalThis.window.removeEventListener?.("fotoro-lock", abort); globalThis.window.removeEventListener?.("pagehide", abort);}
+      if (typeof document !== "undefined") document.removeEventListener?.("visibilitychange", visibility);
+    }
+  }, key);
 }
 export function saveChosenImports(session: UnlockedVault, photoIds: readonly string[], signal?: AbortSignal, current?: () => boolean) {
   const chosen = [...photoIds];

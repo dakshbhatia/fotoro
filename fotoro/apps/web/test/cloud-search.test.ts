@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { PhotoSearchIndex } from "../src/local/search";
 import { cloudSearchRecords } from "../src/library/search";
-import {savedSearchPhotos} from "../src/library/consumer-search";
+import {savedSearchPhotos, savedMetadataRecords, accountSearchResult, accountSearchResultAsync, SavedMetadataProjection} from "../src/library/consumer-search";
 import type { Photo } from "../src/library/catalog";
 import {withAnnotationLocation} from "@fotoro/contracts/location";
 const digest = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -91,4 +91,104 @@ test("PhotoKit date pins stay within capture periods, permissions and source pro
     const refreshed = new PhotoSearchIndex(cloudSearchRecords([changed, sources[1], sources[2]]), index.feedback());
     assert.deepEqual(refreshed.search("family today", {now, scope, previous: result}).photoIds, ["exif"]);
   }
+});
+
+test("asynchronous account index preserves literal, OCR, GPS and capture-date evidence and can be cancelled between work slices", async () => {
+  const records = cloudSearchRecords([datedPhoto("b", "photos"), datedPhoto("a", "exif", 3, 10)]);
+  records[0].location = {latitude: 41.9, longitude: 12.5, source: "photos", name: "Villa Borghese"};
+  const sync = new PhotoSearchIndex(records);
+  const asyncIndex = await PhotoSearchIndex.build(records, new AbortController().signal, () => true);
+  for (const query of ["family", "invoice number", "1234", "GPS", "villa borg", "family today", "today"])
+    assert.deepEqual(asyncIndex.search(query, {now}), sync.search(query, {now}));
+  const many = Array.from({length: 2000}, (_, n) => ({...records[0], id: "photo-" + n}));
+  const controller = new AbortController();
+  const pending = PhotoSearchIndex.build(many, controller.signal, () => true);
+  setTimeout(() => controller.abort(), 0);
+  await assert.rejects(pending, error => error instanceof DOMException && error.name === "AbortError");
+  await assert.rejects(PhotoSearchIndex.build(records, new AbortController().signal, () => true, 64), /CACHED_SEARCH_BUDGET/);
+  asyncIndex.dispose(); assert.deepEqual(asyncIndex.search("family").photoIds, []);
+});
+
+
+test("the shared account index returns unloaded Saved display IDs and joins an exact local digest without broadening allowed sources", async () => {
+  const records = cloudSearchRecords([photo]), shared = await PhotoSearchIndex.build(records, new AbortController().signal, () => true);
+  const saved = savedMetadataRecords(records, []);
+  const savedIDs = new Map([[records[0].id, saved[0].id]]);
+  assert.deepEqual(accountSearchResult(shared.search.bind(shared), records, savedIDs, "invoice", {allowedIds: new Set([saved[0].id])}).photoIds, ["saved:cloud-id"]);
+  const local = {id: "chosen-local", digest, filename: "IMG_001.jpg", date: photo.metadata.sourceDate, dateSource: "selected" as const, file: new File(["public fixture"], "IMG_001.jpg")};
+  const joined = savedMetadataRecords(records, [local]), ids = new Map([[records[0].id, joined[0].id]]);
+  assert.equal(joined[0].ocr?.photoID, local.id);
+  assert.deepEqual(accountSearchResult(shared.search.bind(shared), records, ids, "invoice", {allowedIds: new Set([local.id])}).photoIds, [local.id]);
+  assert.deepEqual(accountSearchResult(shared.search.bind(shared), records, ids, "invoice", {allowedIds: new Set(["saved:cloud-id"])}).photoIds, []);
+  shared.dispose();
+});
+
+
+test("account metadata projection stays stable across local evidence/progress updates and withdraws on source changes", () => {
+  const records = cloudSearchRecords([photo]), projection = new SavedMetadataProjection();
+  const file = new File(["public fixture"], "IMG_001.jpg");
+  const local = {id: "local", digest, filename: "IMG_001.jpg", date: "2026-10-01", dateSource: "selected" as const, file};
+  const first = projection.read(records, [local]);
+  const evidenceUpdate = {...local, labels: ["reviewed"], ocr: {photoID: "local", revision: digest, status: "complete" as const, text: "new local OCR", confidence: 1, processor: "test"}};
+  assert.equal(projection.read(records, [evidenceUpdate]), first, "Local OCR/Picks presentation updates cannot reproject the entire account");
+  const moved = projection.read(records, [{...local, id: "replacement"}]); assert.notEqual(moved, first); assert.equal(moved[0].id, "replacement");
+  assert.notEqual(projection.read([...records], [local]), first);
+  assert.deepEqual(projection.read(undefined, [local]), []);
+});
+
+test("large cached queries yield through broad candidate ranking and cancel replaced queries", async () => {
+  const rows = Array.from({length: 20_000}, (_, i) => ({id: "account-" + i, filename: "IMG_" + i + ".jpg", date: "2026-10-01T12:00:00Z", dateSource: "exif" as const, labels: ["Family holiday " + i]}));
+  const index = await PhotoSearchIndex.build(rows, new AbortController().signal, () => true);
+  const options = {scope: "account:fixture", now: Date.parse("2026-10-11T12:00:00Z")};
+  let beats = 0;
+  const heartbeat = setInterval(() => beats++, 0);
+  try {
+    const result = await index.searchAsync("family", options);
+    assert.ok(beats > 1, "broad candidate collection and ranking must let timers run");
+    assert.deepEqual(result, index.search("family", options));
+    let generation = 1, published: string[] = [];
+    const old = index.searchAsync("family", options, undefined, () => generation === 1).then(value => published.push(value.query));
+    setTimeout(() => {generation = 2;}, 0);
+    await assert.rejects(old, error => error instanceof DOMException && error.name === "AbortError");
+    const replacement = await index.searchAsync("IMG_19999", options, undefined, () => generation === 2);
+    published.push(replacement.query);
+    assert.deepEqual(published, ["IMG_19999"]);
+    assert.deepEqual(replacement.photoIds, ["account-19999"]);
+    const controller = new AbortController(); controller.abort();
+    await assert.rejects(index.searchAsync("family", options, controller.signal), error => error instanceof DOMException && error.name === "AbortError");
+  } finally {clearInterval(heartbeat); index.dispose();}
+});
+
+test("source withdrawal during yielded ranking cannot publish stale account evidence", async () => {
+  let admitted = true, lastSourceChecks = 0;
+  const rows = Array.from({length: 20_000}, (_, i) => ({id: "source-" + i, filename: "photo.jpg", date: "2026-10-01T12:00:00Z", labels: ["Family"], current: () => {
+    // The last source's second check ends pre-rank validation. Withdraw while ranking yields.
+    if (i === 19_999 && ++lastSourceChecks === 2) setTimeout(() => {admitted = false;}, 0);
+    return i !== 0 || admitted;
+  }}));
+  const index = await PhotoSearchIndex.build(rows, new AbortController().signal, () => true);
+  let published = false;
+  const pending = index.searchAsync("family").then(() => {published = true;});
+  await assert.rejects(pending, /CACHED_SEARCH_SOURCE_CHANGED/);
+  assert.equal(published, false);
+  const fresh = await index.searchAsync("family");
+  assert.equal(fresh.meaning?.photoIds.includes("source-0"), false);
+  assert.equal(fresh.meaning?.photoIds.length, 19_999);
+  assert.equal(fresh.current?.(), true);
+  index.dispose();
+  assert.equal(fresh.current?.(), false, "a result publication fence follows shared index disposal");
+});
+
+
+test("account display mapping revalidates exact evidence after yielding", async () => {
+  let admitted = true;
+  const records = Array.from({length: 20_000}, (_, i) => ({id: "mapping-" + i, filename: "photo.jpg", date: "2026-10-01", labels: ["Family"], current: () => admitted}));
+  const index = await PhotoSearchIndex.build(records, new AbortController().signal, () => true);
+  const search: PhotoSearchIndex["searchAsync"] = async (...args) => {
+    const result = await index.searchAsync(...args);
+    setTimeout(() => {admitted = false;}, 0);
+    return result;
+  };
+  await assert.rejects(accountSearchResultAsync(search, records, new Map(), "family", {}, new AbortController().signal, () => true), /CACHED_SEARCH_SOURCE_CHANGED/);
+  index.dispose();
 });

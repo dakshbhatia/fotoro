@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {createElement} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
-import {subscribeSavedRefresh} from "../src/library/consumer-refresh";
+import {readSavedBrowsePage, subscribeSavedRefresh} from "../src/library/consumer-refresh";
 import {photoChangeState, type ConsumerPhotoChanges} from "../src/library/consumer-changes";
 import {requireVault} from "../src/vault/vault";
 import {LocalTrial, bestShotSelectionRequestCurrent} from "../src/local/LocalTrial";
@@ -99,4 +99,32 @@ test("a delayed best-shot selection follows user intent across metadata refreshe
   }
   assert.equal(bestShotSelectionRequestCurrent(request, "different filter", source, request.selectionRevision), false);
   assert.equal(bestShotSelectionRequestCurrent(request, "trip", {}, request.selectionRevision), false);
+});
+
+test("cached Saved paging publishes while an independent upload remains active", async () => {
+  const controller = new AbortController(), keys = new Uint8Array([1, 2, 3]);
+  let current = true, uploading = true, published = 0;
+  const result = {photos: [{metadataKey: keys}] as import("../src/library/catalog").Photo[],
+    coverage: {loaded: 200, cachedTotal: 300, hasMore: true, hasMoreChanges: false}};
+  await readSavedBrowsePage({signal: controller.signal, current: () => current,
+    read: async () => {assert.equal(uploading, true); return result;},
+    publish: value => {assert.equal(value, result); published++;}});
+  assert.equal(published, 1); assert.equal(uploading, true); assert.deepEqual([...keys], [1, 2, 3]);
+  current = false; uploading = false;
+});
+
+test("cached Saved paging rejects withdrawn scope or cancellation and wipes unpublished keys", async () => {
+  for (const withdrawal of ["scope", "cancel"]) {
+    const controller = new AbortController(), keys = new Uint8Array([1, 2, 3]);
+    let current = true, release!: () => void, publications = 0;
+    const held = new Promise<void>(resolve => {release = resolve;});
+    const reading = readSavedBrowsePage({signal: controller.signal, current: () => current,
+      read: async () => {await held; return {photos: [{metadataKey: keys}] as import("../src/library/catalog").Photo[],
+        coverage: {loaded: 200, cachedTotal: 300, hasMore: true, hasMoreChanges: false}};},
+      publish: () => {publications++;}});
+    if (withdrawal === "cancel") controller.abort(); else current = false;
+    release();
+    await assert.rejects(reading, {name: "AbortError"}, withdrawal);
+    assert.equal(publications, 0); assert.ok(keys.every(byte => byte === 0), "Discarded read owns and wipes its copied metadata keys");
+  }
 });
