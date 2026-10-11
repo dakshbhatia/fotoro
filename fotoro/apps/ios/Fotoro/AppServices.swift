@@ -658,7 +658,7 @@ enum ReviewedPhotosBackupPolicy {
       facts.paused = try store.uploadsPaused()
       facts.uploading = journal.running && !entries.isEmpty
       facts.checking = consumerChecking || annotations.busy
-      facts.preparing = backup.isRunning && !facts.uploading && !facts.checking
+      facts.preparing = (automaticPhotoSyncBusy || backup.isRunning) && !facts.uploading && !facts.checking
       facts.offline = consumerOffline
       facts.completed = completed
       facts.total = backup.status.sourceTotal == nil ? nil : completed + pendingIDs.count + unpreparedIDs.count + skipped
@@ -705,6 +705,7 @@ enum ReviewedPhotosBackupPolicy {
       _ = auth.needsRecovery
       _ = backup.status
       _ = backup.isRunning
+      _ = automaticPhotoSyncBusy
       _ = journal.running
       _ = journal.errors
       _ = annotations.busy
@@ -1015,6 +1016,7 @@ enum ReviewedPhotosBackupPolicy {
     let token = UUID()
     automaticSyncGeneration = token
     automaticPhotoSyncBusy = true
+    refreshConsumerSyncSummary()
     let catalog = store
     let account = session.accountId
     let card = account.flatMap { session.pinnedCards[$0] }
