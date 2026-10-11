@@ -5,6 +5,43 @@ work; [product](product.md) owns the intended experience. Earlier measurements a
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
 
+## October 10 People links — deployed and installed
+
+PR 82 is deployed at fotoro.cloud: Worker version
+`7ef7e9a3-2d28-47d6-bd33-ad2174cb3631` at 100%, deployment
+`84762eae-6ef9-42ee-bfa0-b604191091c0`. Migration 0011 is applied; all
+47 emitted assets and 10 routes match the qualified merged tree. All 23 hosted
+checks passed or intentionally skipped. Local qualification passed 653 native,
+167 preview, 722 browser and 129 API tests; native and preview each have two
+platform skips. Reviewed contributor names can be explicitly linked in an
+encrypted same-account ledger, with current membership/evidence fences and
+conflict review. This does not publish a family-wide identity to other accounts.
+
+Build 71 passed archive audit and was directly installed on the paired iPhone;
+device inventory confirms build 71. Automatic launch was blocked by the locked
+phone. Its distribution export failed with No Accounts and a missing iOS
+Distribution signing certificate/private key; no TestFlight upload completed.
+PR 81's Saved-page preservation and browser resize/return fixes are included.
+Physical frame pacing and a complete two-account family Trip journey remain open.
+
+## October 10 sync priority — locally qualified
+
+Current queued sources retry staged ciphertext before Photos discovery. Every
+asynchronous journal boundary rechecks account, trust, vault, API URL, permission,
+pause, source revision, owned live photo and digest. A recoverable transfer failure
+retains its retry and allows discovery to continue. Recent discovery queries the
+persisted date horizon plus tracked sources; new untracked old or undated photos
+wait for Include older. Tracked older revisions remain reconcilable. Automatic
+Picks waits through account restoration, queued sync, catalog preflight and backup;
+explicit Picks remains available and cached completed work survives resumption.
+
+The full native simulator suite passes 661 with two platform skips and no failures.
+Focused sync/Picks and media/reconciliation suites pass 63 and 96 respectively.
+The full core/API/browser check passes, including 722 browser and 129 API tests.
+Physical build 70 diagnostics recorded 37 seconds with a cancelled discovery scan,
+overlapping Picks and no upload POST. That trace motivates this change; it does not
+measure frame pacing or prove the new pipeline on the physical iPhone.
+
 Latest verified distribution before this pass is PR 77 in production, Worker
 `dd6a9562-8888-4440-844a-4c98ee1c6d96` at 100%. All 23 hosted contexts passed;
 merge `e61e474bedd2700e16bcea93d36be6f1fb2bcf3a` has the qualified tree.

@@ -18,7 +18,7 @@ struct AutomaticPhotoSyncPreference: Codable, Equatable {
 }
 
 // Account isolation comes from LibraryStore; the origin is part of the persisted key.
-// Initial exclusions do not grow with new arrivals; explicit expansion admits older dated sources.
+// The persisted horizon does not roll forward; explicit expansion admits older sources.
 struct AutomaticPhotoSyncIntake: Codable, Equatable {
   var cutoff: Date
   var includesAll = false
@@ -56,9 +56,33 @@ struct AutomaticPhotoSyncIntake: Codable, Equatable {
     return candidates.filter {
       if existingSourceIDs.contains($0.id) { return true }
       if includesAll { return true }
-      if let capturedAt = $0.capturedAt, capturedAt > now { return false }
+      guard let capturedAt = $0.capturedAt, capturedAt >= cutoff, capturedAt <= now else { return false }
       return initialExcludedIDs?.contains($0.id) != true
     }
+  }
+}
+
+// Query the admitted dated horizon and point-fetch earlier accepted sources.
+// Tracked revisions remain reconcilable regardless of phase or capture date.
+struct AutomaticPhotoSyncScanPlan {
+  let cutoff: Date?
+  let through: Date
+  let trackedIDs: Set<String>
+
+  init(intake: AutomaticPhotoSyncIntake, sources: [BackupSource], now: Date = Date()) {
+    cutoff = intake.includesAll ? nil : intake.cutoff
+    through = now
+    trackedIDs = Set(sources.filter { !$0.isRetainedOriginal }.map(\.id))
+  }
+  func includes(_ candidate: BackupCandidate) -> Bool {
+    guard let cutoff else { return true }
+    if trackedIDs.contains(candidate.id) { return true }
+    guard let date = candidate.capturedAt else { return false }
+    return date >= cutoff && date <= through
+  }
+  func select(_ candidates: [BackupCandidate]) -> [BackupCandidate] {
+    var seen = Set<String>()
+    return candidates.filter { includes($0) && seen.insert($0.id).inserted }
   }
 }
 

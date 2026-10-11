@@ -1045,7 +1045,8 @@ final class ConsumerCoreTests: XCTestCase {
       let record = SearchRecord(id: "local-family-source", revision: "current")
       try services.store.putBackupSource(BackupSource(id: record.id, photoId: photo.id, phase: .committed,
         sourceRevision: record.revision, originalSha256: photo.metadata.originalSha256))
-      services.photosBackupSnapshot = { _ in [BackupCandidate(id: record.id, capturedAt: Date(), sourceRevision: record.revision)] }
+      let capturedAt = Date()
+      services.photosBackupSnapshot = { _ in [BackupCandidate(id: record.id, capturedAt: capturedAt, sourceRevision: record.revision)] }
       let index = try SearchIndex(); try index.setWorkGeneration(1)
       try index.replacePermitted([record]); try index.setPeopleEnabled(true)
       var vector = [Float](repeating: 0, count: 128); vector[0] = 1
@@ -2094,9 +2095,11 @@ extension ConsumerCoreTests {
       services.session.bearerToken = "controlled-private-session"
       services.automaticPhotosAuthorization = { .limited }
       let reads = ReconciliationSourceReads()
+      let capturedAt = Date()
+      var firstScanCutoff: Date?
       services.photosBackupSnapshot = { cutoff in
-        XCTAssertEqual(cutoff, .distantPast)
-        return [BackupCandidate(id: "this-devices-asset", capturedAt: Date(), sourceRevision: "original")]
+        if firstScanCutoff == nil { firstScanCutoff = cutoff }
+        return [BackupCandidate(id: "this-devices-asset", capturedAt: capturedAt, sourceRevision: "original")]
       }
       services.importer = PhotoImport(store: services.store, sourceReader: { _ in
         await reads.record()
@@ -2105,6 +2108,8 @@ extension ConsumerCoreTests {
       XCTAssertTrue(try services.store.photos().isEmpty)
       try services.enableAutomaticPhotoSync()
       await services.waitForAutomaticPhotoSync()
+      let origin = try XCTUnwrap(BackgroundUploadPolicy.origin(services.api.baseURL))
+      XCTAssertEqual(firstScanCutoff, try services.store.automaticPhotoSyncIntake(origin: origin)?.cutoff)
       let readCount = await reads.count
       XCTAssertEqual(readCount, 1, "A new device compares its unchanged original with the verified remote digest")
       let checkpoint = try services.store.backupSource("this-devices-asset")
@@ -2145,9 +2150,10 @@ extension ConsumerCoreTests {
         services.session.bearerToken = "controlled-private-session"
         services.automaticPhotosAuthorization = { .authorized }
         var scans = 0
+        let capturedAt = Date()
         services.photosBackupSnapshot = { _ in
           scans += 1
-          return [BackupCandidate(id: "not-staged", capturedAt: Date(), sourceRevision: "original")]
+          return [BackupCandidate(id: "not-staged", capturedAt: capturedAt, sourceRevision: "original")]
         }
         let reads = ReconciliationSourceReads()
         services.importer = PhotoImport(store: services.store, sourceReader: { _ in
@@ -2442,13 +2448,14 @@ final class ChangedOriginalReconciliationTests: XCTestCase {
       let bytes = try Data(contentsOf: context.sample)
       var permission = PHAuthorizationStatus.authorized
       services.automaticPhotosAuthorization = { permission }
-      services.photosBackupSnapshot = { _ in [BackupCandidate(id: "changed", capturedAt: Date(), sourceRevision: "before")] }
+      let capturedAt = Date()
+      services.photosBackupSnapshot = { _ in [BackupCandidate(id: "changed", capturedAt: capturedAt, sourceRevision: "before")] }
       services.importer = PhotoImport(store: services.store, sourceReader: { _ in (bytes, "earlier.jpg", false) },
         sourceRevision: { _ in "before" }, sourceLocation: { _ in nil }, sourceCaptureMetadata: { _ in nil })
       try services.enableAutomaticPhotoSync()
       await services.waitForAutomaticPhotoSync()
       let earlier = try services.store.backupSource("changed")
-      services.photosBackupSnapshot = { _ in [BackupCandidate(id: "changed", capturedAt: Date(), sourceRevision: "current")] }
+      services.photosBackupSnapshot = { _ in [BackupCandidate(id: "changed", capturedAt: capturedAt, sourceRevision: "current")] }
       let gate = ReconciliationFailureGate()
       services.importer = PhotoImport(store: services.store, sourceReader: { _ in
         await gate.wait()
@@ -2458,7 +2465,7 @@ final class ChangedOriginalReconciliationTests: XCTestCase {
       while !gate.entered { await Task.yield() }
       switch withdrawal {
       case "revision":
-        services.photosBackupSnapshot = { _ in [BackupCandidate(id: "changed", capturedAt: Date(), sourceRevision: "newer")] }
+        services.photosBackupSnapshot = { _ in [BackupCandidate(id: "changed", capturedAt: capturedAt, sourceRevision: "newer")] }
       case "permission": permission = .denied
       default: services.vault.lock()
       }
@@ -2480,15 +2487,16 @@ final class ChangedOriginalReconciliationTests: XCTestCase {
       defer { services.vault.lock() }
       let bytes = try Data(contentsOf: context.sample)
       services.automaticPhotosAuthorization = { .authorized }
-      services.photosBackupSnapshot = { _ in [BackupCandidate(id: "changed", capturedAt: Date(), sourceRevision: "before")] }
+      let capturedAt = Date()
+      services.photosBackupSnapshot = { _ in [BackupCandidate(id: "changed", capturedAt: capturedAt, sourceRevision: "before")] }
       services.importer = PhotoImport(store: services.store, sourceReader: { _ in (bytes, "earlier.jpg", false) },
         sourceRevision: { _ in "before" }, sourceLocation: { _ in nil }, sourceCaptureMetadata: { _ in nil })
       try services.enableAutomaticPhotoSync()
       await services.waitForAutomaticPhotoSync()
       let earlier = try services.store.backupSource("changed")
       services.photosBackupSnapshot = { _ in [
-        BackupCandidate(id: "changed", capturedAt: Date(), sourceRevision: "current"),
-        BackupCandidate(id: "neighbor", capturedAt: Date(), sourceRevision: "current")
+        BackupCandidate(id: "changed", capturedAt: capturedAt, sourceRevision: "current"),
+        BackupCandidate(id: "neighbor", capturedAt: capturedAt, sourceRevision: "current")
       ] }
       services.importer = PhotoImport(store: services.store, sourceReader: { _ in
         if urlCancellation { throw URLError(.cancelled) }

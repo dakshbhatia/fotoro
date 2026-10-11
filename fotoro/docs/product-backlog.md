@@ -42,8 +42,12 @@ cross-device journey before admitting more features.
 ## Current boundaries
 
 Native automatic preparation starts with the last 30 days after one explicit
-opt-in while the app is open and unlocked. Older initial photos require expansion;
-newly observed arrivals are admitted without inventing capture dates. Already scheduled ciphertext uploads may finish in the background.
+opt-in while the app is open and unlocked. Discovery queries the persisted date
+horizon and separately fetches tracked sources in every retry/reconciliation phase.
+New untracked backdated or undated photos require Include older. Current queued
+originals retry before discovery, without reading their original resources again.
+Automatic Picks waits through sync preflight and backup; an explicit Picks request
+remains available. Already scheduled ciphertext uploads may finish in the background.
 Existing 10-day Sync anchors preserve their journal and exclusions until explicit
 expansion to 30 days. Date and reviewed-People metadata scope heavy processing;
 the next batch and unavailable-source retry remain explicit actions.
@@ -84,7 +88,10 @@ do not consume that allowance. Each invited member explicitly accepts before
 reading or adding chosen owned Saved photos. Originals are reused. Private
 annotations remain private; contributors explicitly choose up to 12 reviewed
 names and optional location for a separate signed, encrypted album record.
-Names remain contributor-scoped text snapshots. Album search intersects people,
+Names remain contributor-scoped text snapshots. A reviewed private People link
+can combine exact named sources from different contributors; its encrypted ledger
+syncs across the viewer's own account. Other members do not inherit that link.
+Global shared family identity remains open. Album search intersects people,
 place and recorded capture dates on each copy before exact-original grouping.
 Import dates cannot satisfy capture-date filters. Grouping does not delete copies
 or change storage/capacity; every contribution stays reachable. Download trip

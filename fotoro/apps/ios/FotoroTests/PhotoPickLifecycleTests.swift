@@ -32,6 +32,60 @@ import XCTest
     }
     return (permission, photos, now)
   }
+  func testAutomaticPicksWaitForBackupWithoutLosingScrollAdmissionOrRescanningPhotos() async throws {
+    let (permission, photos, now) = try permittedPickPhotos(count: 1)
+    var previews = 0, metadataReads = 0
+    let resumed = expectation(description: "Automatic Picks resumes after backup and scrolling settle")
+    let analyzer = PhotoPickAnalyzer(preview: { _ in
+      previews += 1; resumed.fulfill(); return self.signal
+    })
+    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in
+      metadataReads += 1; return photos
+    }, picks: analyzer)
+    defer { store.pauseAnalysis() }
+    func admission(restoring: Bool, sync: Bool = false, backup: Bool, scrolling: Bool) {
+      store.setAutomaticAnalysisActive(PhotoPicksAdmission.automatic(homeVisible: true, foreground: true,
+        restoringAccount: restoring, automaticSyncBusy: sync, backupRunning: backup))
+      store.setBrowseInteractionActive(scrolling)
+    }
+    admission(restoring: true, backup: false, scrolling: false)
+    store.restoreAccess(now: now)
+    PHPhotoLibrary.shared().unregisterChangeObserver(store)
+    await Task.yield()
+    XCTAssertEqual(previews, 0, "Account restoration must not start Picks before backup is admitted")
+    admission(restoring: false, sync: true, backup: false, scrolling: false)
+    await Task.yield()
+    XCTAssertEqual(previews, 0, "Queued automatic sync and catalog preflight hold Picks before backup starts")
+    admission(restoring: false, sync: true, backup: true, scrolling: false)
+    await Task.yield()
+    XCTAssertEqual(previews, 0, "Backup scanning/preparation owns automatic admission")
+    admission(restoring: false, sync: true, backup: false, scrolling: false)
+    await Task.yield()
+    XCTAssertEqual(previews, 0, "Backup settlement cannot resume Picks while the automatic run is finishing")
+    admission(restoring: false, backup: true, scrolling: true)
+    admission(restoring: false, backup: false, scrolling: true)
+    await Task.yield()
+    XCTAssertEqual(previews, 0, "Backup completion must preserve an ongoing scroll")
+    admission(restoring: false, backup: false, scrolling: false)
+    await fulfillment(of: [resumed], timeout: 2)
+    _ = try await store.completedPicks()
+    admission(restoring: false, backup: true, scrolling: false)
+    admission(restoring: false, backup: false, scrolling: false)
+    await Task.yield()
+    XCTAssertEqual(previews, 1, "Subsequent backup transitions reuse the completed Picks snapshot")
+    XCTAssertEqual(metadataReads, 1, "Changing scheduling priority cannot refresh Photos metadata")
+  }
+  func testPicksAdmissionKeepsForegroundAndHomeLifetimeFences() {
+    XCTAssertTrue(PhotoPicksAdmission.automatic(homeVisible: true, foreground: true,
+      restoringAccount: false, automaticSyncBusy: false, backupRunning: false))
+    XCTAssertFalse(PhotoPicksAdmission.automatic(homeVisible: true, foreground: true,
+      restoringAccount: false, automaticSyncBusy: true, backupRunning: false),
+      "Queued preflight remains busy before the backup coordinator starts")
+    XCTAssertFalse(PhotoPicksAdmission.automatic(homeVisible: false, foreground: true,
+      restoringAccount: false, automaticSyncBusy: false, backupRunning: false))
+    XCTAssertFalse(PhotoPicksAdmission.automatic(homeVisible: true, foreground: false,
+      restoringAccount: false, automaticSyncBusy: false, backupRunning: false))
+  }
   func testHeldAutomaticPicksYieldToScrollingAndResumeCachedSignalsWithoutMetadataRefresh() async throws {
     let (permission, photos, now) = try permittedPickPhotos(count: 2)
     let gate = PickPreviewGate()
@@ -83,6 +137,8 @@ import XCTest
       metadataReads += 1; return photos
     }, picks: analyzer)
     defer { store.pauseAnalysis(); gate.open() }
+    store.setAutomaticAnalysisActive(PhotoPicksAdmission.automatic(homeVisible: true, foreground: true,
+      restoringAccount: false, automaticSyncBusy: true, backupRunning: false))
     store.setBrowseInteractionActive(true)
     store.restoreAccess(now: now)
     PHPhotoLibrary.shared().unregisterChangeObserver(store)

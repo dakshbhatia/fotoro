@@ -319,6 +319,12 @@ private enum PhotoHomeScope: String, CaseIterable, Identifiable, Hashable {
   var id: String { rawValue }
 }
 
+enum PhotoPicksAdmission {
+  static func automatic(homeVisible: Bool, foreground: Bool, restoringAccount: Bool, automaticSyncBusy: Bool, backupRunning: Bool) -> Bool {
+    homeVisible && foreground && !restoringAccount && !automaticSyncBusy && !backupRunning
+  }
+}
+
 struct RecentPhotosView: View {
   @State private var store = RecentPhotosStore()
   @State private var search = LocalSearchStore()
@@ -330,6 +336,7 @@ struct RecentPhotosView: View {
   @FocusState private var queryFocused: Bool
 #if !FOTORO_LOCAL_PREVIEW
   @State private var services: AppServices?
+  @State private var restoringPhotoAccount = true
   @State private var backupAccount: PhotosAccountPresentation?
   @State private var photoSyncPresentation: PhotoSyncPresentation?
   @State private var pendingPhotoSync: Bool?
@@ -732,6 +739,8 @@ struct RecentPhotosView: View {
         savedHasMore = true
         cancelBestShots(); validateSavedPresentation()
       }
+      .onChange(of: services?.automaticPhotoSyncBusy) { updateAutomaticAnalysisAdmission() }
+      .onChange(of: services?.backup.isRunning) { updateAutomaticAnalysisAdmission() }
       .onChange(of: services?.session.accountId) {
         cancelBestShots()
         if !savedShareSources.isEmpty { shareTask?.cancel(); cleanupShare() }
@@ -862,6 +871,11 @@ struct RecentPhotosView: View {
           updateAutomaticAnalysisAdmission()
         }
         .task {
+#if !FOTORO_LOCAL_PREVIEW
+          restoringPhotoAccount = true
+          defer { restoringPhotoAccount = false; updateAutomaticAnalysisAdmission() }
+#endif
+          updateAutomaticAnalysisAdmission()
           restorePhotos()
 #if !FOTORO_LOCAL_PREVIEW
           do {
@@ -895,7 +909,16 @@ struct RecentPhotosView: View {
     #if !FOTORO_LOCAL_PREVIEW
       services?.setSavedSemanticBrowseInteractionActive(browseInteractionActive)
     #endif
-    store.setAutomaticAnalysisActive(active)
+    #if !FOTORO_LOCAL_PREVIEW
+      let picksActive = PhotoPicksAdmission.automatic(homeVisible: homeVisible, foreground: scenePhase == .active,
+        restoringAccount: restoringPhotoAccount, automaticSyncBusy: services?.automaticPhotoSyncBusy == true,
+        backupRunning: services?.backup.isRunning == true)
+    #else
+      let picksActive = active
+    #endif
+    store.setAutomaticAnalysisActive(picksActive)
+    // Suspension clears the store’s interaction flag. Keep it while backup holds admission.
+    store.setBrowseInteractionActive(browseInteractionActive)
     search.setAutomaticAnalysisActive(active)
     #if !FOTORO_LOCAL_PREVIEW
       services?.setSavedSemanticAnalysisActive(active)
@@ -918,12 +941,12 @@ struct RecentPhotosView: View {
 #endif
   private func handleScenePhaseChange(_ phase: ScenePhase) {
     if phase == .active {
-      updateAutomaticAnalysisAdmission()
-      if homeVisible { restorePhotos() }
 #if !FOTORO_LOCAL_PREVIEW
       services?.setPhotoSyncForeground(true)
       if let services { Task { await services.resumeSavedAccount() } }
 #endif
+      updateAutomaticAnalysisAdmission()
+      if homeVisible { restorePhotos() }
     } else {
       updateAutomaticAnalysisAdmission()
       cancelBestShots()
