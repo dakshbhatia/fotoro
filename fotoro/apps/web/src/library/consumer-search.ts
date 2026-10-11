@@ -68,7 +68,7 @@ export async function accountSearchResultAsync(search: PhotoSearchIndex["searchA
   check(); if (result.current?.() === false) throw new Error("CACHED_SEARCH_SOURCE_CHANGED"); return {...result, photoIds: [...new Set(result.photoIds.map(idFor))], photoId: result.photoId ? idFor(result.photoId) : undefined,
     meanings: result.meanings.map(value => mapped.get(value)!), meaning: result.meaning ? mapped.get(result.meaning) : undefined};
 }
-/** A result belongs to one exact request. Replacement clears it during render and aborts its work. */
+// A result belongs to one request. Replacement clears it and aborts its work.
 export function useAccountSearch(query: string, scope: string, request: ((signal: AbortSignal, current: () => boolean) => Promise<SearchResult>) | undefined, enabled: boolean) {
   const latest = useRef(request); latest.current = request;
   const [visibleEpoch, setVisibleEpoch] = useState(0);
