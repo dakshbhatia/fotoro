@@ -28,6 +28,19 @@ struct PhotoBrowseItem {
 }
 enum PhotoBrowseGrouping { case days, moments }
 enum PhotoBrowseOrder { case newestFirst, oldestFirst }
+// Scroll offset follows browsing choices, never arriving pages or analysis progress.
+struct PhotoBrowseViewportID: Hashable {
+  let browsingChoices: String
+  let query: String
+  let people: String
+  let acceptedMeaning: String?
+  init(browsingChoices: String, query: String, people: PeopleSearchSelection, acceptedMeaning: String?) {
+    self.browsingChoices = browsingChoices
+    self.query = SearchNormalization.text(query)
+    self.people = people.key
+    self.acceptedMeaning = self.query.isEmpty && people.isEmpty ? nil : acceptedMeaning
+  }
+}
 struct PhotoBrowseGroup: Identifiable {
   var id: String
   var start: Date?

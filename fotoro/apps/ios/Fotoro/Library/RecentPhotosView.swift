@@ -1110,8 +1110,10 @@ struct RecentPhotosView: View {
   #endif
   // Native scrolling owns its offset. Only a new browsing choice resets it;
   // photo/page/progress updates must not become programmatic scroll commands.
-  private var browseViewportKey: String {
-    "\(scope.id)|\(browseFilter.id)|\(browseDates.id)|\(groupMoments)|\(overviewGranularity.id)|\(overviewSelection?.interval?.start.timeIntervalSince1970.description ?? overviewSelection?.title ?? "all")|\(search.hasSearch)"
+  private var browseViewportKey: PhotoBrowseViewportID {
+    PhotoBrowseViewportID(
+      browsingChoices: "\(scope.id)|\(browseFilter.id)|\(browseDates.id)|\(groupMoments)|\(overviewGranularity.id)|\(overviewSelection?.interval?.start.timeIntervalSince1970.description ?? overviewSelection?.title ?? "all")",
+      query: query, people: search.peopleSelection, acceptedMeaning: search.acceptedMeaningID)
   }
   private var bestShotsControls: some View {
     VStack(alignment: .leading, spacing: 8) {

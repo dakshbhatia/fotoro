@@ -5,7 +5,7 @@ import {captureGroup} from "./capture-groups";
 import {PhotoTable} from "./PhotoTable";
 import type {PhotoColumn} from "./photo-table";
 import {useLocalThumbnail} from "./useLocalThumbnail";
-import {usePhotoNavigation} from "../library/photo-navigation";
+import {restorePhotoGridAnchor, usePhotoNavigation} from "../library/photo-navigation";
 export interface PickSelection {
   ids: ReadonlySet<string>;
   reasons?: ReadonlyMap<string, string[]>;
@@ -82,6 +82,7 @@ function LocalGrid({
     [width, setWidth] = useState(800),
     [columns, setColumns] = useState(2);
   const anchor = useRef<{ id: string; offset: number } | undefined>(undefined);
+  const measuredGeometry = useRef<{width: number; columns: number} | undefined>(undefined);
   useEffect(() => {
     const observer = new ResizeObserver((entries) => {
       const w = entries[0].contentRect.width;
@@ -132,14 +133,11 @@ function LocalGrid({
   const navigate = usePhotoNavigation(parent,navigationRows,index => virtual.scrollToIndex(index,{align: "auto"}),
     Math.max(1,Math.floor((parent.current?.clientHeight ?? width)/Math.max(1,width/columns))),active);
   useLayoutEffect(() => {
-    if (!active || !anchor.current) return;
-    const index = rows.findIndex((row) =>
-      row.photos.some((photo) => photo.id === anchor.current!.id),
-    );
-    const offset =
-      index >= 0 ? virtual.getOffsetForIndex(index, "start") : undefined;
-    if (offset) virtual.scrollToOffset(offset[0] + anchor.current.offset);
-  }, [rows, width, virtual, active]);
+    if (!active) return;
+    const changed = measuredGeometry.current?.width !== width || measuredGeometry.current?.columns !== columns;
+    measuredGeometry.current = {width, columns};
+    restorePhotoGridAnchor(virtual, navigationRows, anchor.current, changed);
+  }, [navigationRows, width, columns, virtual, active]);
   return (
     <div
       className="canvas"

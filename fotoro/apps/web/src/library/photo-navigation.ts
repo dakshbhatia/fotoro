@@ -1,4 +1,18 @@
 import {useLayoutEffect, useRef, useState, type KeyboardEvent, type RefObject} from "react";
+import type {Virtualizer} from "@tanstack/react-virtual";
+
+export function restorePhotoGridAnchor(virtual: Pick<Virtualizer<HTMLDivElement, Element>, "measure" | "getTotalSize" | "getOffsetForIndex" | "scrollToOffset">,
+  rows: readonly (readonly string[])[], anchor: {id: string; offset: number} | undefined, geometryChanged: boolean) {
+  if (geometryChanged) {
+    virtual.measure();
+    // Index offsets read the measurement cache; rebuild it before restoring.
+    virtual.getTotalSize();
+  }
+  if (!anchor) return;
+  const index = rows.findIndex(row => row.includes(anchor.id));
+  const offset = index >= 0 ? virtual.getOffsetForIndex(index, "start") : undefined;
+  if (offset) virtual.scrollToOffset(offset[0] + anchor.offset);
+}
 
 export function photoNavigationDestination(rows: readonly (readonly string[])[], current: string, key: string, pageRows = 1) {
   const row = rows.findIndex(values => values.includes(current));if(row < 0)return;

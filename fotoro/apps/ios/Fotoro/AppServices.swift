@@ -125,6 +125,7 @@ enum ReviewedPhotosBackupPolicy {
   @ObservationIgnored private var savedSemanticIdleTask: Task<Void, Never>?
   let storageRoot: URL
   var photos: [LocalPhoto] = []
+  @ObservationIgnored private var loadedPhotoWindow: (access: PhotoAccountAccess, origin: String?)?
   var received: [LocalPhoto] = []
   var grants: [GrantV1] = []
   var error: String?
@@ -761,6 +762,7 @@ enum ReviewedPhotosBackupPolicy {
       self?.photoAnnotations = [:]
       self?.localSearch?.clearSyncedAnnotations()
       self?.photos = []
+      self?.loadedPhotoWindow = nil
       self?.received = []
       self?.grants = []
       self?.selectedGrant = nil
@@ -1484,8 +1486,13 @@ enum ReviewedPhotosBackupPolicy {
   }
   func reload() throws {
     guard vault.isUnlocked else { return }
-    if let account = session.accountId { photos = try store.ownedPhotos(accountId: account, limit: 1000) }
-    else { photos = [] }
+    if let account = session.accountId {
+      let access = PhotoAccountAccess(account: account, vault: vault.generation, catalog: ObjectIdentifier(store))
+      let origin = BackgroundUploadPolicy.origin(api.baseURL)
+      let tail = loadedPhotoWindow?.access == access && loadedPhotoWindow?.origin == origin ? photos.last : nil
+      photos = try store.ownedPhotoWindow(accountId: account, retaining: tail)
+      loadedPhotoWindow = (access, origin)
+    } else { photos = []; loadedPhotoWindow = nil }
     try reloadAnnotations()
     refreshConsumerSyncSummary()
   }

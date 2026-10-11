@@ -148,6 +148,25 @@ final class LibraryStore: @unchecked Sendable {
       return try rows.map { rebased(try Wire.decode(LocalPhoto.self, $0["value"] as Data)) }
     }
   }
+  // Read the current first page plus the already admitted range in one snapshot.
+  // Newer arrivals cannot push its old tail out; older unvisited rows stay unloaded.
+  func ownedPhotoWindow(accountId: String, retaining tail: LocalPhoto?) throws -> [LocalPhoto] {
+    try database.read { db in
+      let owner = "json_extract(CAST(value AS TEXT),'$.manifest.ownerAccountId')"
+      var count = 1000
+      if let tail, tail.manifest.ownerAccountId == accountId {
+        let retained = try Int.fetchOne(db, sql: """
+          SELECT COUNT(*) FROM photos WHERE \(owner)=?
+            AND (sourceDate > ? OR (sourceDate = ? AND id <= ?))
+          """, arguments: [accountId, tail.metadata.sourceDate, tail.metadata.sourceDate, tail.id]) ?? 0
+        count = max(count, retained)
+      }
+      let rows = try Row.fetchAll(db, sql: """
+        SELECT value FROM photos WHERE \(owner)=? ORDER BY sourceDate DESC,id LIMIT ?
+        """, arguments: [accountId, count])
+      return try rows.map { rebased(try Wire.decode(LocalPhoto.self, $0["value"] as Data)) }
+    }
+  }
   func consumerCommittedCount(accountId: String) throws -> Int {
     try database.read {
       try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM photos WHERE json_extract(CAST(value AS TEXT),'$.manifest.ownerAccountId')=? AND json_extract(CAST(value AS TEXT),'$.transferState') IN ('committed','saved')", arguments: [accountId]) ?? 0

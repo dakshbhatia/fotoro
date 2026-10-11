@@ -4,7 +4,7 @@ import { type Photo } from "./catalog";
 import {requireVault} from "../vault/vault";
 import {sameVault} from "../vault/scope";
 import {leaseSavedRaster, savedRasterSource} from "./saved-raster";
-import {usePhotoNavigation} from "./photo-navigation";
+import {restorePhotoGridAnchor, usePhotoNavigation} from "./photo-navigation";
 export function PhotoSelectionButton({filename, selected, disabled = false, onSelect}: {filename: string; selected: boolean; disabled?: boolean; onSelect: () => void}) {
   return <button className="select" aria-label={"Select " + filename} aria-pressed={selected} disabled={disabled}
     onClick={() => {if (!disabled) onSelect();}}>{selected ? "✓" : ""}</button>;
@@ -103,6 +103,7 @@ export function Library({
     return () => observer.disconnect();
   }, []);
   const anchor = useRef<{ id: string; offset: number } | undefined>(undefined);
+  const measuredGeometry = useRef<{width: number; columns: number} | undefined>(undefined);
   const rows = useMemo(() => {
     const days = new Map<string, Photo[]>();
     for (const photo of photos) {
@@ -146,15 +147,11 @@ export function Library({
   const navigate = usePhotoNavigation(parent,navigationRows,index => virtual.scrollToIndex(index,{align: "auto"}),
     Math.max(1,Math.floor((parent.current?.clientHeight ?? width)/Math.max(1,width/columns))),active);
   useLayoutEffect(() => {
-    if (active && anchor.current && parent.current) {
-      const index = rows.findIndex((row) =>
-        row.photos.some((photo) => photo.manifest.photoId === anchor.current!.id),
-      );
-      const offset =
-        index >= 0 ? virtual.getOffsetForIndex(index, "start") : undefined;
-      if (offset) virtual.scrollToOffset(offset[0] + anchor.current.offset);
-    }
-  }, [rows, width, virtual, active]);
+    if (!active) return;
+    const changed = measuredGeometry.current?.width !== width || measuredGeometry.current?.columns !== columns;
+    measuredGeometry.current = {width, columns};
+    restorePhotoGridAnchor(virtual, navigationRows, anchor.current, changed);
+  }, [navigationRows, width, columns, virtual, active]);
   return (
     <div
       className="canvas"
