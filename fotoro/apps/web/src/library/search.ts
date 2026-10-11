@@ -33,3 +33,18 @@ export function cloudSearchRecords(photos: Photo[]): SearchPhoto[] {
     };
   });
 }
+
+// Search hydration joins existing admitted sources instead of replacing the browse/selection window.
+export function mergeSearchPhotos(previous: Photo[], matches: Photo[], added: Set<string>, retained: ReadonlySet<string>) {
+  const requested = new Set(matches.map(photo => photo.manifest.photoId));
+  const next = previous.filter(photo => !added.has(photo.manifest.photoId) || retained.has(photo.manifest.photoId) || requested.has(photo.manifest.photoId));
+  const nextAdded = new Set(next.filter(photo => added.has(photo.manifest.photoId)).map(photo => photo.manifest.photoId));
+  for (const photo of previous) if (!next.includes(photo)) photo.metadataKey.fill(0);
+  for (const match of matches) {
+    const index = next.findIndex(photo => photo.manifest.photoId === match.manifest.photoId);
+    if (index < 0) {next.push(match); nextAdded.add(match.manifest.photoId);}
+    else if (JSON.stringify([next[index].manifest, next[index].metadata, next[index].annotations, next[index].annotationRevision]) === JSON.stringify([match.manifest, match.metadata, match.annotations, match.annotationRevision])) match.metadataKey.fill(0);
+    else {next[index].metadataKey.fill(0); next[index] = match;}
+  }
+  return {photos: next, added: nextAdded};
+}

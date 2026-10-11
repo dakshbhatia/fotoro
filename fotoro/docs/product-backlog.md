@@ -15,6 +15,46 @@ Cloudflare proposals become tasks here only when a consumer need admits them.
 | Sharing and receiving | Send the intended moment and let the recipient keep it. | System sharing and the private invitation route complete with the exact selected set; recipient identity and ownership remain correct. |
 | Returning and smoothness | Reopen and continue without starting over. | Remembered access, cached previews, selection and durable work survive return; measure frame pacing, memory and search latency on supported hardware. |
 
+## Current core implementation order
+
+1. Separate search coverage from the grid. Search verified metadata across the
+   cached account; hydrate only matching rows. Discover server metadata in
+   serialized foreground slices independently of the gallery window. Keep
+   incomplete change-feed, visual and People coverage visible. Build and query
+   large indexes in cancellable slices, reuse unchanged source receipts, and
+   keep sync progress out of search identity.
+2. Finish resumable inference. Reuse the existing native SQLite records/vectors
+   and encrypted browser catalog. Add durable jobs keyed by account, photo ID,
+   source revision, processor version and job kind; OCR, embeddings and opted-in
+   faces need separate completion/retry state. Metadata comes first; heavier
+   preparation starts with 30 days and expands deliberately. Queries retrieve
+   completed evidence rather than restarting inference.
+3. Protect scrolling while work progresses. Move metadata discovery off-main;
+   checkpoint each fully attempted photo and reuse one derivative when the model
+   is ready. Cold model preparation cannot hold later OCR/classification; it
+   schedules one missing-vector pass at readiness. Keep stable tile sources,
+   separate transfer status from verified-copy timeline identity, and avoid
+   catalog publication for acknowledgment-only changes.
+   Remaining large-inventory filtering/reconciliation and per-photo publication
+   need measured frame, CPU and memory budgets before claiming smoothness.
+4. Qualify retrieval before replacing models. Current iOS Vision OCR/classification,
+   TinyCLIP CoreML retrieval and local face models already provide AI. Measure
+   date/place/person/text/visual queries, correction behavior, cold/warm latency,
+   memory and battery on representative photos. A small caption model is a
+   separate experiment; it must improve a specific task within those budgets.
+5. Complete the installed family journey. Two accounts open one Trip, add chosen
+   photos, find them by reviewed people/place/date, download the verified deduped
+   bundle, interrupt work and return. Check sync plus scrolling on the installed
+   phone, cross-device restoration and accessibility. Source tests and a browser
+   release do not establish installed-device acceptance.
+
+Use existing account/owner IDs, photo IDs, original digests and source revisions
+for joins. Native records, vectors, terms, postings, feedback and People tables
+already exist; do not add a parallel photo database. Browser inference still needs
+persistent local job/vector storage independent of React component lifetimes.
+iOS background processing is scheduled by the system: work must resume durably,
+without promising a permanently running process while the app is suspended.
+
 ## The ten foundations for Sync, Search and Share
 
 | Order | Foundation and current implementation | Still needed to call it complete |
@@ -22,9 +62,9 @@ Cloudflare proposals become tasks here only when a consumer need admits them.
 | 1 | First photos and access: local photos before an account; password/passkey entry continues a chosen Save, Sync or invitation. Native welcome directly offers new-account, passkey and password choices. A matching returning browser can sign in and unlock in one PRF request; fresh-browser discovery retains its second request. Both clients offer reviewed trusted-device approval with an explicit public request exchange. | Fresh iPhone → allow Photos → browse → opt in once → open the same Saved photos in Safari. Qualify real PRF passkeys and device approval on iPhone, Safari and Mac. Sign in with Apple is not implemented; device approval still requires copying the public request. |
 | 2 | Sync intake: durable last-30-days initial scope, explicit expansion, Pause, retry and account/source fences. Existing 10-day anchors retain their exclusions until explicit expansion. | Physical background, relaunch, offline reconnect, changed permissions and edited/iCloud assets. Already scheduled ciphertext may finish in the background; new preparation needs the open, unlocked app. |
 | 3 | Original recovery: encrypted JPEG/PNG/HEIC, supported video and complete Live Photo resources, bounded staging and byte verification. | Cross-device physical restore after an interrupted transfer and relaunch. Keep the 50 MiB logical-original limit until larger-original recovery is qualified. |
-| 4 | Photo evidence: OCR, EXIF/Photos dates, observed locations, supplied labels and current revision bindings. iOS Info groups observed photo/camera fields, keeps capture details collapsed and shows provenance. Cheap metadata scopes heavy work before previews; native startup processes one bounded recent batch. | Personal-library OCR/metadata coverage, correction and location acceptance. No invented date or location for missing evidence; old Saved originals do not acquire trusted capture details retroactively. |
+| 4 | Photo evidence: OCR, EXIF/Photos dates, observed locations, supplied labels and current revision bindings. iOS Info groups observed photo/camera fields, keeps capture details collapsed and shows provenance. Cheap metadata scopes heavy work before previews; native automatic preparation continues bounded recent batches independently of queries and checkpoints completed photo attempts across scroll interruptions. | Personal-library OCR/metadata coverage, correction and location acceptance. No invented date or location for missing evidence; old Saved originals do not acquire trusted capture details retroactively. |
 | 5 | People: opt-in local pinned models, reviewed names, merge, separate and rejection on both clients. Native Any/Everyone choices include source-bound reviewed Saved names without Photos permission and invalidate after corrections. Saved-name discovery reads local catalog/annotations in explicit 200-record pages and reports partial coverage. Date/source filters precede pixels and ranking limits; explicit batches contain at most 500 pending photos and reuse current results. | Held-out identity quality and cross-device reviewed-name acceptance. Isolated browser inference passes; physical Safari still needs qualification. Separate portraits or similar places must not imply shared attendance. |
-| 6 | Search and Picks: text/date/label search, local visual retrieval, diverse suggestions and explicit incomplete-coverage feedback. Browsing starts at 30 days; all photos and historical date queries stay reachable. Browser Saved starts with a 100-record window and explicit further pages; date, Search and People coverage is limited to loaded photos until expanded. | Held-out retrieval and shortlist quality against human choices; cold/warm time to the intended photo. Suggestions cannot silently select, save or delete originals. |
+| 6 | Search and Picks: text/date/label search, local visual retrieval, diverse suggestions and explicit incomplete-coverage feedback. Browsing starts at 30 days; all photos and historical date queries stay reachable. Browser Saved starts with a 100-record gallery and explicit further pages. Foreground metadata discovery continues independently of that window; verified cached metadata is indexed and queried in cancellable slices, with at most 200 matching rows hydrated. Visual inference and People discovery remain scoped to available evidence; incomplete feed/budget coverage stays visible. | Held-out retrieval and shortlist quality against human choices; cold/warm time to the intended photo. Suggestions cannot silently select, save or delete originals. |
 | 7 | Photo delivery and return: thumbnails/previews, owned URL leases, retry, cancellation and bounded native zoom/pan. Browser browsing hydrates bounded Saved windows and reuses verified unchanged metadata; an atomic 100 MiB cache ledger avoids ciphertext rescans. | Large-library frame pacing, memory, battery, motion playback and interruptions on supported phones. Explicit save/contribution synchronization can still traverse the full catalog; measure that path separately from bounded browsing. Missing derivatives cannot silently download originals. |
 | 8 | Organization and accessibility: optional sortable photo tables, observed columns, keyboard navigation across virtualized rows and responsive selection/viewers. iOS Places adapts geographic clusters to zoom, counts available location metadata in the viewport and opens individual photos. An explicit optional Apple Maps lookup labels up to eight map areas per action for the current view. | VoiceOver, Dynamic Type, physical gestures and broader hardware/browser acceptance. Area labels do not establish a photo's landmark or attendance; physical-device map performance remains unverified. |
 | 9 | Share and receive: system original sharing, private invitations, recipient-owned Save and live albums with explicit acceptance and later chosen owned-photo additions. Browser and native Join album combine reviewed owner verification, contact trust and acceptance; Choose → Continue retains the exact album and selection. Native album selection pages through Saved in explicit 200-record batches; each contribution selects at most 100. Contributors can explicitly publish reviewed names and location for album People/place/capture-date search. Exact-original groups retain every copy. Trips accept chosen device photos through Save before contribution, and export one verified ZIP of the complete bounded contribution list, remove duplicate original/resource bundles, preserve Live Photo pairs, and show cancellable progress. Approved contacts sync privately within the account with conflict review. | Physical share-sheet completion and the family journey on installed devices; cross-device contact acceptance, shared person identity across contributors and cross-trip landmark/family matching. |
@@ -50,7 +90,7 @@ Automatic Picks waits through sync preflight and backup; an explicit Picks reque
 remains available. Already scheduled ciphertext uploads may finish in the background.
 Existing 10-day Sync anchors preserve their journal and exclusions until explicit
 expansion to 30 days. Date and reviewed-People metadata scope heavy processing;
-the next batch and unavailable-source retry remain explicit actions.
+automatic recent preparation continues when browsing is idle; older query-scoped batches and unavailable-source retries remain explicit actions.
 Native API requests normalize URLSession cancellation to cancellation outcomes.
 Pause cancels active foreground transfer work while retaining its durable retry;
 interrupted work does not become a transfer failure solely because it was paused.

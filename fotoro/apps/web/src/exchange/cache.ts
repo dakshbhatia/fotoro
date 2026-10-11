@@ -5,6 +5,12 @@ const metadataStore = "read-cache-metadata", totalsKey = "@totals";
 interface CacheEntry {bytes: number; sequence: number}
 interface CacheTotals {bytes: number; nextSequence: number}
 let opened: Promise<IDBDatabase> | undefined;
+const catalogRevisions = new Map<string, number>();
+const photoRevisions = new Map<string, number>();
+const catalogListeners = new Set<() => void>();
+export const cachedMetadataRevision = (account: string) => catalogRevisions.get(account) ?? 0;
+export const cachedPhotoRevision = (account: string, photoId: string) => photoRevisions.get(account + ":" + photoId) ?? 0;
+export function subscribeCachedMetadata(listener: () => void) {catalogListeners.add(listener); return () => {catalogListeners.delete(listener);};}
 export function db() {
   if (opened) return opened;
   let attempt: Promise<IDBDatabase>;
@@ -70,14 +76,15 @@ export async function all<T>(store: Store, prefix?: string): Promise<[string, T]
   });
 }
 // Count keys without reading their values; only materialize the requested account window.
-export async function boundedRows<T>(store: Store, prefix: string, limit: number) {
+export async function boundedRows<T>(store: Store, prefix: string, limit: number, after?: string) {
   if (!prefix || !Number.isSafeInteger(limit) || limit < 1) throw new Error("INVALID_CACHE_WINDOW");
   const d = await db();
   return new Promise<{rows: [string, T][]; total: number}>((resolve, reject) => {
     const tx = d.transaction(store), source = tx.objectStore(store);
     const upper = prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
     const range = IDBKeyRange.bound(prefix, upper, false, true);
-    const rows: [string, T][] = [], count = source.count(range), cursor = source.openCursor(range);
+    if (after && !after.startsWith(prefix)) {reject(new Error("INVALID_CACHE_WINDOW")); return;}
+    const rows: [string, T][] = [], count = source.count(range), cursor = source.openCursor(after ? IDBKeyRange.bound(after, upper, true, true) : range);
     cursor.onsuccess = () => {
       const row = cursor.result;
       if (!row) return;
@@ -149,7 +156,16 @@ export async function atomic(writes: Write[]) {
       }
       if (cipher.length) cipherWrites(tx, cipher);
     } catch (error) {tx.abort(); reject(error); return;}
-    tx.oncomplete = () => resolve();
+    tx.oncomplete = () => {
+      const accounts = new Set(writes.filter(w => w.store === "catalog" || w.store === "settings" && w.key.includes(":annotation:")).map(w => w.key.split(":")[0]));
+      for (const write of writes) if (write.store === "catalog" || write.store === "settings" && write.key.includes(":annotation:")) {
+        const parts = write.key.split(":"), key = parts[0] + ":" + parts.at(-1);
+        photoRevisions.set(key, (photoRevisions.get(key) ?? 0) + 1);
+      }
+      for (const account of accounts) catalogRevisions.set(account, cachedMetadataRevision(account) + 1);
+      if (accounts.size) for (const listener of catalogListeners) listener();
+      resolve();
+    };
     tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error ?? new Error("STORAGE_ABORTED"));
   });

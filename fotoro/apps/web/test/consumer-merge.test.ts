@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {mergeConsumerSearchPhotos as merge} from "../src/library/consumer-search";
-import {savedSearchPhotos, combineConsumerSearch, type OwnedPhotoSnapshot} from "../src/library/consumer-search";
+import {SavedSearchProjection, savedSearchPhotos, combineConsumerSearch, type OwnedPhotoSnapshot} from "../src/library/consumer-search";
+import {SemanticFindSession} from "../src/local/semantic-find";
 import {PhotoSearchIndex} from "../src/local/search";
 import type {LocalPhoto} from "../src/local/resources";
 import type {Photo} from "../src/library/catalog";
@@ -110,4 +111,56 @@ test("matching saved location fills a selected original independently of date pr
   assert.deepEqual(index.search("gps").photoIds, [source.id]);
   invalidate(); assert.equal(merge([source], adapted)[0], source);
   assert.deepEqual(index.search("gps").photoIds, [], "An already built location index cannot retain withdrawn account evidence");
+});
+
+test("Saved search and People sources survive Save availability and coverage updates", async () => {
+  const {snapshot} = matchingCapture(), projection = new SavedSearchProjection();
+  let release!: () => void, reads = 0;
+  const held = new Promise<void>(resolve => {release = resolve;});
+  snapshot.preview = async () => {reads++; await held; return new Blob();};
+  const initial = projection.read(snapshot, []), preview = initial[0].previewLoader;
+  const inFlight = preview!();
+  const updating = {...snapshot, selectionReady: false, coverage: {loaded: 1, cachedTotal: 101, hasMore: true, hasMoreChanges: true}};
+  const continued = projection.read(updating, []);
+  assert.equal(continued, initial, "Sync status must not replace the semantic hook's photo input");
+  assert.equal(continued[0].previewLoader, preview, "An in-flight preview and People scan keep the exact source identity");
+  assert.equal(projection.read({...updating, selectionReady: true}, []), initial);
+  release(); assert.equal(await inFlight instanceof Blob, true); assert.equal(reads, 1, "A held preview completes across sync status changes without being requested again");
+});
+
+test("Saved search projection withdraws old sources and rebuilds only for actual source/local changes", () => {
+  const {snapshot, local, invalidate} = matchingCapture(), projection = new SavedSearchProjection();
+  const initial = projection.read(snapshot, []);
+  const changed = {...snapshot, photos: [{...snapshot.photos[0], metadata: {...snapshot.photos[0].metadata, filename: "edited.png"}}]};
+  assert.notEqual(projection.read(changed, []), initial);
+  assert.notEqual(projection.read({...snapshot, token: {}}, []), initial, "A new vault lifetime cannot reuse the projection");
+  assert.deepEqual(projection.read({...snapshot, accountId: "other-owner"}, []), [], "Account identity remains part of admission");
+  assert.equal(projection.read(changed, [local])[0].id, local.id, "An exact local original can change the projection's identity");
+  invalidate();
+  assert.deepEqual(projection.read(snapshot, []), []);
+  assert.equal(initial[0].current?.(), false, "Stabilizing inputs must never revive a withdrawn account source");
+});
+
+test("held semantic inference finishes once while Saved sync availability changes", async () => {
+  const {snapshot} = matchingCapture(), projection = new SavedSearchProjection();
+  let latest = projection.read(snapshot, []), release!: () => void, started!: () => void, images = 0, publications = 0;
+  const held = new Promise<void>(resolve => {started = resolve;});
+  const vector = new Float32Array(512); vector[0] = 1;
+  const worker = {onmessage: null as Worker["onmessage"], onerror: null as Worker["onerror"], terminate() {},
+    postMessage(message: {id: number; kind: string}) {
+      const reply = () => this.onmessage?.call(this as unknown as Worker, {data: {id: message.id, vector}} as MessageEvent);
+      if (message.kind === "text") queueMicrotask(reply);
+      else if (message.kind === "image") {images++; release = reply; started();}
+    }};
+  const engine = new SemanticFindSession(() => worker as unknown as Worker,
+    {load: async () => ({blob: new Blob(), url: "", bytes: 1, decoded: 1, width: 1, height: 1, used: 0}), clear() {}});
+  try {
+    const input = latest;
+    const searching = engine.search(input, "fireworks", () => latest === input, scores => {publications++; assert.equal(scores.size, 1);});
+    await held;
+    latest = projection.read({...snapshot, selectionReady: false}, []);
+    latest = projection.read({...snapshot, selectionReady: true}, []);
+    release(); await searching;
+    assert.equal(images, 1); assert.equal(publications, 1, "Progress-only snapshots cannot invalidate a held semantic result");
+  } finally {engine.clear();}
 });
