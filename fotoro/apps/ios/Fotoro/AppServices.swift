@@ -1412,21 +1412,12 @@ enum ReviewedPhotosBackupPolicy {
           guard RecentPhotosPolicy.canRead(permission) else {
             throw FotoroError("Allow Photos access to sync.")
           }
-          let assetResults: [PHFetchResult<PHAsset>]
-          if let selection {
-            assetResults = [PHAsset.fetchAssets(withLocalIdentifiers: selection.map(\.id), options: nil)]
-          } else if automatic {
+          let cutoff: Date?
+          var through = now
+          if selection != nil { cutoff = nil }
+          else if automatic {
             guard let scanPlan else { throw CancellationError() }
-            let options = PHFetchOptions()
-            options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-            if let cutoff = scanPlan.cutoff {
-              options.predicate = NSPredicate(format: "creationDate >= %@ AND creationDate <= %@", cutoff as NSDate, now as NSDate)
-            }
-            var results = [PHAsset.fetchAssets(with: options)]
-            if scanPlan.cutoff != nil, !scanPlan.trackedIDs.isEmpty {
-              results.append(PHAsset.fetchAssets(withLocalIdentifiers: Array(scanPlan.trackedIDs), options: nil))
-            }
-            assetResults = results
+            cutoff = scanPlan.cutoff
           } else {
             guard let recent = self.recentPhotos else {
               throw FotoroError("Open Photos to find your picks before syncing.")
@@ -1437,44 +1428,33 @@ enum ReviewedPhotosBackupPolicy {
               self.store === catalog, picks.matches(recent.pickCandidates),
               PhotoPickAnalyzer.isCurrent(picks.candidates) else { throw CancellationError() }
             acceptedPicks = picks
-            let now = Date()
-            let options = PHFetchOptions()
-            options.predicate = NSPredicate(
-              format: "creationDate >= %@ AND creationDate <= %@",
-              RecentPhotosPolicy.cutoff(now: now) as NSDate, now as NSDate)
-            options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-            assetResults = [PHAsset.fetchAssets(with: options)]
+            through = Date()
+            cutoff = RecentPhotosPolicy.cutoff(now: through)
           }
-          var candidates: [BackupCandidate] = []
-          var seen = Set<String>()
-          var examined = 0
-          let total = assetResults.reduce(0) { $0 + $1.count }
+          let selectionIDs = selection?.map(\.id)
+          let trackedIDs = scanPlan?.trackedIDs ?? []
+          let excludeHidden = selection != nil || automatic
+          let scanThrough = through
+          func checkMetadataScope() throws {
+            try Task.checkCancellation()
+            guard self.session.isSignedIn, self.vault.isUnlocked, self.vault.generation == generation,
+              self.session.accountId == account, self.store === catalog,
+              self.session.pinnedCards[account] == trustedCard, self.api.baseURL == baseURL,
+              BackgroundUploadPolicy.origin(self.api.baseURL) == origin,
+              RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+              !automatic || self.automaticPhotoSyncAdmitted else { throw CancellationError() }
+          }
+          try checkMetadataScope()
           let scanStarted = ProcessInfo.processInfo.systemUptime
-          for assets in assetResults {
-            for index in 0..<assets.count {
-              if examined.isMultiple(of: 128) {
-                await Task.yield()
-                try Task.checkCancellation()
-                guard self.vault.generation == generation, self.session.accountId == account,
-                  self.store === catalog, self.api.baseURL == baseURL, BackgroundUploadPolicy.origin(self.api.baseURL) == origin,
-                  RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
-                  !automatic || self.automaticPhotoSyncAdmitted else { throw CancellationError() }
-              }
-              examined += 1
-              if examined.isMultiple(of: 256) {
-                self.diagnostics.record(NativeDiagnosticEvent(phase: .sync, outcome: .started,
-                  elapsed: ProcessInfo.processInfo.systemUptime - scanStarted,
-                  completed: examined, pending: max(0, total - examined), step: .scan))
-              }
-              let asset = assets.object(at: index)
-              guard seen.insert(asset.localIdentifier).inserted else { continue }
-              if (selection != nil || automatic) && asset.isHidden { continue }
-              let candidate = BackupCandidate(id: asset.localIdentifier, capturedAt: asset.creationDate,
-                skipReason: CameraMedia.sourceSkipReason(asset), sourceRevision: RecentPhoto.sourceRevision(asset))
-              if let scanPlan, !scanPlan.includes(candidate) { continue }
-              candidates.append(candidate)
-            }
+          var candidates = try await SearchMetadataIntake.run {
+            try BackupMetadataIntake.fetch(cutoff: cutoff, through: scanThrough, trackedIDs: trackedIDs,
+              selectionIDs: selectionIDs, excludeHidden: excludeHidden)
           }
+          try checkMetadataScope()
+          self.diagnostics.record(NativeDiagnosticEvent(phase: .sync, outcome: .completed,
+            elapsed: ProcessInfo.processInfo.systemUptime - scanStarted,
+            completed: candidates.count, step: .scan))
+          if let scanPlan { candidates = scanPlan.select(candidates) }
           if let selection { candidates = try ReviewedPhotosBackupPolicy.select(candidates, selection: selection) }
           else if !automatic { candidates = PhotoPicksBackupPolicy.select(candidates, snapshot: acceptedPicks) }
           return try intakeCandidates(candidates)
@@ -2140,7 +2120,10 @@ enum ReviewedPhotosBackupPolicy {
       _ = try await self.api.request("/v1/photos/\(try Wire.decode(PhotoAnnotationsUpdateV1.self, Data(b64: signed.body)).photoId)/annotations", method: "PUT", body: Wire.encode(signed))
     })
     guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account else { return }
-    do { try reloadAnnotations() } catch { self.error = error.localizedDescription }
+    // This drain only acknowledges our frozen payloads. The visible draft was
+    // already published by the edit, and a newer draft survives its older ack.
+    // Coalesced/no-op drains must not rebuild every overlay or restart search.
+    refreshConsumerSyncSummary()
   }
   func resolveAnnotationConflict(_ photo: LocalPhoto, keepLocal: Bool) async throws {
     let generation = vault.generation

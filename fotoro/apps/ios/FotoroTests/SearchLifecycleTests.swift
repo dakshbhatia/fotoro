@@ -16,6 +16,73 @@ private actor AdmissionQueryProbe {
 }
 
 final class SearchLifecycleTests: XCTestCase {
+  @MainActor func testAutomaticAnalysisResumesPartialBatchAcrossQueryChangesWithoutRetryingUnavailableSources() async throws {
+    let fetched = PHAsset.fetchAssets(with: .image, options: nil)
+    guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)), fetched.count >= 4 else {
+      throw XCTSkip("Permit four existing public Simulator photos for bounded analysis continuation.")
+    }
+    let photos = (0..<4).map { RecentPhoto(asset: fetched.object(at: $0)) }
+    guard photos.allSatisfy({ !$0.asset.isHidden }) else { throw XCTSkip("Use permitted visible public photos.") }
+    let index = try SearchIndex()
+    let records = photos.map { photo -> SearchRecord in
+      var record = SearchRecord(id: photo.id)
+      record.revision = photo.sourceRevision
+      record.capturedAt = Date()
+      record.visualStatus = .complete
+      return record
+    }
+    try index.replacePermitted(records)
+    #if !FOTORO_LOCAL_PREVIEW
+      var vector = [Float](repeating: 0, count: 512); vector[0] = 1
+      for record in records {
+        XCTAssertTrue(try index.applySemantic(vector, photoID: record.id, revision: record.revision))
+      }
+    #endif
+    let store = LocalSearchStore(index: index), gate = AdmissionPreviewGate()
+    store.setAutomaticAnalysisActive(false)
+    store.automaticAnalysisBatchLimit = 2
+    store.completePermittedSnapshotRefresh(photos: photos)
+    let completed = expectation(description: "Idle preparation reaches every bounded batch")
+    let held = expectation(description: "Second source holds its unfinished preview")
+    var previews = 0, published = 0
+    var reads: [String: Int] = [:]
+    store.analysisPreview = { asset in
+      previews += 1; reads[asset.localIdentifier, default: 0] += 1
+      if previews == 2 { held.fulfill(); await gate.wait() }
+      return nil
+    }
+    store.onRecordChanged = { _, _ in
+      published += 1
+      if published == 1 {
+        store.updateQuery("unindexed beach")
+        store.setPeopleSelection(PeopleSearchSelection(personIDs: ["reviewed-person"]))
+      }
+      if published == records.count { completed.fulfill() }
+    }
+    defer { store.pause(); gate.open() }
+    let generation = store.libraryGeneration
+    store.setAutomaticAnalysisActive(true)
+    await fulfillment(of: [held], timeout: 5)
+    XCTAssertEqual(published, 1)
+    store.setBrowseInteractionActive(true)
+    gate.open()
+    store.setBrowseInteractionActive(false)
+    await fulfillment(of: [completed], timeout: 5)
+    for _ in 0..<200 where store.indexing { try await Task.sleep(for: .milliseconds(10)) }
+    XCTAssertFalse(store.indexing)
+    XCTAssertEqual(previews, records.count + 1)
+    XCTAssertEqual(reads.values.sorted(), [1, 1, 1, 2], "Only the unfinished source may be reread after scrolling")
+    XCTAssertEqual(store.automaticAnalysisWorkerStarts, 2)
+    XCTAssertEqual(store.analysisRemaining, 0)
+    XCTAssertEqual(store.analysisUnavailable, records.count)
+    XCTAssertEqual(store.query, "unindexed beach")
+    for record in records { XCTAssertEqual(try index.record(record.id)?.ocrStatus, .unavailable) }
+    store.setBrowseInteractionActive(true)
+    store.setBrowseInteractionActive(false)
+    try await Task.sleep(for: .milliseconds(700))
+    XCTAssertEqual(previews, records.count + 1, "Idle must retain its cursor instead of retrying unavailable sources")
+    XCTAssertEqual(store.libraryGeneration, generation, "Query and batch progress cannot restart metadata intake")
+  }
   @MainActor func testQueuedQueryUpdatesInvokeOnlyNewestExecutor() async throws {
     let probe = AdmissionQueryProbe()
     let store = LocalSearchStore(index: try SearchIndex(), queryExecutor: { index, query, scope, accepted, previous, generation in
