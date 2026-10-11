@@ -6,6 +6,44 @@ import XCTest
 @testable import Fotoro
 
 final class PhotosBackupTests: XCTestCase {
+  @MainActor func testMetadataIntakeReadsOnlyReviewedPhotoFactsOffMainActor() async throws {
+    let assets = PHAsset.fetchAssets(with: .image, options: nil)
+    guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+      let asset = assets.firstObject, !asset.isHidden else {
+      throw XCTSkip("Permit an existing public Simulator photo for metadata intake.")
+    }
+    let id = asset.localIdentifier, revision = RecentPhoto.sourceRevision(asset)
+    let date = asset.creationDate, reason = CameraMedia.sourceSkipReason(asset)
+    // A selected older source must be point-fetched independently of the dated horizon.
+    let result = try await SearchMetadataIntake.run {
+      let offMain = !Thread.isMainThread
+      let facts = try BackupMetadataIntake.fetch(cutoff: .distantFuture, through: .distantPast,
+        trackedIDs: [], selectionIDs: [id, id], excludeHidden: true)
+      return (offMain, facts)
+    }
+    XCTAssertTrue(result.0)
+    XCTAssertEqual(result.1.map(\.id), [id], "Reviewed identifiers are deduplicated without admitting the library")
+    XCTAssertEqual(result.1.first?.sourceRevision, revision)
+    XCTAssertEqual(result.1.first?.capturedAt, date)
+    XCTAssertEqual(result.1.first?.skipReason, reason)
+    let tracked = try await SearchMetadataIntake.run {
+      try BackupMetadataIntake.fetch(cutoff: .distantFuture, through: .distantPast,
+        trackedIDs: [id], selectionIDs: nil, excludeHidden: true)
+    }
+    XCTAssertEqual(tracked.map(\.id), [id], "Older tracked sources remain available for reconciliation")
+    let cancelled = Task {
+      try await SearchMetadataIntake.run {
+        try BackupMetadataIntake.fetch(cutoff: nil, through: Date(), trackedIDs: [],
+          selectionIDs: [id], excludeHidden: true)
+      }
+    }
+    cancelled.cancel()
+    do {
+      _ = try await cancelled.value
+      XCTFail("Cancelled metadata intake cannot return facts for staging")
+    } catch { XCTAssertTrue(error is CancellationError) }
+  }
+
   @MainActor func testSyncTileObservationIgnoresUnrelatedItemsAndAggregateCounts() {
     let projection = PhotoSyncItemProjection()
     let catalog = NSObject()

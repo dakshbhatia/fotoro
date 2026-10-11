@@ -5,6 +5,91 @@ import Photos
 @testable import Fotoro
 
 final class ConsumerCoreTests: XCTestCase {
+  @MainActor func testTransferStatusUpdatesDoNotRegroupTimelineButVerifiedCopiesStillDo() async throws {
+    try await withSavedLibrary { services, _ in
+      var source = BackupSource(id: "permitted-source", photoId: Wire.id(), sourceRevision: "current",
+        originalSha256: Data("original".utf8).digest)
+      try services.store.putBackupSource(source)
+      services.refreshConsumerSyncSummary()
+      let projection = PhotoBrowseProjection(), page = UUID()
+      var builds = 0
+      @MainActor func group() {
+        let identity = PhotoBrowseProjectionID(storePage: page, catalog: services.consumerCatalogGeneration,
+          sources: services.consumerBackupSourcesGeneration, filter: .all, dates: .all, moments: false,
+          scope: "photos", day: Calendar.current.startOfDay(for: Date()))
+        _ = projection.groups(for: identity) { builds += 1; return [] }
+      }
+      group()
+      let baseline = services.consumerBackupSourcesGeneration
+      for phase: BackupSource.Phase in [.queued, .failed, .pending] {
+        source.phase = phase; source.message = "Current transfer status"
+        try services.store.putBackupSource(source); services.refreshConsumerSyncSummary(); group()
+        XCTAssertEqual(services.consumerBackupSourcesGeneration, baseline)
+        XCTAssertEqual(services.consumerBackupSources.first { $0.id == source.id }, source,
+          "Progress must still reach the separate tile status projection")
+        XCTAssertEqual(services.photoSyncItem(sourceID: source.id, revision: "current")?.sourceRevision, "current")
+      }
+      XCTAssertEqual(builds, 1)
+      source.phase = .committed
+      try services.store.putBackupSource(source); services.refreshConsumerSyncSummary(); group()
+      XCTAssertEqual(builds, 2, "A newly verified Saved copy must refresh timeline deduplication")
+      source.message = "Updated status detail"
+      try services.store.putBackupSource(source); services.refreshConsumerSyncSummary(); group()
+      XCTAssertEqual(builds, 2)
+      source.sourceRevision = "edited"
+      try services.store.putBackupSource(source); services.refreshConsumerSyncSummary(); group()
+      XCTAssertEqual(builds, 3, "Source corrections must withdraw the old deduplication binding")
+      source.phase = .queued
+      try services.store.putBackupSource(source); services.refreshConsumerSyncSummary(); group()
+      XCTAssertEqual(builds, 4, "Leaving committed state must restore the Saved copy")
+    }
+  }
+  @MainActor func testAnnotationAcknowledgmentAndCoalescedDrainDoNotRepublishBrowseEvidence() async throws {
+    for editDuringSend in [false, true] {
+      let started = expectation(description: "Held annotation acknowledgment")
+      let gate = SavedLibraryRequestGate(started: started)
+      try await withSavedLibrary(gate: gate, annotationWrites: true) { services, server in
+        defer { gate.release.signal() }
+        var photo = try self.samplePhoto()
+        photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+        try services.store.put(photo)
+        try services.reload()
+        try services.setLabels(["First reviewed label"], photo: photo)
+        let sending = Task { await services.syncAnnotations() }
+        await self.fulfillment(of: [started], timeout: 3)
+        XCTAssertTrue(services.annotations.busy)
+        // A second wakeup returns while the first request remains held.
+        let beforeCoalesced = services.consumerCatalogGeneration
+        await services.syncAnnotations()
+        XCTAssertEqual(services.consumerCatalogGeneration, beforeCoalesced)
+        if editDuringSend {
+          try services.setLabels(["Newer reviewed label"], photo: photo)
+          XCTAssertEqual(services.annotation(photo).labels, ["Newer reviewed label"])
+          XCTAssertGreaterThan(services.consumerCatalogGeneration, beforeCoalesced,
+            "A genuine annotation edit must still publish immediately")
+        }
+        let expected = services.annotation(photo)
+        let generation = services.consumerCatalogGeneration
+        let catalogChanges = SavedSemanticObservationCounter(), overlayChanges = SavedSemanticObservationCounter()
+        withObservationTracking { _ = services.consumerCatalogGeneration } onChange: { catalogChanges.increment() }
+        withObservationTracking { _ = services.photoAnnotations } onChange: { overlayChanges.increment() }
+        gate.release.signal()
+        await sending.value
+        XCTAssertEqual(services.annotation(photo), expected, "An older acknowledgment cannot overwrite a newer visible edit")
+        XCTAssertEqual(try services.annotations.ledger.current(photo: photo, bundle: services.vault.requireBundle(),
+          card: services.session.requireCard(photo.manifest.ownerAccountId)), expected)
+        XCTAssertTrue(try services.annotations.ledger.pendingIDs().isEmpty)
+        XCTAssertEqual(server.requests.filter { $0.method == "PUT" }.count, editDuringSend ? 2 : 1)
+        XCTAssertEqual(services.consumerCatalogGeneration, generation)
+        XCTAssertEqual(catalogChanges.value, 0, "Acknowledgment must not restart catalog-bound search")
+        XCTAssertEqual(overlayChanges.value, 0, "Acknowledgment must not republish every loaded photo overlay")
+        await services.syncAnnotations()
+        XCTAssertEqual(services.consumerCatalogGeneration, generation, "An empty drain must also leave browse identity stable")
+        XCTAssertEqual(overlayChanges.value, 0)
+      }
+    }
+  }
+
   @MainActor func testPhotosExportPreservesOriginalResourcesUntilCreationCompletes() async throws {
     let archive = try Data(contentsOf: XCTUnwrap(Bundle(for: Self.self).url(forResource: "camera-live", withExtension: "fotoro-live")))
     let pair = try CameraMedia.decodeLivePhoto(archive)
@@ -2203,6 +2288,7 @@ extension ConsumerCoreTests {
     failureCode: String = "CONTROLLED_CATALOG_UNAVAILABLE",
     networkFailure: URLError.Code? = nil,
     original: Data? = nil, mediaVersion: Int? = 1, peerContribution: Bool = false, multipage: Bool = false,
+    annotationWrites: Bool = false,
     check: @MainActor (AppServices, SavedLibraryServer) async throws -> Void) async throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
     let previousCards = UserDefaults.standard.object(forKey: "fotoro.pinnedCards")
@@ -2211,7 +2297,8 @@ extension ConsumerCoreTests {
     let secret = accounts.testSecrets[0]
     let server = try SavedLibraryServer(card: card, secret: secret, gate: gate, failFirst: failFirst,
       failureCode: failureCode, networkFailure: networkFailure,
-      original: original ?? Data("jpg".utf8), mediaVersion: mediaVersion, peerContribution: peerContribution, multipage: multipage)
+      original: original ?? Data("jpg".utf8), mediaVersion: mediaVersion, peerContribution: peerContribution, multipage: multipage,
+      annotationWrites: annotationWrites)
     SavedLibraryProtocol.server = server
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [SavedLibraryProtocol.self]
@@ -2281,15 +2368,18 @@ private final class SavedLibraryServer: @unchecked Sendable {
   private let gate: SavedLibraryRequestGate?
   private var gateUsed = false
   private let multipage: Bool
+  private let annotationWrites: Bool
   private var failFirst: Bool
   private var networkFailure: URLError.Code?
   private let failureCode: String
   private let page: Data
   private let metadata: Data
   init(card: AccountCardV1, secret: FixtureSecrets, gate: SavedLibraryRequestGate?, failFirst: Bool,
-    failureCode: String, networkFailure: URLError.Code?, original: Data, mediaVersion: Int?, peerContribution: Bool, multipage: Bool = false) throws {
+    failureCode: String, networkFailure: URLError.Code?, original: Data, mediaVersion: Int?, peerContribution: Bool, multipage: Bool = false,
+    annotationWrites: Bool = false) throws {
     self.gate = gate; self.failFirst = failFirst
     self.multipage = multipage
+    self.annotationWrites = annotationWrites
     self.failureCode = failureCode
     self.networkFailure = networkFailure
     let crypto = CryptoAdapter(), key = crypto.randomKey()
@@ -2326,11 +2416,13 @@ private final class SavedLibraryServer: @unchecked Sendable {
   }
   var requests: [Request] { lock.lock(); defer { lock.unlock() }; return recorded }
   func response(_ request: URLRequest) throws -> (Int, Data) {
-    guard request.httpMethod == "GET", let path = request.url?.path else { throw FotoroError("Catalog reading sent a write") }
+    guard let path = request.url?.path,
+      request.httpMethod == "GET" || annotationWrites && request.httpMethod == "PUT" && path.hasSuffix("/annotations")
+    else { throw FotoroError("Catalog reading sent a write") }
     let mediaAware = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?
       .contains { $0.name == "media" && $0.value == "1" } == true
     let cursor = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "cursor" }?.value
-    lock.lock(); recorded.append(Request(method: "GET", path: path, mediaAware: mediaAware, cursor: cursor)); let first = recorded.count == 1
+    lock.lock(); recorded.append(Request(method: request.httpMethod ?? "GET", path: path, mediaAware: mediaAware, cursor: cursor)); let first = recorded.count == 1
     let hold = !gateUsed && (gate?.cursor.map { path == "/v1/changes" && cursor == $0 } ?? first)
     if hold { gateUsed = true }
     let fail = failFirst && path == "/v1/changes"; if fail { failFirst = false }
@@ -2339,6 +2431,7 @@ private final class SavedLibraryServer: @unchecked Sendable {
     lock.unlock()
     if hold, let gate { gate.started.fulfill(); _ = gate.release.wait(timeout: .now() + 5) }
     if let networkError { throw URLError(networkError) }
+    if request.httpMethod == "PUT" { return (200, Data("{}".utf8)) }
     if fail {
       return (failureCode == "UNAUTHENTICATED" ? 401 : 503,
         try JSONSerialization.data(withJSONObject: ["code": failureCode, "retryable": true]))

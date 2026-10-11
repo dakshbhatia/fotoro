@@ -64,7 +64,7 @@ struct AutomaticPhotoSyncIntake: Codable, Equatable {
 
 // Query the admitted dated horizon and point-fetch earlier accepted sources.
 // Tracked revisions remain reconcilable regardless of phase or capture date.
-struct AutomaticPhotoSyncScanPlan {
+struct AutomaticPhotoSyncScanPlan: Sendable {
   let cutoff: Date?
   let through: Date
   let trackedIDs: Set<String>
@@ -201,11 +201,47 @@ extension LibraryStore {
   }
 }
 
-struct BackupCandidate {
+struct BackupCandidate: Sendable {
   var id: String
   var capturedAt: Date?
   var skipReason: String?
   var sourceRevision: String?
+}
+
+enum BackupMetadataIntake {
+  // Only value facts cross the worker boundary. PhotoKit objects stay here.
+  static func fetch(cutoff: Date?, through: Date, trackedIDs: Set<String>,
+    selectionIDs: [String]?, excludeHidden: Bool) throws -> [BackupCandidate] {
+    try Task.checkCancellation()
+    let results: [PHFetchResult<PHAsset>]
+    if let selectionIDs {
+      results = [PHAsset.fetchAssets(withLocalIdentifiers: selectionIDs, options: nil)]
+    } else {
+      let options = PHFetchOptions()
+      options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+      if let cutoff {
+        options.predicate = NSPredicate(format: "creationDate >= %@ AND creationDate <= %@", cutoff as NSDate, through as NSDate)
+      }
+      var fetched = [PHAsset.fetchAssets(with: options)]
+      if cutoff != nil, !trackedIDs.isEmpty {
+        fetched.append(PHAsset.fetchAssets(withLocalIdentifiers: Array(trackedIDs), options: nil))
+      }
+      results = fetched
+    }
+    var candidates: [BackupCandidate] = [], seen = Set<String>(), examined = 0
+    for assets in results {
+      for offset in 0..<assets.count {
+        if examined.isMultiple(of: 128) { try Task.checkCancellation() }
+        examined += 1
+        let asset = assets.object(at: offset)
+        guard seen.insert(asset.localIdentifier).inserted, !excludeHidden || !asset.isHidden else { continue }
+        candidates.append(BackupCandidate(id: asset.localIdentifier, capturedAt: asset.creationDate,
+          skipReason: CameraMedia.sourceSkipReason(asset), sourceRevision: RecentPhoto.sourceRevision(asset)))
+      }
+    }
+    try Task.checkCancellation()
+    return candidates
+  }
 }
 struct PhotoSyncItemStatus: Equatable {
   enum Phase: Equatable { case waiting, preparing, uploading, finishing, saved, skipped, needsAttention }

@@ -12,6 +12,21 @@ struct ConsumerSearchHit: Identifiable, Equatable, Sendable {
   var id: String { photo.id }
 }
 enum ConsumerSearchBinding {
+  struct CopyIdentity: Hashable {
+    let sourceID: String
+    let photoID: String
+    let revision: String
+    let digest: String
+  }
+  // Only these source fields participate in verified device/Saved deduplication.
+  // Messages and non-committed phases are tile status, not timeline identity.
+  static func copyIdentities(_ sources: [BackupSource]) -> Set<CopyIdentity> {
+    Set(sources.compactMap { source in
+      guard source.phase == .committed, let revision = source.sourceRevision,
+        let digest = source.originalSha256, (try? Data(b64: digest).count) == 32 else { return nil }
+      return CopyIdentity(sourceID: source.id, photoID: source.photoId, revision: revision, digest: digest)
+    })
+  }
   static func selectionForResults(_ hits: [ConsumerSearchHit], reviewedIDs: Set<String>? = nil) -> Set<ConsumerPhotoReference> {
     Set(hits.filter { reviewedIDs?.contains($0.id) ?? true }.map(\.photo))
   }
