@@ -1,6 +1,13 @@
 import Foundation
 import GRDB
 
+enum SearchAnalysisStage: String, Sendable, CaseIterable { case ocr, visual, semantic }
+enum SearchAnalysisOutcome: String, Sendable { case unavailable, failed, modelDeferred }
+struct SearchAnalysisWork: Sendable {
+  let record: SearchRecord
+  let stages: Set<SearchAnalysisStage>
+}
+
 // A device-local index. Network synchronization is handled by the owner annotation journal.
 final class SearchIndex: @unchecked Sendable {
   let database: DatabaseQueue
@@ -75,6 +82,8 @@ final class SearchIndex: @unchecked Sendable {
           CREATE TABLE IF NOT EXISTS searchRecords(id TEXT PRIMARY KEY, scope TEXT NOT NULL, capture REAL, favorite INTEGER NOT NULL, moment INTEGER NOT NULL, ocrState TEXT NOT NULL, visualState TEXT NOT NULL DEFAULT 'pending', preview INTEGER NOT NULL, burst TEXT, value BLOB NOT NULL);
           CREATE INDEX IF NOT EXISTS searchSourceDate ON searchRecords(scope,capture);
           CREATE TABLE IF NOT EXISTS searchVectors(photo TEXT PRIMARY KEY REFERENCES searchRecords(id) ON DELETE CASCADE, revision TEXT NOT NULL, processor TEXT NOT NULL, vector BLOB NOT NULL);
+          CREATE TABLE IF NOT EXISTS searchAnalysisAttempts(photo TEXT NOT NULL REFERENCES searchRecords(id) ON DELETE CASCADE, stage TEXT NOT NULL, revision TEXT NOT NULL, processor TEXT NOT NULL, outcome TEXT NOT NULL, attempts INTEGER NOT NULL, retryAfter REAL NOT NULL, PRIMARY KEY(photo,stage));
+          CREATE INDEX IF NOT EXISTS searchAnalysisRetryAt ON searchAnalysisAttempts(retryAfter);
           CREATE TABLE IF NOT EXISTS searchTerms(meaning TEXT NOT NULL, term TEXT NOT NULL, display TEXT NOT NULL, relation TEXT NOT NULL, PRIMARY KEY(meaning,term));
           CREATE INDEX IF NOT EXISTS searchTermPrefix ON searchTerms(term,meaning);
           CREATE TABLE IF NOT EXISTS searchPostings(meaning TEXT NOT NULL, photo TEXT NOT NULL REFERENCES searchRecords(id) ON DELETE CASCADE, evidence INTEGER NOT NULL, confidence REAL NOT NULL, display TEXT NOT NULL DEFAULT '', PRIMARY KEY(meaning,photo));
@@ -143,6 +152,7 @@ final class SearchIndex: @unchecked Sendable {
         current.revision == revision else { return false }
       try db.execute(sql: "INSERT OR REPLACE INTO searchVectors(photo,revision,processor,vector) VALUES(?,?,?,?)",
         arguments: [photoID, revision, SemanticVector.processor, SemanticVector.data(normalized)])
+      try clearAnalysisAttempt(photoID: photoID, stage: .semantic, db: db)
       return true
     }
   }
@@ -176,7 +186,7 @@ final class SearchIndex: @unchecked Sendable {
   #endif
   func applyOCR(
     _ result: SearchOCRResult?, status: SearchOCRStatus, photoID: String, revision: String,
-    generation: UInt64? = nil
+    generation: UInt64? = nil, attemptedAt: Date? = nil, expectedProcessor: String? = nil
   ) throws -> Bool {
     try database.write { db in
       guard acceptsGeneration(generation) else { return false }
@@ -185,6 +195,7 @@ final class SearchIndex: @unchecked Sendable {
           db, sql: "SELECT value FROM searchRecords WHERE id=?", arguments: [photoID]
         ).map(decode), r.revision == revision
       else { return false }
+      guard expectedProcessor == nil || expectedProcessor == r.processor else { return false }
       r.ocrText = result?.text ?? ""
       r.ocrConfidence = result?.confidence ?? 0
       r.ocrStatus = status
@@ -195,17 +206,21 @@ final class SearchIndex: @unchecked Sendable {
       }
       r.previewAvailable = result != nil || status == .failed
       try put(r, db: db)
+      try updateAnalysisAttempt(record: r, stage: .ocr, processor: r.processor,
+        outcome: status == .unavailable ? .unavailable : status == .failed ? .failed : nil,
+        attemptedAt: attemptedAt, db: db)
       return true
     }
   }
   @discardableResult func applyVisual(
     _ result: SearchVisualResult?, status: SearchVisualStatus, photoID: String, revision: String,
-    generation: UInt64? = nil
+    generation: UInt64? = nil, attemptedAt: Date? = nil, expectedProcessor: String? = nil
   ) throws -> Bool {
     try database.write { db in
       guard acceptsGeneration(generation), var record = try Row.fetchOne(
         db, sql: "SELECT value FROM searchRecords WHERE id=?", arguments: [photoID]
       ).map(decode), record.revision == revision else { return false }
+      guard expectedProcessor == nil || expectedProcessor == record.visualProcessor else { return false }
       guard result == nil || result?.processor == record.visualProcessor else { return false }
       record.visualLabels = result.map {
         SearchVisualPolicy.validated($0.labels, processor: $0.processor)
@@ -218,6 +233,9 @@ final class SearchIndex: @unchecked Sendable {
       }
       record.previewAvailable = record.previewAvailable || result != nil || status == .failed
       try put(record, db: db)
+      try updateAnalysisAttempt(record: record, stage: .visual, processor: record.visualProcessor,
+        outcome: status == .unavailable ? .unavailable : status == .failed ? .failed : nil,
+        attemptedAt: attemptedAt, db: db)
       return true
     }
   }
@@ -334,26 +352,137 @@ final class SearchIndex: @unchecked Sendable {
     }
     return (conditions.joined(separator: " AND "), arguments)
   }
-  private func scopedAnalysisQuery(_ scope: PhotoAnalysisScope, after: PhotoAnalysisCursor?, retryFailed: Bool) -> (String, StatementArguments) {
-    let (condition, arguments) = metadataAnalysisFilter(scope, after: after)
-    var pending = "r.ocrState IN ('pending','unavailable') OR r.visualState IN ('pending','unavailable')"
-    if retryFailed { pending += " OR r.ocrState='failed' OR r.visualState='failed'" }
+  private func analysisStageConditions(retryFailed: Bool, now: Date, bypassDeferred: Bool) -> [(SearchAnalysisStage, String, StatementArguments)] {
+    var stages: [(SearchAnalysisStage, String, StatementArguments)] = []
+    for (stage, state, processor) in [(SearchAnalysisStage.ocr, "r.ocrState", "json_extract(r.value,'$.processor')"),
+      (.visual, "r.visualState", "json_extract(r.value,'$.visualProcessor')")] {
+      let matching = "a.photo=r.id AND a.stage='\(stage.rawValue)' AND a.revision=json_extract(r.value,'$.revision') AND a.processor=\(processor)"
+      // A scheduled failure retries when due even during a metadata-only refresh.
+      let failed = retryFailed ? "\(state)='failed'" : "(\(state)='failed' AND EXISTS(SELECT 1 FROM searchAnalysisAttempts a WHERE \(matching)))"
+      var sql = "(\(state) IN ('pending','unavailable') OR \(failed))"
+      var arguments = StatementArguments()
+      if !bypassDeferred {
+        sql += " AND NOT EXISTS(SELECT 1 FROM searchAnalysisAttempts a WHERE \(matching) AND a.retryAfter>?)"
+        arguments += [now.timeIntervalSince1970]
+      }
+      stages.append((stage, sql, arguments))
+    }
     #if !FOTORO_LOCAL_PREVIEW
-    pending += " OR v.photo IS NULL OR v.processor!=? OR v.revision!=json_extract(r.value,'$.revision')"
-    return ("FROM searchRecords r LEFT JOIN searchVectors v ON v.photo=r.id WHERE "+condition+" AND ("+pending+")", arguments + [SemanticVector.processor])
+    var semantic = "(v.photo IS NULL OR v.processor!=? OR v.revision!=json_extract(r.value,'$.revision'))"
+    var arguments: StatementArguments = [SemanticVector.processor]
+    if !bypassDeferred {
+      semantic += " AND NOT EXISTS(SELECT 1 FROM searchAnalysisAttempts a WHERE a.photo=r.id AND a.stage='semantic' AND a.revision=json_extract(r.value,'$.revision') AND a.processor=? AND a.retryAfter>?)"
+      arguments += [SemanticVector.processor, now.timeIntervalSince1970]
+    }
+    stages.append((.semantic, semantic, arguments))
+    #endif
+    return stages
+  }
+  private var analysisJoin: String {
+    #if !FOTORO_LOCAL_PREVIEW
+    "FROM searchRecords r LEFT JOIN searchVectors v ON v.photo=r.id"
     #else
-    return ("FROM searchRecords r WHERE "+condition+" AND ("+pending+")", arguments)
+    "FROM searchRecords r"
     #endif
   }
-  func pendingMetadataAnalysisCount(scope: PhotoAnalysisScope, after: PhotoAnalysisCursor? = nil, retryFailed: Bool = false) throws -> Int {
-    let (sql, arguments) = scopedAnalysisQuery(scope, after: after, retryFailed: retryFailed)
-    return try database.read { try Int.fetchOne($0, sql: "SELECT count(*) "+sql, arguments: arguments) ?? 0 }
+  func pendingMetadataAnalysisCount(scope: PhotoAnalysisScope, after: PhotoAnalysisCursor? = nil,
+    retryFailed: Bool = false, now: Date = Date(), bypassDeferred: Bool = false) throws -> Int {
+    let (filter, filterArguments) = metadataAnalysisFilter(scope, after: after)
+    let stages = analysisStageConditions(retryFailed: retryFailed, now: now, bypassDeferred: bypassDeferred)
+    var arguments = filterArguments
+    for stage in stages { arguments += stage.2 }
+    let pending = stages.map { "("+$0.1+")" }.joined(separator: " OR ")
+    return try database.read { try Int.fetchOne($0, sql: "SELECT count(*) "+analysisJoin+" WHERE "+filter+" AND ("+pending+")", arguments: arguments) ?? 0 }
   }
-  func pendingMetadataAnalysisRecords(scope: PhotoAnalysisScope, after: PhotoAnalysisCursor? = nil, retryFailed: Bool = false, limit: Int = 500) throws -> [SearchRecord] {
-    let (sql, arguments) = scopedAnalysisQuery(scope, after: after, retryFailed: retryFailed)
-    return try database.read { try Row.fetchAll($0, sql: "SELECT r.value "+sql+" ORDER BY r.capture DESC,r.id LIMIT ?",
-      arguments: arguments + [min(500, max(0, limit))]).map(decode) }
+  func pendingMetadataAnalysisWork(scope: PhotoAnalysisScope, after: PhotoAnalysisCursor? = nil,
+    retryFailed: Bool = false, now: Date = Date(), bypassDeferred: Bool = false, limit: Int = 500) throws -> [SearchAnalysisWork] {
+    let (filter, filterArguments) = metadataAnalysisFilter(scope, after: after)
+    let stages = analysisStageConditions(retryFailed: retryFailed, now: now, bypassDeferred: bypassDeferred)
+    let columns = stages.map { "CASE WHEN "+$0.1+" THEN 1 ELSE 0 END AS "+$0.0.rawValue+"Due" }.joined(separator: ",")
+    let pending = stages.map { "("+$0.1+")" }.joined(separator: " OR ")
+    var arguments = StatementArguments()
+    for stage in stages { arguments += stage.2 }
+    arguments += filterArguments
+    for stage in stages { arguments += stage.2 }
+    arguments += [min(500, max(0, limit))]
+    return try database.read { db in
+      try Row.fetchAll(db, sql: "SELECT r.value,"+columns+" "+analysisJoin+" WHERE "+filter+" AND ("+pending+") ORDER BY r.capture DESC,r.id LIMIT ?", arguments: arguments).map { row in
+        SearchAnalysisWork(record: try decode(row), stages: Set(stages.compactMap { stage in
+          let due: Bool = row[stage.0.rawValue+"Due"]
+          return due ? stage.0 : nil
+        }))
+      }
+    }
   }
+  func pendingMetadataAnalysisRecords(scope: PhotoAnalysisScope, after: PhotoAnalysisCursor? = nil,
+    retryFailed: Bool = false, now: Date = Date(), bypassDeferred: Bool = false, limit: Int = 500) throws -> [SearchRecord] {
+    try pendingMetadataAnalysisWork(scope: scope, after: after, retryFailed: retryFailed,
+      now: now, bypassDeferred: bypassDeferred, limit: limit).map(\.record)
+  }
+  func nextMetadataAnalysisRetry(scope: PhotoAnalysisScope, now: Date = Date()) throws -> Date? {
+    let (filter, filterArguments) = metadataAnalysisFilter(scope)
+    let stages = analysisStageConditions(retryFailed: true, now: now, bypassDeferred: true)
+    var arguments = filterArguments
+    let pending = stages.map { stage -> String in
+      arguments += stage.2
+      let processor: String
+      switch stage.0 {
+      case .ocr: processor = "json_extract(r.value,'$.processor')"
+      case .visual: processor = "json_extract(r.value,'$.visualProcessor')"
+      case .semantic:
+        #if !FOTORO_LOCAL_PREVIEW
+        processor = "?"; arguments += [SemanticVector.processor]
+        #else
+        processor = "''"
+        #endif
+      }
+      return "(a.stage='\(stage.0.rawValue)' AND (\(stage.1)) AND a.processor=\(processor))"
+    }.joined(separator: " OR ")
+    return try database.read { db in
+      // Include deadlines that elapsed while later sources were being processed.
+      // The owner clamps an overdue wakeup to zero and restarts the transient cursor.
+      try Double.fetchOne(db, sql: "SELECT MIN(a.retryAfter) "+analysisJoin+" JOIN searchAnalysisAttempts a ON a.photo=r.id AND a.revision=json_extract(r.value,'$.revision') WHERE "+filter+" AND ("+pending+")", arguments: arguments).map(Date.init(timeIntervalSince1970:))
+    }
+  }
+  private func clearAnalysisAttempt(photoID: String, stage: SearchAnalysisStage, db: Database) throws {
+    try db.execute(sql: "DELETE FROM searchAnalysisAttempts WHERE photo=? AND stage=?", arguments: [photoID, stage.rawValue])
+  }
+  private func updateAnalysisAttempt(record: SearchRecord, stage: SearchAnalysisStage, processor: String,
+    outcome: SearchAnalysisOutcome?, attemptedAt: Date?, db: Database) throws {
+    guard let outcome, let attemptedAt else {
+      try clearAnalysisAttempt(photoID: record.id, stage: stage, db: db)
+      return
+    }
+    let prior = try Int.fetchOne(db, sql: "SELECT attempts FROM searchAnalysisAttempts WHERE photo=? AND stage=? AND revision=? AND processor=? AND outcome=?",
+      arguments: [record.id, stage.rawValue, record.revision, processor, outcome.rawValue]) ?? 0
+    let attempts = min(16, prior + 1)
+    let initial: Double = outcome == .failed ? 30 : outcome == .unavailable ? 300 : 60
+    let delay = min(outcome == .unavailable ? 3600 : 900, initial * pow(2, Double(min(6, attempts - 1))))
+    try db.execute(sql: "INSERT INTO searchAnalysisAttempts(photo,stage,revision,processor,outcome,attempts,retryAfter) VALUES(?,?,?,?,?,?,?) ON CONFLICT(photo,stage) DO UPDATE SET revision=excluded.revision,processor=excluded.processor,outcome=excluded.outcome,attempts=excluded.attempts,retryAfter=excluded.retryAfter",
+      arguments: [record.id, stage.rawValue, record.revision, processor, outcome.rawValue, attempts, attemptedAt.addingTimeInterval(delay).timeIntervalSince1970])
+  }
+  #if !FOTORO_LOCAL_PREVIEW
+  @discardableResult func deferSemantic(_ outcome: SearchAnalysisOutcome, photoID: String, revision: String,
+    attemptedAt: Date, generation: UInt64? = nil) throws -> Bool {
+    try database.write { db in
+      guard acceptsGeneration(generation), let record = try Row.fetchOne(db,
+        sql: "SELECT value FROM searchRecords WHERE id=?", arguments: [photoID]).map(decode),
+        record.revision == revision else { return false }
+      guard try Int.fetchOne(db, sql: "SELECT count(*) FROM searchVectors WHERE photo=? AND revision=? AND processor=?",
+        arguments: [photoID, revision, SemanticVector.processor]) == 0 else { return false }
+      try updateAnalysisAttempt(record: record, stage: .semantic, processor: SemanticVector.processor,
+        outcome: outcome, attemptedAt: attemptedAt, db: db)
+      return true
+    }
+  }
+  @discardableResult func releaseModelDeferredAnalysis(generation: UInt64? = nil) throws -> Bool {
+    try database.write { db in
+      guard acceptsGeneration(generation) else { return false }
+      try db.execute(sql: "DELETE FROM searchAnalysisAttempts WHERE stage='semantic' AND outcome='modelDeferred' AND processor=? AND revision=(SELECT json_extract(value,'$.revision') FROM searchRecords WHERE id=photo)", arguments: [SemanticVector.processor])
+      return db.changesCount > 0
+    }
+  }
+  #endif
   func pendingAnalysisRecords(retryFailed: Bool = false) throws -> [SearchRecord] {
     try database.read { db in
       try Row.fetchAll(db, sql: """

@@ -66,6 +66,9 @@ enum SearchMetadataIntake {
   @ObservationIgnored private var automaticAnalysisScope: PhotoAnalysisScope?
   @ObservationIgnored private var automaticAnalysisCursor: PhotoAnalysisCursor?
   @ObservationIgnored private var idleAnalysisTask: Task<Void, Never>?
+  @ObservationIgnored private var automaticRetryTask: Task<Void, Never>?
+  @ObservationIgnored private var automaticRetryID = UUID()
+  @ObservationIgnored var analysisNow: () -> Date = { Date() }
   @ObservationIgnored private var automaticAnalysisActive = true
   @ObservationIgnored private var browseInteractionActive = false
   @ObservationIgnored private var automaticRetryFailed = false
@@ -191,6 +194,7 @@ enum SearchMetadataIntake {
   }
   private func cancelAutomaticAnalysis() {
     idleAnalysisTask?.cancel(); idleAnalysisTask = nil
+    automaticRetryTask?.cancel(); automaticRetryTask = nil; automaticRetryID = UUID()
     automaticAnalysisRestartRequested = false
     #if !FOTORO_LOCAL_PREVIEW
       semanticPreparationTask?.cancel()
@@ -204,12 +208,35 @@ enum SearchMetadataIntake {
   private func scheduleAutomaticAnalysis() {
     guard ready, index != nil, automaticAnalysisAdmitted, !indexing,
       (automaticAnalysisTask == nil || automaticAnalysisTask?.isCancelled == true), idleAnalysisTask == nil else { return }
+    automaticRetryTask?.cancel(); automaticRetryTask = nil; automaticRetryID = UUID()
     idleAnalysisTask = Task { [weak self] in
       do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
       guard let self, !Task.isCancelled else { return }
       idleAnalysisTask = nil
       automaticAnalysisRestartRequested = true
       startAutomaticAnalysis()
+    }
+  }
+  private func scheduleAutomaticRetry(scope: PhotoAnalysisScope, token: UInt64) {
+    guard ready, let index, automaticAnalysisAdmitted, !indexing, automaticRetryTask == nil else { return }
+    let id = UUID(), now = analysisNow()
+    automaticRetryID = id
+    automaticRetryTask = Task { [weak self] in
+      defer { if let self, automaticRetryID == id { automaticRetryTask = nil } }
+      do {
+        let due = try await Task.detached(priority: .utility) {
+          try index.nextMetadataAnalysisRetry(scope: scope, now: now)
+        }.value
+        guard let due else { return }
+        try Task.checkCancellation()
+        try await Task.sleep(for: .seconds(max(0, due.timeIntervalSince(now))))
+        guard let self, !Task.isCancelled, automaticRetryID == id,
+          token == work.generation, automaticAnalysisAdmitted, ready else { return }
+        automaticRetryTask = nil
+        // Results and stage deadlines are durable; the traversal cursor is not.
+        automaticAnalysisCursor = nil
+        scheduleAutomaticAnalysis()
+      } catch {}
     }
   }
   private func startAutomaticAnalysis() {
@@ -232,6 +259,9 @@ enum SearchMetadataIntake {
           #if !FOTORO_LOCAL_PREVIEW
             if semanticRetryRequested { scheduleAutomaticAnalysis() }
           #endif
+          if !Task.isCancelled, !automaticAnalysisRestartRequested {
+            scheduleAutomaticRetry(scope: automaticAnalysisScope ?? PhotoAnalysisScope(), token: token)
+          }
         }
       }
       guard !Task.isCancelled, automaticAnalysisID == id, automaticAnalysisAdmitted,
@@ -243,6 +273,15 @@ enum SearchMetadataIntake {
       let scope = automaticAnalysisScope ?? PhotoAnalysisScope()
       automaticAnalysisScope = scope
       var after = automaticAnalysisCursor
+      #if !FOTORO_LOCAL_PREVIEW
+        if await semanticReady(), let index {
+          let released = try? await Task.detached(priority: .utility) {
+            try index.releaseModelDeferredAnalysis(generation: token)
+          }.value
+          guard analysisIsCurrent(scope, token: token, explicit: false) else { return }
+          if released == true { after = nil; automaticAnalysisCursor = nil }
+        }
+      #endif
       #if DEBUG
         let limit = max(1, min(500, automaticAnalysisBatchLimit))
       #else
@@ -400,6 +439,13 @@ enum SearchMetadataIntake {
           try await prepareSemantic()
           try Task.checkCancellation()
           guard token == work.generation, ready, await semanticReady() else { return }
+          guard let index else { return }
+          let released = try await Task.detached(priority: .utility) {
+            try index.releaseModelDeferredAnalysis(generation: token)
+          }.value
+          guard released else { return }
+          try Task.checkCancellation()
+          guard token == work.generation, ready else { return }
           semanticRetryRequested = true
           scheduleAutomaticAnalysis()
         } catch {}
@@ -433,9 +479,12 @@ enum SearchMetadataIntake {
     guard let localIndex = index else { return nil }
     analysisScope = scope
     do {
+      let now = analysisNow()
       let batch = try await Task.detached(priority: .utility) {
-        (try localIndex.pendingMetadataAnalysisCount(scope: scope, after: after, retryFailed: retryFailedOCR),
-          try localIndex.pendingMetadataAnalysisRecords(scope: scope, after: after, retryFailed: retryFailedOCR, limit: limit))
+        (try localIndex.pendingMetadataAnalysisCount(scope: scope, after: after, retryFailed: retryFailedOCR,
+          now: now, bypassDeferred: explicit),
+          try localIndex.pendingMetadataAnalysisWork(scope: scope, after: after, retryFailed: retryFailedOCR,
+            now: now, bypassDeferred: explicit, limit: limit))
       }.value
       let pending = batch.1
       guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled else { return nil }
@@ -464,7 +513,8 @@ enum SearchMetadataIntake {
         #endif
       }
       analysisProgress = pending.isEmpty ? nil : SearchAnalysisProgress(processed: 0, total: pending.count)
-      for record in pending {
+      for job in pending {
+        let record = job.record
         try Task.checkCancellation()
         guard analysisIsCurrent(scope, token: token, explicit: explicit), let photo = assets[record.id], analysisSourceCurrent(record) else { break }
         let preview = await loadPreview(photo.asset)
@@ -472,10 +522,8 @@ enum SearchMetadataIntake {
         guard analysisIsCurrent(scope, token: token, explicit: explicit), analysisSourceCurrent(record),
           RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite))
         else { break }
-        let needsOCR = record.ocrStatus == .pending || record.ocrStatus == .unavailable
-          || retryFailedOCR && record.ocrStatus == .failed
-        let needsVisual = record.visualStatus == .pending || record.visualStatus == .unavailable
-          || retryFailedOCR && record.visualStatus == .failed
+        let needsOCR = job.stages.contains(.ocr)
+        let needsVisual = job.stages.contains(.visual)
         if needsVisual {
           var result: SearchVisualResult?
           var state: SearchVisualStatus = .unavailable
@@ -494,9 +542,10 @@ enum SearchMetadataIntake {
           guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled, analysisSourceCurrent(record) else { break }
           let visualResult = result
           let visualState = state
+          let attemptedAt = analysisNow()
           _ = try await Task.detached {
             try localIndex.applyVisual(visualResult, status: visualState, photoID: record.id,
-              revision: record.revision, generation: token)
+              revision: record.revision, generation: token, attemptedAt: attemptedAt, expectedProcessor: record.visualProcessor)
           }.value
           guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled else { break }
         }
@@ -512,9 +561,10 @@ enum SearchMetadataIntake {
           // Both writes verify the revision and permitted generation inside the transaction.
           let ocrResult = result
           let ocrState = state
+          let attemptedAt = analysisNow()
           _ = try await Task.detached {
             try localIndex.applyOCR(ocrResult, status: ocrState, photoID: record.id,
-              revision: record.revision, generation: token)
+              revision: record.revision, generation: token, attemptedAt: attemptedAt, expectedProcessor: record.processor)
           }.value
         }
         guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled, analysisSourceCurrent(record) else { break }
@@ -526,7 +576,21 @@ enum SearchMetadataIntake {
         #if !FOTORO_LOCAL_PREVIEW
         // Warm inference uses this derivative. Cold installation cannot hold
         // later photos' OCR/classification or retain a cancelled browse worker.
-        if let preview, try localIndex.needsSemantic(photoID: record.id, revision: record.revision) {
+        if job.stages.contains(.semantic), try localIndex.needsSemantic(photoID: record.id, revision: record.revision) {
+          let attemptedAt = analysisNow()
+          guard let preview else {
+            _ = try await Task.detached {
+              try localIndex.deferSemantic(.unavailable, photoID: record.id, revision: record.revision,
+                attemptedAt: attemptedAt, generation: token)
+            }.value
+            guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled else { break }
+            analysisUnavailableIDs.insert(record.id)
+            attempted.append(record)
+            if !explicit { automaticAnalysisCursor = PhotoAnalysisCursor(record) }
+            analysisProgress?.processed += 1
+            await Task.yield()
+            continue
+          }
           var modelReady = await semanticReady()
           if explicit && !modelReady {
             // Historical/query-scoped requests retain this derivative and their
@@ -539,12 +603,29 @@ enum SearchMetadataIntake {
           if modelReady, let vector = try? await semanticImage(preview)
           {
             guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled, analysisSourceCurrent(record) else { break }
-            _ = try await Task.detached {
+            let committed = try await Task.detached {
               try localIndex.applySemantic(vector, photoID: record.id, revision: record.revision, generation: token)
             }.value
+            if !committed {
+              try Task.checkCancellation()
+              guard analysisIsCurrent(scope, token: token, explicit: explicit), analysisSourceCurrent(record) else { break }
+              _ = try await Task.detached {
+                try localIndex.deferSemantic(.failed, photoID: record.id, revision: record.revision,
+                  attemptedAt: attemptedAt, generation: token)
+              }.value
+            }
             guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled else { break }
             updateQuery(query)
-          } else if !modelReady && !explicit { beginSemanticPreparation(token: token) }
+          } else {
+            try Task.checkCancellation()
+            guard analysisIsCurrent(scope, token: token, explicit: explicit), analysisSourceCurrent(record) else { break }
+            let outcome: SearchAnalysisOutcome = modelReady ? .failed : .modelDeferred
+            _ = try await Task.detached {
+              try localIndex.deferSemantic(outcome, photoID: record.id, revision: record.revision,
+                attemptedAt: attemptedAt, generation: token)
+            }.value
+            if !modelReady && !explicit { beginSemanticPreparation(token: token) }
+          }
         }
         #endif
         guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled, analysisSourceCurrent(record) else { break }

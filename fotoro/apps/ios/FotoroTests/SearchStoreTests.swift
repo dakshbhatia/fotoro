@@ -1,8 +1,139 @@
+import GRDB
 import XCTest
 
 @testable import Fotoro
 
 final class SearchStoreTests: XCTestCase {
+  func testAnalysisRetriesReopenByStageWithoutLosingCompletedWork() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let now = Date(timeIntervalSince1970: 1_790_000_000)
+    let scope = PhotoAnalysisScope(now: now)
+    var records = ["complete", "unavailable", "failed", "vector-only", "untouched"].map { id in
+      var record = SearchRecord(id: id); record.capturedAt = now; return record
+    }
+    for number in 0..<4 { records[number].ocrStatus = .complete; records[number].visualStatus = .complete }
+    var index: SearchIndex? = try SearchIndex(root: root)
+    try index!.replacePermitted(records)
+    #if !FOTORO_LOCAL_PREVIEW
+    var vector = [Float](repeating: 0, count: 512); vector[0] = 1
+    for id in ["complete", "unavailable", "failed"] {
+      XCTAssertTrue(try index!.applySemantic(vector, photoID: id, revision: "1"))
+    }
+    #endif
+    XCTAssertTrue(try index!.applyOCR(nil, status: .unavailable, photoID: "unavailable", revision: "1", attemptedAt: now))
+    XCTAssertTrue(try index!.applyVisual(nil, status: .failed, photoID: "failed", revision: "1", attemptedAt: now))
+    index = nil
+    let reopened = try SearchIndex(root: root)
+    try reopened.replacePermitted(records)
+    let due = try reopened.pendingMetadataAnalysisWork(scope: scope, retryFailed: true, now: now)
+    #if !FOTORO_LOCAL_PREVIEW
+    XCTAssertEqual(Set(due.map { $0.record.id }), ["vector-only", "untouched"])
+    XCTAssertEqual(due.first { $0.record.id == "vector-only" }?.stages, [.semantic])
+    XCTAssertTrue(try reopened.needsSemantic(photoID: "vector-only", revision: "1"),
+      "A canceled stage that did not commit stays eligible after reopening")
+    XCTAssertFalse(try reopened.needsSemantic(photoID: "complete", revision: "1"))
+    #else
+    XCTAssertEqual(due.map { $0.record.id }, ["untouched"])
+    #endif
+    XCTAssertEqual(due.first { $0.record.id == "untouched" }?.stages.intersection([.ocr, .visual]), [.ocr, .visual])
+    XCTAssertEqual(try reopened.record("complete")?.ocrStatus, .complete)
+    XCTAssertEqual(try reopened.nextMetadataAnalysisRetry(scope: scope, now: now), now.addingTimeInterval(30))
+    let later = now.addingTimeInterval(301)
+    XCTAssertEqual(try reopened.nextMetadataAnalysisRetry(scope: scope, now: later), now.addingTimeInterval(30),
+      "An earlier retry that became due during a long batch must still wake the owner")
+    let laterWork = try reopened.pendingMetadataAnalysisWork(scope: scope, now: later)
+    XCTAssertEqual(laterWork.first { $0.record.id == "unavailable" }?.stages, [.ocr])
+    XCTAssertEqual(laterWork.first { $0.record.id == "failed" }?.stages, [.visual])
+    let explicit = try reopened.pendingMetadataAnalysisWork(scope: scope, retryFailed: true, now: now, bypassDeferred: true)
+    XCTAssertTrue(explicit.contains { $0.record.id == "unavailable" && $0.stages == [.ocr] })
+    XCTAssertTrue(explicit.contains { $0.record.id == "failed" && $0.stages == [.visual] })
+  }
+
+  func testAnalysisRetryRevisionProcessorWithdrawalAndAtomicFailure() throws {
+    let now = Date(timeIntervalSince1970: 1_790_000_000), scope = PhotoAnalysisScope(now: Date(timeIntervalSince1970: 1_790_000_000))
+    let index = try SearchIndex()
+    var record = SearchRecord(id: "source"); record.capturedAt = now
+    try index.replacePermitted([record])
+    XCTAssertTrue(try index.applyOCR(nil, status: .unavailable, photoID: record.id, revision: "1", attemptedAt: now))
+    XCTAssertTrue(try index.applyVisual(nil, status: .unavailable, photoID: record.id, revision: "1", attemptedAt: now))
+    record.processor = "vision-text-v2"
+    try index.replacePermitted([record])
+    let processorWork = try XCTUnwrap(index.pendingMetadataAnalysisWork(scope: scope, now: now).first)
+    XCTAssertTrue(processorWork.stages.contains(.ocr)); XCTAssertFalse(processorWork.stages.contains(.visual))
+    XCTAssertFalse(try index.applyOCR(nil, status: .failed, photoID: record.id, revision: "1", attemptedAt: now, expectedProcessor: "vision-text-v1"))
+    record.revision = "2"
+    try index.replacePermitted([record])
+    let changed = try XCTUnwrap(index.pendingMetadataAnalysisWork(scope: scope, now: now).first)
+    XCTAssertTrue(changed.stages.isSuperset(of: [.ocr, .visual]))
+    XCTAssertFalse(try index.applyVisual(nil, status: .failed, photoID: record.id, revision: "1", attemptedAt: now))
+    try index.database.write { db in
+      try db.execute(sql: "CREATE TRIGGER rejectAttempt BEFORE INSERT ON searchAnalysisAttempts BEGIN SELECT RAISE(ABORT,'test rollback'); END")
+    }
+    XCTAssertThrowsError(try index.applyOCR(nil, status: .failed, photoID: record.id, revision: "2", attemptedAt: now))
+    XCTAssertEqual(try index.record(record.id)?.ocrStatus, .pending, "Result and retry deadline roll back together")
+    try index.database.write { try $0.execute(sql: "DROP TRIGGER rejectAttempt") }
+    XCTAssertTrue(try index.applyOCR(nil, status: .failed, photoID: record.id, revision: "2", attemptedAt: now))
+    index.setWorkGeneration(2)
+    try index.replacePermitted([], generation: 2)
+    XCTAssertFalse(try index.applyOCR(nil, status: .failed, photoID: record.id, revision: "2", generation: 1, attemptedAt: now))
+    XCTAssertEqual(try index.database.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM searchAnalysisAttempts") }, 0)
+    XCTAssertTrue(try index.pendingMetadataAnalysisWork(scope: scope, now: now).isEmpty)
+  }
+
+  #if !FOTORO_LOCAL_PREVIEW
+  func testSyncedCompletionDoesNotBecomeLocalRetryAuthority() throws {
+    let now = Date(timeIntervalSince1970: 1_790_000_000), scope = PhotoAnalysisScope(now: Date(timeIntervalSince1970: 1_790_000_000))
+    let index = try SearchIndex()
+    var record = SearchRecord(id: "source"); record.capturedAt = now; record.visualStatus = .complete
+    try index.replacePermitted([record])
+    XCTAssertTrue(try index.applyOCR(nil, status: .unavailable, photoID: record.id, revision: "1", attemptedAt: now))
+    var remote = PhotoAnnotationsV1(photoId: Wire.id(), originalSha256: Data("original".utf8).digest)
+    remote.ocr = PhotoAnnotationsV1.OCR(text: "Remote receipt", confidence: 0.9, processor: record.processor)
+    XCTAssertTrue(try index.applyAnnotations(remote, photoID: record.id, revision: "1", accountId: "owner"))
+    XCTAssertEqual(try index.record(record.id)?.ocrStatus, .complete)
+    try index.clearSyncedAnnotations()
+    XCTAssertEqual(try index.record(record.id)?.ocrStatus, .unavailable)
+    XCTAssertFalse(try index.pendingMetadataAnalysisWork(scope: scope, now: now).first?.stages.contains(.ocr) ?? false,
+      "Clearing account evidence retains the local source retry deadline")
+    XCTAssertTrue(try index.pendingMetadataAnalysisWork(scope: scope, now: now.addingTimeInterval(301)).first?.stages.contains(.ocr) ?? false)
+    XCTAssertTrue(try index.applyOCR(SearchOCRResult(text: "Local receipt", confidence: 0.9), status: .complete,
+      photoID: record.id, revision: "1", attemptedAt: now.addingTimeInterval(301)))
+    XCTAssertEqual(try index.database.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM searchAnalysisAttempts WHERE stage='ocr'") }, 0)
+  }
+
+  func testModelReadinessReleasesOnlyDeferredVectorsAfterReopen() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let now = Date(timeIntervalSince1970: 1_790_000_000), scope = PhotoAnalysisScope(now: Date(timeIntervalSince1970: 1_790_000_000))
+    var records = ["cold", "unavailable", "failed"].map { id in
+      var record = SearchRecord(id: id); record.capturedAt = now; record.ocrStatus = .complete; record.visualStatus = .complete; return record
+    }
+    records[0].ocrStatus = .unavailable
+    var index: SearchIndex? = try SearchIndex(root: root)
+    try index!.replacePermitted(records)
+    XCTAssertTrue(try index!.applyOCR(nil, status: .unavailable, photoID: "cold", revision: "1", attemptedAt: now))
+    XCTAssertTrue(try index!.deferSemantic(.modelDeferred, photoID: "cold", revision: "1", attemptedAt: now))
+    XCTAssertTrue(try index!.deferSemantic(.unavailable, photoID: "unavailable", revision: "1", attemptedAt: now))
+    XCTAssertTrue(try index!.deferSemantic(.failed, photoID: "failed", revision: "1", attemptedAt: now))
+    index = nil
+    let reopened = try SearchIndex(root: root)
+    XCTAssertTrue(try reopened.pendingMetadataAnalysisWork(scope: scope, retryFailed: true, now: now).isEmpty)
+    reopened.setWorkGeneration(2)
+    XCTAssertFalse(try reopened.releaseModelDeferredAnalysis(generation: 1))
+    XCTAssertTrue(try reopened.releaseModelDeferredAnalysis(generation: 2))
+    let ready = try reopened.pendingMetadataAnalysisWork(scope: scope, now: now)
+    XCTAssertEqual(ready.map { $0.record.id }, ["cold"])
+    XCTAssertEqual(ready.first?.stages, [.semantic], "Readiness cannot bypass the source's OCR deadline")
+    var vector = [Float](repeating: 0, count: 512); vector[0] = 1
+    XCTAssertTrue(try reopened.applySemantic(vector, photoID: "cold", revision: "1", generation: 2))
+    XCTAssertFalse(try reopened.releaseModelDeferredAnalysis(generation: 2))
+    XCTAssertFalse(try reopened.deferSemantic(.failed, photoID: "cold", revision: "1", attemptedAt: now, generation: 2))
+    XCTAssertEqual(try reopened.pendingMetadataAnalysisWork(scope: scope, now: now.addingTimeInterval(31)).map { $0.record.id }, ["failed"])
+    XCTAssertEqual(try reopened.nextMetadataAnalysisRetry(scope: scope, now: now), now.addingTimeInterval(30))
+  }
+  #endif
+
   func testHeavyAnalysisMetadataFilterPrecedesExplicitBatchAndPreservesCompletedHistory() throws {
     let index = try SearchIndex(), now = Date()
     var records = (0..<601).map { number in
