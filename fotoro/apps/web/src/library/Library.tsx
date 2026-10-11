@@ -1,10 +1,10 @@
-import { useRef, useState, useEffect, useLayoutEffect, useMemo } from "react";
+import { useRef, useState, useEffect, useMemo } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { type Photo } from "./catalog";
 import {requireVault} from "../vault/vault";
 import {sameVault} from "../vault/scope";
 import {leaseSavedRaster, savedRasterSource} from "./saved-raster";
-import {restorePhotoGridAnchor, usePhotoNavigation} from "./photo-navigation";
+import {usePhotoGridAnchorRestoration, usePhotoNavigation} from "./photo-navigation";
 export function PhotoSelectionButton({filename, selected, disabled = false, onSelect}: {filename: string; selected: boolean; disabled?: boolean; onSelect: () => void}) {
   return <button className="select" aria-label={"Select " + filename} aria-pressed={selected} disabled={disabled}
     onClick={() => {if (!disabled) onSelect();}}>{selected ? "✓" : ""}</button>;
@@ -103,7 +103,6 @@ export function Library({
     return () => observer.disconnect();
   }, []);
   const anchor = useRef<{ id: string; offset: number } | undefined>(undefined);
-  const measuredGeometry = useRef<{width: number; columns: number} | undefined>(undefined);
   const rows = useMemo(() => {
     const days = new Map<string, Photo[]>();
     for (const photo of photos) {
@@ -146,12 +145,7 @@ export function Library({
   const navigationRows = useMemo(() => rows.map(row => row.photos.map(photo => photo.manifest.photoId)),[rows]);
   const navigate = usePhotoNavigation(parent,navigationRows,index => virtual.scrollToIndex(index,{align: "auto"}),
     Math.max(1,Math.floor((parent.current?.clientHeight ?? width)/Math.max(1,width/columns))),active);
-  useLayoutEffect(() => {
-    if (!active) return;
-    const changed = measuredGeometry.current?.width !== width || measuredGeometry.current?.columns !== columns;
-    measuredGeometry.current = {width, columns};
-    restorePhotoGridAnchor(virtual, navigationRows, anchor.current, changed);
-  }, [navigationRows, width, columns, virtual, active]);
+  usePhotoGridAnchorRestoration(virtual, navigationRows, anchor, width, columns, active);
   return (
     <div
       className="canvas"

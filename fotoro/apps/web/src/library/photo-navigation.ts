@@ -1,17 +1,46 @@
 import {useLayoutEffect, useRef, useState, type KeyboardEvent, type RefObject} from "react";
 import type {Virtualizer} from "@tanstack/react-virtual";
 
-export function restorePhotoGridAnchor(virtual: Pick<Virtualizer<HTMLDivElement, Element>, "measure" | "getTotalSize" | "getOffsetForIndex" | "scrollToOffset">,
-  rows: readonly (readonly string[])[], anchor: {id: string; offset: number} | undefined, geometryChanged: boolean) {
-  if (geometryChanged) {
+type GridMeasurements = Pick<Virtualizer<HTMLDivElement, Element>, "measure" | "getTotalSize" | "getOffsetForIndex" | "getVirtualItemForOffset" | "scrollToOffset">;
+type GridAnchor = {id: string; offset: number};
+export function restorePhotoGridAnchor(virtual: GridMeasurements,
+  rows: readonly (readonly string[])[], anchor: GridAnchor | undefined, phase: "remeasure" | "resized" | "return") {
+  if (phase === "remeasure") {
     virtual.measure();
-    // Index offsets read the measurement cache; rebuild it before restoring.
     virtual.getTotalSize();
+    // The spacer still has its previous DOM height until the next commit.
+    return;
   }
   if (!anchor) return;
   const index = rows.findIndex(row => row.includes(anchor.id));
   const offset = index >= 0 ? virtual.getOffsetForIndex(index, "start") : undefined;
-  if (offset) virtual.scrollToOffset(offset[0] + anchor.offset);
+  if (offset) {
+    const row = phase === "resized" ? virtual.getVirtualItemForOffset(offset[0]) : undefined;
+    // A smaller row cannot retain an inset beyond its end. At the scroll
+    // boundary, the aligned offset is already clamped before this row.
+    const inset = phase === "resized" ? row?.index === index ? Math.max(0, Math.min(anchor.offset, row.size - 1)) : 0 : anchor.offset;
+    virtual.scrollToOffset(offset[0] + inset);
+  }
+}
+
+export function usePhotoGridAnchorRestoration(virtual: GridMeasurements, rows: readonly (readonly string[])[],
+  anchor: RefObject<GridAnchor | undefined>, width: number, columns: number, active: boolean) {
+  const geometry = useRef<{width: number; columns: number} | undefined>(undefined);
+  const pending = useRef<{anchor: GridAnchor | undefined; commit: number} | undefined>(undefined);
+  const [spacerCommit, setSpacerCommit] = useState(0);
+  useLayoutEffect(() => {
+    if (!active) return;
+    if (geometry.current?.width !== width || geometry.current?.columns !== columns) {
+      geometry.current = {width, columns};
+      pending.current = {anchor: pending.current ? pending.current.anchor : anchor.current, commit: spacerCommit + 1};
+      restorePhotoGridAnchor(virtual, rows, pending.current.anchor, "remeasure");
+      setSpacerCommit(spacerCommit + 1);
+      return;
+    }
+    if (pending.current && spacerCommit < pending.current.commit) return;
+    restorePhotoGridAnchor(virtual, rows, pending.current ? pending.current.anchor : anchor.current, pending.current ? "resized" : "return");
+    pending.current = undefined;
+  }, [virtual, rows, anchor, width, columns, active, spacerCommit]);
 }
 
 export function photoNavigationDestination(rows: readonly (readonly string[])[], current: string, key: string, pageRows = 1) {

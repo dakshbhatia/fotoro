@@ -1,11 +1,11 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { type LocalPhoto, LocalResources } from "./resources";
 import {captureGroup} from "./capture-groups";
 import {PhotoTable} from "./PhotoTable";
 import type {PhotoColumn} from "./photo-table";
 import {useLocalThumbnail} from "./useLocalThumbnail";
-import {restorePhotoGridAnchor, usePhotoNavigation} from "../library/photo-navigation";
+import {usePhotoGridAnchorRestoration, usePhotoNavigation} from "../library/photo-navigation";
 export interface PickSelection {
   ids: ReadonlySet<string>;
   reasons?: ReadonlyMap<string, string[]>;
@@ -82,7 +82,6 @@ function LocalGrid({
     [width, setWidth] = useState(800),
     [columns, setColumns] = useState(2);
   const anchor = useRef<{ id: string; offset: number } | undefined>(undefined);
-  const measuredGeometry = useRef<{width: number; columns: number} | undefined>(undefined);
   useEffect(() => {
     const observer = new ResizeObserver((entries) => {
       const w = entries[0].contentRect.width;
@@ -132,12 +131,7 @@ function LocalGrid({
   const navigationRows = useMemo(() => rows.map(row => row.photos.map(photo => photo.id)),[rows]);
   const navigate = usePhotoNavigation(parent,navigationRows,index => virtual.scrollToIndex(index,{align: "auto"}),
     Math.max(1,Math.floor((parent.current?.clientHeight ?? width)/Math.max(1,width/columns))),active);
-  useLayoutEffect(() => {
-    if (!active) return;
-    const changed = measuredGeometry.current?.width !== width || measuredGeometry.current?.columns !== columns;
-    measuredGeometry.current = {width, columns};
-    restorePhotoGridAnchor(virtual, navigationRows, anchor.current, changed);
-  }, [navigationRows, width, columns, virtual, active]);
+  usePhotoGridAnchorRestoration(virtual, navigationRows, anchor, width, columns, active);
   return (
     <div
       className="canvas"
