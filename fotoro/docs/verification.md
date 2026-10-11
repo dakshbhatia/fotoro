@@ -5,6 +5,26 @@ work; [product](product.md) owns the intended experience. Earlier measurements a
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
 
+## October 11 durable native retries — awaiting hosted qualification
+
+The next native patch stores stage retry deadlines in the existing search SQLite
+store, separate from successful OCR/classification/vector completion. Automatic
+startup honors deadlines; explicit scoped retry bypasses them. One admitted
+wakeup includes deadlines elapsed during later batches and resets the transient
+cursor. Model readiness releases only model-deferred vectors. Revision,
+processor and generation checks protect result/retry transactions.
+
+Added permission-independent regressions exercise close/reopen, due and overdue
+selection, per-stage eligibility, atomic rollback, withdrawal, model readiness
+and account-overlay removal. Backup regressions check indexed source point reads
+among 10,000 unrelated checkpoints and one selection write across repeated
+status updates, with rollback and queued/committed exceptions preserved.
+Source review found and corrected the overdue-retry starvation case. Local core
+checks pass; hosted compilation caught two missing test `try` markers, corrected
+before rerunning. Hosted native tests and physical-device acceptance remain
+separate gates. No local Xcode, device installation or browser cutover is part
+of this native-only patch.
+
 ## October 11 indexing and sync isolation — source reviewed
 
 Recent-photo analysis continues bounded batches independently of Search/People

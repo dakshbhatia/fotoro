@@ -74,7 +74,7 @@ final class SearchStoreTests: XCTestCase {
     XCTAssertEqual(try index.record(record.id)?.ocrStatus, .pending, "Result and retry deadline roll back together")
     try index.database.write { try $0.execute(sql: "DROP TRIGGER rejectAttempt") }
     XCTAssertTrue(try index.applyOCR(nil, status: .failed, photoID: record.id, revision: "2", attemptedAt: now))
-    index.setWorkGeneration(2)
+    try index.setWorkGeneration(2)
     try index.replacePermitted([], generation: 2)
     XCTAssertFalse(try index.applyOCR(nil, status: .failed, photoID: record.id, revision: "2", generation: 1, attemptedAt: now))
     XCTAssertEqual(try index.database.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM searchAnalysisAttempts") }, 0)
@@ -119,7 +119,7 @@ final class SearchStoreTests: XCTestCase {
     index = nil
     let reopened = try SearchIndex(root: root)
     XCTAssertTrue(try reopened.pendingMetadataAnalysisWork(scope: scope, retryFailed: true, now: now).isEmpty)
-    reopened.setWorkGeneration(2)
+    try reopened.setWorkGeneration(2)
     XCTAssertFalse(try reopened.releaseModelDeferredAnalysis(generation: 1))
     XCTAssertTrue(try reopened.releaseModelDeferredAnalysis(generation: 2))
     let ready = try reopened.pendingMetadataAnalysisWork(scope: scope, now: now)
