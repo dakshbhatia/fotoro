@@ -1002,6 +1002,7 @@ final class AutomaticPhotoSyncTests: XCTestCase {
       try services.enableAutomaticPhotoSync()
       XCTAssertTrue(services.automaticPhotoSyncBusy, "Queued automatic preflight closes Picks admission synchronously")
       XCTAssertFalse(services.backup.isRunning, "Preflight is busy before the backup coordinator starts")
+      XCTAssertEqual(services.consumerSyncSummary.state, .preparing)
       while gate.count == 0 { await Task.yield() }
       XCTAssertEqual(scans, 0)
       XCTAssertTrue(services.automaticPhotoSyncBusy)
@@ -1019,6 +1020,8 @@ final class AutomaticPhotoSyncTests: XCTestCase {
       XCTAssertEqual(try services.journal.entries().map { $0.photo.id }, [queued.photoId])
       XCTAssertEqual(try services.store.backupSource(queued.id), queued)
       XCTAssertNil(try services.store.backupSource(queued.id).message)
+      XCTAssertEqual(services.consumerSyncSummary.state, withdrawal == "pause" ? .paused : .needsAttention,
+        "Cancelled preflight must return to the actual durable queue state")
     }
   }
 

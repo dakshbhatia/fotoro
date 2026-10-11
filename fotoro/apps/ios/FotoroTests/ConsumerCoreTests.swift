@@ -1815,8 +1815,19 @@ extension ConsumerCoreTests {
       services.session.bearerToken = "controlled-private-session"
       services.automaticPhotosAuthorization = { .authorized }
       services.photosBackupSnapshot = { _ in [] }
+      let tileChanges = SavedSemanticObservationCounter()
+      withObservationTracking {
+        _ = services.photoSyncItem(sourceID: "unchanged", revision: "current")
+      } onChange: { tileChanges.increment() }
       try services.enableAutomaticPhotoSync()
+      XCTAssertTrue(services.automaticPhotoSyncBusy)
+      XCTAssertFalse(services.backup.isRunning)
+      XCTAssertEqual(services.consumerSyncSummary.state, .preparing,
+        "Queued automatic work must stop looking idle before its first task turn")
+      XCTAssertEqual(services.consumerSyncSummary.action, .none)
       await fulfillment(of: [gate.started], timeout: 3)
+      XCTAssertEqual(services.consumerSyncSummary.state, .checking,
+        "The actual catalog request takes precedence over queued preparation")
       let refresh = SavedLibraryRefresh(), joined = expectation(description: "Visible Photos refresh joined")
       let reading = Task { joined.fulfill(); await refresh.open(services, recheck: true) }
       await fulfillment(of: [joined], timeout: 1)
@@ -1830,6 +1841,9 @@ extension ConsumerCoreTests {
       XCTAssertEqual(server.requests.filter { $0.path == "/v1/changes" }.count, 1)
       XCTAssertTrue(try services.journal.entries().isEmpty)
       XCTAssertTrue(server.requests.allSatisfy { $0.method == "GET" })
+      XCTAssertFalse(services.automaticPhotoSyncBusy)
+      XCTAssertEqual(services.consumerSyncSummary.state, .upToDate)
+      XCTAssertEqual(tileChanges.value, 0, "Aggregate preflight must not redraw an unchanged photo tile")
     }
   }
   @MainActor func testReturningToSavedRechecksCatalogWithoutSendingPausedOriginalsOrLocalDrafts() async throws {

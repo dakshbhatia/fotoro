@@ -17,7 +17,17 @@ Hono Worker with D1 and private R2. The upstream Ente application is a reference
   require separate preview consent and explicitly configured provider/work limits;
   that route remains disabled by default.
 
-### October 8 PR 56 browser / PR 57 native checkpoint
+### October 10 current checkpoint
+
+PR 82 Worker `7ef7e9a3-2d28-47d6-bd33-ad2174cb3631` serves 100%,
+deployment `84762eae-6ef9-42ee-bfa0-b604191091c0`. Migration 0011 is applied;
+all 47 emitted assets and 10 routes match the qualified source. PR 83 is native
+only and included in directly installed, archive-audited build 72. Its distribution
+export retry still fails with No Accounts and a missing iOS Distribution signing
+identity/private key, so build 72 is not on TestFlight. Device launch is blocked
+while locked; physical acceptance remains open. See [verification](verification.md).
+
+### Earlier October 8 PR 56 browser / PR 57 native checkpoint
 
 Worker `fadcbe53-2be1-4f19-99aa-0b8782b551d1` serves 100%, deployment
 `a23d4ef0-7819-4b96-a1f5-0d4bc45aa82c`. Browser source

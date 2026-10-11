@@ -24,7 +24,14 @@ Distribution signing certificate/private key; no TestFlight upload completed.
 PR 81's Saved-page preservation and browser resize/return fixes are included.
 Physical frame pacing and a complete two-account family Trip journey remain open.
 
-## October 10 sync priority — locally qualified
+## October 10 sync priority — merged and directly installed
+
+PR 83 merge `cd085742538ba6dcaf4ff04ad2296a51d56969f6` matches the
+qualified source tree; all 23 hosted checks passed or intentionally skipped.
+Build 72 passed archive audit and direct installation; device inventory confirms
+72. Launch remains blocked by the locked phone. A fresh export retry still reports
+No Accounts and a missing iOS Distribution certificate/private key; no build 72
+TestFlight upload completed. The cloud remains on the PR 82 version above.
 
 Current queued sources retry staged ciphertext before Photos discovery. Every
 asynchronous journal boundary rechecks account, trust, vault, API URL, permission,
@@ -36,13 +43,23 @@ Picks waits through account restoration, queued sync, catalog preflight and back
 explicit Picks remains available and cached completed work survives resumption.
 
 The full native simulator suite passes 661 with two platform skips and no failures.
+The isolated preview suite passes 169 with two platform skips and no failures.
 Focused sync/Picks and media/reconciliation suites pass 63 and 96 respectively.
 The full core/API/browser check passes, including 722 browser and 129 API tests.
 Physical build 70 diagnostics recorded 37 seconds with a cancelled discovery scan,
 overlapping Picks and no upload POST. That trace motivates this change; it does not
 measure frame pacing or prove the new pipeline on the physical iPhone.
 
-Latest verified distribution before this pass is PR 77 in production, Worker
+The follow-up status fix shows Preparing immediately when automatic work is queued,
+then yields to actual catalog checking or upload activity. Completion and withdrawal
+restore the durable queue status without notifying an unchanged photo tile. The
+new preflight regression fails against the previous source; 108 consumer/manual
+backup and 26 automatic-sync simulator tests pass with the fix. This evidence
+does not establish physical frame pacing or TestFlight delivery.
+
+### Earlier PR 77 checkpoint
+
+PR 77 was verified in production, Worker
 `dd6a9562-8888-4440-844a-4c98ee1c6d96` at 100%. All 23 hosted contexts passed;
 merge `e61e474bedd2700e16bcea93d36be6f1fb2bcf3a` has the qualified tree.
 Native 0.1.0 (65) passed archive and distribution IPA audits and uploaded through
