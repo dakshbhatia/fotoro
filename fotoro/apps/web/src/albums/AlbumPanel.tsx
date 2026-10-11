@@ -5,7 +5,10 @@ const Albums = lazy(() => import("./Albums").then(module => ({default: module.Al
 type Props = Omit<ComponentProps<typeof AlbumsComponent>, "onChoosePhotos"> & {onChoosePhotos: (albumId: string) => void; onIncomingDone?: () => void};
 
 export function AlbumPanel({onClose, onChoosePhotos, onIncomingDone, incoming, ...props}: Props) {
-  const close = () => {onClose(); onIncomingDone?.();};
+  const close = () => {
+    if (incoming && !incoming.pending) return;
+    onClose(); if (incoming?.pending) onIncomingDone?.();
+  };
   const choosePhotos = (albumId: string) => {
     onClose();
     // Preserve an invitation only when choosing photos for that same album.

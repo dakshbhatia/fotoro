@@ -164,6 +164,65 @@ test("append retries retain exact encrypted signed entries and re-adding an exis
   access.dispose(); snapshot.dispose(); assert.ok(data.photo.metadataKey.some(byte => byte !== 0), "Closing album selection preserves the catalog key");
 }));
 
+test("concurrent append version conflict retains the exact Saved choice for explicit retry", () => scoped(async () => {
+  const data = await fixture(), otherID = crypto.randomUUID();
+  const otherManifest = {...data.photo.manifest, photoId: otherID,
+    representations: data.photo.manifest.representations.map(value => ({...value, binding: {...value.binding, photoId: otherID}})),
+    metadataRepresentation: {...data.photo.manifest.metadataRepresentation, binding: {...data.photo.manifest.metadataRepresentation.binding, photoId: otherID}}};
+  const otherSigned = signPayload("photo-manifest", data.owner.accountId, utf8(otherManifest), data.owner.signingSecretKey);
+  const openedDefinition = openAlbumDefinition({signed: data.made.signed, trustedOwner: data.owner.card,
+    recipientCard: data.owner.card, recipientSecretKey: data.owner.boxSecretKey, expectedAlbumId: data.made.definition.albumId});
+  const otherEntry = makeAlbumPhoto({definition: data.made.definition, manifest: otherSigned, metadataKey: data.photo.metadataKey,
+    albumKey: openedDefinition.albumKey, signingSecretKey: data.owner.signingSecretKey}); openedDefinition.albumKey.fill(0);
+  let concurrent = false, published = false, attempts = 0, stored: ReturnType<typeof validateAlbumAppend> | undefined;
+  globalThis.fetch = async (path, init) => {
+    const url = String(path), active = {...overview(data), photoCount: Number(concurrent) + Number(published)};
+    if (url.endsWith("/access")) return response(active);
+    if (url.endsWith("/manifest")) return response(data.signed);
+    if (url.endsWith("/photos")) {
+      const request = validateAlbumAppend(JSON.parse(String(init?.body))); attempts++;
+      if (stored) assert.deepEqual(request, stored, "Explicit retry replays the exact signed immutable append"); else stored = request;
+      if (attempts === 1) {concurrent = true; return response({code: "VERSION_CONFLICT"}, 409);}
+      published = true; return response({version: 1, albumId: data.made.definition.albumId, operationId: request.operationId, added: 1, photoCount: 2});
+    }
+    return response({...active, version: 1, entries: [...(concurrent ? [otherEntry] : []), ...(published ? stored!.entries : [])],
+      manifests: [...(concurrent ? [otherSigned] : []), ...(published ? stored!.manifests : [])], nextCursor: null, hasMore: false});
+  };
+  const access = await AlbumAccess.open({...overview(data), photoCount: 0}, {});
+  const choice = new PendingAlbumContribution([data.photo], () => access.current());
+  let retained: readonly Photo[] = [];
+  const add = (photos: readonly Photo[]) => {retained = photos; return access.add(photos, () => [data.photo]);};
+  await assert.rejects(choice.add(add), /VERSION_CONFLICT/);
+  assert.equal(access.current(), true, "A concurrent contributor does not revoke this member's access");
+  assert.equal(choice.current, true); assert.ok(retained[0].metadataKey.some(byte => byte !== 0));
+  assert.equal(await choice.add(add), 1); assert.equal(attempts, 2);
+  assert.equal(await access.add([data.photo], () => [data.photo]), 0); assert.equal(attempts, 2);
+  assert.equal(choice.current, false); assert.ok(retained[0].metadataKey.every(byte => byte === 0));
+  access.dispose();
+}));
+
+test("append retry exception cannot retain authorization, identity or non-append version conflicts", () => scoped(async () => {
+  for (const failure of [{target: "append", code: "UNAUTHORIZED", status: 401},
+    {target: "append", code: "FORBIDDEN", status: 403},
+    {target: "append", code: "IDEMPOTENCY_CONFLICT", status: 409},
+    {target: "access", code: "ACCOUNT_KEYS_CHANGED_RENEW_TRUST", status: 409},
+    {target: "manifest", code: "VERSION_CONFLICT", status: 409}]) {
+    const data = await fixture();
+    globalThis.fetch = async (path) => {
+      const url = String(path);
+      if (url.endsWith("/access")) return failure.target === "access" ? response({code: failure.code}, failure.status) : response({...overview(data), photoCount: 0});
+      if (url.endsWith("/manifest")) return failure.target === "manifest" ? response({code: failure.code}, failure.status) : response(data.signed);
+      if (url.endsWith("/photos")) return response({code: failure.code}, failure.status);
+      return response({...overview(data), version: 1, photoCount: 0, entries: [], manifests: [], nextCursor: null, hasMore: false});
+    };
+    const access = await AlbumAccess.open({...overview(data), photoCount: 0}, {}), choice = new PendingAlbumContribution([data.photo], () => access.current());
+    let retained: readonly Photo[] = [];
+    await assert.rejects(choice.add(photos => {retained = photos; return access.add(photos, () => [data.photo]);}), new RegExp(failure.code));
+    assert.equal(access.current(), false); assert.equal(choice.current, false);
+    assert.ok(retained[0].metadataKey.every(byte => byte === 0), "Rejected access still wipes the retained private selection");
+  }
+}));
+
 test("chosen contributions retry transient access reads before and after commit without duplicate additions", () => scoped(async () => {
   for (const phase of [1, 2, 3]) {
     const data = await fixture(); let accessReads = 0, writes = 0, failing = true, published = false;

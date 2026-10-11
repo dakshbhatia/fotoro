@@ -409,15 +409,16 @@ export class AlbumAccess {
   }
   add(chosen: readonly Photo[], latest: () => readonly Photo[]) {
     return diagnose("album", async diagnostic => {
-      try {return await this.addAction(diagnostic, chosen, latest);}
+      let appendConflict: ApiError | undefined;
+      try {return await this.addAction(diagnostic, chosen, latest, error => {appendConflict = error;});}
       catch (error) {
-        if (error instanceof WireError || error instanceof ApiError && [401, 403, 409].includes(error.status ?? 0)
+        if (error instanceof WireError || error instanceof ApiError && error !== appendConflict && [401, 403, 409].includes(error.status ?? 0)
           || error instanceof Error && ["ALBUM_BINDING_MISMATCH", "ALBUM_PAGE_MISMATCH", "ALBUM_ACCESS_ENDED"].includes(error.message)) this.dispose();
         throw error;
       }
     }, "add");
   }
-  private async addAction(diagnostic: DiagnosticContext, chosen: readonly Photo[], latest: () => readonly Photo[]) {
+  private async addAction(diagnostic: DiagnosticContext, chosen: readonly Photo[], latest: () => readonly Photo[], onAppendConflict: (error: ApiError) => void) {
     const requestApi = scopedApi(diagnostic);
     albumOwnedSelection(chosen, this.session, latest()); await this.assertAccessRequest(diagnostic, true);
     // Never generate a different immutable envelope for a contribution already present.
@@ -450,7 +451,12 @@ export class AlbumAccess {
       const entries = batch.map((photo, n) => makeAlbumPhoto({definition: this.definition, manifest: manifests[n], metadataKey: photo.metadataKey, albumKey: this.key, signingSecretKey: this.session.signingSecretKey}));
       const request = await retainAppend({version: 1, operationId, entries, manifests}, this.albumId, this.session, this.scope);
       await this.assertAccessRequest(diagnostic, true); albumOwnedSelection(chosen, this.session, latest());
-      const result = validateAlbumAppendResult(await requestApi("/v1/albums/" + this.albumId + "/photos", request, undefined, "POST", this.scope.signal)); this.check();
+      const result = validateAlbumAppendResult(await requestApi("/v1/albums/" + this.albumId + "/photos", request, undefined, "POST", this.scope.signal).catch(error => {
+        // Another member can change the count after our access check. Retain only
+        // this append CAS conflict; explicit retry still revalidates access/sources.
+        if (error instanceof ApiError && error.status === 409 && error.code === "VERSION_CONFLICT") onAppendConflict(error);
+        throw error;
+      })); this.check();
       if (result.albumId !== this.albumId || result.operationId !== request.operationId || result.added > batch.length) throw new Error("ALBUM_BINDING_MISMATCH");
       await this.assertAccessRequest(diagnostic, true); added += result.added;
     }

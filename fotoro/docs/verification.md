@@ -1,9 +1,27 @@
-# Verification — October 10, 2026
+# Verification — October 11, 2026
 
 This is the current evidence record. [The backlog](product-backlog.md) owns next
 work; [product](product.md) owns the intended experience. Earlier measurements and
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
+
+## October 11 family Trip recovery — locally qualified
+
+Browser invitations survive switching apps to verify the sender. Private work and
+copied keys stop immediately; returning reloads the same public invitation in the
+same vault and origin, with fresh verification and explicit Join. Rapid background
+transitions force a new panel lifetime. An old panel cannot complete a replacement
+invitation. Explicit Close, page navigation, lock and account/origin changes retain
+their withdrawal behavior.
+
+An append-only `409 VERSION_CONFLICT` from concurrent family contributions retains
+the exact already-Saved choice and signed request for explicit retry. Other access,
+identity, manifest and integrity failures still dispose access and retained keys.
+Both original defects were reproduced by regressions before their fixes. The final
+web build and 729 browser tests pass; the 35 focused invitation and action cases
+also pass. The full core/API/browser check and pinned visual inference smoke pass;
+independent source review found no remaining blocker. Physical Safari and the
+complete two-account family journey remain open.
 
 ## October 10 People links — deployed and installed
 

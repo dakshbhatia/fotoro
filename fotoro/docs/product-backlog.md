@@ -109,6 +109,13 @@ can load their own details on demand through two signed metadata reads, without
 hydrating the full Saved catalog; Saved browsing remains bounded. These paths
 retain album membership, account, vault and source-binding checks.
 
+Browser invitation return preserves the exact public link while stopping private
+work on a temporary app switch. Return reloads sender verification only in the
+same vault and origin; Join remains explicit. Concurrent contribution count
+conflicts retain the already-Saved choice for explicit retry, while authorization,
+identity and integrity failures still withdraw access. The physical family journey
+remains an acceptance gate.
+
 Cross-device private annotation merging treats reviewed People, location, capture
 details, optional observations, supplied text and unknown reserved facts as
 separate atomic categories. Changes in different categories merge; incompatible

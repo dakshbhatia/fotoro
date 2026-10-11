@@ -221,7 +221,7 @@ export default function CloudApp({
   const albumIncomingRef = useRef(incomingAlbum); albumIncomingRef.current = incomingAlbum;
   useEffect(() => {if (!active || !account) setPlacesOpen(false);}, [active, account]);
   useEffect(() => {if (!active || !account) setPeopleOpen(false);}, [active, account]);
-  useEffect(() => {if (!active || !account) {setAlbumsOpen(false); setAlbumSelection(null); setAlbumDestination(null);}}, [active, account]);
+  useEffect(() => {if (!active || !account) {albumEntryRevision.cancelReturn(); setAlbumsOpen(false); setAlbumSelection(null); setAlbumDestination(null);}}, [active, account]);
   useEffect(() => () => placeResources.clear(), [placeResources]);
   const running = useRef(false),
     authIntent = useRef(0),
@@ -233,6 +233,19 @@ export default function CloudApp({
   const activeRef = useRef(active), saveIntentRef = useRef(saveIntent), incomingRef = useRef(incoming);
   const chosenTripRef = useRef(chosenTrip); chosenTripRef.current = chosenTrip;
   activeRef.current = active; saveIntentRef.current = saveIntent; incomingRef.current = incoming;
+  useEffect(() => {
+    const discard = () => albumEntryRevision.cancelReturn();
+    const returned = () => {
+      if (document.visibilityState !== "visible") return;
+      let session; try {session = requireVault();} catch {}
+      if (albumEntryRevision.resume(albumIncomingRef.current, session, location.origin, activeRef.current)) {
+        setAlbumSelection(albumEntryRevision.capture([])); setAlbumsOpen(true);
+      }
+    };
+    document.addEventListener("visibilitychange", returned);
+    window.addEventListener("fotoro-lock", discard); window.addEventListener("pagehide", discard);
+    return () => {discard(); document.removeEventListener("visibilitychange", returned); window.removeEventListener("fotoro-lock", discard); window.removeEventListener("pagehide", discard);};
+  }, [albumEntryRevision]);
   const backButton = useRef<HTMLButtonElement>(null), passwordPanel = useRef<HTMLElement>(null);
   useEffect(() => {
     if (!active) return;
@@ -310,7 +323,7 @@ export default function CloudApp({
     setExchange(false);
     setMenu(false);
     setPeopleOpen(false);
-    setAlbumsOpen(false); setAlbumSelection(null); setAlbumDestination(null);
+    albumEntryRevision.cancelReturn(); setAlbumsOpen(false); setAlbumSelection(null); setAlbumDestination(null);
     setReselect(undefined);
     setPending([]);
     setAnnotationPending([]);
@@ -984,7 +997,7 @@ export default function CloudApp({
     if (destination && albumDestination?.albumId !== destination) return;
     setAlbumSelection(albumEntryRevision.capture(selection)); setAlbumsOpen(true);
   };
-  const closeAlbums = () => {setAlbumsOpen(false); setAlbumSelection(null); setAlbumDestination(null); onAlbumDone?.();};
+  const closeAlbums = () => {albumEntryRevision.cancelReturn(); setAlbumsOpen(false); setAlbumSelection(null); setAlbumDestination(null); onAlbumDone?.();};
   useEffect(() => {if (active && account && albumPhotos?.length) {setAlbumDestination(null); openAlbums(albumPhotos, null);}}, [active, account, albumPhotos]);
   useEffect(() => {
     if (!active || !account || !sharePhotos?.length) return;
@@ -1471,6 +1484,11 @@ export default function CloudApp({
           // The album reads the new source-bound snapshot after React publishes it.
           await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
           check();
+        }}
+        onSuspend={() => {
+          if (albumIncomingRef.current !== incomingAlbum || !incomingAlbum?.pending) return;
+          if (!activeRef.current || !albumEntryRevision.suspend(albumIncomingRef.current, effectVault(), location.origin)) {closeAlbums(); onAlbumIncomingDone?.(); return;}
+          setAlbumsOpen(false); setAlbumSelection(null); setAlbumDestination(null);
         }}
         onClose={closeAlbums} onIncomingDone={() => {setAlbumDestination(null); onAlbumIncomingDone?.();}} onChoosePhotos={albumId => {const session = effectVault(); if (!session) return; const origin = location.origin; const invitation = albumIncomingRef.current?.pending && albumIncomingRef.current.link.albumId === albumId ? albumIncomingRef.current : undefined; setAlbumDestination({albumId, current: () => sameVault(session) && location.origin === origin && activeRef.current && (!invitation || invitation.current(session))}); setReceived(null); setReceivedContext(null); setSelecting(true);}} incoming={incomingAlbum ?? undefined}
         onRetryAccount={incomingAlbum?.pending ? () => {incomingAlbum.retryPassword(); setAlbumsOpen(false); setAlbumSelection(null); lockVault();} : undefined} />}
