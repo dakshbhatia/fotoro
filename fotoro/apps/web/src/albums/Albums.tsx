@@ -86,7 +86,7 @@ function AlbumImage({access, photo, preview = false, onOpen}: {access: AlbumAcce
 export function AlbumContributionActions({albumId, chosen, busy, onChoosePhotos, onAdd, showSaved = true}: {showSaved?: boolean; albumId: string; chosen: number; busy: boolean; onChoosePhotos: (albumId: string) => void; onAdd: () => void}) {
   return <>{showSaved && <button disabled={busy} title="Choose photos already in Saved" onClick={() => onChoosePhotos(albumId)}>From Saved</button>}{chosen > 0 && <button className="primary-action" disabled={busy} onClick={onAdd}>Add {chosen} {chosen === 1 ? "photo" : "photos"}</button>}</>;
 }
-export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incoming, onRetryAccount, currentOwnedPhotos, onLoadOwnedPhoto, onImportPhotos, initialAlbumId}: {selection: readonly Photo[]; initialAlbumId?: string; onImportPhotos?: (choice: TripImportChoice, signal: AbortSignal, current: () => boolean) => Promise<Photo[]>; currentPhotos: () => readonly Photo[]; onClose: () => void; onChoosePhotos: (albumId: string) => void; incoming?: IncomingAlbumIntent; onRetryAccount?: () => void; currentOwnedPhotos?: () => OwnedPhotoSnapshot | null; onLoadOwnedPhoto?: (photo: Photo, signal: AbortSignal) => Promise<void>}) {
+export function Albums({selection, currentPhotos, onClose, onSuspend, onChoosePhotos, incoming, onRetryAccount, currentOwnedPhotos, onLoadOwnedPhoto, onImportPhotos, initialAlbumId}: {selection: readonly Photo[]; initialAlbumId?: string; onImportPhotos?: (choice: TripImportChoice, signal: AbortSignal, current: () => boolean) => Promise<Photo[]>; currentPhotos: () => readonly Photo[]; onClose: () => void; onSuspend?: () => void; onChoosePhotos: (albumId: string) => void; incoming?: IncomingAlbumIntent; onRetryAccount?: () => void; currentOwnedPhotos?: () => OwnedPhotoSnapshot | null; onLoadOwnedPhoto?: (photo: Photo, signal: AbortSignal) => Promise<void>}) {
   const [session] = useState(requireVault), [controller] = useState(() => new AbortController());
   const [origin] = useState(() => location.origin);
   const [chosenSnapshot] = useState(() => new ShareSelection([...selection]));
@@ -137,9 +137,17 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     clearDownload();
     return () => clearDownload();
   }, [access, preview]);
-  useEffect(() => subscribeAlbumLifetime(window, document, () => {
-    alive.current = false; controller.abort(); setPeopleBook(undefined); setPeopleSync({pending: false, conflicts: []}); setPeopleFilter(emptyPeopleFilter()); clearImport(); clearContribution(); clearTripDownload(); accessRef.current?.dispose(); chosenSnapshot.dispose();
-  }, close), []);
+  useEffect(() => {
+    const dispose = () => {
+      alive.current = false; controller.abort(); setPeopleBook(undefined); setPeopleSync({pending: false, conflicts: []}); setPeopleFilter(emptyPeopleFilter()); clearImport(); clearContribution(); clearTripDownload(); clearDownload(); accessRef.current?.dispose(); chosenSnapshot.dispose();
+    };
+    return subscribeAlbumLifetime(window, document, dispose, close, () => {
+      // A fast return can leave this disposed panel listening until React commits.
+      // Repeated suspension retains only the same public invitation and vault.
+      if (location.origin === origin && sameVault(session) && incoming?.current(session) && onSuspend) {dispose(); onSuspend();}
+      else close();
+    });
+  }, []);
   const [actions] = useState(() => new AlbumActionQueue(() => alive.current && sameVault(session)
     && (!incoming || incoming.current(session)), value => {if (alive.current && sameVault(session)) setBusy(value);}));
   async function action(task: () => Promise<void>, background = false) {

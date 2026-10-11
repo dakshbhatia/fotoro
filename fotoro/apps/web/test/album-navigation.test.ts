@@ -120,6 +120,100 @@ test("mounted album teardown preserves account correction and same-account expir
   }
 });
 
+test("background sender verification stops private work and preserves the exact invitation until return", () => {
+  const flow = navigation(), original = flow.incoming.link;
+  const entry = new AlbumEntryRevision(), key = entry.key(flow.incoming), selection = entry.capture([{manifest: {photoId: "old-choice"}} as Photo]);
+  const windowTarget = new EventTarget(), documentTarget = Object.assign(new EventTarget(), {visibilityState: "visible"});
+  const request = new AbortController(); let suspended = 0;
+  const returnedPanel = AlbumPanel({selection: [], currentPhotos: () => [], incoming: flow.incoming, onChoosePhotos() {}, onClose: albums(flow.render()).onClose,
+    onSuspend() {assert.equal(entry.suspend(flow.incoming, flow.session, "https://fotoro.cloud"), true); suspended++;}});
+  const detach = subscribeAlbumLifetime(windowTarget, documentTarget, () => request.abort(), () => {request.abort(); albums(flow.render()).onClose();},
+    () => {request.abort(); albums(returnedPanel).onSuspend();});
+  documentTarget.visibilityState = "hidden"; documentTarget.dispatchEvent(new Event("visibilitychange"));
+  assert.equal(request.signal.aborted, true);
+  assert.equal(suspended, 1);
+  assert.equal(flow.state().completed, 0, "Switching apps to verify the sender is not explicit Close");
+  assert.equal(flow.incoming.current(flow.session), true);
+  documentTarget.visibilityState = "visible"; documentTarget.dispatchEvent(new Event("visibilitychange"));
+  assert.equal(entry.resume(flow.incoming, flow.session, "https://fotoro.cloud", true), true);
+  assert.notEqual(entry.key(flow.incoming), key, "A fast hidden/visible transition still forces fresh sender verification");
+  assert.deepEqual(entry.photos(selection), [], "No old private choice reaches the remounted panel");
+  assert.equal(entry.resume(flow.incoming, flow.session, "https://fotoro.cloud", true), false, "Return is consumed once");
+  assert.equal(flow.incoming.link, original);
+  assert.equal(albums(flow.reopen([])).incoming, flow.incoming, "Return reloads this same invitation, without accepting it");
+  albums(flow.render()).onClose();
+  assert.equal(flow.state().completed, 1); assert.equal(flow.incoming.pending, false);
+  detach();
+});
+
+test("invitation return cannot reopen a replaced link, changed vault, changed origin, inactive surface or explicit withdrawal", () => {
+  for (const change of ["link", "vault", "origin", "inactive", "cancel", "lock", "discard"] as const) {
+    const flow = navigation(), entry = new AlbumEntryRevision(); entry.key(flow.incoming);
+    assert.equal(entry.suspend(flow.incoming, flow.session, "https://fotoro.cloud"), true);
+    const incoming = change === "link" ? navigation().incoming : flow.incoming;
+    if (change === "cancel") flow.incoming.cancel();
+    if (change === "lock") flow.incoming.vaultLocked("manual", flow.session.accountId);
+    if (change === "discard") entry.cancelReturn();
+    assert.equal(entry.resume(incoming, change === "vault" ? {...flow.session} : flow.session,
+      change === "origin" ? "https://other.example" : "https://fotoro.cloud", change !== "inactive"), false, change);
+    assert.equal(entry.resume(flow.incoming, flow.session, "https://fotoro.cloud", true), false, "Rejected return cannot replay later");
+  }
+  const flow = navigation(), entry = new AlbumEntryRevision(); entry.key(flow.incoming);
+  assert.equal(entry.suspend(flow.incoming, {...flow.session}, "https://fotoro.cloud"), false);
+  assert.equal(entry.suspend(flow.incoming, undefined, "https://fotoro.cloud"), false);
+  assert.equal(entry.suspend(undefined, flow.session, "https://fotoro.cloud"), false);
+});
+
+test("page navigation still explicitly closes a suspended invitation", () => {
+  const flow = navigation(), windowTarget = new EventTarget(), documentTarget = Object.assign(new EventTarget(), {visibilityState: "visible"});
+  const detach = subscribeAlbumLifetime(windowTarget, documentTarget, () => {}, albums(flow.render()).onClose, () => {});
+  documentTarget.visibilityState = "hidden"; documentTarget.dispatchEvent(new Event("visibilitychange"));
+  assert.equal(flow.incoming.pending, true);
+  windowTarget.dispatchEvent(new Event("pagehide"));
+  assert.equal(flow.incoming.pending, false); assert.equal(flow.state().completed, 1);
+  detach();
+});
+
+test("rapid hidden-visible-hidden events leave the invitation suspended until the final return", () => {
+  const flow = navigation(), entry = new AlbumEntryRevision(); entry.key(flow.incoming);
+  const windowTarget = new EventTarget(), documentTarget = Object.assign(new EventTarget(), {visibilityState: "visible"});
+  const privateWork = new AbortController(); let queuedOpen = true, returns = 0;
+  const panel = AlbumPanel({selection: [], currentPhotos: () => [], incoming: flow.incoming, onChoosePhotos() {}, onClose: albums(flow.render()).onClose,
+    onSuspend() {assert.equal(entry.suspend(flow.incoming, flow.session, "https://fotoro.cloud"), true); queuedOpen = false;}});
+  const detach = subscribeAlbumLifetime(windowTarget, documentTarget, () => privateWork.abort(), albums(panel).onClose,
+    () => {privateWork.abort(); albums(panel).onSuspend();});
+  const visible = () => {
+    if (documentTarget.visibilityState === "visible" && entry.resume(flow.incoming, flow.session, "https://fotoro.cloud", true)) {queuedOpen = true; returns++;}
+  };
+  documentTarget.addEventListener("visibilitychange", visible);
+  for (const visibility of ["hidden", "visible", "hidden"]) {
+    documentTarget.visibilityState = visibility; documentTarget.dispatchEvent(new Event("visibilitychange"));
+  }
+  assert.equal(privateWork.signal.aborted, true); assert.equal(queuedOpen, false);
+  assert.equal(flow.incoming.pending, true); assert.equal(flow.state().completed, 0);
+  documentTarget.visibilityState = "visible"; documentTarget.dispatchEvent(new Event("visibilitychange"));
+  assert.equal(queuedOpen, true); assert.equal(returns, 2);
+  assert.equal(flow.incoming.current(flow.session), true);
+  documentTarget.removeEventListener("visibilitychange", visible); detach();
+});
+
+test("an old panel closing during invitation replacement cannot complete the new link", () => {
+  const previous = navigation(), replacement = navigation(); let completed = 0;
+  const oldPanel = AlbumPanel({selection: [], currentPhotos: () => [], incoming: previous.incoming, onChoosePhotos() {}, onClose() {},
+    onIncomingDone() {completed++; replacement.incoming.cancel();}});
+  const windowTarget = new EventTarget(), documentTarget = Object.assign(new EventTarget(), {visibilityState: "visible"});
+  const request = new AbortController();
+  const detach = subscribeAlbumLifetime(windowTarget, documentTarget, () => request.abort(), () => {request.abort(); albums(oldPanel).onClose();});
+  // hashchange withdraws the previous public intent before React replaces its panel.
+  previous.incoming.cancel();
+  documentTarget.visibilityState = "hidden"; documentTarget.dispatchEvent(new Event("visibilitychange"));
+  assert.equal(request.signal.aborted, true); assert.equal(completed, 0);
+  documentTarget.visibilityState = "visible"; documentTarget.dispatchEvent(new Event("visibilitychange"));
+  assert.equal(replacement.incoming.current(replacement.session), true);
+  assert.equal(albums(replacement.render()).incoming, replacement.incoming);
+  detach();
+});
+
 
 test("Choose photos → one chosen Saved photo → direct continuation passes exact album and selection to the panel", () => {
   let destination: string | undefined;
