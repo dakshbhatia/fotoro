@@ -5,7 +5,107 @@ import XCTest
 
 @testable import Fotoro
 
+// Keep GRDB overload selection synchronous, including inside XCTest autoclosures.
+private func readBackupFixture<Value>(_ store: LibraryStore, _ body: (Database) throws -> Value) throws -> Value {
+  try store.database.read(body)
+}
+private func writeBackupFixture(_ store: LibraryStore, _ body: (Database) throws -> Void) throws {
+  try store.database.write(body)
+}
+
 final class PhotosBackupTests: XCTestCase {
+  func testBackupSourcePointReadDoesNotInsertOrDecodeUnrelatedInventory() throws {
+    let store = try LibraryStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
+    let chosen = BackupSource(id: "chosen", photoId: Wire.id(), sourceRevision: "reviewed")
+    try store.putBackupSource(chosen)
+    try writeBackupFixture(store) { db in
+      // Corrupt unrelated checkpoints make a whole-inventory decode fail.
+      for n in 0..<10_000 {
+        try db.execute(sql: "INSERT INTO backupSources(id,value) VALUES(?,?)",
+          arguments: ["unrelated-\(n)", Data("not-json".utf8)])
+      }
+    }
+    XCTAssertNil(try store.backupSourceIfPresent(id: "missing"))
+    XCTAssertEqual(try readBackupFixture(store) { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM backupSources") }, 10_001)
+    for _ in 0..<200 { XCTAssertEqual(try store.backupSourceIfPresent(id: chosen.id), chosen) }
+    XCTAssertThrowsError(try store.backupSources())
+    let plan = try readBackupFixture(store) { db in
+      try Row.fetchAll(db, sql: "EXPLAIN QUERY PLAN SELECT value FROM backupSources WHERE id=?", arguments: [chosen.id])
+        .map { (row: Row) -> String in row["detail"] }
+    }
+    XCTAssertTrue(plan.contains { $0.uppercased().contains("SEARCH") && $0.contains("id=?") },
+      "The exact lookup must use the indexed source ID instead of scanning inventory: \(plan)")
+  }
+
+  @MainActor func testLargeBackupSelectionWritesOnceAcrossHeldStatusUpdatesAndReopensExactly() async throws {
+    let store = try LibraryStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
+    let candidates = (0..<10_000).map { BackupCandidate(id: "selected-\($0)", sourceRevision: "reviewed") }
+    try writeBackupFixture(store) { db in
+      for candidate in candidates {
+        var source = BackupSource(id: candidate.id, photoId: Wire.id(), sourceRevision: candidate.sourceRevision)
+        source.phase = candidate.id == "selected-0" ? .pending : .committed
+        try db.execute(sql: "INSERT INTO backupSources(id,value) VALUES(?,?)",
+          arguments: [source.id, try Wire.encode(source)])
+      }
+      try db.execute(sql: "CREATE TABLE selectionWrites(value INTEGER NOT NULL)")
+      try db.execute(sql: "CREATE TRIGGER countSelectionInsert AFTER INSERT ON state WHEN NEW.key='backupSelection' BEGIN INSERT INTO selectionWrites VALUES(1); END")
+      try db.execute(sql: "CREATE TRIGGER countSelectionUpdate AFTER UPDATE ON state WHEN NEW.key='backupSelection' BEGIN INSERT INTO selectionWrites VALUES(1); END")
+    }
+    let backup = try PhotosBackup(store: store), gate = BackupGate()
+    let held = expectation(description: "Selected source reaches held transfer")
+    backup.start(snapshot: { candidates }, valid: { true }, stage: { _, _ in held.fulfill(); await gate.wait() }, upload: { _ in }, checkCatalog: {})
+    await fulfillment(of: [held], timeout: 10)
+    for _ in 0..<8 { try backup.refreshCounts() }
+    XCTAssertEqual(try readBackupFixture(store) { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM selectionWrites") }, 1)
+    gate.open(); await backup.waitUntilSettled()
+    XCTAssertEqual(try readBackupFixture(store) { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM selectionWrites") }, 1)
+    backup.start(snapshot: { candidates }, valid: { true },
+      stage: { _, _ in XCTFail("Committed sources cannot stage again") }, upload: { _ in XCTFail("Committed sources cannot upload again") }, checkCatalog: {})
+    await backup.waitUntilSettled()
+    XCTAssertEqual(try readBackupFixture(store) { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM selectionWrites") }, 1,
+      "An identical next snapshot must not dirty the persisted selection")
+    let encoded = try XCTUnwrap(readBackupFixture(store) { try String.fetchOne($0, sql: "SELECT value FROM state WHERE key='backupSelection'") })
+    let persisted = try Wire.decode([String].self, XCTUnwrap(Data(base64Encoded: encoded)))
+    XCTAssertEqual(persisted, candidates.map(\.id).sorted())
+    var outsideQueued = BackupSource(id: "outside-queued", photoId: Wire.id()); outsideQueued.phase = .queued
+    var outsideCommitted = BackupSource(id: "outside-committed", photoId: Wire.id()); outsideCommitted.phase = .committed
+    let outsidePending = BackupSource(id: "outside-pending", photoId: Wire.id())
+    for source in [outsideQueued, outsideCommitted, outsidePending] { try store.putBackupSource(source) }
+    let reopened = try PhotosBackup(store: store)
+    let counted = Set(try reopened.countedSources(from: store.backupSources()).map(\.id))
+    XCTAssertEqual(counted, Set(candidates.map(\.id)).union([outsideQueued.id, outsideCommitted.id]))
+    XCTAssertEqual(try readBackupFixture(store) { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM selectionWrites") }, 1,
+      "Reopening must retain selection without rewriting it")
+  }
+
+  @MainActor func testFailedStatusTransactionLeavesChangedSelectionRetryable() async throws {
+    let store = try LibraryStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
+    let backup = try PhotosBackup(store: store)
+    try writeBackupFixture(store) { db in
+      try db.execute(sql: "CREATE TABLE selectionWrites(value INTEGER NOT NULL)")
+      try db.execute(sql: "CREATE TRIGGER countSelectionInsert AFTER INSERT ON state WHEN NEW.key='backupSelection' BEGIN INSERT INTO selectionWrites VALUES(1); END")
+      try db.execute(sql: "CREATE TRIGGER countSelectionUpdate AFTER UPDATE ON state WHEN NEW.key='backupSelection' BEGIN INSERT INTO selectionWrites VALUES(1); END")
+    }
+    backup.start(snapshot: {
+      // The initial scanning status has committed; fail after the changed
+      // selection is written, so the entire status transaction must roll back.
+      try writeBackupFixture(store) { db in
+        try db.execute(sql: "CREATE TRIGGER failBackupStatus BEFORE UPDATE ON state WHEN NEW.key='backupStatus' BEGIN SELECT RAISE(ABORT,'held status failure'); END")
+      }
+      return [BackupCandidate(id: "reviewed", skipReason: "Unavailable fixture")]
+    }, valid: { true }, stage: { _, _ in XCTFail("Skipped source cannot stage") }, upload: { _ in XCTFail("Skipped source cannot upload") }, checkCatalog: {})
+    await backup.waitUntilSettled()
+    XCTAssertNil(try readBackupFixture(store) { try String.fetchOne($0, sql: "SELECT value FROM state WHERE key='backupSelection'") })
+    XCTAssertEqual(try readBackupFixture(store) { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM selectionWrites") }, 0)
+    try writeBackupFixture(store) { try $0.execute(sql: "DROP TRIGGER failBackupStatus") }
+    try backup.refreshCounts()
+    let encoded = try XCTUnwrap(readBackupFixture(store) { try String.fetchOne($0, sql: "SELECT value FROM state WHERE key='backupSelection'") })
+    XCTAssertEqual(try Wire.decode([String].self, XCTUnwrap(Data(base64Encoded: encoded))), ["reviewed"])
+    try backup.refreshCounts()
+    XCTAssertEqual(try readBackupFixture(store) { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM selectionWrites") }, 1,
+      "A successful retry clears selection dirtiness; later status updates cannot rewrite it")
+  }
+
   @MainActor func testMetadataIntakeReadsOnlyReviewedPhotoFactsOffMainActor() async throws {
     let assets = PHAsset.fetchAssets(with: .image, options: nil)
     guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),

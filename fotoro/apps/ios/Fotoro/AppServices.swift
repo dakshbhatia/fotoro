@@ -2004,7 +2004,7 @@ enum ReviewedPhotosBackupPolicy {
   }
   private func captureLocalAnnotation(_ record: SearchRecord, labelsChanged: Bool, source knownSource: BackupSource? = nil, refreshSummary: Bool = true, derivedOnly: Bool = false) throws {
     guard vault.isUnlocked, let account = session.accountId,
-      let source = try knownSource ?? store.backupSources().first(where: { $0.id == record.id }),
+      let source = try knownSource ?? store.backupSourceIfPresent(id: record.id),
       source.id == record.id,
       AnnotationSourceBinding.accepts(sourceRevision: source.sourceRevision, recordRevision: record.revision),
       let photo = try store.backupPhoto(source.photoId) else { return }

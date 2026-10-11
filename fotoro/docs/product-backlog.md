@@ -23,12 +23,13 @@ Cloudflare proposals become tasks here only when a consumer need admits them.
    incomplete change-feed, visual and People coverage visible. Build and query
    large indexes in cancellable slices, reuse unchanged source receipts, and
    keep sync progress out of search identity.
-2. Finish resumable inference. Reuse the existing native SQLite records/vectors
-   and encrypted browser catalog. Add durable jobs keyed by account, photo ID,
-   source revision, processor version and job kind; OCR, embeddings and opted-in
-   faces need separate completion/retry state. Metadata comes first; heavier
-   preparation starts with 30 days and expands deliberately. Queries retrieve
-   completed evidence rather than restarting inference.
+2. Finish resumable inference. Native SQLite completion rows now have separate
+   source/revision/processor-bound stage retry deadlines. Reopening preserves
+   completed OCR/classification/vectors; due work resumes through one admitted
+   wakeup and model readiness releases only model-deferred vectors. Metadata
+   comes first; heavier preparation starts with 30 days and expands deliberately.
+   Durable browser inference and broader physical acceptance remain open.
+   Queries retrieve completed evidence rather than restarting inference.
 3. Protect scrolling while work progresses. Move metadata discovery off-main;
    checkpoint each fully attempted photo and reuse one derivative when the model
    is ready. Cold model preparation cannot hold later OCR/classification; it
@@ -90,7 +91,9 @@ Automatic Picks waits through sync preflight and backup; an explicit Picks reque
 remains available. Already scheduled ciphertext uploads may finish in the background.
 Existing 10-day Sync anchors preserve their journal and exclusions until explicit
 expansion to 30 days. Date and reviewed-People metadata scope heavy processing;
-automatic recent preparation continues when browsing is idle; older query-scoped batches and unavailable-source retries remain explicit actions.
+automatic recent preparation continues when browsing is idle, including due
+source retries. Older query-scoped batches and immediate retry remain explicit
+choices; model readiness cannot bypass unavailable-source deadlines.
 Native API requests normalize URLSession cancellation to cancellation outcomes.
 Pause cancels active foreground transfer work while retaining its durable retry;
 interrupted work does not become a transfer failure solely because it was paused.

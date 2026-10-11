@@ -147,6 +147,12 @@ extension LibraryStore {
       }
     }
   }
+  func backupSourceIfPresent(id: String) throws -> BackupSource? {
+    try database.read { db in
+      try Data.fetchOne(db, sql: "SELECT value FROM backupSources WHERE id=?", arguments: [id])
+        .map { try Wire.decode(BackupSource.self, $0) }
+    }
+  }
   func putBackupSource(_ source: BackupSource) throws {
     try database.write { db in try putBackupSource(source, db: db) }
   }
@@ -362,6 +368,7 @@ struct BackupStatus: Codable {
   private(set) var status: BackupStatus
   private(set) var activeSource: BackupSource?
   private var selectionIDs: Set<String>?
+  private var selectionDirty = false
   private var task: Task<Void, Never>?
   var isRunning: Bool { task != nil }
   init(store: LibraryStore) throws {
@@ -388,7 +395,7 @@ struct BackupStatus: Codable {
   private func persist() throws {
     let encoded = try Wire.encode(status).base64EncodedString()
     try store.database.write { db in
-      if let selectionIDs {
+      if selectionDirty, let selectionIDs {
         try db.execute(
           sql: "INSERT INTO state(key,value) VALUES('backupSelection',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
           arguments: [try Wire.encode(selectionIDs.sorted()).base64EncodedString()])
@@ -398,6 +405,7 @@ struct BackupStatus: Codable {
           "INSERT INTO state(key,value) VALUES('backupStatus',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         arguments: [encoded])
     }
+    selectionDirty = false
   }
   func refreshCounts() throws {
     let sources = try countedSources()
@@ -447,7 +455,11 @@ struct BackupStatus: Codable {
         try persist()
         let candidates = try await snapshot()
         try fence()
-        selectionIDs = Set(candidates.map(\.id))
+        let nextSelection = Set(candidates.map(\.id))
+        if selectionIDs != nextSelection {
+          selectionIDs = nextSelection
+          selectionDirty = true
+        }
         var dates: [String: Date] = [:]
         let existing = Dictionary(try store.backupSources().map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         for (index, candidate) in candidates.enumerated() {
