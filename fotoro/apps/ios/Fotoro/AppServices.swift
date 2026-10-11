@@ -629,10 +629,11 @@ enum ReviewedPhotosBackupPolicy {
       let allSources = try store.backupSources()
       let access = PhotoAccountAccess(account: account, vault: vault.generation, catalog: ObjectIdentifier(store))
       let origin = BackgroundUploadPolicy.origin(api.baseURL)
-      if consumerProjectionAccess != access || consumerProjectionOrigin != origin || consumerBackupSources != allSources {
-        consumerBackupSources = allSources
+      if consumerProjectionAccess != access || consumerProjectionOrigin != origin
+        || ConsumerSearchBinding.copyIdentities(consumerBackupSources) != ConsumerSearchBinding.copyIdentities(allSources) {
         consumerBackupSourcesGeneration &+= 1
       }
+      if consumerBackupSources != allSources { consumerBackupSources = allSources }
       consumerProjectionAccess = access
       consumerProjectionOrigin = origin
       let retainedIDs = Set(allSources.filter(\.isRetainedOriginal).map(\.photoId))

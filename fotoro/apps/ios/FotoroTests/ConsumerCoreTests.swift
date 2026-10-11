@@ -5,6 +5,45 @@ import Photos
 @testable import Fotoro
 
 final class ConsumerCoreTests: XCTestCase {
+  @MainActor func testTransferStatusUpdatesDoNotRegroupTimelineButVerifiedCopiesStillDo() async throws {
+    try await withSavedLibrary { services, _ in
+      var source = BackupSource(id: "permitted-source", photoId: Wire.id(), sourceRevision: "current",
+        originalSha256: Data("original".utf8).digest)
+      try services.store.putBackupSource(source)
+      services.refreshConsumerSyncSummary()
+      let projection = PhotoBrowseProjection(), page = UUID()
+      var builds = 0
+      func group() {
+        let identity = PhotoBrowseProjectionID(storePage: page, catalog: services.consumerCatalogGeneration,
+          sources: services.consumerBackupSourcesGeneration, filter: .all, dates: .all, moments: false,
+          scope: "photos", day: Calendar.current.startOfDay(for: Date()))
+        _ = projection.groups(for: identity) { builds += 1; return [] }
+      }
+      group()
+      let baseline = services.consumerBackupSourcesGeneration
+      for phase: BackupSource.Phase in [.queued, .failed, .pending] {
+        source.phase = phase; source.message = "Current transfer status"
+        try services.store.putBackupSource(source); services.refreshConsumerSyncSummary(); group()
+        XCTAssertEqual(services.consumerBackupSourcesGeneration, baseline)
+        XCTAssertEqual(services.consumerBackupSources.first { $0.id == source.id }, source,
+          "Progress must still reach the separate tile status projection")
+        XCTAssertEqual(services.photoSyncItem(sourceID: source.id, revision: "current")?.sourceRevision, "current")
+      }
+      XCTAssertEqual(builds, 1)
+      source.phase = .committed
+      try services.store.putBackupSource(source); services.refreshConsumerSyncSummary(); group()
+      XCTAssertEqual(builds, 2, "A newly verified Saved copy must refresh timeline deduplication")
+      source.message = "Updated status detail"
+      try services.store.putBackupSource(source); services.refreshConsumerSyncSummary(); group()
+      XCTAssertEqual(builds, 2)
+      source.sourceRevision = "edited"
+      try services.store.putBackupSource(source); services.refreshConsumerSyncSummary(); group()
+      XCTAssertEqual(builds, 3, "Source corrections must withdraw the old deduplication binding")
+      source.phase = .queued
+      try services.store.putBackupSource(source); services.refreshConsumerSyncSummary(); group()
+      XCTAssertEqual(builds, 4, "Leaving committed state must restore the Saved copy")
+    }
+  }
   @MainActor func testAnnotationAcknowledgmentAndCoalescedDrainDoNotRepublishBrowseEvidence() async throws {
     for editDuringSend in [false, true] {
       let started = expectation(description: "Held annotation acknowledgment")

@@ -16,6 +16,143 @@ private actor AdmissionQueryProbe {
 }
 
 final class SearchLifecycleTests: XCTestCase {
+  #if !FOTORO_LOCAL_PREVIEW
+  @MainActor func testColdSemanticPreparationCannotHoldRecentBatchesOrScrollResume() async throws {
+    let fetched = PHAsset.fetchAssets(with: .image, options: nil)
+    guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)), fetched.count >= 3 else {
+      throw XCTSkip("Permit three existing public Simulator photos for cold indexing admission.")
+    }
+    let photos = (0..<3).map { RecentPhoto(asset: fetched.object(at: $0)) }
+    guard photos.allSatisfy({ !$0.asset.isHidden }) else { throw XCTSkip("Use visible permitted public photos.") }
+    let index = try SearchIndex()
+    let records = photos.map { photo -> SearchRecord in
+      var record = SearchRecord(id: photo.id)
+      record.revision = photo.sourceRevision; record.capturedAt = Date()
+      record.ocrStatus = .complete; record.visualStatus = .complete
+      return record
+    }
+    try index.replacePermitted(records)
+    let image = try XCTUnwrap(UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).image { context in
+      UIColor.white.setFill(); context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+    }.cgImage)
+    let preparationGate = AdmissionPreviewGate(), previewGate = AdmissionPreviewGate()
+    let installationStarted = expectation(description: "Public model installation is held")
+    let installation = Task<URL, Error> { @MainActor in
+      installationStarted.fulfill(); await preparationGate.wait()
+      return URL(fileURLWithPath: "/public-model-fixture")
+    }
+    let store = LocalSearchStore(index: index)
+    store.setAutomaticAnalysisActive(false); store.automaticAnalysisBatchLimit = 2
+    store.completePermittedSnapshotRefresh(photos: photos)
+    let held = expectation(description: "Second preview is unfinished during cold preparation")
+    let prepared = expectation(description: "Every source reaches its cold checkpoint")
+    let embedded = expectation(description: "Ready model revisits every missing vector")
+    var ready = false, reads: [String: Int] = [:], previews = 0, publications = 0, vectors = 0
+    store.analysisSemanticPreparation = {
+      _ = try await PhotoSemanticProcessor.awaitInstallation(installation)
+      ready = true
+    }
+    store.analysisSemanticReady = { ready }
+    store.analysisSemanticImage = { _ in
+      vectors += 1
+      if vectors == records.count { embedded.fulfill() }
+      var result = [Float](repeating: 0, count: 512); result[0] = 1
+      return result
+    }
+    store.analysisPreview = { asset in
+      previews += 1; reads[asset.localIdentifier, default: 0] += 1
+      if previews == 2 { held.fulfill(); await previewGate.wait() }
+      return SearchPreview(image: image)
+    }
+    store.onRecordChanged = { _, _ in
+      publications += 1
+      if publications == records.count { prepared.fulfill() }
+    }
+    defer { store.pause(); preparationGate.open(); previewGate.open() }
+    store.setAutomaticAnalysisActive(true)
+    await fulfillment(of: [installationStarted, held], timeout: 5)
+    store.setBrowseInteractionActive(true); previewGate.open(); store.setBrowseInteractionActive(false)
+    await fulfillment(of: [prepared], timeout: 5)
+    XCTAssertFalse(ready, "OCR checkpoints and the replacement worker cannot await installation")
+    XCTAssertFalse(installation.isCancelled, "Scrolling cannot cancel the shared public installation")
+    XCTAssertEqual(store.automaticAnalysisWorkerStarts, 2)
+    XCTAssertEqual(reads.values.sorted(), [1, 1, 2], "Only the unfinished preview is reread before readiness")
+    XCTAssertEqual(vectors, 0)
+    for record in records { XCTAssertTrue(try index.needsSemantic(photoID: record.id, revision: record.revision)) }
+    preparationGate.open()
+    await fulfillment(of: [embedded], timeout: 5)
+    for _ in 0..<200 where store.indexing { try await Task.sleep(for: .milliseconds(10)) }
+    for record in records { XCTAssertFalse(try index.needsSemantic(photoID: record.id, revision: record.revision)) }
+    XCTAssertEqual(vectors, records.count)
+    XCTAssertEqual(store.analysisUnavailable, 0)
+  }
+  @MainActor func testCancelledModelConsumerLeavesSharedInstallationAvailableForNextConsumer() async throws {
+    let gate = AdmissionPreviewGate()
+    let began = expectation(description: "Installation began"), cancelled = expectation(description: "Consumer cancels before installation ends")
+    let installation = Task<URL, Error> { @MainActor in
+      began.fulfill(); await gate.wait(); return URL(fileURLWithPath: "/public-model-fixture")
+    }
+    defer { gate.open() }
+    let consumer = Task {
+      do { _ = try await PhotoSemanticProcessor.awaitInstallation(installation); XCTFail("Cancelled consumer cannot admit a model") }
+      catch { XCTAssertTrue(error is CancellationError); cancelled.fulfill() }
+    }
+    await fulfillment(of: [began], timeout: 1)
+    consumer.cancel()
+    await fulfillment(of: [cancelled], timeout: 1)
+    XCTAssertFalse(installation.isCancelled)
+    gate.open()
+    let admitted = try await PhotoSemanticProcessor.awaitInstallation(installation)
+    XCTAssertEqual(admitted, URL(fileURLWithPath: "/public-model-fixture"))
+    await consumer.value
+  }
+  @MainActor func testColdExplicitHistoricalAnalysisKeepsItsScopeAndCancelsPromptly() async throws {
+    guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+      let asset = PHAsset.fetchAssets(with: .image, options: nil).firstObject, !asset.isHidden else {
+      throw XCTSkip("Permit an existing public Simulator photo for historical analysis.")
+    }
+    for withdraw in [false, true] {
+      let photo = RecentPhoto(asset: asset), index = try SearchIndex()
+      var record = SearchRecord(id: photo.id)
+      record.revision = photo.sourceRevision; record.capturedAt = Date().addingTimeInterval(-90 * 86400)
+      record.labels = ["historical fixture"]; record.ocrStatus = .complete; record.visualStatus = .complete
+      try index.replacePermitted([record])
+      let image = try XCTUnwrap(UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).image { context in
+        UIColor.white.setFill(); context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+      }.cgImage)
+      let gate = AdmissionPreviewGate(), began = expectation(description: "Historical model consumer awaits readiness")
+      let installation = Task<URL, Error> { @MainActor in
+        await gate.wait(); return URL(fileURLWithPath: "/public-model-fixture")
+      }
+      let store = LocalSearchStore(index: index)
+      store.setAutomaticAnalysisActive(false); store.completePermittedSnapshotRefresh(photos: [photo])
+      var ready = false, vectors = 0, previews = 0
+      store.analysisPreview = { _ in previews += 1; return SearchPreview(image: image) }
+      store.analysisSemanticPreparation = {
+        began.fulfill(); _ = try await PhotoSemanticProcessor.awaitInstallation(installation); ready = true
+      }
+      store.analysisSemanticReady = { ready }
+      store.analysisSemanticImage = { _ in
+        vectors += 1; var result = [Float](repeating: 0, count: 512); result[0] = 1; return result
+      }
+      defer { store.pause(); gate.open() }
+      store.updateQuery("historical fixture"); store.analyzeMetadataMatches()
+      await fulfillment(of: [began], timeout: 3)
+      XCTAssertTrue(store.indexing)
+      if withdraw {
+        store.updateQuery("different scope")
+        for _ in 0..<100 where store.indexing { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(store.indexing, "Query withdrawal must not await installation")
+        XCTAssertFalse(installation.isCancelled)
+      }
+      gate.open()
+      for _ in 0..<200 where store.indexing { try await Task.sleep(for: .milliseconds(10)) }
+      XCTAssertEqual(previews, 1, "Explicit inference retains the same derivative")
+      XCTAssertEqual(vectors, withdraw ? 0 : 1)
+      XCTAssertEqual(try index.needsSemantic(photoID: record.id, revision: record.revision), withdraw)
+    }
+  }
+  #endif
   @MainActor func testAutomaticAnalysisResumesPartialBatchAcrossQueryChangesWithoutRetryingUnavailableSources() async throws {
     let fetched = PHAsset.fetchAssets(with: .image, options: nil)
     guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)), fetched.count >= 4 else {

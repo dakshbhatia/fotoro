@@ -69,7 +69,7 @@ actor PhotoSemanticProcessor {
       installation = task
     }
     do {
-      let root = try await task.value
+      let root = try await Self.awaitInstallation(task)
       try Task.checkCancellation()
       if ready { return }
       let config = MLModelConfiguration()
@@ -82,11 +82,29 @@ actor PhotoSemanticProcessor {
       textModel = try MLModel(contentsOf: root.appendingPathComponent("text.mlmodelc"), configuration: config)
       tokenizer = try CLIPTokenizer()
       installation = nil
+    } catch is CancellationError {
+      // A scrolling/search consumer can leave immediately. The shared public
+      // model installation remains owned by this actor for the next consumer.
+      throw CancellationError()
     } catch {
       imageModel = nil; textModel = nil; tokenizer = nil
       installation = nil; lastFailure = Date()
       throw error
     }
+  }
+  nonisolated static func awaitInstallation(_ task: Task<URL, Error>) async throws -> URL {
+    let results = AsyncThrowingStream<URL, Error> { continuation in
+      let waiter = Task {
+        do { continuation.yield(try await task.value); continuation.finish() }
+        catch { continuation.finish(throwing: error) }
+      }
+      continuation.onTermination = { _ in waiter.cancel() }
+    }
+    var iterator = results.makeAsyncIterator()
+    let root = try await iterator.next()
+    try Task.checkCancellation()
+    guard let root else { throw CancellationError() }
+    return root
   }
   func image(_ preview: SearchPreview) throws -> [Float] {
     try Task.checkCancellation()
