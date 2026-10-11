@@ -73,6 +73,7 @@ import {resolveChosenTripSources, chosenTripPhotos} from "./exchange/chosen-trip
 import {ChosenSaveIntent, continueChosenSave, type ChosenSaveSnapshot} from "./exchange/chosen-save";
 import type {UnlockedVault} from "./vault/vault";
 import {syncContacts, subscribeContacts} from "./exchange/contacts";
+import {syncPeopleLinks, subscribePeopleLinks} from "./exchange/people-links";
 import {subscribeSavedRefresh} from "./library/consumer-refresh";
 import {saveQueuedAnnotations} from "./library/consumer-annotation-save";
 import type {ConsumerPhotoChanges} from "./library/consumer-changes";
@@ -523,10 +524,11 @@ export default function CloudApp({
       if (!current() || !navigator.onLine || document.visibilityState !== "visible") return;
       // Contact approval has its own encrypted queue; photo Pause does not pause it.
       void syncContacts(session, {signal: controller.signal, current}).catch(() => {});
+      void syncPeopleLinks(session, {signal: controller.signal, current}).catch(() => {});
     };
     synchronize();
-    const refresh = subscribeSavedRefresh(window, document, synchronize), edits = subscribeContacts(synchronize);
-    return () => {controller.abort(); refresh(); edits();};
+    const refresh = subscribeSavedRefresh(window, document, synchronize), edits = subscribeContacts(synchronize), linkedNames = subscribePeopleLinks(synchronize);
+    return () => {controller.abort(); refresh(); edits(); linkedNames();};
   }, [active, account]);
   useEffect(() => {
     setReceivedNow(Date.now());

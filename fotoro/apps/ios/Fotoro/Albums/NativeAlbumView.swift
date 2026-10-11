@@ -282,7 +282,14 @@ struct NativeAlbumView: View {
       .sheet(item: $viewer) { item in NativeAlbumPhotoView(model: model, item: item).presentationDetents([.large]) }
       .sheet(isPresented: $showFamilyFilters) {
         NativeAlbumFamilyFilters(filter: $familyFilter, groupDuplicates: $groupDuplicates,
-          choices: NativeAlbumSearch.choices(items: model.items, facts: model.sharedFacts),
+          choices: NativeAlbumSearch.linkedChoices(items: model.items, facts: model.sharedFacts, links: model.currentPeopleLinks),
+          sourceChoices: NativeAlbumSearch.unlinkedChoices(items: model.items, facts: model.sharedFacts, links: model.currentPeopleLinks),
+          links: model.reviewablePeopleLinks, review: services.peopleLinksReview,
+          pendingLinks: services.peopleLinksPending, linksBusy: services.peopleLinksSyncBusy,
+          linksMessage: services.peopleLinksSyncMessage,
+          createLink: { try model.linkPeople($0, name: $1) }, removeLink: { try model.removePeopleLink($0) },
+          resolveLinks: { try services.resolvePeopleLinks($0, keepLocal: $1) },
+          retryLinks: { run { try await services.syncPeopleLinks() } },
           loadingChoices: wantsWholeTripSearch && !model.searchMetadataComplete,
           searchError: searchError,
           retrySearch: { searchError = nil; startTripSearch() },

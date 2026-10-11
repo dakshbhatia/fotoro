@@ -10,6 +10,7 @@ import * as albumPhotoFacts from "./album-photo-facts";
 import { savePhoto } from "./saves";
 import * as annotations from "./annotations";
 import * as contacts from "./contacts";
+import * as peopleLinks from "./people-links";
 import * as intelligence from "./intelligence";
 import {beginDiagnostic, diagnosticFailure, finalDiagnostic, type RequestDiagnostic} from "./diagnostics";
 import { readJson } from "./requests";
@@ -226,6 +227,14 @@ app.get("/v1/contacts", async (c) => {
 app.put("/v1/contacts", async (c) => {
   c.header("Cache-Control", "no-store");
   return c.json(await contacts.putContacts(c.env, c.get("actor"), await contacts.readContactsRequest(c.req.raw)));
+});
+app.get("/v1/people-links", async (c) => {
+  c.header("Cache-Control", "no-store");
+  return c.json(await peopleLinks.getPeopleLinks(c.env, c.get("actor")));
+});
+app.put("/v1/people-links", async (c) => {
+  c.header("Cache-Control", "no-store");
+  return c.json(await peopleLinks.putPeopleLinks(c.env, c.get("actor"), await peopleLinks.readPeopleLinksRequest(c.req.raw)));
 });
 app.get("/v1/changes", async (c) =>
   c.json(

@@ -1727,6 +1727,182 @@
           ]
         }
       }
+    },
+    "TripPersonAliasV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "card",
+        "name"
+      ],
+      "properties": {
+        "card": {
+          "$ref": "#/$defs/AccountCardV1"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        }
+      }
+    },
+    "TripPersonLinkV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "origin",
+        "albumId",
+        "ownerCard",
+        "name",
+        "aliases",
+        "deleted"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "origin": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "albumId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "ownerCard": {
+          "$ref": "#/$defs/AccountCardV1"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "aliases": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/TripPersonAliasV1"
+          }
+        },
+        "deleted": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "deleted": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "aliases": {
+                "type": "array",
+                "minItems": 2
+              }
+            }
+          }
+        }
+      ]
+    },
+    "AccountPeopleLinksV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "ownerAccountId",
+        "links"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "ownerAccountId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "links": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/TripPersonLinkV1"
+          }
+        }
+      }
+    },
+    "AccountPeopleLinksUpdateV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "revision",
+        "encrypted"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "encrypted": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "nonce",
+            "ciphertext"
+          ],
+          "properties": {
+            "version": {
+              "const": 1
+            },
+            "nonce": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]*$",
+              "minLength": 32,
+              "maxLength": 32
+            },
+            "ciphertext": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]*$",
+              "minLength": 22,
+              "maxLength": 262144
+            }
+          }
+        }
+      }
+    },
+    "AccountPeopleLinksReplyV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "peopleLinks"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "peopleLinks": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SignedPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
     }
   }
 }

@@ -65,6 +65,20 @@ enum ReviewedPhotosBackupPolicy {
 
 @MainActor @Observable final class AppServices: Identifiable {
   let id = UUID()
+  var peopleLinks: [TripPersonLinkV1] = []
+  var peopleLinksReview: PeopleLinksReview?
+  var peopleLinksPending = false
+  var peopleLinksSyncMessage: String?
+  var peopleLinksSyncBusy = false
+  @ObservationIgnored private var peopleLinksSyncEngine: PeopleLinksSync?
+  private var peopleLinksSync: PeopleLinksSync {
+    if let peopleLinksSyncEngine { return peopleLinksSyncEngine }
+    let engine = PeopleLinksSync(services: self); peopleLinksSyncEngine = engine; return engine
+  }
+  func editPeopleLink(_ link: TripPersonLinkV1) throws { try peopleLinksSync.edit(link) }
+  func removePeopleLink(_ expected: TripPersonLinkV1) throws { try peopleLinksSync.remove(expected) }
+  func syncPeopleLinks() async throws { try await peopleLinksSync.syncNow() }
+  func resolvePeopleLinks(_ review: PeopleLinksReview, keepLocal: Bool) throws { try peopleLinksSync.resolve(review, keepLocal: keepLocal) }
   var contactsSyncConflicts: [ContactSyncConflict] = []
   var contactsSyncMessage: String?
   var contactsSyncBusy = false
@@ -76,6 +90,7 @@ enum ReviewedPhotosBackupPolicy {
     let engine = ContactSync(services: self); contactSyncEngine = engine; return engine
   }
   private func suspendContactSync() {
+    peopleLinksSyncEngine?.pause(); peopleLinks = []; peopleLinksReview = nil; peopleLinksPending = false; peopleLinksSyncMessage = nil
     contactSyncEngine?.pause(); contactsSyncBusy = false
     contactsSyncMessage = nil; contactsSyncConflicts = []; contactNames = [:]
   }
@@ -810,6 +825,7 @@ enum ReviewedPhotosBackupPolicy {
     resetConsumerSyncObservation()
     activatedPhotoAccount = PhotoAccountAccess(account: id, vault: vault.generation, catalog: ObjectIdentifier(store))
     do { try contactSync.activate() } catch { contactsSyncMessage = "Contacts could not open. Try again." }
+    do { try peopleLinksSync.activate() } catch { peopleLinksSyncMessage = "People links could not open. Try again." }
     kickAutomaticPhotoSync()
   }
   func startPhotosBackup(selection: [RecentPhotoSource]? = nil) throws {
@@ -930,6 +946,8 @@ enum ReviewedPhotosBackupPolicy {
   func setPhotoSyncForeground(_ active: Bool, reason: NativeDiagnosticReason = .background) {
     if !active { photoSyncSuspensionReason = reason == .inactive ? .inactive : .background }
     contactSyncEngine?.foreground(active)
+    peopleLinksSyncEngine?.foreground(active)
+    if !active { peopleLinks = []; peopleLinksReview = nil }
     guard photoSyncForeground != active else {
       if active { kickAutomaticPhotoSync() }
       return

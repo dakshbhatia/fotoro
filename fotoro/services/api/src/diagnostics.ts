@@ -12,7 +12,7 @@ export function diagnosticArea(path: string): DiagnosticArea {
   if (/^\/v1\/(?:uploads|background\/uploads|storage)(?:\/|$)/.test(path)) return "sync";
   if (/^\/v1\/(?:changes|photos)(?:\/|$)/.test(path)) return "catalog";
   if (/^\/v1\/albums(?:\/|$)/.test(path)) return "albums";
-  if (/^\/v1\/(?:moments|grants|saves|contacts)(?:\/|$)/.test(path)) return "sharing";
+  if (/^\/v1\/(?:moments|grants|saves|contacts|people-links)(?:\/|$)/.test(path)) return "sharing";
   if (/^\/v1\/objects(?:\/|$)/.test(path)) return "media";
   if (/^\/v1\/intelligence(?:\/|$)/.test(path)) return "intelligence";
   return "other";

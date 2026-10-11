@@ -27,14 +27,25 @@ function day(value: string, after = false) {
 }
 // Only explicitly shared, authenticated details enter album search; private annotations never do.
 export function searchAlbumPhotos(photos: Photo[], query: string, current: () => boolean, now = Date.now(), options: {
-  facts?: AlbumSharedFacts; people?: PeopleFilter; from?: string; through?: string;
+  facts?: AlbumSharedFacts; people?: PeopleFilter; from?: string; through?: string; linkedPeople?: readonly {id: string; name: string; aliases: readonly string[]}[];
 } = {}) {
   if (!current()) return [];
   const dateQuery = parseNaturalDateQuery(query, {now});
   const tokens = (dateQuery.text.match(/[\p{L}\p{N}]+/gu) ?? []).map(normalizeSearch);
   const from = day(options.from ?? ""), until = day(options.through ?? "", true), selected = [...(options.people?.ids ?? [])];
+  const linkedByAlias = new Map<string, {id: string; name: string}[]>();
+  for (const person of options.linkedPeople ?? []) {
+    const linked = {id: person.id, name: person.name};
+    for (const alias of person.aliases) {
+      const matches = linkedByAlias.get(alias);
+      if (matches) matches.push(linked); else linkedByAlias.set(alias, [linked]);
+    }
+  }
   const eligible = photos.filter(photo => {
     const details = sharedAlbumDetails(photo, options.facts), assigned = new Set((details?.people ?? []).map(name => albumPersonKey(photo.manifest.ownerAccountId, name)));
+    const linked = new Set<{id: string; name: string}>();
+    for (const alias of assigned) for (const person of linkedByAlias.get(alias) ?? []) linked.add(person);
+    for (const person of linked) assigned.add(person.id);
     if (selected.length && !(options.people?.mode === "everyone" ? selected.every(id => assigned.has(id)) : selected.some(id => assigned.has(id)))) return false;
     if (from !== undefined || until !== undefined || dateQuery.phrase !== undefined) {
       const date = Date.parse(photo.metadata.sourceDate);
@@ -44,7 +55,7 @@ export function searchAlbumPhotos(photos: Photo[], query: string, current: () =>
     }
     if (!tokens.length) return !normalizeSearch(query) || dateQuery.phrase !== undefined;
     // Every term must be supported by this copy's own shared fields; never combine copies or private annotations.
-    const fields = [photo.metadata.filename, ...(details?.people ?? []), details?.location?.name ?? "", ...(details?.location ? ["GPS"] : [])];
+    const fields = [photo.metadata.filename, ...(details?.people ?? []), ...Array.from(linked, person => person.name), details?.location?.name ?? "", ...(details?.location ? ["GPS"] : [])];
     const words = fields.flatMap(field => normalizeSearch(field).match(/[\p{L}\p{N}]+/gu) ?? []);
     return tokens.every((token, index) => words.some(word => word === token || index === tokens.length - 1 && !/^\d+$/.test(token) && word.startsWith(token)));
   });

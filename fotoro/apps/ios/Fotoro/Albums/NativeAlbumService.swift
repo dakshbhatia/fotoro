@@ -53,6 +53,7 @@ private struct NativeAlbumBrowseIdentity: Equatable {
   let groupDuplicates: Bool
   let calendar: Calendar
   let day: Date
+  let links: [TripPersonLinkV1]
 }
 
 @MainActor @Observable final class NativeAlbumService {
@@ -122,15 +123,45 @@ private struct NativeAlbumBrowseIdentity: Equatable {
       captured.epoch == epoch else { return nil }
     return captured.photo
   }
+  var reviewablePeopleLinks: [TripPersonLinkV1] {
+    guard currentOpenedPhotoAccess != nil, let opened, let origin = PeopleLinksCrypto.origin(services.api.baseURL),
+      let owner = opened.definition.members.first(where: { $0.card.accountId == opened.definition.ownerAccountId })?.card else { return [] }
+    return services.peopleLinks.filter { !$0.deleted && $0.origin == origin && $0.albumId == opened.id && $0.ownerCard == owner }
+  }
+  var currentPeopleLinks: [TripPersonLinkV1] {
+    guard currentOpenedPhotoAccess != nil, let opened,
+      let origin = PeopleLinksCrypto.origin(services.api.baseURL),
+      let owner = opened.definition.members.first(where: { $0.card.accountId == opened.definition.ownerAccountId })?.card else { return [] }
+    let cards = opened.definition.members.map(\.card)
+    return TripPersonLinkScope.active(services.peopleLinks, origin: origin, albumID: opened.id, owner: owner, contributors: cards)
+  }
+  func linkPeople(_ choiceIDs: Set<String>, name: String) throws {
+    guard currentOpenedPhotoAccess != nil, let opened, let reading = access,
+      let origin = PeopleLinksCrypto.origin(services.api.baseURL),
+      let owner = opened.definition.members.first(where: { $0.card.accountId == opened.definition.ownerAccountId })?.card else { throw CancellationError() }
+    try check(reading.context)
+    let choices = NativeAlbumSearch.choices(items: items, facts: sharedFacts).filter { choiceIDs.contains($0.id) }
+    guard choices.count == choiceIDs.count, choices.count >= 2 else { throw FotoroError("Choose at least two current shared names.") }
+    let aliases = try choices.map { choice -> TripPersonAliasV1 in
+      guard let card = opened.definition.members.first(where: { $0.card.accountId == choice.contributor })?.card else { throw CancellationError() }
+      return TripPersonAliasV1(card: card, name: choice.name)
+    }
+    try services.editPeopleLink(TripPersonLinkV1(id: Wire.id(), origin: origin, albumId: opened.id, ownerCard: owner,
+      name: name, aliases: aliases, deleted: false))
+  }
+  func removePeopleLink(_ expected: TripPersonLinkV1) throws {
+    guard let link = reviewablePeopleLinks.first(where: { $0.id == expected.id }), link == expected else { throw FotoroError("This People link changed. Review again.") }
+    try services.removePeopleLink(link)
+  }
   func browse(filter: NativeAlbumSearchFilter, groupDuplicates: Bool,
     now: Date = Date(), calendar: Calendar = .current) -> NativeAlbumSearchSnapshot {
     let captured = currentOpenedPhotoAccess == nil ? nil : access?.context
     let identity = NativeAlbumBrowseIdentity(context: captured, endpoint: services.api.baseURL.absoluteString,
       albumID: opened?.id, items: itemsGeneration, facts: sharedFactsGeneration, filter: filter,
-      groupDuplicates: groupDuplicates, calendar: calendar, day: calendar.startOfDay(for: now))
+      groupDuplicates: groupDuplicates, calendar: calendar, day: calendar.startOfDay(for: now), links: currentPeopleLinks)
     return browseProjection.value(for: identity) {
       NativeAlbumSearch.snapshot(items: captured == nil ? [] : items, facts: sharedFacts,
-        filter: filter, groupDuplicates: groupDuplicates, now: now, calendar: calendar)
+        filter: filter, groupDuplicates: groupDuplicates, now: now, calendar: calendar, links: currentPeopleLinks)
     }
   }
   private func check(_ expected: NativeAlbumContext) throws {

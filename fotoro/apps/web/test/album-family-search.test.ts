@@ -22,6 +22,7 @@ import {collect, source, digest, type Photo} from "../src/library/catalog";
 import {ownedAlbumDetails} from "../src/albums/details";
 import {albumPhotoGroups, albumPreviewNavigation} from "../src/albums/browse";
 import {albumPersonKey, albumReviewedPeople, searchAlbumPhotos} from "../src/albums/search";
+import {tripPeopleLinks} from "../src/albums/people-links";
 import type {OwnedPhotoSnapshot} from "../src/library/consumer-search";
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), {status});
 async function open(index: number) {
@@ -297,4 +298,53 @@ test("grouped trip preview follows matching tiles while contributor copies stay 
   assert.equal(albumPreviewNavigation(ungrouped, first).next, firstCopy);
   assert.equal(albumPreviewNavigation(ungrouped, firstCopy).previous, first);
   assert.equal(albumPreviewNavigation(ungrouped, firstCopy).count, 4);
+});
+
+test("explicit private links match contributor aliases but Everyone and text stay on one authenticated copy", () => scoped(async () => {
+  const data = await fixture(), a = await open(0), first = await AlbumAccess.open(data.overview(), {}), [aPhoto] = (await first.loadPhotoPage()).photos;
+  const sourceA = reviewed(data.initial[0].photo, a, "Mum");
+  await first.shareDetails(aPhoto, sourceA, {people: true, location: false}, 1); first.dispose();
+  const b = await open(1); await joinAlbumInvitation(data.overview(), {}, accounts.accounts[0]);
+  const adding = await AlbumAccess.open(data.overview(), {}); await adding.add([data.other.photo], () => [data.other.photo]); adding.dispose();
+  const access = await AlbumAccess.open(data.overview(), {}), photos = (await access.loadPhotoPage()).photos, own = photos.find(photo => photo.manifest.ownerAccountId === b.accountId)!;
+  await access.shareDetails(own, reviewed(data.other.photo, b, "Mom"), {people: true, location: false}, 1);
+  const facts = (await access.loadFacts()).facts, ownerCard = accounts.accounts[0], cards = access.definition.members.map(member => member.card);
+  const scope = {accountId: b.accountId, origin: "https://fotoro.cloud", albumId: access.albumId, ownerCard, cards, current: () => access.current()};
+  const mum = {id: crypto.randomUUID(), origin: scope.origin, albumId: scope.albumId, ownerCard, name: "Mother", aliases: [{card: ownerCard, name: "Mum"}, {card: b.card, name: "Mom"}], deleted: false};
+  const dad = {...mum, id: crypto.randomUUID(), name: "Father", aliases: [{card: ownerCard, name: "Dad"}, {card: b.card, name: "Papa"}]};
+  const book = {version: 1 as const, ownerAccountId: b.accountId, links: [mum, dad]};
+  let linkedPeople = tripPeopleLinks(book, photos, facts, scope);
+  assert.equal(linkedPeople.length, 1); assert.equal(linkedPeople[0].aliases.length, 2);
+  assert.equal(searchAlbumPhotos(photos, "Mother", scope.current, Date.now(), {facts, linkedPeople}).length, 2);
+  assert.equal(searchAlbumPhotos(photos, "Father", scope.current, Date.now(), {facts, linkedPeople}).length, 0, "A label without any authenticated source alias supplies no text");
+  await access.shareDetails(own, {...reviewed(data.other.photo, b, "Mom"), people: ["Mom", "Papa"]}, {people: true, location: false}, 2);
+  const bothFacts = (await access.loadFacts()).facts; linkedPeople = tripPeopleLinks(book, photos, bothFacts, scope);
+  const everyone = searchAlbumPhotos(photos, "", scope.current, Date.now(), {facts: bothFacts, linkedPeople, people: {ids: new Set(linkedPeople.map(person => person.id)), mode: "everyone"}});
+  assert.deepEqual(everyone, [own], "Two distinct canonical people must be present in one contributor's authenticated facts");
+  assert.equal(searchAlbumPhotos(photos, "Mother Father", scope.current, Date.now(), {facts: bothFacts, linkedPeople}).length, 1);
+  assert.deepEqual(tripPeopleLinks(book, photos, bothFacts, {...scope, origin: "https://other.test"}), []);
+  assert.deepEqual(tripPeopleLinks(book, photos, bothFacts, {...scope, accountId: ownerCard.accountId}), []);
+  assert.deepEqual(tripPeopleLinks(book, photos, bothFacts, {...scope, ownerCard: {...ownerCard, signingPublicKey: b.card.signingPublicKey}}), []);
+  const onlyOwner = tripPeopleLinks(book, photos, bothFacts, {...scope, cards: [ownerCard]});
+  assert.equal(onlyOwner.length, 1); assert.equal(onlyOwner[0].aliases.length, 1, "Absent contributor aliases never project");
+  const changedContributor = tripPeopleLinks(book, photos, bothFacts, {...scope, cards: [ownerCard, {...b.card, signingPublicKey: ownerCard.signingPublicKey}]});
+  assert.equal(searchAlbumPhotos(photos, "Mother", scope.current, Date.now(), {facts: bothFacts, linkedPeople: changedContributor}).length, 1, "The same name on a changed contributor card never supplies a canonical label");
+  assert.deepEqual(tripPeopleLinks({...book, links: [{...mum, deleted: true}]}, photos, bothFacts, scope), []);
+  access.dispose(); assert.deepEqual(tripPeopleLinks(book, photos, bothFacts, scope), []);
+}));
+
+test("linked-person aliases and labels are indexed once independently of photo count", () => {
+  const owner = accounts.accounts[0].accountId;
+  const photos = Array.from({length: 1000}, (_, index) => ({manifest: {photoId: "photo-" + index, ownerAccountId: owner}, metadata: {filename: "public.png", originalSha256: "original-" + index}} as Photo));
+  const facts = new Map(photos.map(photo => [photo.manifest.photoId, {version: 1 as const, albumId: "public-trip", photoId: photo.manifest.photoId, ownerAccountId: owner, originalSha256: photo.metadata.originalSha256, people: ["Mum"]}]));
+  let aliasReads = 0, labelReads = 0, idReads = 0;
+  const linkedPeople = Array.from({length: 256}, (_, index) => ({
+    get id() {idReads++; return "linked:" + index;},
+    get name() {labelReads++; return index === 0 ? "Mother" : "Other";},
+    get aliases() {aliasReads++; return [albumPersonKey(owner, index === 0 ? "Mum" : "Other " + index)];},
+  }));
+  const result = searchAlbumPhotos(photos, "Mother", () => true, Date.now(), {facts, linkedPeople, people: {ids: new Set(["linked:0"]), mode: "everyone"}});
+  assert.deepEqual(result, photos, "Each photo receives only the label supported by its own reviewed source name");
+  assert.equal(aliasReads, linkedPeople.length, "Aliases are enumerated once, rather than once per photo");
+  assert.equal(labelReads, linkedPeople.length); assert.equal(idReads, linkedPeople.length);
 });
