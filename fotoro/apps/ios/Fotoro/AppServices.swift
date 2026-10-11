@@ -1435,7 +1435,7 @@ enum ReviewedPhotosBackupPolicy {
           let trackedIDs = scanPlan?.trackedIDs ?? []
           let excludeHidden = selection != nil || automatic
           let scanThrough = through
-          func checkMetadataScope() throws {
+          @MainActor func checkMetadataScope() throws {
             try Task.checkCancellation()
             guard self.session.isSignedIn, self.vault.isUnlocked, self.vault.generation == generation,
               self.session.accountId == account, self.store === catalog,
