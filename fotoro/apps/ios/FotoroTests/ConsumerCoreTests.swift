@@ -13,7 +13,7 @@ final class ConsumerCoreTests: XCTestCase {
       services.refreshConsumerSyncSummary()
       let projection = PhotoBrowseProjection(), page = UUID()
       var builds = 0
-      func group() {
+      @MainActor func group() {
         let identity = PhotoBrowseProjectionID(storePage: page, catalog: services.consumerCatalogGeneration,
           sources: services.consumerBackupSourcesGeneration, filter: .all, dates: .all, moments: false,
           scope: "photos", day: Calendar.current.startOfDay(for: Date()))
