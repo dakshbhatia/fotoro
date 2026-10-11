@@ -20,8 +20,10 @@ export class TripDownloadLease {
   private releasing?: Promise<void>;
   constructor(result: TripDownload, private environment: DownloadEnvironment = browser) {this.result = result;}
   get published() {return this.started;}
-  publish(current: () => boolean) {
+  publish(current: () => boolean, photoCount: number) {
     if (!this.result || this.started || !current()) throw new DOMException("Trip download cancelled", "AbortError");
+    // Exported uniques plus skipped exact copies equal the original Trip inventory.
+    if (photoCount !== this.result.photos + this.result.duplicates) throw new Error("TRIP_CHANGED");
     this.url = this.environment.createURL(this.result.file);
     if (!current()) {this.environment.revokeURL(this.url); this.url = undefined; throw new DOMException("Trip download cancelled", "AbortError");}
     this.environment.download(this.url, this.result.file.name); this.started = true;

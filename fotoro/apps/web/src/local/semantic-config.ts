@@ -5,6 +5,7 @@ export const SEMANTIC_REVISION = "9463a9c508a344c837ffefe9d724f3827bf2dc79";
 export const SEMANTIC_DIMENSIONS = 512;
 export const SEMANTIC_THRESHOLD = .25;
 export const SEMANTIC_RUNTIME = "1.25.0-dev.20260327-722743c0e2";
+export const SEMANTIC_PROCESSOR = `${SEMANTIC_MODEL}@${SEMANTIC_REVISION}:${SEMANTIC_RUNTIME}:thumbnail-clip-q8-v1`;
 const modelRoot = `https://huggingface.co/${SEMANTIC_MODEL}/resolve/${SEMANTIC_REVISION}/`;
 const wasmRoot = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${SEMANTIC_RUNTIME}/dist/`;
 // SHA-256 and sizes come from this immutable Hub revision and the installed runtime package.

@@ -124,6 +124,45 @@ export class LocalRetention {
       return result;
     } finally { db.close(); }
   }
+  /* Inference shares the opt-in, key and clear epoch of retained photo metadata. */
+  async readInference(id: string, digest: string, processor: string, current: () => boolean) {
+    const generation = this.generation, db = await this.database();
+    try {
+      const store = db.transaction("data").objectStore("data");
+      const [enabled, key, epoch, photo, value] = await Promise.all([request(store.get("enabled")), request<CryptoKey>(store.get("key")), request(store.get("epoch")), request<SavedPhoto>(store.get("photo:" + id)), request<Envelope>(store.get("inference:" + id))]);
+      if (!enabled || !key || !photo || !value || generation !== this.generation || !current()) return;
+      const metadata = JSON.parse(decoder.decode(await open(key, photo.meta, "photo:" + id)));
+      if (!validPhoto(metadata) || metadata.id !== id || metadata.digest !== digest) return;
+      const record = JSON.parse(decoder.decode(await open(key, value, "inference:" + id)));
+      const latestEpoch = await request(db.transaction("data").objectStore("data").get("epoch"));
+      if (latestEpoch !== epoch || generation !== this.generation || !current() || record.id !== id || record.digest !== digest || record.processor !== processor) return;
+      return record.value as unknown;
+    } finally {db.close();}
+  }
+  async writeInference(id: string, digest: string, processor: string, value: unknown, current: () => boolean) {
+    const generation = this.generation, db = await this.database();
+    try {
+      const read = db.transaction("data").objectStore("data");
+      const [enabled, key, epoch, photo] = await Promise.all([request(read.get("enabled")), request<CryptoKey>(read.get("key")), request(read.get("epoch")), request<SavedPhoto>(read.get("photo:" + id))]);
+      if (!enabled || !key || !photo || generation !== this.generation || !current()) return;
+      const metadata = JSON.parse(decoder.decode(await open(key, photo.meta, "photo:" + id)));
+      if (!validPhoto(metadata) || metadata.id !== id || metadata.digest !== digest) return;
+      const bytes = jsonBytes({id, digest, processor, value});
+      if (bytes.byteLength > 16 * 1024) return;
+      const sealed = await seal(key, bytes, "inference:" + id);
+      const tx = db.transaction("data", "readwrite"), done = finished(tx), store = tx.objectStore("data");
+      const check = store.get("epoch"), latestPhoto = store.get("photo:" + id), keys = store.getAllKeys();
+      keys.onsuccess = () => {
+        const latestBytes = latestPhoto.result && new Uint8Array(latestPhoto.result.meta.data), expectedBytes = new Uint8Array(photo.meta.data);
+        if (generation !== this.generation || !current() || check.result !== epoch || !latestPhoto.result
+          || latestBytes!.byteLength !== expectedBytes.byteLength || !latestBytes!.every((byte: number, index: number) => byte === expectedBytes[index])) return;
+        const retained = keys.result.filter(key => String(key).startsWith("inference:") && key !== "inference:" + id);
+        for (const key of retained.slice(0, Math.max(0, retained.length - 511))) store.delete(key);
+        store.put(sealed, "inference:" + id);
+      };
+      await done;
+    } finally {db.close();}
+  }
   private async loadPreview(id: string, epoch: string) {
     const db = await this.database();
     try {
@@ -179,12 +218,18 @@ export class LocalRetention {
           const check = data.get("epoch");
           check.onsuccess = () => {
             if (!current() || (check.result ?? "0") !== epoch) { tx.abort(); return; }
+            const oldKeys = data.getAllKeys(), oldValues = data.getAll();
+            oldValues.onsuccess = () => {
+            if (!current()) {tx.abort(); return;}
             wrote = true;
             data.clear(); data.put(epoch, "epoch"); data.put(key, "key"); data.put(true, "enabled"); data.put(encryptedFeedback, "feedback");
             for (const [id, value] of records) data.put(value, id);
+            const retainedIDs = new Set(photos.map(photo => "inference:" + photo.id));
+            for (let i = 0; i < oldKeys.result.length; i++) if (retainedIDs.has(String(oldKeys.result[i]))) data.put(oldValues.result[i], oldKeys.result[i]);
             const keys = images.getAllKeys();
             keys.onsuccess = () => { for (const id of keys.result) if (!keep.has(String(id))) images.delete(id); };
             for (const [id, value] of previews) images.put(value, id);
+            };
           };
         });
         if (committed && current()) { this.knownPreviews = sizes; this.lastFiles = files; }

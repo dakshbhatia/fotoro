@@ -2012,6 +2012,7 @@ enum ReviewedPhotosBackupPolicy {
     let bundle = try vault.requireBundle()
     let card = try session.requireCard(account)
     var value = try annotations.ledger.current(photo: photo, bundle: bundle, card: card) ?? PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+    let priorValue = value
     let priorPeopleFacts = (value.facts ?? []).filter(PhotoPeopleFacts.isReserved)
     let priorFavorite = value.favorite
     let priorLocation = value.location
@@ -2065,6 +2066,8 @@ enum ReviewedPhotosBackupPolicy {
         })
     }
     guard !derivedOnly || hasCompletedDerivedResult else { return }
+    // Repeated stage callbacks must not republish unchanged overlays or rescan sync inventory.
+    guard value != priorValue else { return }
     try annotations.ledger.edit(value, photo: photo, bundle: bundle, card: card)
     photoAnnotations[photo.id] = value
     if priorFavorite != value.favorite || priorLocation != value.location
@@ -2105,7 +2108,7 @@ enum ReviewedPhotosBackupPolicy {
     await worker.resume(bundle: bundle, card: card, derivedOnly: derivedOnly, eligible: { [weak self] photo in
       guard derivedOnly else { return true }
       guard let self, self.automaticPhotoSyncAdmitted,
-        let source = try? catalog.backupSources().first(where: { $0.photoId == photo.id }),
+        let source = try? catalog.backupSourceForPhoto(photo.id),
         source.originalSha256 == photo.metadata.originalSha256 else { return false }
       if let location = try? worker.ledger.current(photo: photo, bundle: bundle, card: card)?.location,
         ["photos", "exif"].contains(location.source), self.automaticLocationSourceCurrent(source) { return true }

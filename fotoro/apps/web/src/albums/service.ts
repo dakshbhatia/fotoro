@@ -398,7 +398,9 @@ export class AlbumAccess {
     this.photos = retained; this.photoSources = sources;
     this.pageIds = new Set(refreshed.pageIds); this.pageCursors = new Set(refreshed.pageCursors);
     this.nextPhotoCursor = refreshed.nextPhotoCursor;
-    this.pendingFacts.clear();
+    // A lost committed details response must retry the same signed ciphertext.
+    // Retain it only when refresh admitted the exact previous authenticated Photo.
+    for (const id of this.pendingFacts.keys()) if (!retained.has(previous.get(id)!)) this.pendingFacts.delete(id);
     const rasterKeys = new Set(photos.flatMap(photo => ["thumbnail", "preview"].map(kind =>
       this.rasterKey(photo, kind as "thumbnail" | "preview"))));
     this.rasters.retain(rasterKeys);

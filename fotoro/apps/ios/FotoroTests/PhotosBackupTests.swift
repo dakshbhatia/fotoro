@@ -14,6 +14,87 @@ private func writeBackupFixture(_ store: LibraryStore, _ body: (Database) throws
 }
 
 final class PhotosBackupTests: XCTestCase {
+  @MainActor func testBackupCountAggregateMatchesSelectionAndFailureSemantics() throws {
+    let store = try LibraryStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
+    var sources: [BackupSource] = []
+    for phase in [BackupSource.Phase.pending, .queued, .committed, .skipped, .failed] {
+      for message in [nil, "", "Retry"] as [String?] {
+        var source = BackupSource(id: "\(phase.rawValue)-\(sources.count)", photoId: Wire.id())
+        source.phase = phase; source.message = message
+        sources.append(source)
+      }
+    }
+    var retained = BackupSource(id: "fotoro-retained-original:old", photoId: Wire.id())
+    retained.phase = .queued; retained.message = "Retry"
+    sources.append(retained)
+    for source in sources { try store.putBackupSource(source) }
+    for selection in [nil, [], [sources[0].id, sources[9].id, retained.id]] as [[String]?] {
+      try writeBackupFixture(store) { db in
+        if let selection {
+          try db.execute(sql: "INSERT OR REPLACE INTO state(key,value) VALUES('backupSelection',?)",
+            arguments: [try Wire.encode(selection).base64EncodedString()])
+        } else { try db.execute(sql: "DELETE FROM state WHERE key='backupSelection'") }
+      }
+      let backup = try PhotosBackup(store: store)
+      let included = backup.countedSources(from: sources)
+      XCTAssertEqual(backup.status.completed, included.filter { $0.phase == .committed }.count)
+      XCTAssertEqual(backup.status.pending, included.filter { $0.phase == .pending || $0.phase == .queued }.count)
+      XCTAssertEqual(backup.status.failed, included.filter {
+        $0.phase == .failed || (($0.phase == .queued || $0.phase == .committed) && $0.message != nil)
+      }.count)
+      XCTAssertEqual(backup.status.skipped, included.filter { $0.phase == .skipped }.count)
+      backup.pause()
+    }
+  }
+
+  @MainActor func testLargeBackupCountAggregateUsesMaterializedSelectionAndReadsLatestDatabase() throws {
+    let store = try LibraryStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
+    let selected = (0..<10_000).map { "selected-\($0)" }
+    try writeBackupFixture(store) { db in
+      for id in selected {
+        var source = BackupSource(id: id, photoId: Wire.id()); source.phase = .committed
+        try db.execute(sql: "INSERT INTO backupSources(id,value) VALUES(?,?)", arguments: [id, try Wire.encode(source)])
+      }
+      try db.execute(sql: "INSERT INTO state(key,value) VALUES('backupSelection',?)",
+        arguments: [try Wire.encode(selected).base64EncodedString()])
+    }
+    let backup = try PhotosBackup(store: store)
+    let began = Date()
+    for _ in 0..<20 { try backup.refreshCounts(); XCTAssertEqual(backup.status.completed, 10_000) }
+    XCTAssertLessThan(Date().timeIntervalSince(began), 10, "Repeated progress counts must not decode 10,000 checkpoints per completion")
+    let selectedJSON = String(decoding: try Wire.encode(selected), as: UTF8.self)
+    let plan = try readBackupFixture(store) { db in
+      try Row.fetchAll(db, sql: "EXPLAIN QUERY PLAN " + LibraryStore.backupCountsQuery, arguments: [selectedJSON, false])
+        .map { (row: Row) -> String in row["detail"] }
+    }
+    XCTAssertTrue(plan.contains { $0.uppercased().contains("MATERIALIZE SELECTED") }, "\(plan)")
+    XCTAssertTrue(plan.contains { $0.uppercased().contains("SEARCH SELECTED") && $0.contains("id=?") },
+      "Selection membership must use a lookup, not rescan json_each per source: \(plan)")
+    var updated = try store.backupSource(selected[0]); updated.phase = .failed
+    try store.putBackupSource(updated)
+    try backup.refreshCounts()
+    XCTAssertEqual(backup.status.completed, 9_999); XCTAssertEqual(backup.status.failed, 1)
+  }
+
+  @MainActor func testFailedCountStatusTransactionDoesNotPublishUncommittedCounts() throws {
+    let store = try LibraryStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
+    var source = BackupSource(id: "chosen", photoId: Wire.id()); source.phase = .committed
+    try store.putBackupSource(source)
+    let backup = try PhotosBackup(store: store)
+    source.phase = .failed; try store.putBackupSource(source)
+    try writeBackupFixture(store) { db in
+      try db.execute(sql: "CREATE TRIGGER failCountStatus BEFORE UPDATE ON state WHEN NEW.key='backupStatus' BEGIN SELECT RAISE(ABORT,'count status failure'); END")
+    }
+    XCTAssertThrowsError(try backup.refreshCounts())
+    XCTAssertEqual(backup.status.completed, 1); XCTAssertEqual(backup.status.failed, 0)
+    let persisted = try XCTUnwrap(readBackupFixture(store) { try String.fetchOne($0, sql: "SELECT value FROM state WHERE key='backupStatus'") })
+    let persistedStatus = try Wire.decode(BackupStatus.self, XCTUnwrap(Data(base64Encoded: persisted)))
+    XCTAssertEqual(persistedStatus.completed, 1); XCTAssertEqual(persistedStatus.failed, 0)
+    try writeBackupFixture(store) { try $0.execute(sql: "DROP TRIGGER failCountStatus") }
+    try backup.refreshCounts()
+    XCTAssertEqual(backup.status.completed, 0); XCTAssertEqual(backup.status.failed, 1)
+  }
+
   func testBackupSourcePointReadDoesNotInsertOrDecodeUnrelatedInventory() throws {
     let store = try LibraryStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
     let chosen = BackupSource(id: "chosen", photoId: Wire.id(), sourceRevision: "reviewed")

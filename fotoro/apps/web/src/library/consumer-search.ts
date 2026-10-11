@@ -7,7 +7,19 @@ import type {SearchResult, SearchMeaning, SearchPhoto, PhotoSearchIndex} from ".
 import type {PhotoLocationV1} from "@fotoro/contracts";
 import type {PhotoObservationV1} from "@fotoro/contracts/intelligence";
 import type {PeopleAssignment} from "@fotoro/contracts/people";
-const savedSources = new WeakMap<object, {snapshot: OwnedPhotoSnapshot; date: string; dateSource: LocalPhoto["dateSource"]; digest?: string; file?: File; location?: PhotoLocationV1}>();
+const savedSources = new WeakMap<object, {snapshot: OwnedPhotoSnapshot; photo: Photo; date: string; dateSource: LocalPhoto["dateSource"]; digest?: string; file?: File; location?: PhotoLocationV1}>();
+// Only an adapted, owned source can bind private inference to an account.
+export function savedInferenceSource(photo: LocalPhoto) {
+  const source = savedSources.get(photo);
+  if (!source || !source.digest || source.digest !== photo.digest || source.photo.grantId
+    || source.photo.manifest.ownerAccountId !== source.snapshot.accountId) return;
+  const digest = source.digest, revision = JSON.stringify(source.photo.manifest);
+  const current = () => photo.current?.() !== false && photo.digest === digest
+    && source.photo.metadata.originalSha256 === digest && JSON.stringify(source.photo.manifest) === revision
+    && (source.snapshot.sourceCurrent?.(source.photo) ?? source.snapshot.current());
+  if (!current()) return;
+  return {accountId: source.snapshot.accountId, token: source.snapshot.token, photoId: source.photo.manifest.photoId, digest, revision, current};
+}
 export function mergeConsumerSearchPhotos<T extends {id: string}>(local: T[], saved: T[]): T[] {
   const localIDs = new Set(local.map(photo => photo.id));
   const currentSaved = saved.filter(photo => savedSources.get(photo)?.snapshot.current() ?? true);
@@ -219,7 +231,7 @@ export function savedSearchPhotos(snapshot: OwnedPhotoSnapshot | null, local: Lo
         if (!snapshot.current()) throw new Error("Your saved library is locked.");
         return blob;
       }};
-    savedSources.set(adapted, {snapshot, date: record.date, dateSource: record.dateSource, digest: record.digest, file: original?.file, location: record.location});
+    savedSources.set(adapted, {snapshot, photo, date: record.date, dateSource: record.dateSource, digest: record.digest, file: original?.file, location: record.location});
     return adapted;
   });
 }

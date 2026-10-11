@@ -3,6 +3,8 @@ import type {SearchResult} from "./search";
 import {ConsumerPreviewResources} from "../library/consumer-search";
 import {parseNaturalDateQuery} from "./natural-date";
 import {SEMANTIC_DIMENSIONS, SEMANTIC_THRESHOLD} from "./semantic-config";
+import {SEMANTIC_PROCESSOR} from "./semantic-config";
+import {DurableSemanticInference, failedSemanticRecord, type SemanticInferenceStore, type SemanticInferenceRecord} from "./semantic-persistence";
 export function normalizeVector(values: ArrayLike<number>): Float32Array {
   if (values.length !== SEMANTIC_DIMENSIONS) throw new Error("Visual search output is invalid.");
   const vector = Float32Array.from(values);
@@ -60,7 +62,7 @@ export function subscribeSemanticLifecycle(cancel: () => void, resume: () => voi
   };
 }
 
-// One worker owns the model and source vectors. Closing or locking the view destroys both.
+// Workers and plaintext vectors die with the view; opt-in encrypted results can reopen.
 export class SemanticFindSession {
   private worker?: Worker;
   private requests = new Map<number, {resolve: (value: Float32Array) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>}>();
@@ -70,7 +72,14 @@ export class SemanticFindSession {
   private failedGeneration?: number;
   private vectors = new Map<string, {source: WeakRef<object>; digest?: string; vector: Float32Array}>();
   constructor(private createWorker = () => new Worker(new URL("./semantic-worker.ts", import.meta.url), {type: "module"}),
-    private resources: Pick<ConsumerPreviewResources, "load" | "clear"> = new ConsumerPreviewResources(), private requestTimeout = 90000) {}
+    private resources: Pick<ConsumerPreviewResources, "load" | "clear"> = new ConsumerPreviewResources(), private requestTimeout = 90000,
+    private persistence: SemanticInferenceStore = new DurableSemanticInference()) {}
+  private cacheVector(id: string, value: {source: WeakRef<object>; digest?: string; vector: Float32Array}) {
+    this.vectors.set(id, value);
+    if (this.vectors.size > 4096) {
+      const oldest = this.vectors.entries().next().value!; oldest[1].vector.fill(0); this.vectors.delete(oldest[0]);
+    }
+  }
   reconcile(photos: readonly LocalPhoto[]) {
     const sources = new Map(photos.filter(photo => photo.current?.() !== false && photo.previewAvailable !== false).map(photo => [photo.id, photo]));
     for (const [id, cached] of this.vectors) {
@@ -105,12 +114,19 @@ export class SemanticFindSession {
     progress: (scores: ReadonlyMap<string, number>) => void): Promise<SearchResult["visualStatus"]> {
     this.cancel();
     const token = this.generation, signal = this.controller.signal;
+    const persistenceCurrent = this.persistence.scope?.(() => current() && token === this.generation) ?? (() => current() && token === this.generation);
     const valid = () => {
       if (!current()) return false;
       if (token === this.failedGeneration) throw new Error("Visual search is unavailable.");
       return token === this.generation;
     };
     const scoped = scopedSemanticPhotos(photos, query), selected = scoped.filter(hasSemanticPreview);
+    const selectedSources = new Map(selected.map(photo => [photo.id, {photo, digest: photo.digest, source: photo.file ?? photo.preview ?? photo.previewLoader}]));
+    const sourceCurrentFor = (id: string) => {
+      const captured = selectedSources.get(id), photo = captured?.photo;
+      return !!photo && photo.current?.() !== false && photo.digest === captured.digest
+        && (photo.file ?? photo.preview ?? photo.previewLoader) === captured.source;
+    };
     if (!valid()) return;
     if (!selected.length) return scoped.length ? "missing-preview" : undefined;
     this.reconcile(photos);
@@ -119,34 +135,63 @@ export class SemanticFindSession {
     const scores = new Map<string, number>();
     let missingPreviews = scoped.filter(photo => !hasSemanticPreview(photo)).length, modelErrors = 0;
     const selectedByID = new Map(selected.map(photo => [photo.id, photo]));
-    const emit = () => {if (valid()) progress(new Map([...scores].filter(([id]) => selectedByID.get(id)?.current?.() !== false)));};
+    const emit = () => {if (valid()) progress(new Map([...scores].filter(([id]) => sourceCurrentFor(id))));};
     for (let index = 0; index < selected.length; index++) {
       const photo = selected[index];
       if (!valid()) return;
-      if (photo.current?.() === false) continue;
+      if (!sourceCurrentFor(photo.id)) continue;
       const source = photo.file ?? photo.preview ?? photo.previewLoader;
+      const digest = photo.digest;
       if (!source) {missingPreviews++; continue;}
       let cached = this.vectors.get(photo.id);
+      let retained: SemanticInferenceRecord | undefined;
+      const sourceCurrent = () => persistenceCurrent() && sourceCurrentFor(photo.id);
+      if (!cached || (cached.digest ? cached.digest !== photo.digest : cached.source.deref() !== source)) {
+        retained = await this.persistence.read(photo, sourceCurrent).catch(() => undefined);
+        if (!valid()) return;
+        if (!sourceCurrentFor(photo.id)) continue;
+        if (retained?.state === "complete") {
+          cached = {source: new WeakRef(source), digest: photo.digest, vector: normalizeVector(retained.vector!)};
+          this.cacheVector(photo.id, cached);
+        } else if (retained && retained.retryAt! > Date.now()) {
+          if (retained.state === "preview-failed") missingPreviews++; else modelErrors++;
+          continue;
+        }
+      }
       if (!cached || (cached.digest ? cached.digest !== photo.digest : cached.source.deref() !== source)) {
         let blob: Blob | undefined;
         try {blob = (await this.resources.load(photo, "thumbnail", signal)).blob;} catch {
           if (!valid()) return;
-          if (photo.current?.() !== false) missingPreviews++;
+          if (sourceCurrentFor(photo.id)) {
+            missingPreviews++;
+            await this.persistence.write(photo, failedSemanticRecord(photo, "preview-failed", retained), sourceCurrent).catch(() => {});
+          }
           continue;
         }
         if (!valid()) return;
-        if (photo.current?.() === false) continue;
-        if (!blob) {missingPreviews++; continue;}
+        if (!sourceCurrentFor(photo.id)) continue;
+        if (!blob) {
+          missingPreviews++;
+          await this.persistence.write(photo, failedSemanticRecord(photo, "preview-failed", retained), sourceCurrent).catch(() => {});
+          continue;
+        }
         try {
           const vector = await this.request({kind: "image", blob});
           if (!valid()) return;
-          if (photo.current?.() === false) continue;
-          cached = {source: new WeakRef(source), digest: photo.digest, vector}; this.vectors.set(photo.id, cached);
-          if (this.vectors.size > 4096) {
-            const oldest = this.vectors.entries().next().value!; oldest[1].vector.fill(0); this.vectors.delete(oldest[0]);
+          if (!sourceCurrentFor(photo.id)) {vector.fill(0); continue;}
+          cached = {source: new WeakRef(source), digest, vector}; this.cacheVector(photo.id, cached);
+          await this.persistence.write(photo, {version: 1, id: photo.id, digest: photo.digest!, processor: SEMANTIC_PROCESSOR, state: "complete", vector: Array.from(vector)}, sourceCurrent).catch(() => {});
+        } catch (error) {
+          if (!valid()) throw error;
+          if (sourceCurrentFor(photo.id)) {
+            modelErrors++;
+            await this.persistence.write(photo, failedSemanticRecord(photo, "model-failed", retained), sourceCurrent).catch(() => {});
           }
-        } catch (error) {if (!valid()) throw error; if (photo.current?.() !== false) modelErrors++; continue;}
+          continue;
+        }
       }
+      if (!valid()) return;
+      if (!sourceCurrentFor(photo.id)) continue;
       scores.set(photo.id, cosine(text, cached.vector));
       if ((index + 1) % 8 === 0) emit();
       // Cached vectors need only a dot product; yield in bounded batches rather than

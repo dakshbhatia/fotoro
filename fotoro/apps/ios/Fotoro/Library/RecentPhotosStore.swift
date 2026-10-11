@@ -438,12 +438,18 @@ struct PhotoPreviewProgress {
   }
   func refresh(now: Date = Date()) { refresh(now: now, refreshPicks: true) }
   private func refresh(now: Date, refreshPicks: Bool) {
-    refreshThumbnails()
+    let previousThumbnailGeneration = thumbnailGeneration
+    // A date filter changes the projection, not the Photos sources. Keep warm
+    // tiles and their requests, but still fence any authorization transition.
+    if refreshPicks { refreshThumbnails() }
+    else { _ = thumbnailAccessAllowed() }
     guard opened else { return }
     browseGeneration = UUID()
     browsePage = UUID()
     status = authorization()
-    images.stopCachingImagesForAllAssets()
+    if refreshPicks || previousThumbnailGeneration != thumbnailGeneration {
+      images.stopCachingImagesForAllAssets()
+    }
     guard RecentPhotosPolicy.canRead(status) else {
       pauseAnalysis()
       picksSnapshot = nil

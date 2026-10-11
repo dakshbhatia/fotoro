@@ -121,6 +121,53 @@ final class RecentPhotosTests: XCTestCase {
     store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: store.thumbnailGeneration)
     XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true))
   }
+  @MainActor func testDateScopeChangeKeepsWarmTilesAndCurrentRequestsButStillValidatesTheirSources() {
+    let source = RecentPhotoSource(id: "photo", revision: "current")
+    var revision: String? = source.revision
+    let store = RecentPhotosStore(authorization: { .authorized }, readPhotos: { _ in [] },
+      sourceRevisions: { _ in revision.map { [source.id: $0] } ?? [:] })
+    store.restoreAccess()
+    defer { store.pauseAnalysis() }
+    let generation = store.thumbnailGeneration
+    let target = CGSize(width: 384, height: 384)
+    let image = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).image { _ in }
+    store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: generation)
+
+    store.setBrowseDates(.all)
+    XCTAssertEqual(store.thumbnailGeneration, generation, "Filtering must not cancel unchanged tile requests")
+    XCTAssertTrue(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true) === image)
+    XCTAssertTrue(store.canPublishThumbnail(source: source, generation: generation))
+    revision = "edited"
+    XCTAssertFalse(store.canPublishThumbnail(source: source, generation: generation))
+    revision = nil
+    XCTAssertFalse(store.canPublishThumbnail(source: source, generation: generation), "Removed sources still reject late callbacks")
+    store.refresh()
+    XCTAssertNotEqual(store.thumbnailGeneration, generation, "A source refresh must still fence old requests")
+    XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true))
+  }
+  @MainActor func testDateScopeChangeInvalidatesTilesWhenPermissionChangesBeforeOrDuringReload() {
+    for changesDuringReload in [false, true] {
+      var permission = PHAuthorizationStatus.authorized
+      var changing = false
+      let source = RecentPhotoSource(id: "photo", revision: "current")
+      let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in
+        if changing { permission = .limited }
+        return []
+      }, sourceRevisions: { _ in [source.id: source.revision] })
+      store.restoreAccess()
+      let generation = store.thumbnailGeneration
+      let target = CGSize(width: 384, height: 384)
+      let image = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).image { _ in }
+      store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: generation)
+      if changesDuringReload { changing = true } else { permission = .limited }
+
+      store.setBrowseDates(.all)
+      XCTAssertNotEqual(store.thumbnailGeneration, generation)
+      XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true))
+      XCTAssertFalse(store.canPublishThumbnail(source: source, generation: generation))
+      store.pauseAnalysis()
+    }
+  }
   @MainActor func testThumbnailRefreshRetainsUnchangedButEvictsChangedAndRemovedSources() {
     let source = RecentPhotoSource(id: "photo", revision: "current")
     var revision: String? = source.revision
