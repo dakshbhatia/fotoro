@@ -46,3 +46,8 @@ export function AccountContactV1(value:unknown):boolean;
 export function AccountContactsV1(value:unknown):boolean;
 export function AccountContactsUpdateV1(value:unknown):boolean;
 export function AccountContactsReplyV1(value:unknown):boolean;
+export function TripPersonAliasV1(value:unknown):boolean;
+export function TripPersonLinkV1(value:unknown):boolean;
+export function AccountPeopleLinksV1(value:unknown):boolean;
+export function AccountPeopleLinksUpdateV1(value:unknown):boolean;
+export function AccountPeopleLinksReplyV1(value:unknown):boolean;

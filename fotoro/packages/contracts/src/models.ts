@@ -26,6 +26,19 @@ export interface AccountContactsReplyV1 {
   version: 1;
   contacts: SignedPayloadV1 | null;
 }
+export interface TripPersonAliasV1 {card: AccountCardV1; name: string;}
+export interface TripPersonLinkV1 {
+  id: UUID;
+  origin: string;
+  albumId: UUID;
+  ownerCard: AccountCardV1;
+  name: string;
+  aliases: TripPersonAliasV1[];
+  deleted: boolean;
+}
+export interface AccountPeopleLinksV1 {version: 1; ownerAccountId: UUID; links: TripPersonLinkV1[];}
+export interface AccountPeopleLinksUpdateV1 {version: 1; revision: number; encrypted: WrappedKeyV1;}
+export interface AccountPeopleLinksReplyV1 {version: 1; peopleLinks: SignedPayloadV1 | null;}
 export interface MediaBinding {
   version: 1;
   photoId: UUID;

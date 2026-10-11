@@ -18,7 +18,8 @@
     "./albums-links": "./src/albums-links.ts",
     "./capture-metadata": "./src/capture-metadata.ts",
     "./album-photo-facts": "./src/album-photo-facts.ts",
-    "./contacts": "./src/contacts.ts"
+    "./contacts": "./src/contacts.ts",
+    "./people-links": "./src/people-links.ts"
   },
   "dependencies": {
     "ajv": "8.18.0",

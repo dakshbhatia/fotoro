@@ -7,7 +7,11 @@ import {cleanupTripDownloads, prepareTripDownload, type TripDownloadProgress} fr
 import {TripPicks} from "./TripPicks";
 import {AlbumNameChoices} from "./AlbumNameChoices";
 import {lazy, Suspense, useEffect, useMemo, useRef, useState} from "react";
-import type {AccountCardV1} from "@fotoro/contracts";
+import type {AccountCardV1, AccountPeopleLinksV1} from "@fotoro/contracts";
+import {peopleLinksState, syncPeopleLinks, subscribePeopleLinks, savePersonLink, resolvePeopleLinksConflict, type PeopleLinksSyncState} from "../exchange/people-links";
+import {tripPeopleLinks} from "./people-links";
+import {TripPeopleLinks} from "./TripPeopleLinks";
+import {sameContactCard} from "@fotoro/contracts/contacts";
 import {ALBUM_DEFINITION_KIND, readAlbumSignedBody, validateAlbumDefinition, type AlbumOverviewV1} from "@fotoro/contracts/albums";
 import {createAlbumLink} from "@fotoro/contracts/albums-links";
 import {subscribeContacts} from "../exchange/contacts";
@@ -37,6 +41,8 @@ const AlbumContacts = lazy(() => import("../exchange/Exchange").then(module => (
 
 function readableError(error: unknown) {
   const code = error instanceof Error ? error.message : "";
+  if (/PEOPLE_LINKS_REVIEW_/.test(code)) return "Linked names changed. Review them again.";
+  if (code === "PEOPLE_LINKS_SOURCE_OVERLAP") return "A chosen name is already linked. Refresh People and choose again.";
   if (code === "TRIP_CHOOSE_1_TO_100_FILES") return "Choose 1 to 100 device photos at a time.";
   if (code === "TRIP_SAVE_INCOMPLETE") return "Saving has not finished. Retry saving your chosen photos.";
   if (code === "TRIP_SOURCE_CHANGED") return "A chosen Saved source changed. Choose your photos again.";
@@ -82,6 +88,7 @@ export function AlbumContributionActions({albumId, chosen, busy, onChoosePhotos,
 }
 export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incoming, onRetryAccount, currentOwnedPhotos, onLoadOwnedPhoto, onImportPhotos, initialAlbumId}: {selection: readonly Photo[]; initialAlbumId?: string; onImportPhotos?: (choice: TripImportChoice, signal: AbortSignal, current: () => boolean) => Promise<Photo[]>; currentPhotos: () => readonly Photo[]; onClose: () => void; onChoosePhotos: (albumId: string) => void; incoming?: IncomingAlbumIntent; onRetryAccount?: () => void; currentOwnedPhotos?: () => OwnedPhotoSnapshot | null; onLoadOwnedPhoto?: (photo: Photo, signal: AbortSignal) => Promise<void>}) {
   const [session] = useState(requireVault), [controller] = useState(() => new AbortController());
+  const [origin] = useState(() => location.origin);
   const [chosenSnapshot] = useState(() => new ShareSelection([...selection]));
   const creationDraft = useRef<AlbumCreationDraft>({});
   const deviceInput = useRef<HTMLInputElement>(null), searchInput = useRef<HTMLInputElement>(null), moreMenu = useRef<HTMLDetailsElement>(null);
@@ -99,6 +106,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
   const [searchFailed, setSearchFailed] = useState(false), [searchRetry, setSearchRetry] = useState(0);
   const [facts, setFacts] = useState(new Map<string, AlbumPhotoFactsContentV1>()), [factsState, setFactsState] = useState<"loading" | "ready" | "legacy" | "error" | "partial">("loading");
   const [peopleFilter, setPeopleFilter] = useState(emptyPeopleFilter), [from, setFrom] = useState(""), [through, setThrough] = useState(""), [groupCopies, setGroupCopies] = useState(true);
+  const [peopleBook, setPeopleBook] = useState<AccountPeopleLinksV1>(), [peopleSync, setPeopleSync] = useState<PeopleLinksSyncState>({pending: false, conflicts: []}), [peopleSyncFailed, setPeopleSyncFailed] = useState(false);
   const [detailDraft, setDetailDraft] = useState<{photo: Photo; source: OwnedAlbumDetails; revision: number; people: string[]; location: boolean; existing: boolean; unavailable: number} | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState(""), [title, setTitle] = useState(""), [invitees, setInvitees] = useState(new Set<string>()), [confirmEnd, setConfirmEnd] = useState(false);
   const [showContacts, setShowContacts] = useState(false);
@@ -120,8 +128,8 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     setTripProgress(null); setDownloadStarted(false);
   };
   const clearDownload = () => {preparedDownload.current?.controller.abort(); preparedDownload.current = null;};
-  const scope: ShareScope = {signal: controller.signal, current: () => alive.current && sameVault(session) && (!incoming || incoming.current(session))};
-  const closeAlbum = () => {clearImport(); clearContribution(); clearTripDownload(); clearDownload(); const previous = accessRef.current; accessRef.current = null; previous?.dispose(); setAccess(null); setPhotos([]); publishPage({hasMore: false, photoCount: 0}); setPreview(null); setQuery(""); setFiltersOpen(false); setShowTripPicks(false); setSearchFailed(false); setConfirmEnd(false); setFacts(new Map()); setFactsState("loading"); setPeopleFilter(emptyPeopleFilter()); setFrom(""); setThrough(""); setDetailDraft(null);};
+  const scope: ShareScope = {signal: controller.signal, current: () => alive.current && location.origin === origin && sameVault(session) && (!incoming || incoming.current(session))};
+  const closeAlbum = () => {setPeopleBook(undefined); setPeopleSync({pending: false, conflicts: []}); setPeopleSyncFailed(false); clearImport(); clearContribution(); clearTripDownload(); clearDownload(); const previous = accessRef.current; accessRef.current = null; previous?.dispose(); setAccess(null); setPhotos([]); publishPage({hasMore: false, photoCount: 0}); setPreview(null); setQuery(""); setFiltersOpen(false); setShowTripPicks(false); setSearchFailed(false); setConfirmEnd(false); setFacts(new Map()); setFactsState("loading"); setPeopleFilter(emptyPeopleFilter()); setFrom(""); setThrough(""); setDetailDraft(null);};
   const close = () => {alive.current = false; controller.abort(); closeAlbum(); onClose();};
   useDialogFocus(panel, () => preview ? setPreview(null) : close(), !showContacts);
   useEffect(() => {setDetailDraft(null); if (preview) previewPanel.current?.focus({preventScroll: true});}, [preview]);
@@ -130,7 +138,7 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     return () => clearDownload();
   }, [access, preview]);
   useEffect(() => subscribeAlbumLifetime(window, document, () => {
-    alive.current = false; controller.abort(); clearImport(); clearContribution(); clearTripDownload(); accessRef.current?.dispose(); chosenSnapshot.dispose();
+    alive.current = false; controller.abort(); setPeopleBook(undefined); setPeopleSync({pending: false, conflicts: []}); setPeopleFilter(emptyPeopleFilter()); clearImport(); clearContribution(); clearTripDownload(); accessRef.current?.dispose(); chosenSnapshot.dispose();
   }, close), []);
   const [actions] = useState(() => new AlbumActionQueue(() => alive.current && sameVault(session)
     && (!incoming || incoming.current(session)), value => {if (alive.current && sameVault(session)) setBusy(value);}));
@@ -178,6 +186,20 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
       }
     }
   }
+  const peopleScope = (opened: AlbumAccess): ShareScope => ({signal: AbortSignal.any([controller.signal, opened.signal]), current: () => !!scope.current?.() && accessRef.current === opened && opened.current()});
+  async function readPeopleLinks(opened: AlbumAccess, synchronize = false) {
+    const bound = peopleScope(opened);
+    try {
+      const local = await peopleLinksState(session, bound);
+      if (bound.current?.()) {setPeopleBook(local.book); setPeopleSync(local);}
+      if (synchronize) {await syncPeopleLinks(session, bound); if (bound.current?.()) setPeopleSyncFailed(false); await readPeopleLinks(opened);}
+    } catch {if (bound.current?.()) setPeopleSyncFailed(true);}
+  }
+  useEffect(() => {
+    if (!access || access.overview.membership !== "accepted") return;
+    void readPeopleLinks(access, true);
+    return subscribePeopleLinks(() => {if (peopleScope(access).current?.()) void readPeopleLinks(access);});
+  }, [access]);
   async function loadPage(opened: AlbumAccess, cursor?: string, searching = false) {
     const loaded = await opened.loadPhotoPage(cursor, {preserveTransientFailure: searching || cursor !== undefined});
     if (!scope.current?.() || accessRef.current !== opened || !opened.current()) return;
@@ -271,9 +293,17 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
     return () => {cancelled = true; window.clearTimeout(timer);};
   }, [access, searching, page.hasMore, searchRetry]);
   const contributor = (id: string, roster = access?.definition.members.map(member => member.card.accountId) ?? cards.map(card => card.accountId)) => albumMemberLabel(id, session.accountId, names, roster);
-  const shown = useMemo(() => searchAlbumPhotos(photos, query, () => !!access?.current(), Date.now(), {facts, people: peopleFilter, from, through}), [photos, query, access, facts, peopleFilter, from, through]);
+  const sources = useMemo(() => albumReviewedPeople(photos, facts, () => !!access?.current()), [photos, facts, access]);
+  const linkedPeople = useMemo(() => access ? tripPeopleLinks(peopleBook, photos, facts, {accountId: session.accountId, origin: location.origin, albumId: access.albumId, ownerCard: access.owner, cards: access.definition.members.map(member => member.card), current: () => access.current()}) : [], [peopleBook, photos, facts, access]);
+  const shown = useMemo(() => searchAlbumPhotos(photos, query, () => !!access?.current(), Date.now(), {facts, people: peopleFilter, from, through, linkedPeople}), [photos, query, access, facts, peopleFilter, from, through, linkedPeople]);
   const groups = useMemo(() => albumPhotoGroups(shown, groupCopies, () => !!access?.current()), [shown, groupCopies, access]);
-  const reviewed = useMemo(() => albumReviewedPeople(photos, facts, () => !!access?.current()).map(person => ({...person, names: [person.names[0] + " · " + contributor(JSON.parse(person.id)[0])]})), [photos, facts, access, names]);
+  const reviewed = useMemo(() => [...sources.filter(person => !linkedPeople.some(link => link.aliases.includes(person.id))).map(person => ({...person, names: [person.names[0] + " · " + contributor(JSON.parse(person.id)[0])]})), ...linkedPeople.map(person => ({id: person.id, names: [person.name], photoCount: 0}))], [sources, linkedPeople, names]);
+  const editPeopleLinks = (mutate: (bound: ShareScope) => Promise<unknown>) => action(async () => {
+    const opened = accessRef.current; if (!opened) return;
+    await opened.assertAccess(); const bound = peopleScope(opened); if (!bound.current?.()) return;
+    await mutate(bound); if (!bound.current?.()) return;
+    setPeopleFilter(emptyPeopleFilter()); await readPeopleLinks(opened, true);
+  });
   const openDetails = (photo: Photo) => action(async () => {
     if (!access || accessRef.current !== access || factsState === "legacy") return;
     setDetailDraft(null);
@@ -456,6 +486,18 @@ export function Albums({selection, currentPhotos, onClose, onChoosePhotos, incom
                   }} />{person.names.join(" / ")}</label>)}
                   {!reviewed.length && <p className="hint">{page.hasMore || factsState === "loading" ? "Checking shared people…" : factsState === "error" ? "Shared people could not load." : factsState === "legacy" ? "Shared people are unavailable on this server." : "No shared people."}</p>}
                   {[...peopleFilter.ids].some(id => !reviewed.some(person => person.id === id)) && <p className="hint" role="status">A selected person is unavailable. Clear filters to reset.</p>}
+                  {access && <TripPeopleLinks key={access.identity} sources={sources} cards={access.definition.members.map(member => member.card)} linked={linkedPeople} conflicts={peopleSync.conflicts} pending={peopleSync.pending} failed={peopleSyncFailed} disabled={busy || !peopleBook} label={contributor}
+                    onSave={(name, aliases) => void editPeopleLinks(async bound => {
+                      const opened = access, latest = await opened.loadFacts({preserveTransientFailure: true});
+                      if (!bound.current?.()) return;
+                      const available = new Set(albumReviewedPeople(photos, latest.facts, () => !!bound.current?.()).map(person => person.id));
+                      if (aliases.some(alias => !available.has(JSON.stringify([alias.card.accountId, alias.name])) || !opened.definition.members.some(member => sameContactCard(member.card, alias.card)))) throw new Error("ALBUM_SELECTION_CHANGED");
+                      setFacts(latest.facts);
+                      await savePersonLink({id: crypto.randomUUID(), origin: location.origin, albumId: opened.albumId, ownerCard: opened.owner, name, aliases, deleted: false}, bound);
+                    })}
+                    onRemove={link => void editPeopleLinks(bound => savePersonLink({...link, deleted: true}, bound, link))}
+                    onResolve={(review, choice) => void editPeopleLinks(bound => resolvePeopleLinksConflict(review, choice, bound))}
+                    onRetry={() => void action(async () => {if (access) await readPeopleLinks(access, true);})} />}
                 </fieldset>
                 {peopleFilter.ids.size > 1 && <label>Match<select aria-label="Match selected people" value={peopleFilter.mode} disabled={busy} onChange={event => setPeopleFilter({...peopleFilter, mode: event.target.value as typeof peopleFilter.mode})}><option value="any">Any selected people</option><option value="everyone">Everyone in a photo</option></select></label>}
                 <div className="album-range"><label>From<input type="date" aria-label="Captured from" value={from} onChange={event => setFrom(event.target.value)} /></label><label>Through<input type="date" aria-label="Captured through" value={through} onChange={event => setThrough(event.target.value)} /></label></div>
