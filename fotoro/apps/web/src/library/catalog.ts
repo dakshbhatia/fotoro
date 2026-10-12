@@ -460,10 +460,12 @@ export class CachedAccountSearch {
   private withdrawn = new Set<string>();
   private disposed = false;
   private readonly revision: number;
+  private previousIndex?: PhotoSearchIndex;
   constructor(private session: UnlockedVault, private current: () => boolean, previous?: CachedAccountSearch) {
     this.revision = cachedMetadataRevision(session.accountId);
     if (previous && !previous.disposed && previous.session === session && previous.current()) {
       this.sources = new Map(previous.sources); this.verified = new Map(previous.verified);
+      this.previousIndex = previous.index;
     }
   }
   get admitted() {return !this.disposed && sameVault(this.session) && this.current();}
@@ -472,9 +474,10 @@ export class CachedAccountSearch {
     const id = record.id;
     return {...record, current: () => this.admitted && !this.withdrawn.has(id) && cachedPhotoRevision(this.session.accountId, id) === revision};
   }
-  dispose() {this.disposed = true; this.records = []; this.sources.clear(); this.verified.clear(); this.withdrawn.clear(); this.index?.dispose(); this.index = undefined;}
+  dispose() {this.disposed = true; this.records = []; this.sources.clear(); this.verified.clear(); this.withdrawn.clear(); this.index?.dispose(); this.index = undefined; this.previousIndex = undefined;}
   async scan(signal: AbortSignal) {
     let metadataBytes = 0;
+    const unchanged = new Set<string>();
     const admit = (record: SearchPhoto) => {metadataBytes += 512 + 2 * JSON.stringify(record).length; if (metadataBytes > 32 * 1024 * 1024) throw new Error("CACHED_SEARCH_BUDGET");};
     try {
       await scanCachedMetadata(this.session, signal, () => this.admitted, (photo, source) => {
@@ -489,13 +492,15 @@ export class CachedAccountSearch {
           || previous.revision !== source.revision
           || !!previous.annotation !== !!source.annotation || previous.annotation && source.annotation && previous.annotation !== source.annotation) return false;
         const projected = this.project(record, source.revision);
-        admit(projected); this.records.push(projected); this.verified.set(id, projected); return true;
+        admit(projected); this.records.push(projected); this.verified.set(id, projected); unchanged.add(id); return true;
       });
       const present = new Set(this.records.map(record => record.id));
       for (const id of this.sources.keys()) if (!present.has(id)) {this.sources.delete(id); this.verified.delete(id);}
-      this.index = await PhotoSearchIndex.build(this.records, signal, () => this.admitted, 128 * 1024 * 1024 - metadataBytes);
+      this.index = await PhotoSearchIndex.build(this.records, signal, () => this.admitted, 128 * 1024 * 1024 - metadataBytes,
+        this.previousIndex ? {index: this.previousIndex, unchanged} : undefined);
       return this;
     } catch (error) {this.records = []; if (!sameVault(this.session) || !this.current() || error instanceof Error && error.message === "CACHED_SEARCH_BUDGET") this.dispose(); throw error;}
+    finally {this.previousIndex = undefined;}
   }
   async hydrate(ids: readonly string[], signal: AbortSignal) {
     const chosen = [...new Set(ids)].slice(0, 200);

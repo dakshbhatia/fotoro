@@ -215,6 +215,8 @@ struct PhotoPreviewProgress {
   @ObservationIgnored private var analysisCandidates: [AutomaticPhotoPickCandidate]?
   @ObservationIgnored private var settlingAnalysis: Task<Void, Never>?
   @ObservationIgnored private var analysisGeneration = UUID()
+  @ObservationIgnored private var observerRefreshTask: Task<Void, Never>?
+  @ObservationIgnored private var observerRefreshGeneration = UUID()
   @ObservationIgnored private var observing = false
   @ObservationIgnored private var analysisPermitted = true
   @ObservationIgnored private var automaticAnalysisActive = true
@@ -263,9 +265,27 @@ struct PhotoPreviewProgress {
   }
   deinit { PHPhotoLibrary.shared().unregisterChangeObserver(self) }
   nonisolated func photoLibraryDidChange(_ changeInstance: PHChange) {
-    Task { @MainActor [weak self] in self?.refresh() }
+    Task { @MainActor [weak self] in self?.queueObserverRefresh() }
+  }
+  // Keep the first queued deadline: bursts must not postpone a current snapshot.
+  func queueObserverRefresh() {
+    guard opened, analysisPermitted, observerRefreshTask == nil else { return }
+    let generation = observerRefreshGeneration
+    observerRefreshTask = Task { @MainActor [weak self] in
+      await Task.yield()
+      guard !Task.isCancelled, let self, observerRefreshGeneration == generation,
+        opened, analysisPermitted else { return }
+      observerRefreshTask = nil
+      refresh()
+    }
+  }
+  private func cancelObserverRefresh() {
+    observerRefreshGeneration = UUID()
+    observerRefreshTask?.cancel()
+    observerRefreshTask = nil
   }
   func pauseAnalysis() {
+    cancelObserverRefresh()
     analysisPermitted = false
     idleAnalysisTask?.cancel(); idleAnalysisTask = nil
     browseInteractionActive = false
@@ -438,6 +458,7 @@ struct PhotoPreviewProgress {
   }
   func refresh(now: Date = Date()) { refresh(now: now, refreshPicks: true) }
   private func refresh(now: Date, refreshPicks: Bool) {
+    cancelObserverRefresh()
     let previousThumbnailGeneration = thumbnailGeneration
     // A date filter changes the projection, not the Photos sources. Keep warm
     // tiles and their requests, but still fence any authorization transition.
