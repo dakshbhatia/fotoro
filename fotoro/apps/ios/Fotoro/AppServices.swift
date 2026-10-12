@@ -2106,7 +2106,7 @@ enum ReviewedPhotosBackupPolicy {
       defer {
         if self.annotationSummaryRequest == request { self.annotationSummaryTask = nil }
       }
-      func current() -> Bool {
+      @MainActor func current() -> Bool {
         !Task.isCancelled && self.annotationSummaryRequest == request
           && self.consumerObservation == observation && self.photoAccountAccess == access
           && self.store === catalog && BackgroundUploadPolicy.origin(self.api.baseURL) == origin
