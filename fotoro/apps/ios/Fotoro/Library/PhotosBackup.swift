@@ -391,6 +391,10 @@ struct BackupStatus: Codable {
   private var selectionIDs: Set<String>?
   private var selectionDirty = false
   private var task: Task<Void, Never>?
+  #if DEBUG
+    var inventoryBeforeDecode: (@Sendable () -> Void)?
+    var reconciliationDidYield: ((Int) throws -> Void)?
+  #endif
   var isRunning: Bool { task != nil }
   init(store: LibraryStore) throws {
     self.store = store
@@ -472,6 +476,27 @@ struct BackupStatus: Codable {
           try Task.checkCancellation()
           guard valid() else { throw CancellationError() }
         }
+        @MainActor func inventory<Value: Sendable>(_ project: @escaping @Sendable ([BackupSource]) throws -> Value) async throws -> Value {
+          let catalog = store
+          #if DEBUG
+            let beforeDecode = inventoryBeforeDecode
+          #else
+            let beforeDecode: (@Sendable () -> Void)? = nil
+          #endif
+          while true {
+            try fence()
+            let read = Task.detached(priority: .utility) {
+              let snapshot = try catalog.backupSourceInventorySnapshot(beforeDecode: beforeDecode)
+              let value = try project(snapshot.sources)
+              try Task.checkCancellation()
+              return (snapshot, value)
+            }
+            let (snapshot, value) = try await withTaskCancellationHandler { try await read.value } onCancel: { read.cancel() }
+            try fence()
+            if try catalog.backupSourceInventoryIsCurrent(snapshot) { return value }
+            await Task.yield()
+          }
+        }
         try fence()
         status.phase = .scanning
         status.message = nil
@@ -485,10 +510,20 @@ struct BackupStatus: Codable {
           selectionDirty = true
         }
         var dates: [String: Date] = [:]
-        let existing = Dictionary(try store.backupSources().map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let existing = try await inventory { sources in
+          Dictionary(sources.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        }
         for (index, candidate) in candidates.enumerated() {
-          if index.isMultiple(of: 128) { await Task.yield(); try fence() }
-          var source = try existing[candidate.id] ?? store.backupSource(candidate.id)
+          if index.isMultiple(of: 128) {
+            await Task.yield()
+            #if DEBUG
+              try reconciliationDidYield?(index)
+            #endif
+            try fence()
+          }
+          // A metadata-page yield can admit another source writer. The initial
+          // inventory is prior verification evidence, never write authority.
+          var source = try store.backupSource(candidate.id)
           dates[candidate.id] = candidate.capturedAt
           if source.phase == .skipped, candidate.skipReason == nil,
             source.skipProcessor != "camera-original-v1" || source.sourceRevision != candidate.sourceRevision {
@@ -524,18 +559,30 @@ struct BackupStatus: Codable {
           uniquingKeysWith: { first, _ in first })
         // Verification belongs to the same per-source lifetime as preparation.
         // Snapshot scanning never needs to download every changed original first.
-        let verificationIDs = Set(existing.values.filter { source in
-          guard reconcile != nil, let candidate = permitted[source.id],
-            source.phase == .committed || (restrictQueuedToSnapshot && source.phase == .queued) else { return false }
-          return source.sourceRevision != candidate.sourceRevision || source.originalSha256 == nil
-        }.map(\.id))
-        let work = try store.backupSources().filter {
-          verificationIDs.contains($0.id)
-            || ($0.phase == .queued && (!restrictQueuedToSnapshot
-            || (permitted[$0.id] != nil && permitted[$0.id]?.sourceRevision == $0.sourceRevision)))
-            || (($0.phase == .pending || $0.phase == .failed) && selectedIDs.contains($0.id))
-        }.sorted { ($0.phase == .queued ? 0 : 1) < ($1.phase == .queued ? 0 : 1) }
-        status.sourceTotal = try countedSources().count
+        let canReconcile = reconcile != nil
+        let countedSelection = selectionIDs
+        let (verificationIDs, work, sourceTotal) = try await inventory { sources in
+          let verificationIDs = Set(existing.values.filter { source in
+            guard canReconcile, let candidate = permitted[source.id],
+              source.phase == .committed || (restrictQueuedToSnapshot && source.phase == .queued) else { return false }
+            return source.sourceRevision != candidate.sourceRevision || source.originalSha256 == nil
+          }.map(\.id))
+          let work = sources.filter {
+            verificationIDs.contains($0.id)
+              || ($0.phase == .queued && (!restrictQueuedToSnapshot
+              || (permitted[$0.id] != nil && permitted[$0.id]?.sourceRevision == $0.sourceRevision)))
+              || (($0.phase == .pending || $0.phase == .failed) && selectedIDs.contains($0.id))
+          }.sorted {
+            let left = $0.phase == .queued ? 0 : 1, right = $1.phase == .queued ? 0 : 1
+            return left == right ? $0.id < $1.id : left < right
+          }
+          let total = sources.filter {
+            !$0.isRetainedOriginal && (countedSelection == nil || countedSelection?.contains($0.id) == true
+              || $0.phase == .queued || $0.phase == .committed)
+          }.count
+          return (verificationIDs, work, total)
+        }
+        status.sourceTotal = sourceTotal
         status.phase = .running
         try refreshCounts()
         var performedTransferWork = false
