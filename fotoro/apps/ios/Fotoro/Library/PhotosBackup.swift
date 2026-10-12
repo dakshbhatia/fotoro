@@ -107,8 +107,8 @@ struct AutomaticPhotoSyncStatus {
   }
 }
 
-struct BackupSource: Codable, Identifiable, Equatable {
-  enum Phase: String, Codable { case pending, queued, committed, skipped, failed }
+struct BackupSource: Codable, Identifiable, Equatable, Sendable {
+  enum Phase: String, Codable, Sendable { case pending, queued, committed, skipped, failed }
   var id: String
   var photoId: String
   var phase: Phase = .pending

@@ -14,6 +14,88 @@ private func writeBackupFixture(_ store: LibraryStore, _ body: (Database) throws
 }
 
 final class PhotosBackupTests: XCTestCase {
+  func testBackupInventoryRevisionTracksEveryWriteButNotStatusNoOpOrRollback() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try LibraryStore(root: root)
+    var source = BackupSource(id: "chosen", photoId: Wire.id())
+    try store.putBackupSource(source)
+    let first = try store.backupSourceInventorySnapshot()
+    try store.putBackupSource(source)
+    try writeBackupFixture(store) { db in
+      try db.execute(sql: "INSERT OR REPLACE INTO state(key,value) VALUES('backupStatus','progress')")
+    }
+    XCTAssertTrue(try store.backupSourceInventoryIsCurrent(first))
+    enum Rollback: Error { case requested }
+    XCTAssertThrowsError(try writeBackupFixture(store) { db in
+      var changed = source; changed.phase = .failed
+      try db.execute(sql: "UPDATE backupSources SET value=? WHERE id=?", arguments: [try Wire.encode(changed), source.id])
+      throw Rollback.requested
+    })
+    XCTAssertTrue(try store.backupSourceInventoryIsCurrent(first), "Rolled-back writes cannot invalidate committed evidence")
+    source.phase = .queued; try store.putBackupSource(source)
+    XCTAssertFalse(try store.backupSourceInventoryIsCurrent(first))
+    let queued = try store.backupSourceInventorySnapshot()
+    let retained = BackupSource(id: "fotoro-retained-original:old", photoId: Wire.id())
+    try store.putBackupSource(retained)
+    XCTAssertFalse(try store.backupSourceInventoryIsCurrent(queued))
+    let aliased = try store.backupSourceInventorySnapshot()
+    try writeBackupFixture(store) { try $0.execute(sql: "DELETE FROM backupSources WHERE id=?", arguments: [retained.id]) }
+    XCTAssertFalse(try store.backupSourceInventoryIsCurrent(aliased))
+    let latest = try store.backupSourceInventorySnapshot()
+    let reopened = try LibraryStore(root: root)
+    XCTAssertTrue(try reopened.backupSourceInventoryIsCurrent(latest))
+    source.message = "Source correction"; try reopened.putBackupSource(source)
+    XCTAssertFalse(try store.backupSourceInventoryIsCurrent(latest), "A second connection's committed write must invalidate")
+    let beforeReset = try store.backupSourceInventorySnapshot()
+    try store.removeAll()
+    XCTAssertTrue(try store.backupSourceInventoryIsCurrent(beforeReset), "Reset preserves the retained inventory revision")
+    XCTAssertEqual(try store.backupSourceInventorySnapshot().sources.count, 1)
+    source.phase = .failed; try store.putBackupSource(source)
+    XCTAssertFalse(try store.backupSourceInventoryIsCurrent(beforeReset), "Source writes still invalidate after a live reset")
+  }
+
+  @MainActor func testLargeInventoryDecodeLeavesMainActorAndDatabaseFreeAndRejectsLaterWrites() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try LibraryStore(root: root)
+    try writeBackupFixture(store) { db in
+      for n in 0..<10_000 {
+        let source = BackupSource(id: "public-\(n)", photoId: "saved-\(n)")
+        try db.execute(sql: "INSERT INTO backupSources(id,value) VALUES(?,?)", arguments: [source.id, try Wire.encode(source)])
+      }
+    }
+    let started = expectation(description: "Inventory bytes fetched before held decode")
+    let release = DispatchSemaphore(value: 0)
+    let reading = Task.detached(priority: .utility) {
+      try store.backupSourceInventorySnapshot(beforeDecode: {
+        started.fulfill(); _ = release.wait(timeout: .now() + 3)
+      })
+    }
+    defer { release.signal(); reading.cancel() }
+    await fulfillment(of: [started], timeout: 5)
+    let ui = expectation(description: "MainActor remains available while inventory decode is held")
+    Task { @MainActor in ui.fulfill() }
+    await fulfillment(of: [ui], timeout: 1)
+    var changed = BackupSource(id: "public-0", photoId: "saved-0"); changed.phase = .committed
+    let began = Date()
+    try store.putBackupSource(changed)
+    XCTAssertLessThan(Date().timeIntervalSince(began), 2, "Decode must not hold the serialized database queue")
+    release.signal()
+    let snapshot = try await reading.value
+    XCTAssertEqual(snapshot.sources.count, 10_000)
+    XCTAssertFalse(try store.backupSourceInventoryIsCurrent(snapshot), "Held old source evidence cannot publish after a write")
+    let refreshed = try await Task.detached { try store.backupSourceInventorySnapshot() }.value
+    XCTAssertTrue(try store.backupSourceInventoryIsCurrent(refreshed))
+    XCTAssertEqual(refreshed.sources.first { $0.id == changed.id }?.phase, .committed)
+    let canceled = Task.detached { () throws -> BackupSourceInventory in
+      withUnsafeCurrentTask { $0?.cancel() }
+      return try store.backupSourceInventorySnapshot()
+    }
+    do { _ = try await canceled.value; XCTFail("Canceled decoding must stop") }
+    catch is CancellationError {} catch { throw error }
+  }
+
   @MainActor func testBackupCountAggregateMatchesSelectionAndFailureSemantics() throws {
     let store = try LibraryStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
     var sources: [BackupSource] = []
@@ -1239,6 +1321,7 @@ final class AutomaticPhotoSyncTests: XCTestCase {
       XCTAssertEqual(try services.journal.entries().map { $0.photo.id }, [queued.photoId])
       XCTAssertEqual(try services.store.backupSource(queued.id), queued)
       XCTAssertNil(try services.store.backupSource(queued.id).message)
+      await services.waitForAnnotationSummaryRefresh()
       XCTAssertEqual(services.consumerSyncSummary.state, withdrawal == "pause" ? .paused : .needsAttention,
         "Cancelled preflight must return to the actual durable queue state")
     }

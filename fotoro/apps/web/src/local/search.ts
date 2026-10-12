@@ -75,6 +75,10 @@ interface PhrasePosition {
   normalized: string[];
   start: number;
 }
+interface IndexedPhoto {
+  dictionary: IndexedMeaning[];
+  phrases: Map<string, PhrasePosition[]>;
+}
 export const emptyFeedback = (): SearchFeedback => ({ version: 1, meanings: {}, photos: {}, pins: {} });
 export const normalizeSearch = (text: string) => text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().trim();
 const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
@@ -100,6 +104,7 @@ export class PhotoSearchIndex {
   private dictionary: IndexedMeaning[];
   private phrases = new Map<string, PhrasePosition[]>();
   private history: SearchFeedback;
+  private indexedPhotos = new Map<string, IndexedPhoto>();
   constructor(photos: SearchPhoto[], feedback: SearchFeedback = emptyFeedback()) {
     this.records = new Map(photos.map(photo => [photo.id, photo]));
     this.history = structuredClone(feedback);
@@ -171,10 +176,11 @@ export class PhotoSearchIndex {
     }
     this.dictionary = [...terms.values()].sort((a, b) => compare(a.normalized, b.normalized) || compare(a.id, b.id));
   }
-  dispose() {this.records.clear(); this.dictionary = []; this.phrases.clear();}
+  dispose() {this.records.clear(); this.dictionary = []; this.phrases.clear(); this.indexedPhotos.clear();}
   // Account metadata can be much larger than the grid. Build once outside render,
   // yielding after bounded work, with an explicit transient-memory admission budget.
-  static async build(photos: SearchPhoto[], signal: AbortSignal, current: () => boolean, budgetBytes = 128 * 1024 * 1024) {
+  static async build(photos: SearchPhoto[], signal: AbortSignal, current: () => boolean, budgetBytes = 128 * 1024 * 1024,
+    reuse?: {index: PhotoSearchIndex; unchanged: ReadonlySet<string>}) {
     const index = new PhotoSearchIndex([]), terms = new Map<string, IndexedMeaning>();
     let bytes = 0, lastYield = performance.now();
     const check = () => {signal.throwIfAborted(); if (!current()) throw new DOMException("Search source changed", "AbortError");};
@@ -206,17 +212,24 @@ export class PhotoSearchIndex {
       for (const photo of index.records.values()) {rows.push(photo); await yieldWork();}
       for (const photo of await ordered(rows, (a, b) => compare(a.id, b.id))) {
         check();
-        const row = new PhotoSearchIndex([photo]); index.records.set(photo.id, photo);
+        // Only the caller's verified unchanged receipts authorize reuse. Contributions
+        // contain text postings, never the predecessor's source/current closures.
+        const retained = reuse?.unchanged.has(photo.id) ? reuse.index.indexedPhotos.get(photo.id) : undefined;
+        const fresh = retained ? undefined : new PhotoSearchIndex([photo]);
+        const row: IndexedPhoto = retained ?? {dictionary: fresh!.dictionary, phrases: fresh!.phrases};
+        index.indexedPhotos.set(photo.id, row);
+        index.records.set(photo.id, photo);
         for (const term of row.dictionary) {
+          account(160 + 2 * (term.id.length + term.term.length + term.normalized.length) + 80 * term.sources.size);
           const existing = terms.get(term.id);
           if (existing) for (const [id, evidence] of term.sources) {existing.sources.set(id, evidence); account(80);}
-          else {terms.set(term.id, term); account(160 + 2 * (term.id.length + term.term.length + term.normalized.length) + 80 * term.sources.size);}
+          else {terms.set(term.id, {...term, sources: new Map(term.sources)}); account(160 + 2 * (term.id.length + term.term.length + term.normalized.length) + 80 * term.sources.size);}
         }
         for (const [word, positions] of row.phrases) {
           const existing = index.phrases.get(word);
-          if (existing) for (const position of positions) existing.push(position); else index.phrases.set(word, positions);
+          if (existing) for (const position of positions) existing.push(position); else index.phrases.set(word, [...positions]);
           // Phrase positions share token arrays; this deliberately overcounts tokens for admission.
-          account(160 * positions.length + 2 * word.length);
+          account(168 * positions.length + 4 * word.length);
         }
         await yieldWork();
       }

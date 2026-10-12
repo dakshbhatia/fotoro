@@ -12,6 +12,11 @@ struct LocalPhoto: Codable, Identifiable, Sendable {
   var previewURL: URL?
   var staged: [String: URL] = [:]
 }
+struct BackupSourceInventory: Sendable {
+  let sources: [BackupSource]
+  fileprivate let revision: String
+}
+
 final class LibraryStore: @unchecked Sendable {
   static let ownedOriginalQuery = """
     SELECT value FROM photos
@@ -35,6 +40,18 @@ final class LibraryStore: @unchecked Sendable {
         sql:
           "CREATE TABLE IF NOT EXISTS annotations (id TEXT PRIMARY KEY, value BLOB NOT NULL); CREATE TABLE IF NOT EXISTS backupSources (id TEXT PRIMARY KEY, value BLOB NOT NULL); CREATE TABLE IF NOT EXISTS photos (id TEXT PRIMARY KEY, sourceDate TEXT NOT NULL, value BLOB NOT NULL); CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT); CREATE TABLE IF NOT EXISTS transfers (id TEXT PRIMARY KEY, value BLOB NOT NULL); CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, value BLOB NOT NULL)"
       )
+      // Every checkpoint write path, including direct SQL and retained aliases,
+      // invalidates snapshots in the same transaction. Rollback restores the revision.
+      try db.execute(sql: """
+        INSERT OR IGNORE INTO state(key,value) VALUES('backupSourceRevision','0');
+        CREATE TRIGGER IF NOT EXISTS backup_inventory_insert AFTER INSERT ON backupSources
+        BEGIN UPDATE state SET value=CAST(value AS INTEGER)+1 WHERE key='backupSourceRevision'; END;
+        CREATE TRIGGER IF NOT EXISTS backup_inventory_update AFTER UPDATE ON backupSources
+        WHEN OLD.value != NEW.value OR OLD.id != NEW.id
+        BEGIN UPDATE state SET value=CAST(value AS INTEGER)+1 WHERE key='backupSourceRevision'; END;
+        CREATE TRIGGER IF NOT EXISTS backup_inventory_delete AFTER DELETE ON backupSources
+        BEGIN UPDATE state SET value=CAST(value AS INTEGER)+1 WHERE key='backupSourceRevision'; END;
+        """)
       // Existing catalogs are indexed on opening; SQLite maintains the index for every write path.
       try db.execute(sql: """
         CREATE INDEX IF NOT EXISTS photos_owned_original ON photos(
@@ -105,6 +122,29 @@ final class LibraryStore: @unchecked Sendable {
     value.previewURL = owned(photo.previewURL, folder: "Media")
     value.staged = photo.staged.mapValues { owned($0, folder: "Pending")! }
     return value
+  }
+  // Call from admitted background work. Fetch bytes under a read transaction,
+  // then decode outside the serialized database queue so other writes can proceed.
+  func backupSourceInventorySnapshot(beforeDecode: (@Sendable () -> Void)? = nil) throws -> BackupSourceInventory {
+    try Task.checkCancellation()
+    let snapshot = try database.read { db -> (String, [Data]) in
+      // DatabaseQueue.read already supplies an isolated read transaction.
+      guard let revision = try String.fetchOne(db, sql: "SELECT value FROM state WHERE key='backupSourceRevision'")
+      else { throw FotoroError("Photo inventory revision is unavailable") }
+      return (revision, try Data.fetchAll(db, sql: "SELECT value FROM backupSources ORDER BY id"))
+    }
+    beforeDecode?()
+    try Task.checkCancellation()
+    let sources = try snapshot.1.map { bytes in
+      try Task.checkCancellation()
+      return try Wire.decode(BackupSource.self, bytes)
+    }
+    return BackupSourceInventory(sources: sources, revision: snapshot.0)
+  }
+  func backupSourceInventoryIsCurrent(_ inventory: BackupSourceInventory) throws -> Bool {
+    try database.read { db in
+      try String.fetchOne(db, sql: "SELECT value FROM state WHERE key='backupSourceRevision'") == inventory.revision
+    }
   }
   static let backupSourcePhotoQuery = """
     SELECT value FROM backupSources
@@ -330,7 +370,7 @@ final class LibraryStore: @unchecked Sendable {
   }
   func removeAll() throws {
     try database.write {
-      try $0.execute(sql: "DELETE FROM annotations; DELETE FROM photos; DELETE FROM state; DELETE FROM transfers")
+      try $0.execute(sql: "DELETE FROM annotations; DELETE FROM photos; DELETE FROM state WHERE key != 'backupSourceRevision'; DELETE FROM transfers")
     }
   }
   func write(_ bytes: Data, name: String, pending: Bool = false) throws -> URL {

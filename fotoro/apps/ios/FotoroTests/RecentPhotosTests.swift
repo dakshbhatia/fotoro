@@ -6,6 +6,67 @@ import XCTest
 @testable import Fotoro
 
 final class RecentPhotosTests: XCTestCase {
+  @MainActor func testObserverBurstRefreshesOnceAndValidatesNewestSource() async {
+    for latest in ["after", nil] as [String?] {
+      var reads = 0
+      let refreshed = expectation(description: "One coalesced refresh")
+      let source = RecentPhotoSource(id: "tile", revision: "before")
+      var revision: String? = source.revision
+      var validations = 0
+      let store = RecentPhotosStore(authorization: { .authorized }, readPhotos: { _ in
+        reads += 1
+        if reads == 2 { refreshed.fulfill() }
+        return []
+      }, sourceRevisions: { _ in validations += 1; return revision.map { [source.id: $0] } ?? [:] })
+      store.restoreAccess()
+      defer { store.pauseAnalysis() }
+      let target = CGSize(width: 384, height: 384)
+      let image = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).image { _ in }
+      let generation = store.thumbnailGeneration
+      store.cacheThumbnail(image, for: source, targetSize: target, networkAllowed: true, generation: generation)
+      for _ in 0..<100 { store.queueObserverRefresh() }
+      revision = latest
+      await fulfillment(of: [refreshed], timeout: 1)
+      XCTAssertEqual(reads, 2)
+      XCTAssertEqual(validations, 1, "The burst validates warm sources once using the newest revision")
+      XCTAssertNotEqual(store.thumbnailGeneration, generation)
+      XCTAssertNil(store.cachedThumbnail(for: source, targetSize: target, networkAllowed: true))
+    }
+  }
+
+  @MainActor func testQueuedObserverRefreshUsesWithdrawnPermissionWithoutReadingMetadata() async {
+    var permission = PHAuthorizationStatus.authorized
+    var reads = 0
+    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in reads += 1; return [] })
+    store.restoreAccess()
+    let generation = store.thumbnailGeneration
+    store.queueObserverRefresh()
+    permission = .denied
+    XCTAssertFalse(store.canPublishThumbnail(source: RecentPhotoSource(id: "tile", revision: "before"), generation: generation))
+    try? await Task.sleep(for: .milliseconds(50))
+    XCTAssertEqual(store.status, .denied)
+    XCTAssertEqual(reads, 1, "The queued refresh must not read withdrawn Photos metadata")
+    XCTAssertTrue(store.photos.isEmpty)
+    store.pauseAnalysis()
+  }
+
+  @MainActor func testPauseCancelsQueuedObserverEvenAfterImmediateRestoreAndManualRefresh() async {
+    var reads = 0
+    let store = RecentPhotosStore(authorization: { .authorized }, readPhotos: { _ in reads += 1; return [] })
+    store.restoreAccess()
+    store.queueObserverRefresh()
+    store.pauseAnalysis()
+    store.queueObserverRefresh() // A notification admitted after hiding must also do nothing.
+    store.restoreAccess()
+    XCTAssertEqual(reads, 2, "Restoration remains immediate")
+    store.queueObserverRefresh()
+    store.setBrowseDates(.all)
+    XCTAssertEqual(reads, 3, "Date changes remain immediate and supersede queued work")
+    try? await Task.sleep(for: .milliseconds(50))
+    XCTAssertEqual(reads, 3, "Old queued generations cannot refresh after restoration")
+    store.pauseAnalysis()
+  }
+
   @MainActor func testThumbnailPublicationValidatesOnlyItsSourceAndRejectsWithdrawalBeforeRefresh() {
     var permission = PHAuthorizationStatus.authorized
     let source = RecentPhotoSource(id: "visible", revision: "current")

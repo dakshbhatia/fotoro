@@ -152,6 +152,10 @@ enum ReviewedPhotosBackupPolicy {
   @ObservationIgnored private var catalogSyncReads: [UUID: CatalogSyncRead] = [:]
   #if DEBUG
     @ObservationIgnored var consumerShareDidWrite: ((URL) -> Void)?
+    @ObservationIgnored var consumerSyncSummaryDidRefresh: (() -> Void)?
+    func waitForAnnotationSummaryRefresh() async {
+      while let task = annotationSummaryTask { await task.value }
+    }
     @ObservationIgnored var catalogSearchWillRead: (@Sendable () -> Void)?
     @ObservationIgnored var savedVisualEmbedding: (@MainActor (SearchPreview) async throws -> [Float])?
     func waitForSavedVisualEvidence() async {
@@ -180,6 +184,8 @@ enum ReviewedPhotosBackupPolicy {
   @ObservationIgnored private var diagnosticAccountState: NativeDiagnosticAccountState?
   @ObservationIgnored private var diagnosticSyncReason: NativeDiagnosticReason?
   @ObservationIgnored private var consumerObservation = UUID()
+  @ObservationIgnored private var annotationSummaryTask: Task<Void, Never>?
+  @ObservationIgnored private var annotationSummaryRequest = UUID()
   @ObservationIgnored private var syncIntent = UUID()
   private var automaticSyncPreference = AutomaticPhotoSyncPreference()
   private var automaticSyncIntake: AutomaticPhotoSyncIntake?
@@ -596,7 +602,13 @@ enum ReviewedPhotosBackupPolicy {
       }
     }
   }
-  func refreshConsumerSyncSummary() {
+  func refreshConsumerSyncSummary(preparedSources: [BackupSource]? = nil) {
+    annotationSummaryRequest = UUID()
+    annotationSummaryTask?.cancel()
+    annotationSummaryTask = nil
+    #if DEBUG
+      consumerSyncSummaryDidRefresh?()
+    #endif
     let accountState: NativeDiagnosticAccountState
     if !session.isSignedIn { accountState = .signedOut }
     else if session.fixture { accountState = .demo }
@@ -626,7 +638,7 @@ enum ReviewedPhotosBackupPolicy {
     }
     do {
       let automatic = automaticSyncPreference.enabled && automaticSyncPreference.origin == BackgroundUploadPolicy.origin(api.baseURL)
-      let allSources = try store.backupSources()
+      let allSources = try preparedSources ?? store.backupSources()
       let access = PhotoAccountAccess(account: account, vault: vault.generation, catalog: ObjectIdentifier(store))
       let origin = BackgroundUploadPolicy.origin(api.baseURL)
       if consumerProjectionAccess != access || consumerProjectionOrigin != origin
@@ -714,8 +726,9 @@ enum ReviewedPhotosBackupPolicy {
     } onChange: { [weak self] in
       Task { @MainActor [weak self] in
         guard let self, self.consumerObservation == token else { return }
-        self.refreshConsumerSyncSummary()
         self.observeConsumerSync()
+        if self.photoAccountAccess == nil { self.refreshConsumerSyncSummary() }
+        else { self.scheduleAnnotationSummaryRefresh() }
       }
     }
   }
@@ -2074,12 +2087,57 @@ enum ReviewedPhotosBackupPolicy {
       || (labelsChanged && priorPeopleFacts != (value.facts ?? []).filter(PhotoPeopleFacts.isReserved)) {
       consumerCatalogGeneration &+= 1
     }
-    if refreshSummary { refreshConsumerSyncSummary() }
+    if refreshSummary {
+      if labelsChanged { refreshConsumerSyncSummary() }
+      else { scheduleAnnotationSummaryRefresh() }
+    }
+  }
+  private func scheduleAnnotationSummaryRefresh() {
+    guard annotationSummaryTask == nil, let access = photoAccountAccess else { return }
+    let request = UUID(), observation = consumerObservation
+    let origin = BackgroundUploadPolicy.origin(api.baseURL)
+    let catalog = store
+    annotationSummaryRequest = request
+    // A fixed window bounds background stage bursts without postponing a
+    // summary indefinitely while new derived results continue arriving.
+    annotationSummaryTask = Task { @MainActor [weak self] in
+      do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+      guard let self, self.annotationSummaryRequest == request else { return }
+      defer {
+        if self.annotationSummaryRequest == request { self.annotationSummaryTask = nil }
+      }
+      @MainActor func current() -> Bool {
+        !Task.isCancelled && self.annotationSummaryRequest == request
+          && self.consumerObservation == observation && self.photoAccountAccess == access
+          && self.store === catalog && BackgroundUploadPolicy.origin(self.api.baseURL) == origin
+      }
+      guard current() else { self.annotationSummaryTask = nil; return }
+      let read = Task.detached(priority: .utility) { try catalog.backupSourceInventorySnapshot() }
+      do {
+        let snapshot = try await withTaskCancellationHandler { try await read.value } onCancel: { read.cancel() }
+        guard current() else { return }
+        self.annotationSummaryTask = nil
+        guard try catalog.backupSourceInventoryIsCurrent(snapshot) else {
+          self.scheduleAnnotationSummaryRefresh()
+          return
+        }
+        self.refreshConsumerSyncSummary(preparedSources: snapshot.sources)
+      } catch {
+        guard current() else { return }
+        self.annotationSummaryTask = nil
+        self.consumerSyncSummary = ConsumerSyncSummary(state: .needsAttention,
+          detail: "Sync status could not be read. Your originals are unchanged.", action: .retry)
+        self.clearConsumerPhotoSyncProjection()
+        self.diagnosticSyncReason = .unknown
+        self.diagnostics.record(NativeDiagnosticEvent(phase: .sync, outcome: .changed,
+          state: .needsAttention, step: .transfer, reason: .unknown))
+      }
+    }
   }
   private func captureLocalAnnotations(derivedOnly: Bool = false) throws {
     guard let localSearch, vault.isUnlocked else { return }
     let sources = try store.backupSources()
-    defer { refreshConsumerSyncSummary() }
+    defer { scheduleAnnotationSummaryRefresh() }
     for source in sources {
       if let record = try localSearch.record(source.id) {
         try captureLocalAnnotation(record, labelsChanged: false, source: source, refreshSummary: false, derivedOnly: derivedOnly)
@@ -2104,6 +2162,7 @@ enum ReviewedPhotosBackupPolicy {
     let generation = vault.generation
     let catalog = store
     let worker = annotations
+    let coalesced = worker.busy
     let origin = BackgroundUploadPolicy.origin(api.baseURL)
     await worker.resume(bundle: bundle, card: card, derivedOnly: derivedOnly, eligible: { [weak self] photo in
       guard derivedOnly else { return true }
@@ -2127,7 +2186,7 @@ enum ReviewedPhotosBackupPolicy {
     // This drain only acknowledges our frozen payloads. The visible draft was
     // already published by the edit, and a newer draft survives its older ack.
     // Coalesced/no-op drains must not rebuild every overlay or restart search.
-    refreshConsumerSyncSummary()
+    if !coalesced { scheduleAnnotationSummaryRefresh() }
   }
   func resolveAnnotationConflict(_ photo: LocalPhoto, keepLocal: Bool) async throws {
     let generation = vault.generation

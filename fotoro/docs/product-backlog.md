@@ -41,7 +41,11 @@ Cloudflare proposals become tasks here only when a consumer need admits them.
    Date-only filtering keeps warm thumbnails and requests. Sync counts use
    transactional SQL aggregates instead of decoding every checkpoint per photo;
    annotation eligibility uses an indexed photo lookup, and unchanged analysis
-   does not republish overlays. Inventory scans still need measured frame, CPU
+   does not republish overlays. Background summary bursts share one fixed window;
+   inventory decoding runs off-main and publication checks transactional source
+   revisions and current access. Photos notification bursts share one refresh.
+   Browser successor indexes reuse receipt-verified unchanged token contributions.
+   Inventory scans still need measured frame, CPU
    and memory budgets before claiming smoothness.
 4. Qualify retrieval before replacing models. Current iOS Vision OCR/classification,
    TinyCLIP CoreML retrieval and local face models already provide AI. Measure

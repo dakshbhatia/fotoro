@@ -503,9 +503,18 @@ test("continuous append acknowledgments do not withdraw existing account search 
   const response = (input: string | URL | Request) => {const id = new URL(String(input), "https://public.test").pathname.split("/").at(-1)!; const bytes = objects.get(id); assert.ok(bytes); return new Response(new Uint8Array(bytes));};
   globalThis.fetch = (async input => response(input)) as typeof fetch;
   const prior = new CachedAccountSearch(session, () => true);
-  let next: CachedAccountSearch | undefined, final: CachedAccountSearch | undefined;
+  const match = String.prototype.match;
+  let tokenizations = 0;
+  String.prototype.match = function (expression: any): any {
+    if (expression instanceof RegExp && expression.source === "[\\p{L}\\p{N}]+"
+      && /^(stable lighthouse|stable garden|baseline-\d+|waiting|append-\d+|replacement)$/.test(String(this))) tokenizations++;
+    return match.call(this, expression);
+  };
+  let next: CachedAccountSearch | undefined, final: CachedAccountSearch | undefined, changed: CachedAccountSearch | undefined, annotated: CachedAccountSearch | undefined;
   try {
     await prior.scan(new AbortController().signal);
+    assert.equal(tokenizations, 200, "Initial scan tokenizes each of the 100 filenames twice for word and phrase postings");
+    tokenizations = 0;
     const waiting = await fixture(session, objects, "waiting.jpg", "00000000-0000-4000-8000-000000000101");
     let release!: (response: Response) => void, enter!: () => void;
     const entered = new Promise<void>(resolve => {enter = resolve;});
@@ -523,14 +532,33 @@ test("continuous append acknowledgments do not withdraw existing account search 
       const [match] = await prior.hydrate([stable.manifest.photoId], new AbortController().signal); match.metadataKey.fill(0);
     }
     release(response("/" + waiting.manifest.metadataRepresentation.objectId)); await scanning;
+    const priorIDs = new Set(prior.records.map(record => record.id));
+    assert.equal(tokenizations, 2 * next.records.filter(record => !priorIDs.has(record.id)).length, "Append scan tokenizes new receipts only");
     assert.equal(next.admitted, true); assert.equal(next.complete, false, "A pass spanning newer writes reports updating coverage");
     assert.deepEqual(next.index!.search("lighthouse").photoIds, [stable.manifest.photoId]);
     globalThis.fetch = (async input => response(input)) as typeof fetch;
+    tokenizations = 0;
     final = new CachedAccountSearch(session, () => true, next); await final.scan(new AbortController().signal);
+    const nextIDs = new Set(next.records.map(record => record.id));
+    assert.equal(tokenizations, 2 * final.records.filter(record => !nextIDs.has(record.id)).length, "Follow-up scan keeps reusing unchanged postings");
     assert.equal(final.records.length, 103); assert.equal(final.complete, true);
     await fixture(session, objects, "replacement.jpg", stable.manifest.photoId);
     assert.deepEqual(final.index!.search("lighthouse").photoIds, [], "Only the changed source withdraws before refresh");
     assert.deepEqual(final.index!.search("garden").photoIds, [unaffected.manifest.photoId]);
     await assert.rejects(final.hydrate([stable.manifest.photoId], new AbortController().signal), /CATALOG_SOURCE_CHANGED/);
-  } finally {prior.dispose(); next?.dispose(); final?.dispose(); globalThis.fetch = oldFetch; lockVault(); await clearAccount(session.accountId);}
+    tokenizations = 0;
+    changed = new CachedAccountSearch(session, () => true, final); await changed.scan(new AbortController().signal);
+    assert.equal(tokenizations, 2, "A changed manifest with the same photo ID and original digest retokenizes only that receipt");
+    assert.deepEqual(changed.index!.search("lighthouse").photoIds, []);
+    assert.deepEqual(changed.index!.search("replacement").photoIds, [stable.manifest.photoId]);
+    assert.deepEqual(changed.index!.search("garden").photoIds, [unaffected.manifest.photoId]);
+    const annotation = signPayload("photo-annotations", session.accountId, utf8({version: 1, photoId: unaffected.manifest.photoId, revision: 1,
+      encrypted: encryptPrivate({version: 1, photoId: unaffected.manifest.photoId, originalSha256: unaffected.metadata.originalSha256, caption: "Fresh annotation receipt"})}), session.signingSecretKey);
+    await put("settings", session.accountId + ":annotation:" + unaffected.manifest.photoId, encryptPrivate(annotation));
+    tokenizations = 0;
+    annotated = new CachedAccountSearch(session, () => true, changed); await annotated.scan(new AbortController().signal);
+    assert.equal(tokenizations, 2, "Same original digest cannot authorize reuse after an annotation receipt changes");
+    assert.deepEqual(annotated.index!.search("Fresh annotation").photoIds, [unaffected.manifest.photoId]);
+    assert.deepEqual(changed.index!.search("Fresh annotation").photoIds, []);
+  } finally {String.prototype.match = match; prior.dispose(); next?.dispose(); final?.dispose(); changed?.dispose(); annotated?.dispose(); globalThis.fetch = oldFetch; lockVault(); await clearAccount(session.accountId);}
 });

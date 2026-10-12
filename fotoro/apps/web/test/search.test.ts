@@ -8,6 +8,45 @@ const now = Date.parse("2026-10-01T12:00:00Z");
 const photo = (id: string, filename: string, labels: string[] = [], date = "2020-01-01T00:00:00Z"): SearchPhoto =>
   ({ id, filename, labels, date, dateSource: "exif" });
 
+test("successor indexes tokenize only changed receipts while keeping predecessor postings and new source fences independent", async () => {
+  const rows = Array.from({length: 1000}, (_, n) => ({...photo(String(n), "neutral.jpg"), caption: "Indexed caption " + n}));
+  const match = String.prototype.match;
+  let tokenizations = 0;
+  String.prototype.match = function (expression: any): any {
+    if (expression instanceof RegExp && expression.source === "[\\p{L}\\p{N}]+" && String(this).startsWith("Indexed caption")) tokenizations++;
+    return match.call(this, expression);
+  };
+  let prior: PhotoSearchIndex | undefined, next: PhotoSearchIndex | undefined;
+  try {
+    prior = await PhotoSearchIndex.build(rows, new AbortController().signal, () => true);
+    assert.equal(tokenizations, 2000);
+    tokenizations = 0;
+    let visible = true;
+    const replacement = {...rows[0], caption: "Indexed caption replacement", current: () => visible};
+    const added = {...rows[0], id: "added", caption: "Indexed caption appended"};
+    const kept = rows.slice(1, -1).map(row => ({...row, current: () => visible}));
+    next = await PhotoSearchIndex.build([replacement, ...kept, added], new AbortController().signal, () => true,
+      undefined, {index: prior, unchanged: new Set(kept.map(row => row.id))});
+    assert.equal(tokenizations, 4, "Only replacement and append tokenize; the 998 verified receipts reuse their postings");
+    assert.deepEqual(next.search("replacement").photoIds, ["0"]);
+    assert.deepEqual(prior.search("replacement").photoIds, [], "Successor merges cannot mutate predecessor dictionary or phrase contributions");
+    assert.ok(!next.search("Indexed caption").photoIds.includes("999"), "Removed receipts are not retained");
+    const published = await next.searchAsync("Indexed caption 10");
+    assert.ok(published.photoIds.includes("10"));
+    visible = false;
+    assert.equal(published.current?.(), false, "Reused postings bind to the successor's source closures");
+    assert.deepEqual(next.search("caption").photoIds, ["added"]);
+    assert.ok(prior.search("caption").photoIds.includes("10"));
+    visible = true;
+    const controller = new AbortController(); let checks = 0;
+    await assert.rejects(PhotoSearchIndex.build(rows, controller.signal, () => {if (++checks === 30) controller.abort(); return true;},
+      undefined, {index: next, unchanged: new Set(rows.map(row => row.id))}), {name: "AbortError"});
+    assert.ok(next.search("replacement").photoIds.includes("0"), "An aborted successor cannot dispose shared predecessor postings");
+    await assert.rejects(PhotoSearchIndex.build(rows, new AbortController().signal, () => true, 1,
+      {index: next, unchanged: new Set(rows.map(row => row.id))}), /CACHED_SEARCH_BUDGET/);
+  } finally {String.prototype.match = match; prior?.dispose(); next?.dispose();}
+});
+
 test("a supplied name beats a newer filename mention and exposes its provenance", () => {
   const index = new PhotoSearchIndex([photo("portrait", "IMG_1234.jpg", ["Ronald"]), photo("mention", "Ronald-receipt.jpg", [], "2026-10-01T00:00:00Z")]);
   const result = index.search("Ron", { now });

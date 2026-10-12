@@ -5,6 +5,78 @@ import Photos
 @testable import Fotoro
 
 final class ConsumerCoreTests: XCTestCase {
+  @MainActor func testChangedAnnotationStagesCoalesceSummaryAndManualLabelsRemainImmediate() async throws {
+    try await withSavedLibrary { services, _ in
+      var photo = try self.samplePhoto(); photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+      try services.store.put(photo)
+      var record = SearchRecord(id: "summary-source", revision: "current")
+      try services.store.putBackupSource(BackupSource(id: record.id, photoId: photo.id, phase: .committed,
+        sourceRevision: record.revision, originalSha256: photo.metadata.originalSha256))
+      let local = LocalSearchStore(index: try SearchIndex()); services.bindLocalSearch(local)
+      await Task.yield()
+      var scans = 0
+      services.consumerSyncSummaryDidRefresh = { scans += 1 }
+      for n in 0..<100 {
+        record.captions = ["Completed stage \(n)"]
+        try local.onRecordChanged?(record, false)
+      }
+      XCTAssertEqual(scans, 0, "Changed background stages must not rescan inventory individually")
+      XCTAssertEqual(services.annotation(photo).caption, "Completed stage 99", "Visible edits still publish immediately")
+      await services.waitForAnnotationSummaryRefresh()
+      XCTAssertEqual(scans, 1)
+      XCTAssertEqual(services.consumerSyncSummary.detail, "Public demo accounts cannot back up your private photos.")
+      XCTAssertEqual(try services.annotations.ledger.pendingIDs(), [photo.id])
+      record.captions = ["Another completed stage"]; try local.onRecordChanged?(record, false)
+      record.labels = ["Reviewed label"]; try local.onRecordChanged?(record, true)
+      XCTAssertEqual(scans, 2, "Manual labels bypass the bounded background window")
+      XCTAssertEqual(services.annotation(photo).labels, ["Reviewed label"])
+      await services.waitForAnnotationSummaryRefresh()
+      XCTAssertEqual(scans, 2, "The immediate refresh absorbs already queued stage work")
+      record.revision = "stale"; record.labels = ["Cannot replace current"]
+      try local.onRecordChanged?(record, true)
+      XCTAssertEqual(services.annotation(photo).labels, ["Reviewed label"])
+      record.revision = "current"; record.labels = ["Reviewed label"]; record.captions = ["Next stage"]
+      try local.onRecordChanged?(record, false)
+      try await services.store.database.write { db in
+        try db.execute(sql: "INSERT INTO backupSources(id,value) VALUES(?,?)", arguments: ["unrelated-invalid", Data("not-json".utf8)])
+      }
+      await services.waitForAnnotationSummaryRefresh()
+      XCTAssertEqual(scans, 2, "A failed background decode must not retry the full scan on MainActor")
+      XCTAssertEqual(services.consumerSyncSummary.state, .needsAttention)
+      XCTAssertEqual(services.consumerSyncSummary.action, .retry)
+      XCTAssertEqual(services.annotation(photo).caption, "Next stage", "Read failure does not discard pending edits")
+      services.consumerSyncSummaryDidRefresh = nil
+    }
+  }
+
+  @MainActor func testQueuedAnnotationSummaryCannotRefreshWithdrawnAccountOrOrigin() async throws {
+    for interruption in ["lock", "account", "origin"] {
+      try await withSavedLibrary { services, _ in
+        var photo = try self.samplePhoto(); photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+        try services.store.put(photo)
+        var record = SearchRecord(id: "summary-source", revision: "current"); record.captions = ["Derived stage"]
+        try services.store.putBackupSource(BackupSource(id: record.id, photoId: photo.id, phase: .committed,
+          sourceRevision: record.revision, originalSha256: photo.metadata.originalSha256))
+        let local = LocalSearchStore(index: try SearchIndex()); services.bindLocalSearch(local)
+        await Task.yield()
+        try local.onRecordChanged?(record, false)
+        switch interruption {
+        case "lock": services.vault.lock()
+        case "account": services.session.accountId = Wire.id()
+        default: services.api.baseURL = URL(string: "http://127.0.0.1:8797")!
+        }
+        // Settle legitimate withdrawal observation before measuring old queued work.
+        await Task.yield()
+        var scans = 0; services.consumerSyncSummaryDidRefresh = { scans += 1 }
+        let summary = services.consumerSyncSummary
+        await services.waitForAnnotationSummaryRefresh()
+        XCTAssertEqual(scans, 0, interruption)
+        XCTAssertEqual(services.consumerSyncSummary, summary, interruption)
+        services.consumerSyncSummaryDidRefresh = nil
+      }
+    }
+  }
+
   func testAnnotationSourceLookupUsesPhotoIndexWithoutDecodingUnrelatedInventory() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
     defer { try? FileManager.default.removeItem(at: root) }
@@ -85,15 +157,33 @@ final class ConsumerCoreTests: XCTestCase {
         let sending = Task { await services.syncAnnotations() }
         await self.fulfillment(of: [started], timeout: 3)
         XCTAssertTrue(services.annotations.busy)
+        await Task.yield()
+        var summaryScans = 0
+        services.consumerSyncSummaryDidRefresh = { summaryScans += 1 }
+        var record = SearchRecord(id: "held-summary-source", revision: "current", labels: ["First reviewed label"])
+        try services.store.putBackupSource(BackupSource(id: record.id, photoId: photo.id, phase: .committed,
+          sourceRevision: record.revision, originalSha256: photo.metadata.originalSha256))
+        let local = LocalSearchStore(index: try SearchIndex()); services.bindLocalSearch(local)
+        services.automaticPhotosAuthorization = { .authorized }
+        for n in 0..<100 {
+          record.captions = ["Completed stage \(n)"]
+          record.ocrStatus = .complete; record.ocrText = "Derived OCR stage \(n)"
+          try local.onRecordChanged?(record, false)
+        }
         // A second wakeup returns while the first request remains held.
         let beforeCoalesced = services.consumerCatalogGeneration
-        await services.syncAnnotations()
+        for _ in 0..<20 { await services.syncAnnotations() }
+        XCTAssertEqual(summaryScans, 0, "Busy wakeups must not scan the whole inventory")
         XCTAssertEqual(services.consumerCatalogGeneration, beforeCoalesced)
+        await services.waitForAnnotationSummaryRefresh()
+        XCTAssertEqual(summaryScans, 1, "Stages and the busy observation must share one detached inventory read")
+        XCTAssertEqual(services.consumerSyncSummary.state, .checking)
         if editDuringSend {
           try services.setLabels(["Newer reviewed label"], photo: photo)
           XCTAssertEqual(services.annotation(photo).labels, ["Newer reviewed label"])
           XCTAssertGreaterThan(services.consumerCatalogGeneration, beforeCoalesced,
             "A genuine annotation edit must still publish immediately")
+          XCTAssertGreaterThan(summaryScans, 0, "Manual edits must refresh summary while a drain is held")
         }
         let expected = services.annotation(photo)
         let generation = services.consumerCatalogGeneration
@@ -106,13 +196,19 @@ final class ConsumerCoreTests: XCTestCase {
         XCTAssertEqual(try services.annotations.ledger.current(photo: photo, bundle: services.vault.requireBundle(),
           card: services.session.requireCard(photo.manifest.ownerAccountId)), expected)
         XCTAssertTrue(try services.annotations.ledger.pendingIDs().isEmpty)
-        XCTAssertEqual(server.requests.filter { $0.method == "PUT" }.count, editDuringSend ? 2 : 1)
+        XCTAssertEqual(server.requests.filter { $0.method == "PUT" }.count, 2,
+          "The newer stage draft must survive the held acknowledgment")
         XCTAssertEqual(services.consumerCatalogGeneration, generation)
         XCTAssertEqual(catalogChanges.value, 0, "Acknowledgment must not restart catalog-bound search")
         XCTAssertEqual(overlayChanges.value, 0, "Acknowledgment must not republish every loaded photo overlay")
         await services.syncAnnotations()
+        await services.waitForAnnotationSummaryRefresh()
         XCTAssertEqual(services.consumerCatalogGeneration, generation, "An empty drain must also leave browse identity stable")
         XCTAssertEqual(overlayChanges.value, 0)
+        XCTAssertGreaterThan(summaryScans, 0, "The admitted drain still publishes eventual summary")
+        XCTAssertLessThanOrEqual(summaryScans, editDuringSend ? 3 : 2,
+          "Acknowledgment, successor, and empty drain observations must coalesce")
+        services.consumerSyncSummaryDidRefresh = nil
       }
     }
   }
