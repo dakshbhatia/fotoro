@@ -37,7 +37,7 @@ final class ConsumerCoreTests: XCTestCase {
       XCTAssertEqual(services.annotation(photo).labels, ["Reviewed label"])
       record.revision = "current"; record.labels = ["Reviewed label"]; record.captions = ["Next stage"]
       try local.onRecordChanged?(record, false)
-      try services.store.database.write { db in
+      try await services.store.database.write { db in
         try db.execute(sql: "INSERT INTO backupSources(id,value) VALUES(?,?)", arguments: ["unrelated-invalid", Data("not-json".utf8)])
       }
       await services.waitForAnnotationSummaryRefresh()
