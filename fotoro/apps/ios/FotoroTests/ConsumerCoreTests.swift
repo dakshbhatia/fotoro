@@ -985,6 +985,38 @@ final class ConsumerCoreTests: XCTestCase {
     XCTAssertFalse(ConsumerSearchBinding.duplicate(source: source, record: record, saved: photo))
     XCTAssertFalse(duplicate(photo))
   }
+  @MainActor func testUnifiedSearchReadsOnlyMatchingDeviceCheckpoints() async throws {
+    try await withSavedLibrary { services, _ in
+      var photo = try self.samplePhoto()
+      photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+      try services.store.put(photo)
+      let record = SearchRecord(id: "matching-device", revision: "current", labels: ["receipt"])
+      let index = try SearchIndex()
+      try index.replacePermitted([record])
+      let local = LocalSearchStore(index: index)
+      var source = BackupSource(id: record.id, photoId: photo.id)
+      source.phase = .committed; source.sourceRevision = record.revision
+      source.originalSha256 = photo.metadata.originalSha256
+      try services.store.putBackupSource(source)
+      try await services.store.database.write { db in
+        for n in 0..<10_000 {
+          // Historical payloads must not be decoded to deduplicate one match.
+          try db.execute(sql: "INSERT INTO backupSources(id,value) VALUES(?,?)",
+            arguments: ["unrelated-\(n)", Data(#"{"phase":"committed"}"#.utf8)])
+        }
+      }
+      let hits = try await services.consumerSearch("receipt", local: local)
+      XCTAssertEqual(hits.map(\.photo), [.device(record.id)])
+      source.sourceRevision = "changed"
+      try services.store.putBackupSource(source)
+      let changed = try await services.consumerSearch("receipt", local: local)
+      XCTAssertEqual(changed.map(\.photo), [.device(record.id), .saved(photo.id)],
+        "A stale device checkpoint cannot hide the verified Saved photo")
+      local.auditAuthorization(status: .denied)
+      let withdrawn = try await services.consumerSearch("receipt", local: local)
+      XCTAssertEqual(withdrawn.map(\.photo), [.saved(photo.id)])
+    }
+  }
   @MainActor func testCloudOnlyReceiptAndLocalRankingSurviveLocalPermissionWithdrawal() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
     let defaults = UserDefaults.standard.data(forKey: "fotoro.pinnedCards")
