@@ -51,6 +51,33 @@ behavior are acceptance requirements to qualify. Use system support where
 available and opaque readable fallbacks for browser surfaces. Screenshots alone
 do not establish accessibility, scrolling smoothness or physical share completion.
 
+## Reusable type and surface rules
+
+Use the existing system font; do not download a font to distinguish photo screens.
+Pair a text role with its layout instead of shrinking text to preserve one row:
+
+| Role | Native | Browser |
+| --- | --- | --- |
+| Screen or section title | System navigation title or `.headline` | Existing heading hierarchy |
+| Filename or main content | `.body`, wrapping at enlarged sizes | `--font-body`, intrinsic height |
+| Action or filter | System control label | `--font-control`, `--control-target` minimum height |
+| Evidence or secondary status | `.caption` or `.subheadline` | `--font-caption`, readable secondary color |
+
+Keep layout flexible when labels grow. At accessibility text sizes, photo rows
+and competing title/actions may stack; filenames and evidence must remain readable.
+Use `--photo-*` semantic colors for content, surfaces, borders, selection and focus.
+Accent text and selected indicators use `--photo-accent`; filled actions use
+`--photo-action` with `--photo-on-action`. One blue cannot serve both contrast jobs.
+Place opaque reduced-transparency and unsupported-blur rules after theme rules
+so later translucent declarations cannot restore the effect. Keep motion opt-outs.
+
+References checked October 12, 2026: [Radix typography and paired type tokens](https://www.radix-ui.com/themes/docs/theme/typography),
+[Radix open-source token implementation](https://raw.githubusercontent.com/radix-ui/themes/main/packages/radix-ui-themes/src/styles/tokens/typography.css),
+and [Apple's Liquid Glass adoption guidance](https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass).
+These guide small native and CSS changes; they do not require importing a library
+or restyling the photo canvas. Qualify enlarged text, keyboard focus and display
+preferences on the actual supported surfaces before claiming accessibility.
+
 ## Quiet, accurate states
 
 Account setup belongs to the action requiring it. Healthy state needs no banner.

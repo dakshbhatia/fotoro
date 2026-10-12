@@ -1,3 +1,4 @@
+import {SelectionTray} from "../components/SelectionTray";
 import {CopyDiagnostics} from "../components/CopyDiagnostics";
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../library/icons";
@@ -595,7 +596,7 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
         : !hasPhotos ? <section className="local-empty local-first-use"><div className="first-use-content"><div className="first-use-actions"><button className="open-photos" aria-label="Open photos from this device" disabled={!ready || !!progress} onClick={() => input.current?.click()}>Open photos</button><button className="text-button" onClick={openBackup}>Open Saved photos</button></div><p className="hint first-use-note">Photos opened here stay on this device until you choose Save.</p></div></section>
         : displayedPhotos.length ? <LocalLibrary key={sourceGeneration} view={photoView} columns={visibleColumns} active={active} photos={displayedPhotos} resources={resources} resourceForPhoto={photo => photo.id.startsWith("saved:") ? savedResources : resources} onOpen={id => id.startsWith("saved:") ? onOpenSaved?.(id.slice(6)) : setViewer(id)} onFailure={failure} selection={{ids: searchSelectionIDs, editing: reviewingPicks, disabled: shareBusy || savedSelectionBusy, onChange: (id, checked) => {setReviewingPicks(true); chooseSearchPhoto(id, checked);}}} />
         : <section className="empty"><p>{familyFilter ? "No matching photos" : browseScope === "picks" ? picks.busy ? "Choosing your picks…" : "No picks yet" : "No photos in this date range"}</p><button onClick={() => {setBrowseScope("photos"); setLast30(false); peopleFind.change({...peopleFind.filter, ids: new Set()});}}>Show all photos</button></section>}
-      {selectedCount > 0 && <section className="consumer-selection" aria-label="Chosen photos">
+      {selectedCount > 0 && <SelectionTray as="section" className="consumer-selection" aria-label="Chosen photos">
         <p role="status">{selectedCount} selected</p>
         <button className="primary-action" disabled={readyOriginals !== picks.ids.size || shareBusy || savedSelectionBusy} onClick={() => chosenSaved.length ? void prepareSelection() : shareSelection()}>{preparingShare ? "Preparing…" : sharing ? "Sharing…" : "Share"}</button>
         {onAlbumSelection && <button disabled={shareBusy || savedSelectionBusy || readyOriginals !== picks.ids.size || selectedCount > 100} onClick={addToAlbum}>Add to trip</button>}
@@ -608,7 +609,7 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
         </details>
         {onAlbumSelection && selectedCount > 100 && <small>Choose up to 100 photos to add to a trip.</small>}
         {readyOriginals < picks.ids.size && <small>Reselect {picks.ids.size - readyOriginals} {picks.ids.size - readyOriginals === 1 ? "original" : "originals"} to Save or Share.</small>}
-      </section>}
+      </SelectionTray>}
       {(progress || ocrProgress || (saving && !saving.startsWith("Saved locally ·")) || (browseScope === "picks" && picks.busy)) && <p className="local-progress" role="status">{progress || ocrProgress || (saving.startsWith("Saved locally ·") ? "" : saving) || "Choosing picks…"}</p>}
       {status && <div className="status" role="status">{status}<button aria-label="Dismiss message" onClick={() => setStatus("")}><Icon kind="close" /></button></div>}
     </main>

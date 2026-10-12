@@ -121,6 +121,7 @@ struct NativeTripPicks: View {
   @State private var review = NativeTripPickReview()
   @State private var retry = UUID()
   @Environment(\.scenePhase) private var scenePhase
+  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
   init(model: NativeAlbumService, items: [NativeAlbumItem], hasMore: Bool, reviewing: Binding<Bool>, open: @escaping (NativeAlbumItem) -> Void) {
     self.model = model; self.hasMore = hasMore; self._reviewing = reviewing; self.open = open
     candidates = NativeTripPickScope.items(items); source = candidates.map(\.signedManifest)
@@ -128,9 +129,11 @@ struct NativeTripPicks: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
       if reviewing, scenePhase == .active, model.currentOpenedPhotoAccess != nil {
-        HStack {
+        let headerLayout = dynamicTypeSize.isAccessibilitySize
+          ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4)) : AnyLayout(HStackLayout())
+        headerLayout {
           Text("Best shots").font(.headline)
-          Spacer()
+          if !dynamicTypeSize.isAccessibilitySize { Spacer() }
           Button("Close") { reviewing = false; review.clear() }
             .frame(minHeight: 44).accessibilityLabel("Close best shots").accessibilityIdentifier("albums.picks.close")
         }
@@ -144,14 +147,19 @@ struct NativeTripPicks: View {
               .font(.subheadline)
             ForEach(candidates.filter { result.ids.contains($0.id) }) { item in
               Button { open(item) } label: {
-                HStack(spacing: 12) {
+                let rowLayout = dynamicTypeSize.isAccessibilitySize
+                  ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8)) : AnyLayout(HStackLayout(spacing: 12))
+                rowLayout {
                   LazyImage(url: review.previews[item.id + "|" + item.signedManifest.signature]) { state in
                     if let image = state.image { image.resizable().scaledToFill() }
                     else { Rectangle().fill(.quaternary) }
                   }.frame(width: 60, height: 60).clipped().accessibilityHidden(true)
                   VStack(alignment: .leading, spacing: 4) {
-                    Text(item.photo.metadata.filename).lineLimit(1)
-                    Text(result.reasons[item.id, default: []].joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
+                    Text(item.photo.metadata.filename).font(.body)
+                      .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                      .fixedSize(horizontal: false, vertical: true)
+                    Text(result.reasons[item.id, default: []].joined(separator: " · "))
+                      .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                   }
                 }
               }.buttonStyle(.bordered)
