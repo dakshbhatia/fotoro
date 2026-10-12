@@ -12,8 +12,74 @@ private func readBackupFixture<Value>(_ store: LibraryStore, _ body: (Database) 
 private func writeBackupFixture(_ store: LibraryStore, _ body: (Database) throws -> Void) throws {
   try store.database.write(body)
 }
+private final class BackupInventoryDecodeGate: @unchecked Sendable {
+  let started: XCTestExpectation
+  let release = DispatchSemaphore(value: 0)
+  private let lock = NSLock()
+  private var count = 0
+  private var mainThread = false
+  private let holdAt: Int
+  init(started: XCTestExpectation, holdAt: Int = 1) { self.started = started; self.holdAt = holdAt }
+  var reads: Int { lock.lock(); defer { lock.unlock() }; return count }
+  var wasMainThread: Bool { lock.lock(); defer { lock.unlock() }; return mainThread }
+  func holdFirst() {
+    lock.lock(); count += 1; mainThread = mainThread || Thread.isMainThread; let hold = count == holdAt; lock.unlock()
+    if hold { started.fulfill(); _ = release.wait(timeout: .now() + 5) }
+  }
+}
 
 final class PhotosBackupTests: XCTestCase {
+  @MainActor func testReconciliationYieldCannotOverwriteCurrentCommittedSourceWithInitialInventory() async throws {
+    let store = try LibraryStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
+    var earlier = BackupSource(id: "chosen", photoId: Wire.id(), sourceRevision: "earlier")
+    try store.putBackupSource(earlier)
+    let backup = try PhotosBackup(store: store)
+    let replacementID = Wire.id()
+    backup.reconciliationDidYield = { _ in
+      earlier.photoId = replacementID; earlier.phase = .committed
+      earlier.sourceRevision = "rebound"; earlier.originalSha256 = Data("kept original".utf8).digest
+      try store.putBackupSource(earlier)
+    }
+    backup.start(snapshot: { [BackupCandidate(id: "chosen", sourceRevision: "candidate")] }, valid: { true },
+      stage: { _, _ in XCTFail("Current committed source must not restage") },
+      upload: { _ in XCTFail("Current committed source must not upload") }, checkCatalog: {})
+    await backup.waitUntilSettled()
+    XCTAssertEqual(try store.backupSource("chosen"), earlier,
+      "A changed source after the initial inventory must be point-read before any mutation")
+    XCTAssertEqual(backup.status.completed, 1)
+  }
+
+  @MainActor func testBackupReconciliationHeldInventoryCancelsAndRejectsChangedSourceEvidence() async throws {
+    for (holdAt, interruption) in [(1, "cancel"), (1, "source"), (2, "cancel"), (2, "source"), (2, "access")] {
+      let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+      defer { try? FileManager.default.removeItem(at: root) }
+      let store = try LibraryStore(root: root)
+      var source = BackupSource(id: "chosen", photoId: Wire.id(), sourceRevision: "current")
+      try store.putBackupSource(source)
+      let backup = try PhotosBackup(store: store)
+      let gate = BackupInventoryDecodeGate(started: expectation(description: "Held inventory \(holdAt) \(interruption)"), holdAt: holdAt)
+      defer { gate.release.signal() }
+      backup.inventoryBeforeDecode = { gate.holdFirst() }
+      var staged = 0, uploads = 0
+      var allowed = true
+      backup.start(snapshot: { [BackupCandidate(id: source.id, sourceRevision: "current")] }, valid: { allowed },
+        stage: { _, _ in staged += 1 }, upload: { _ in uploads += 1 }, checkCatalog: {})
+      await fulfillment(of: [gate.started], timeout: 3)
+      XCTAssertFalse(gate.wasMainThread, "Inventory decode must leave MainActor available")
+      if interruption == "cancel" { backup.pause() }
+      else if interruption == "access" { allowed = false }
+      else { source.phase = .committed; try store.putBackupSource(source) }
+      gate.release.signal(); await backup.waitUntilSettled()
+      XCTAssertEqual(staged, 0, "Canceled or replaced pending evidence cannot stage")
+      XCTAssertEqual(uploads, 0)
+      XCTAssertEqual(try store.backupSource(source.id).phase, interruption == "source" ? .committed : .pending)
+      if interruption == "source" {
+        XCTAssertGreaterThanOrEqual(gate.reads, 3, "Stale initial evidence must re-read before the post-reconciliation snapshot")
+        XCTAssertEqual(backup.status.sourceTotal, 1); XCTAssertEqual(backup.status.completed, 1)
+      }
+    }
+  }
+
   func testSyncAdmissionQueriesReadIDsAndOnlyQueuedOrdinaryCheckpoints() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
     defer { try? FileManager.default.removeItem(at: root) }
