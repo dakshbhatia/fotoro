@@ -862,8 +862,28 @@ private struct NativeAlbumBrowseIdentity: Equatable {
     "albumappend-" + Data((reading.context.origin + "|" + reading.albumID).utf8).digest
   }
   var hasPendingAddition: Bool {
-    guard let reading = access else { return false }
-    return (try? services.store.existingOperation(journalID(reading), as: NativeAlbumPendingAppend.self)) != nil
+    pendingAdditionChoice != nil
+  }
+  var pendingAdditionChoice: NativeAlbumPendingAppend? {
+    guard let reading = access else { return nil }
+    guard currentOpenedPhotoAccess != nil else { return nil }
+    return try? services.store.existingOperation(journalID(reading), as: NativeAlbumPendingAppend.self)
+  }
+  func discardPendingAddition(_ expected: NativeAlbumPendingAppend) throws {
+    guard let reading = access else { throw CancellationError() }
+    try check(reading.context)
+    guard currentOpenedPhotoAccess != nil, expected.accountId == reading.context.photo.account,
+      expected.origin == reading.context.origin, expected.albumId == reading.albumID else { throw CancellationError() }
+    try removePendingAddition(expected, reading: reading)
+  }
+  private func removePendingAddition(_ expected: NativeAlbumPendingAppend, reading: NativeAlbumAccess) throws {
+    let bytes = try Wire.encode(expected), id = journalID(reading)
+    try services.store.database.write { db in
+      guard try Data.fetchOne(db, sql: "SELECT value FROM operations WHERE id=?", arguments: [id]) == bytes else {
+        throw FotoroError("The pending addition changed. Review it again.")
+      }
+      try db.execute(sql: "DELETE FROM operations WHERE id=? AND value=?", arguments: [id, bytes])
+    }
   }
   private func selected(_ photos: [LocalPhoto], reading: NativeAlbumAccess) throws -> [LocalPhoto] {
     try check(reading.context)
@@ -908,8 +928,7 @@ private struct NativeAlbumBrowseIdentity: Equatable {
     guard result.version == 1, result.albumId == reading.albumID, result.operationId == pending.request.operationId,
       (0...pending.request.entries.count).contains(result.added), (0...1000).contains(result.photoCount) else { throw FotoroError("Album contribution binding failed.") }
     try await membership(reading, preservingTransientFailure: true); try check(reading.context)
-    let completedID = journalID(reading)
-    try await services.store.database.write { db in try db.execute(sql: "DELETE FROM operations WHERE id=?", arguments: [completedID]) }
+    try removePendingAddition(pending, reading: reading)
     try await refresh()
     try check(reading.context)
     guard access?.context == reading.context, opened?.id == reading.albumID else { throw CancellationError() }

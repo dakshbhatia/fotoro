@@ -1448,6 +1448,84 @@ final class NativeAlbumTests: XCTestCase {
       for photo in photos { XCTAssertEqual(try services.consumerSavedPhoto(photo.id)?.manifest, photo.manifest) }
     }
   }
+  @MainActor func testReopenedPendingChoiceCanBeClearedWithoutRemovingOriginalsOrAddedPhotos() async throws {
+    try await withAlbum(owner: true) { services, server, model in
+      server.included = false; server.loseAppendResponse = true
+      let replacement = try XCTUnwrap(server.extraOwnedPhotos(count: 1).first)
+      for photo in [server.source, replacement] { try services.store.put(photo) }
+      try services.reload(); try await model.refresh(); try await model.open(server.definition.albumId)
+      do { try await model.append([server.source]); XCTFail("Lost response reported success") } catch {}
+      let original = try XCTUnwrap(services.consumerSavedPhoto(server.source.id))
+      model.clear()
+      let reopened = NativeAlbumService(services: services)
+      try await reopened.refresh(); try await reopened.open(server.definition.albumId)
+      let pending = try XCTUnwrap(reopened.pendingAdditionChoice)
+      let picker = NativeAlbumPhotoPickerStore(); picker.open(services, initial: [server.source])
+      await picker.waitUntilSettled()
+      let requests = server.appendBodies.count
+      try reopened.discardPendingAddition(pending); picker.clearSelection()
+      XCTAssertFalse(reopened.hasPendingAddition); XCTAssertEqual(picker.selection.count, 0)
+      XCTAssertEqual(server.appendBodies.count, requests, "Discard must not POST")
+      XCTAssertEqual(try services.consumerSavedPhoto(server.source.id)?.manifest, original.manifest)
+      XCTAssertTrue(reopened.items.contains { $0.id == server.source.id }, "An ambiguous successful contribution remains")
+      try await reopened.append([replacement])
+      XCTAssertTrue(reopened.items.contains { $0.id == replacement.id })
+      XCTAssertFalse(reopened.hasPendingAddition)
+      picker.clear(); reopened.clear()
+    }
+  }
+
+  @MainActor func testPendingChoiceDiscardRejectsWithdrawnContextAndChangedJournal() async throws {
+    for change in ["account", "origin", "lock", "journal"] {
+      try await withAlbum(owner: true) { services, server, model in
+        server.included = false; server.loseAppendResponse = true
+        try services.store.put(server.source); try services.reload()
+        try await model.refresh(); try await model.open(server.definition.albumId)
+        do { try await model.append([server.source]); XCTFail("Lost response reported success") } catch {}
+        let pending = try XCTUnwrap(model.pendingAdditionChoice)
+        let id = "albumappend-" + Data((pending.origin + "|" + pending.albumId).utf8).digest
+        var replacement = pending; replacement.request.operationId = Wire.id()
+        switch change {
+        case "account": services.session.accountId = Wire.id()
+        case "origin": services.api.baseURL = URL(string: "http://127.0.0.1:8797")!
+        case "lock": services.vault.lock()
+        default:
+          try services.store.database.write { db in
+            try db.execute(sql: "UPDATE operations SET value=? WHERE id=?", arguments: [try Wire.encode(replacement), id])
+          }
+        }
+        XCTAssertThrowsError(try model.discardPendingAddition(pending), change)
+        let remaining = try XCTUnwrap(services.store.existingOperation(id, as: NativeAlbumPendingAppend.self))
+        XCTAssertEqual(remaining.request.operationId, change == "journal" ? replacement.request.operationId : pending.request.operationId)
+        XCTAssertEqual(server.appendBodies.count, 1)
+      }
+    }
+  }
+
+  @MainActor func testHeldAppendResponseCannotClearReplacementPendingChoice() async throws {
+    try await withAlbum(owner: true) { services, server, model in
+      server.included = false
+      try services.store.put(server.source); try services.reload()
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let gate = AlbumFactsRequestGate(started: expectation(description: "Held append response"))
+      defer { gate.release.signal() }
+      server.appendGate = gate
+      let adding = Task { try await model.append([server.source]) }
+      await fulfillment(of: [gate.started], timeout: 3)
+      let pending = try XCTUnwrap(model.pendingAdditionChoice)
+      try model.discardPendingAddition(pending)
+      var replacement = pending; replacement.request.operationId = Wire.id()
+      let id = "albumappend-" + Data((pending.origin + "|" + pending.albumId).utf8).digest
+      _ = try services.store.operation(id) { replacement }
+      XCTAssertThrowsError(try model.discardPendingAddition(pending))
+      gate.release.signal()
+      do { try await adding.value; XCTFail("Old response removed a replacement choice") } catch {}
+      XCTAssertEqual(try services.store.existingOperation(id, as: NativeAlbumPendingAppend.self)?.request.operationId,
+        replacement.request.operationId)
+      XCTAssertNotNil(try services.consumerSavedPhoto(server.source.id))
+    }
+  }
+
   @MainActor func testLostAppendResponseRetriesDurableExactBodyAndOriginalBrowserSignature() async throws {
     try await withAlbum(owner: true) { services, server, model in
       server.included = false; server.loseAppendResponse = true
@@ -1897,6 +1975,7 @@ private final class AlbumTestServer: @unchecked Sendable {
   var accessStatus: Int?
   var detailStatus: Int?
   var accessGate: AlbumFactsRequestGate?
+  var appendGate: AlbumFactsRequestGate?
   var accountMismatchCount = 0; var authAccountHeader: String?
   var factsCapabilityStatus = 404
   var accessStatusAfterFactsCapability: Int?
@@ -2056,6 +2135,8 @@ private final class AlbumTestServer: @unchecked Sendable {
       contributions += Array(zip(body.entries, body.manifests))
       let result = AlbumAppendResultV1(version: 1, albumId: definition.albumId, operationId: body.operationId, added: body.entries.count, photoCount: all.count + body.entries.count)
       receipts[body.operationId] = (bytes, result)
+      if let gate = appendGate { appendGate = nil; lock.unlock(); gate.started.fulfill()
+        _ = gate.release.wait(timeout: .now() + 5); lock.lock() }
       if loseAppendResponse { loseAppendResponse = false; throw URLError(.networkConnectionLost) }
       return (200, try Wire.encode(result))
     }
