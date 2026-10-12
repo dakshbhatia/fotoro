@@ -588,6 +588,9 @@ struct BackupStatus: Codable {
         var performedTransferWork = false
         for var source in work {
           try fence()
+          // Earlier uploads suspend this loop. Do not act on a later checkpoint
+          // that another admitted writer has committed or rebound meanwhile.
+          guard try store.backupSourceIfPresent(id: source.id) == source else { continue }
           activeSource = source
           defer { activeSource = nil }
           do {

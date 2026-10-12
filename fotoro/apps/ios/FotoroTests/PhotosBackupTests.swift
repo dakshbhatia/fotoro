@@ -29,6 +29,31 @@ private final class BackupInventoryDecodeGate: @unchecked Sendable {
 }
 
 final class PhotosBackupTests: XCTestCase {
+  @MainActor func testEarlierUploadCannotReplayLaterWorkAfterItsCheckpointChanges() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try LibraryStore(root: root)
+    var first = BackupSource(id: "a", photoId: Wire.id(), sourceRevision: "current")
+    var later = BackupSource(id: "b", photoId: Wire.id(), sourceRevision: "current")
+    first.phase = .queued; later.phase = .queued
+    try store.putBackupSource(first); try store.putBackupSource(later)
+    let backup = try PhotosBackup(store: store)
+    var uploads: [String] = []
+    backup.start(snapshot: { [] }, valid: { true },
+      stage: { _, _ in XCTFail("Queued originals must not restage") },
+      upload: { source in
+        uploads.append(source.id)
+        await Task.yield()
+        later.photoId = Wire.id(); later.sourceRevision = "replacement"
+        later.phase = .committed; later.originalSha256 = Data("replacement original".utf8).digest
+        try store.putBackupSource(later)
+      }, checkCatalog: {})
+    await backup.waitUntilSettled()
+    XCTAssertEqual(uploads, ["a"], "A stale later work item must not upload")
+    XCTAssertEqual(try store.backupSource("b"), later, "Preserve the newly committed binding")
+    XCTAssertEqual(backup.status.completed, 2)
+  }
+
   @MainActor func testReconciliationYieldCannotOverwriteCurrentCommittedSourceWithInitialInventory() async throws {
     let store = try LibraryStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
     var earlier = BackupSource(id: "chosen", photoId: Wire.id(), sourceRevision: "earlier")
