@@ -844,7 +844,7 @@ final class PhotosBackupTests: XCTestCase {
     services.refreshConsumerSyncSummary()
     XCTAssertEqual(services.consumerSyncSummary.completedPhotos, 1)
     XCTAssertEqual(services.consumerSyncSummary.totalPhotos, 5)
-    XCTAssertEqual(services.consumerSyncSummary.state, .needsAttention)
+    XCTAssertEqual(services.consumerSyncSummary.state, .paused)
     XCTAssertEqual(services.consumerSyncSummary.action, .start)
     XCTAssertEqual(try services.backup.unpreparedSources().count, 4)
     try await services.continueSync()
