@@ -45,6 +45,8 @@ Cloudflare proposals become tasks here only when a consumer need admits them.
    inventory decoding runs off-main and publication checks transactional source
    revisions and current access. Photos notification bursts share one refresh.
    Browser successor indexes reuse receipt-verified unchanged token contributions.
+   Sync admission reads tracked IDs without decoding checkpoints; queued retries
+   use an indexed phase query and decode only admitted ordinary checkpoints.
    Inventory scans still need measured frame, CPU
    and memory budgets before claiming smoothness.
 4. Qualify retrieval before replacing models. Current iOS Vision OCR/classification,

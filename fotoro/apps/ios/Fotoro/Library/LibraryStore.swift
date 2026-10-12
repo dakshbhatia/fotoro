@@ -69,6 +69,10 @@ final class LibraryStore: @unchecked Sendable {
         CREATE INDEX IF NOT EXISTS backup_sources_photo ON backupSources(
           CASE WHEN json_valid(CAST(value AS TEXT)) THEN json_extract(CAST(value AS TEXT),'$.photoId') END, id)
         """)
+      try db.execute(sql: """
+        CREATE INDEX IF NOT EXISTS backup_sources_phase ON backupSources(
+          CASE WHEN json_valid(CAST(value AS TEXT)) THEN json_extract(CAST(value AS TEXT),'$.phase') END, id)
+        """)
       // Legacy change feeds hid unsupported media while advancing the same cursor.
       // Re-read once with this reader's capability; the marker and cursor reset commit together.
       if try String.fetchOne(db, sql: "SELECT value FROM state WHERE key='mediaCatalogVersion'") != "1" {
@@ -155,6 +159,25 @@ final class LibraryStore: @unchecked Sendable {
     try database.read { db in
       try Data.fetchOne(db, sql: Self.backupSourcePhotoQuery, arguments: [photoId])
         .map { try Wire.decode(BackupSource.self, $0) }
+    }
+  }
+  func ordinaryBackupSourceIDs() throws -> Set<String> {
+    try database.read { db in
+      Set(try String.fetchAll(db, sql: """
+        SELECT id FROM backupSources
+        WHERE substr(id,1,length('fotoro-retained-original:')) != 'fotoro-retained-original:'
+        """))
+    }
+  }
+  static let queuedOrdinaryBackupQuery = """
+    SELECT value FROM backupSources
+    WHERE CASE WHEN json_valid(CAST(value AS TEXT)) THEN json_extract(CAST(value AS TEXT),'$.phase') END = 'queued'
+      AND substr(id,1,length('fotoro-retained-original:')) != 'fotoro-retained-original:'
+    ORDER BY id
+    """
+  func queuedOrdinaryBackupSources() throws -> [BackupSource] {
+    try database.read { db in
+      try Data.fetchAll(db, sql: Self.queuedOrdinaryBackupQuery).map { try Wire.decode(BackupSource.self, $0) }
     }
   }
   func put(_ photo: LocalPhoto) throws { try database.write { db in try put(photo, db: db) } }

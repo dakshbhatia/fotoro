@@ -14,6 +14,56 @@ private func writeBackupFixture(_ store: LibraryStore, _ body: (Database) throws
 }
 
 final class PhotosBackupTests: XCTestCase {
+  func testSyncAdmissionQueriesReadIDsAndOnlyQueuedOrdinaryCheckpoints() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try LibraryStore(root: root)
+    let phases: [BackupSource.Phase] = [.pending, .queued, .committed, .skipped, .failed]
+    for phase in phases {
+      var source = BackupSource(id: phase.rawValue, photoId: Wire.id())
+      source.phase = phase; try store.putBackupSource(source)
+    }
+    var retained = BackupSource(id: "fotoro-retained-original:queued", photoId: Wire.id())
+    retained.phase = .queued; try store.putBackupSource(retained)
+    var earlier = BackupSource(id: "a-queued", photoId: Wire.id())
+    earlier.phase = .queued; try store.putBackupSource(earlier)
+    try writeBackupFixture(store) { db in
+      try db.execute(sql: "INSERT INTO backupSources(id,value) VALUES('unrelated-invalid',?)", arguments: [Data("not-json".utf8)])
+    }
+    XCTAssertEqual(try store.ordinaryBackupSourceIDs(), Set(phases.map(\.rawValue) + [earlier.id, "unrelated-invalid"]))
+    XCTAssertEqual(try store.queuedOrdinaryBackupSources().map(\.id), [earlier.id, "queued"])
+    earlier.phase = .committed; try store.putBackupSource(earlier)
+    XCTAssertEqual(try store.queuedOrdinaryBackupSources().map(\.id), ["queued"], "Committed work immediately leaves queued admission")
+    try writeBackupFixture(store) { db in
+      try db.execute(sql: "UPDATE backupSources SET value=? WHERE id='queued'", arguments: [Data(#"{"phase":"queued"}"#.utf8)])
+    }
+    XCTAssertThrowsError(try store.queuedOrdinaryBackupSources(), "Malformed admitted work cannot silently appear complete")
+  }
+
+  func testIndexedQueuedAdmissionFindsOneCheckpointAmongTenThousandWithoutDecodingTheRest() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try LibraryStore(root: root)
+    try writeBackupFixture(store) { db in
+      for n in 0..<10_000 {
+        // Valid phase metadata with intentionally undecodable unrelated payloads.
+        try db.execute(sql: "INSERT INTO backupSources(id,value) VALUES(?,?)",
+          arguments: ["historical-\(n)", Data(#"{"phase":"committed"}"#.utf8)])
+      }
+    }
+    var source = BackupSource(id: "retry", photoId: Wire.id()); source.phase = .queued
+    try store.putBackupSource(source)
+    XCTAssertEqual(try store.queuedOrdinaryBackupSources(), [source])
+    XCTAssertEqual(try store.ordinaryBackupSourceIDs().count, 10_001)
+    let details = try readBackupFixture(store) { db in
+      try Row.fetchAll(db, sql: "EXPLAIN QUERY PLAN " + LibraryStore.queuedOrdinaryBackupQuery)
+        .map { $0["detail"] as String }.joined(separator: " ")
+    }
+    XCTAssertTrue(details.contains("backup_sources_phase"), details)
+    let reopened = try LibraryStore(root: root)
+    XCTAssertEqual(try reopened.queuedOrdinaryBackupSources(), [source])
+  }
+
   func testBackupInventoryRevisionTracksEveryWriteButNotStatusNoOpOrRollback() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
     defer { try? FileManager.default.removeItem(at: root) }

@@ -70,9 +70,12 @@ struct AutomaticPhotoSyncScanPlan: Sendable {
   let trackedIDs: Set<String>
 
   init(intake: AutomaticPhotoSyncIntake, sources: [BackupSource], now: Date = Date()) {
+    self.init(intake: intake, trackedIDs: Set(sources.filter { !$0.isRetainedOriginal }.map(\.id)), now: now)
+  }
+  init(intake: AutomaticPhotoSyncIntake, trackedIDs: Set<String>, now: Date = Date()) {
     cutoff = intake.includesAll ? nil : intake.cutoff
     through = now
-    trackedIDs = Set(sources.filter { !$0.isRetainedOriginal }.map(\.id))
+    self.trackedIDs = trackedIDs
   }
   func includes(_ candidate: BackupCandidate) -> Bool {
     guard let cutoff else { return true }
