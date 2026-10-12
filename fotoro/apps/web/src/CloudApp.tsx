@@ -1,3 +1,4 @@
+import {SelectionTray} from "./components/SelectionTray";
 import {diagnose, diagnosticReason, type DiagnosticContext} from "./diagnostics";
 import {CopyDiagnostics} from "./components/CopyDiagnostics";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
@@ -1384,7 +1385,7 @@ export default function CloudApp({
                 )}
               </div>
             )}
-            {!received && selected.size > 0 && <div className="consumer-selection glass" aria-label="Selected photos">
+            {!received && selected.size > 0 && <SelectionTray className="consumer-selection glass" aria-label="Selected photos">
               <span role="status">{selected.size} selected</span>
               <AlbumContinuation destination={albumDestination} photos={chosen} disabled={busy || preparingOriginals || sharingOriginals || chosen.length > 100} onContinue={(items, albumId) => {if (!running.current) openAlbums(items, albumId);}} />
               <button ref={originalButton} className="primary-action" disabled={busy || preparingOriginals || sharingOriginals} onClick={() => void prepareSelectedOriginals()}>{preparingOriginals ? "Preparing…" : "Share"}</button>
@@ -1394,7 +1395,7 @@ export default function CloudApp({
                 <summary>More</summary><div><button disabled={busy || preparingOriginals || sharingOriginals} onClick={() => {if (!running.current) openSharing(chosen);}}>Share in Fotoro</button>
                 <button disabled={busy || sharingOriginals} onClick={() => {if (!running.current) setSelected(new Set());}}>Clear selection</button></div>
               </details>
-            </div>}
+            </SelectionTray>}
             <input
               ref={input}
               hidden
