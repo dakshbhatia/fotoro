@@ -1148,8 +1148,7 @@ enum ReviewedPhotosBackupPolicy {
         self.vault.generation == generation, self.session.accountId == account,
         self.api.baseURL == baseURL, BackgroundUploadPolicy.origin(self.api.baseURL) == origin else { throw CancellationError() }
       var intake = try catalog.automaticPhotoSyncIntake(origin: origin) ?? AutomaticPhotoSyncIntake()
-      let selected = intake.select(candidates, existingSourceIDs: Set(try catalog.backupSources()
-        .filter { !$0.isRetainedOriginal }.map(\.id)))
+      let selected = intake.select(candidates, existingSourceIDs: try catalog.ordinaryBackupSourceIDs())
       if intake != self.automaticSyncIntake {
         try catalog.setAutomaticPhotoSyncIntake(intake, origin: origin)
         self.automaticSyncIntake = intake
@@ -1353,7 +1352,7 @@ enum ReviewedPhotosBackupPolicy {
     @MainActor func retryCurrentQueuedSources() async throws {
       // Already admitted ciphertext gets a point lookup, before enumerating Photos.
       // Changed revisions still use the normal reconcile path below.
-      let queued = try catalog.backupSources().filter { $0.phase == .queued && !$0.isRetainedOriginal }
+      let queued = try catalog.queuedOrdinaryBackupSources()
       for earlier in queued {
         try Task.checkCancellation()
         guard self.automaticPhotoSyncAdmitted, self.store === catalog,
@@ -1412,7 +1411,7 @@ enum ReviewedPhotosBackupPolicy {
           let scanPlan: AutomaticPhotoSyncScanPlan?
           if automatic, let origin {
             let intake = try catalog.automaticPhotoSyncIntake(origin: origin) ?? AutomaticPhotoSyncIntake(now: now)
-            scanPlan = AutomaticPhotoSyncScanPlan(intake: intake, sources: try catalog.backupSources(), now: now)
+            scanPlan = AutomaticPhotoSyncScanPlan(intake: intake, trackedIDs: try catalog.ordinaryBackupSourceIDs(), now: now)
           } else { scanPlan = nil }
           #if DEBUG
             if let snapshot = self.photosBackupSnapshot {
