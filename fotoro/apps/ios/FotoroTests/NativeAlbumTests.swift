@@ -1490,7 +1490,7 @@ final class NativeAlbumTests: XCTestCase {
         case "origin": services.api.baseURL = URL(string: "http://127.0.0.1:8797")!
         case "lock": services.vault.lock()
         default:
-          try services.store.database.write { db in
+          try await services.store.database.write { db in
             try db.execute(sql: "UPDATE operations SET value=? WHERE id=?", arguments: [try Wire.encode(replacement), id])
           }
         }
