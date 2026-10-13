@@ -372,6 +372,7 @@ final class AnnotationLedger: @unchecked Sendable {
   let ledger: AnnotationLedger
   private(set) var busy = false
   private(set) var errors: [String: String] = [:]
+  private(set) var retryableErrors: Set<String> = []
   private var requestedDrain: (derivedOnly: Bool, action: () async -> Void)?
   init(ledger: AnnotationLedger) { self.ledger = ledger }
   func resume(bundle: AccountBundle, card: AccountCardV1, derivedOnly: Bool = false, eligible: @escaping (LocalPhoto) -> Bool = { _ in true }, valid: @escaping () -> Bool, send: @escaping (SignedPayloadV1) async throws -> Void) async {
@@ -387,6 +388,7 @@ final class AnnotationLedger: @unchecked Sendable {
       return
     }
     busy = true
+    retryableErrors = []
     do {
       let pending = try ledger.pendingIDs()
       let pendingSet = Set(pending)
@@ -404,8 +406,11 @@ final class AnnotationLedger: @unchecked Sendable {
             guard eligible(photo) else { break }
             try ledger.receive(signed, photo: photo, bundle: bundle, card: card)
             errors.removeValue(forKey: id)
+            retryableErrors.remove(id)
           } catch {
             guard valid(), !Task.isCancelled else { throw CancellationError() }
+            if AutomaticPhotoSyncRetryPolicy.permits(error) { retryableErrors.insert(id) }
+            else { retryableErrors.remove(id) }
             if (error as? FotoroError)?.message == "VERSION_CONFLICT" {
               try ledger.markConflict(id)
               errors[id] = "Labels changed on another device. Your edits are still saved here."
@@ -417,6 +422,7 @@ final class AnnotationLedger: @unchecked Sendable {
       guard valid(), !Task.isCancelled else { throw CancellationError() }
       let remaining = Set(try ledger.pendingIDs())
       errors = errors.filter { $0.key != "sync" && remaining.contains($0.key) }
+      retryableErrors.formIntersection(remaining)
     } catch is CancellationError {
     } catch { errors["sync"] = error.localizedDescription }
     busy = false

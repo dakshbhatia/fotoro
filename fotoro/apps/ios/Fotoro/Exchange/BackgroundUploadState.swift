@@ -2,6 +2,8 @@ import Foundation
 
 struct BackgroundUploadFailure: LocalizedError {
   let message: String
+  let retryable: Bool
+  init(message: String, retryable: Bool = false) { self.message = message; self.retryable = retryable }
   var errorDescription: String? { message }
 }
 
@@ -105,6 +107,10 @@ struct BackgroundUploadRecord: Codable, Sendable {
   var state: State = .transferring
   var statusCode: Int?
   var message: String?
+  var retryable: Bool?
+  var failure: BackgroundUploadFailure {
+    BackgroundUploadFailure(message: message ?? "Upload needs retry", retryable: state == .failed && retryable == true)
+  }
 }
 
 // This separate ledger contains identities and receipts, never manifests, keys, or plaintext.
@@ -219,8 +225,15 @@ final class BackgroundUploadLedger: @unchecked Sendable {
       {
         record.state = .uploaded
         record.message = nil
+        record.retryable = nil
       } else {
         record.state = .failed
+        let trustedResponse = responseURL.map { BackgroundUploadPolicy.origin($0) == state.origin } ?? true
+        if let errorCode {
+          record.retryable = trustedResponse && AutomaticPhotoSyncRetryPolicy.permits(URLError(URLError.Code(rawValue: errorCode)))
+        } else if let statusCode {
+          record.retryable = trustedResponse && (statusCode == 408 || statusCode == 429 || (500...599).contains(statusCode))
+        } else { record.retryable = false }
         record.message = errorCode == NSURLErrorCancelled
           ? "Upload was interrupted; open Fotoro and resume"
           : statusCode == 403 || statusCode == 401
@@ -247,6 +260,7 @@ final class BackgroundUploadLedger: @unchecked Sendable {
         guard let record = state.records[key], record.state == .transferring,
           !live.contains(record.identity) else { continue }
         state.records[key]?.state = .failed
+        state.records[key]?.retryable = true
         state.records[key]?.message = "Upload was interrupted; unlock Fotoro and resume"
       }
     }

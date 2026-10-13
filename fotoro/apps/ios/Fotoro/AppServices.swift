@@ -37,6 +37,12 @@ private struct CatalogSyncRead {
   var waiters: Set<UUID>
 }
 
+private struct AutomaticPhotoSyncRetryBinding: Equatable {
+  let access: PhotoAccountAccess
+  let baseURL: URL
+  let card: AccountCardV1?
+}
+
 enum PhotoPicksBackupPolicy {
   static func select(_ candidates: [BackupCandidate], snapshot: PhotoPicksSnapshot?) -> [BackupCandidate] {
     guard let snapshot else { return [] }
@@ -169,6 +175,12 @@ enum ReviewedPhotosBackupPolicy {
     @ObservationIgnored var photosBackupSnapshot: ((Date) throws -> [BackupCandidate])?
     @ObservationIgnored var photosBackupSourceCandidate: ((String) throws -> BackupCandidate?)?
     @ObservationIgnored var automaticPhotosAuthorization: (() -> PHAuthorizationStatus)?
+    @ObservationIgnored var automaticSyncRetrySleep: (@MainActor (Duration) async throws -> Void)?
+    var automaticSyncRetryPending: Bool { automaticSyncRetry.pending }
+    func waitForAutomaticPhotoSyncRetry() async {
+      await automaticSyncRetry.waitUntilSettled()
+      await waitForAutomaticPhotoSync()
+    }
   #endif
   private(set) var consumerSyncSummary = ConsumerSyncSummary()
   private(set) var consumerBackupSources: [BackupSource] = []
@@ -193,6 +205,7 @@ enum ReviewedPhotosBackupPolicy {
   private var photoSyncSuspensionReason: NativeDiagnosticReason = .background
   private var automaticSyncFailure: String?
   private var automaticSyncTask: Task<Void, Never>?
+  @ObservationIgnored private let automaticSyncRetry = AutomaticPhotoSyncRetry<AutomaticPhotoSyncRetryBinding>()
   private(set) var automaticPhotoSyncBusy = false
   @ObservationIgnored private var automaticSyncSettling: Task<Void, Never>?
   @ObservationIgnored private var automaticSyncGeneration = UUID()
@@ -988,6 +1001,7 @@ enum ReviewedPhotosBackupPolicy {
     return .contextChanged
   }
   private func suspendAutomaticPhotoSync(cancelBackground: Bool = false, reason: NativeDiagnosticReason = .contextChanged) {
+    cancelAutomaticPhotoSyncRetry(resetAttempts: true)
     if automaticSyncTask != nil { automaticSyncCancellationReasons[automaticSyncGeneration] = reason }
     automaticSyncGeneration = UUID()
     automaticPhotoSyncBusy = false
@@ -1003,6 +1017,26 @@ enum ReviewedPhotosBackupPolicy {
       journal.pause(cancelBackground: true)
     }
   }
+  private func cancelAutomaticPhotoSyncRetry(resetAttempts: Bool) {
+    automaticSyncRetry.cancel(resetAttempts: resetAttempts)
+  }
+  private var automaticPhotoSyncRetryBinding: AutomaticPhotoSyncRetryBinding? {
+    guard automaticPhotoSyncAdmitted, let access = photoAccountAccess else { return nil }
+    return AutomaticPhotoSyncRetryBinding(access: access, baseURL: api.baseURL,
+      card: session.pinnedCards[access.account])
+  }
+  private func scheduleAutomaticPhotoSyncRetry() {
+    guard let binding = automaticPhotoSyncRetryBinding else { return }
+    let sleep: AutomaticPhotoSyncRetry<AutomaticPhotoSyncRetryBinding>.Sleep?
+    #if DEBUG
+      sleep = automaticSyncRetrySleep
+    #else
+      sleep = nil
+    #endif
+    automaticSyncRetry.schedule(binding: binding,
+      current: { [weak self] in self?.automaticPhotoSyncRetryBinding }, sleep: sleep,
+      retry: { [weak self] in self?.kickAutomaticPhotoSync() })
+  }
   func kickAutomaticPhotoSync(sourcesChanged: Bool = false) {
     // Unrelated PhotoKit notifications request another metadata scan, without
     // discarding a download/encryption already in progress for a current source.
@@ -1013,6 +1047,7 @@ enum ReviewedPhotosBackupPolicy {
       suspendAutomaticPhotoSync(reason: automaticSyncStopReason)
       return
     }
+    cancelAutomaticPhotoSyncRetry(resetAttempts: false)
     if automaticSyncObserver == nil {
       #if DEBUG
         let observesLibrary = photosBackupSnapshot == nil
@@ -1044,6 +1079,7 @@ enum ReviewedPhotosBackupPolicy {
       await NativeDiagnosticTrace.$current.withValue(trace) {
       let started = ProcessInfo.processInfo.systemUptime
       var runCancelled = false
+      var retryableFailure = false
       self.diagnostics.record(NativeDiagnosticEvent(phase: .sync, outcome: .started, step: .action))
       defer {
         let cancelled = runCancelled || Task.isCancelled || self.automaticSyncGeneration != token
@@ -1063,6 +1099,11 @@ enum ReviewedPhotosBackupPolicy {
           self.automaticSyncTask = nil
           self.automaticPhotoSyncBusy = false
           self.refreshConsumerSyncSummary()
+          if !runCancelled, !Task.isCancelled, retryableFailure {
+            self.scheduleAutomaticPhotoSyncRetry()
+          } else {
+            self.cancelAutomaticPhotoSyncRetry(resetAttempts: true)
+          }
         }
       }
       @MainActor func check() throws {
@@ -1081,6 +1122,7 @@ enum ReviewedPhotosBackupPolicy {
         try check()
         while self.automaticSyncNeedsScan {
           self.automaticSyncNeedsScan = false
+          retryableFailure = false
           try check()
           // Another device may already own these originals under different Photos identifiers.
           // Hydrate verified account records before the importer resolves their original digests.
@@ -1089,10 +1131,12 @@ enum ReviewedPhotosBackupPolicy {
           try self.startPhotosBackup(selection: nil, automatic: true)
           try await self.withPhotoSyncStep(.settleBackup, record: self.backup.isRunning) { await self.backup.waitUntilSettled() }
           try check()
+          retryableFailure = retryableFailure || self.backup.retryableFailure
           if self.backup.status.phase == .paused { throw CancellationError() }
           try self.captureLocalAnnotations(derivedOnly: true)
           await self.syncAnnotations(derivedOnly: true)
           try check()
+          retryableFailure = retryableFailure || !self.annotations.retryableErrors.isEmpty
           if self.backup.status.phase == .failed { break }
         }
         try check()
@@ -1102,6 +1146,7 @@ enum ReviewedPhotosBackupPolicy {
       } catch is CancellationError {
         runCancelled = true
       } catch {
+        retryableFailure = retryableFailure || AutomaticPhotoSyncRetryPolicy.permits(error)
         if self.automaticSyncGeneration == token { self.automaticSyncFailure = error.localizedDescription }
       }
       }
@@ -1272,21 +1317,25 @@ enum ReviewedPhotosBackupPolicy {
           }
           // An unavailable current original cannot erase its verified earlier copy.
           source.message = error.localizedDescription
-          try catalog.putBackupSource(source)
+          try catalog.putBackupSource(source, replacing: earlier)
           unavailable = true
+          if AutomaticPhotoSyncRetryPolicy.permits(error) { throw error }
           return false
         }
         try Task.checkCancellation()
         guard verificationCurrent(candidate) else { throw CancellationError() }
         if let oversized {
-          if source.phase == .queued { source = try catalog.retainQueuedBackup(source, currentRevision: candidate.sourceRevision) }
-          else { source.photoId = Wire.id() }
+          var expected = earlier
+          if source.phase == .queued {
+            source = try catalog.retainQueuedBackup(source, currentRevision: candidate.sourceRevision)
+            expected = source
+          } else { source.photoId = Wire.id() }
           source.phase = .skipped
           source.sourceRevision = candidate.sourceRevision
           source.originalSha256 = nil
           source.skipProcessor = "camera-original-v1"
           source.message = oversized.localizedDescription
-          try catalog.putBackupSource(source)
+          try catalog.putBackupSource(source, replacing: expected)
           return false
         }
         guard let original else { throw FotoroError("Original could not be verified") }
@@ -1294,7 +1343,7 @@ enum ReviewedPhotosBackupPolicy {
           source.sourceRevision = candidate.sourceRevision
           source.originalSha256 = original.digest
           source.message = nil
-          try catalog.putBackupSource(source)
+          try catalog.putBackupSource(source, replacing: earlier)
           return true
         }
         if automatic && source.phase == .queued {
@@ -1307,7 +1356,7 @@ enum ReviewedPhotosBackupPolicy {
             source.phase = .pending
             source.originalSha256 = nil
           }
-          try catalog.putBackupSource(source)
+          try catalog.putBackupSource(source, replacing: earlier)
         }
         if automatic {
           // Reuse this source's bytes immediately; no batch-wide original cache.
@@ -1345,7 +1394,8 @@ enum ReviewedPhotosBackupPolicy {
           ["committed", "saved"].contains(photo.transferState)
         else {
           throw FotoroError(
-            uploadJournal.errors[source.photoId] ?? "Upload remains pending. Retry while online.")
+            uploadJournal.errors[source.photoId] ?? "Upload remains pending. Retry while online.",
+            retryable: uploadJournal.retryableErrors.contains(source.photoId))
         }
       }
     }

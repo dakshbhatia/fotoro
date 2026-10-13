@@ -421,11 +421,13 @@ final class AnnotationTests: XCTestCase {
     try ledger.edit(value, photo: photo, bundle: bundle, card: card)
     await worker.resume(bundle: bundle, card: card, valid: { true }, send: { _ in throw URLError(.notConnectedToInternet) })
     XCTAssertNotNil(worker.errors[photo.id])
+    XCTAssertEqual(worker.retryableErrors, [photo.id])
     let acknowledged = try XCTUnwrap(ledger.state(photo.id)?.pending)
     try ledger.receive(acknowledged, photo: photo, bundle: bundle, card: card)
     XCTAssertTrue(try ledger.pendingIDs().isEmpty)
     await worker.resume(bundle: bundle, card: card, valid: { true }, send: { _ in XCTFail("Already acknowledged edits need no write") })
     XCTAssertTrue(worker.errors.isEmpty)
+    XCTAssertTrue(worker.retryableErrors.isEmpty)
   }
   @MainActor func testUnresolvedConflictErrorRemainsUntilTheUserChooses() async throws {
     let (store, photo, bundle, card) = try context()
@@ -434,6 +436,7 @@ final class AnnotationTests: XCTestCase {
     let mine = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256, labels: ["Mine"])
     try ledger.edit(mine, photo: photo, bundle: bundle, card: card)
     await worker.resume(bundle: bundle, card: card, valid: { true }, send: { _ in throw FotoroError("VERSION_CONFLICT") })
+    XCTAssertTrue(worker.retryableErrors.isEmpty)
     let remote = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256, labels: ["Other device"])
     try ledger.receive(AnnotationCrypto.seal(remote, revision: 1, photo: photo, accountId: card.accountId, bundle: bundle), photo: photo, bundle: bundle, card: card)
     await worker.resume(bundle: bundle, card: card, valid: { true }, send: { _ in XCTFail("An unresolved conflict cannot publish") })
