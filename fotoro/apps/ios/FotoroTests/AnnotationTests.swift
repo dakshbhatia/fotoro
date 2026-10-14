@@ -541,23 +541,24 @@ final class AnnotationTests: XCTestCase {
         if let value { UserDefaults.standard.set(value, forKey: key) }
         else { UserDefaults.standard.removeObject(forKey: key) }
       }
-      try? FileManager.default.removeItem(at: firstRoot)
-      try? FileManager.default.removeItem(at: secondRoot)
+      for root in [firstRoot, secondRoot] where FileManager.default.fileExists(atPath: root.path) {
+        try? FileManager.default.removeItem(at: root)
+      }
     }
     let first = try AppServices(root: firstRoot)
     defer { first.vault.lock() }
     try first.configureAPI("http://127.0.0.1:8787")
-    // Hosted timeouts have occurred on initial loopback recovery after the build's
-    // readiness probe. Restart only this public-fixture setup on one timeout;
+    // Hosted transport losses have occurred on initial loopback recovery after
+    // the build's readiness probe. Restart only this setup on one timeout/reset;
     // recover obtains a fresh challenge rather than replaying a consumed proof.
     for attempt in 0..<2 {
       do {
         try await first.auth.recover("fotoro1.\(secret.accountId).\(secret.recoverySecret)")
         break
-      } catch let error as URLError where error.code == .timedOut && attempt == 0 {
+      } catch let error as URLError where [.timedOut, .networkConnectionLost].contains(error.code) && attempt == 0 {
         try Task.checkCancellation()
         XCTAssertEqual(first.api.baseURL.absoluteString, "http://127.0.0.1:8787")
-        print("Public fixture recovery setup timed out; starting the final fresh ceremony.")
+        print("Public fixture recovery setup lost transport; starting the final fresh ceremony.")
       }
     }
     XCTAssertTrue(first.session.isSignedIn)
