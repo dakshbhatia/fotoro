@@ -119,7 +119,8 @@ enum NativeAlbumWire {
     try wrapped(value.ownerWrappedMetadataKey, minimum: 48)
     var ids = Set<String>(), kinds = Set<String>()
     for rep in value.representations + [value.metadataRepresentation] {
-      guard rep.binding.version == 1, rep.binding.photoId == value.photoId, uuid(rep.binding.representationId), uuid(rep.objectId),
+      // Saved copies have a new catalog ID while ciphertext keeps its signed original AAD.
+      guard rep.binding.version == 1, uuid(rep.binding.photoId), uuid(rep.binding.representationId), uuid(rep.objectId),
         ["original", "thumbnail", "preview", "metadata"].contains(rep.binding.kind),
         ids.insert(rep.binding.representationId).inserted, kinds.insert(rep.binding.kind).inserted,
         rep.ciphertextBytes >= 45, rep.ciphertextBytes <= 50 * 1024 * 1024 + 1024 else { throw FotoroError("Invalid album representation.") }
