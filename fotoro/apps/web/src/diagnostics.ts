@@ -1,6 +1,6 @@
 // Ephemeral troubleshooting data. Never accept free-form event labels or payloads.
-export const diagnosticOperations = ["auth", "sync", "catalog", "share", "album", "media", "request"] as const;
-export const diagnosticSteps = ["action", "request", "decode", "transfer"] as const;
+export const diagnosticOperations = ["auth", "sync", "catalog", "share", "album", "media", "request", "search", "metadata"] as const;
+export const diagnosticSteps = ["action", "request", "decode", "transfer", "scan", "prepare", "analysis"] as const;
 export const diagnosticOutcomes = ["started", "succeeded", "failed", "cancelled"] as const;
 export const diagnosticReasons = ["none", "cancelled", "network", "http", "decode", "invalid_wire", "locked", "account_changed", "source_changed", "quota", "unavailable", "verification", "unknown"] as const;
 export const diagnosticActions = ["passkey", "password", "enrollment", "refresh", "save", "create", "accept", "end", "add", "receive", "contribute", "prepare"] as const;
@@ -42,7 +42,7 @@ export function diagnosticReason(error: unknown): DiagnosticReason {
   if (error instanceof SyntaxError) return "decode";
   const code = error.message;
   if (code === "VAULT_LOCKED") return "locked";
-  if (["ACCOUNT_MISMATCH", "PASSWORD_ACCOUNT_MISMATCH"].includes(code)) return "account_changed";
+  if (["ACCOUNT_MISMATCH", "PASSWORD_ACCOUNT_MISMATCH", "INVITATION_RECIPIENT_MISMATCH", "SHARE_OWN_ACCOUNT"].includes(code)) return "account_changed";
   if (["ALBUM_SELECTION_CHANGED", "SOURCE_MISMATCH", "PHOTO_SOURCE_CHANGED"].includes(code)) return "source_changed";
   if (["STORAGE_QUOTA_EXCEEDED", "PHOTO_LIMIT", "ALBUM_LIMIT", "AUTH_RATE_LIMITED"].includes(code)) return "quota";
   if (["PRF_UNAVAILABLE", "PRF_UNAVAILABLE_USE_RECOVERY", "NO_ACCOUNT_PASSKEY", "PREVIEW_UNAVAILABLE", "SOURCE_UNAVAILABLE", "STAGING_MISSING_RESELECT_ORIGINAL"].includes(code)) return "unavailable";
@@ -56,9 +56,21 @@ export class DiagnosticContext {
   private lastRequestId?: string;
   private lastReason: DiagnosticReason = "none";
   private completionReason: DiagnosticReason = "none";
+  private stages = 0;
+  private itemCount?: number;
   constructor(readonly operation: DiagnosticOperation, readonly action?: DiagnosticAction) {}
   start() {record({operation: this.operation, action: this.action, traceId: this.traceId, step: "action", outcome: "started", reason: "none", elapsedMs: 0});}
   incomplete(reason: DiagnosticReason) {this.completionReason = reason;}
+  items(count: number) {this.itemCount = bounded(count, 1_000_000);}
+  // Local stages show where work is waiting without retaining its inputs or outputs.
+  async stage<T>(step: Step, task: () => Promise<T>): Promise<T> {
+    const started = clock(), detailed = ++this.stages <= 6;
+    const event = (outcome: Outcome, reason: DiagnosticReason) => record({operation: this.operation, action: this.action,
+      traceId: this.traceId, step, outcome, reason, elapsedMs: clock() - started});
+    if (detailed) event("started", "none");
+    try {const result = await task(); if (detailed) event("succeeded", "none"); return result;}
+    catch (error) {const reason = diagnosticReason(error); event(reason === "cancelled" ? "cancelled" : "failed", reason); throw error;}
+  }
   request(step: Step, outcome: Outcome, reason: DiagnosticReason, elapsedMs: number, requestId?: string | null, status?: number) {
     this.requests++;
     this.lastRequestId = diagnosticUUID(requestId);
@@ -72,7 +84,7 @@ export class DiagnosticContext {
     const classified = this.completionReason !== "none" ? this.completionReason : failed ? diagnosticReason(error) : "none";
     const reason = failed && classified === "unknown" && this.lastReason !== "none" ? this.lastReason : classified;
     record({operation: this.operation, action: this.action, traceId: this.traceId, step: "action", outcome: reason === "cancelled" ? "cancelled" : failed ? "failed" : "succeeded",
-      reason, elapsedMs: clock() - this.started, count: this.requests, requestId: this.lastRequestId});
+      reason, elapsedMs: clock() - this.started, count: this.itemCount ?? this.requests, requestId: this.lastRequestId});
   }
 }
 export async function diagnose<T>(operation: DiagnosticOperation, task: (context: DiagnosticContext) => Promise<T>, action?: DiagnosticAction): Promise<T> {

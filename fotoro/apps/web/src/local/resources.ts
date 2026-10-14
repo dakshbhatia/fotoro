@@ -1,4 +1,5 @@
 import { photoExifFromFile } from "../library/exif";
+import {diagnose} from "../diagnostics";
 import type {PhotoLocationV1} from "@fotoro/contracts";
 import {photoFormat, displayPhotoDimensions, safePhotoDimensions, boundedPhotoBitmap, photoPreview, PHOTO_HEADER_BYTES} from "../media/photo-source";
 export {imageDimensions} from "../media/photo-source";
@@ -243,28 +244,34 @@ export async function collectLocalFiles(
   onProgress: (completed: number) => void,
   load: (file: File) => Promise<LocalPhoto> = localPhoto,
 ): Promise<{ skipped: number; reason: string }> {
-  let batch: LocalPhoto[] = [],
-    skipped = 0,
-    reason = "";
-  for (let index = 0; index < files.length; index++) {
-    if (!isCurrent()) return { skipped: 0, reason: "" };
-    try {
-      const photo = await load(files[index]);
-      if (!isCurrent()) return { skipped: 0, reason: "" };
-      batch.push(photo);
-    } catch (error) {
-      if (!isCurrent()) return { skipped: 0, reason: "" };
-      skipped++;
-      reason = (error as Error).message;
+  return diagnose("media", async context => context.stage("scan", async () => {
+    let completed = 0;
+    const current = () => {const value = isCurrent(); if (!value) context.incomplete("cancelled"); return value;};
+    let batch: LocalPhoto[] = [],
+      skipped = 0,
+      reason = "";
+    for (let index = 0; index < files.length; index++) {
+      if (!current()) return { skipped: 0, reason: "" };
+      try {
+        const photo = await load(files[index]);
+        if (!current()) return { skipped: 0, reason: "" };
+        batch.push(photo);
+        context.items(++completed);
+      } catch (error) {
+        if (!current()) return { skipped: 0, reason: "" };
+        skipped++;
+        context.incomplete("unavailable");
+        reason = (error as Error).message;
+      }
+      if (!current()) return { skipped: 0, reason: "" };
+      if (batch.length >= 50 || index === files.length - 1) {
+        const append = batch;
+        batch = [];
+        onBatch(append);
+        if (!current()) return { skipped: 0, reason: "" };
+        onProgress(index + 1);
+      }
     }
-    if (!isCurrent()) return { skipped: 0, reason: "" };
-    if (batch.length >= 50 || index === files.length - 1) {
-      const append = batch;
-      batch = [];
-      onBatch(append);
-      if (!isCurrent()) return { skipped: 0, reason: "" };
-      onProgress(index + 1);
-    }
-  }
-  return { skipped, reason };
+    return { skipped, reason };
+  }), "add");
 }

@@ -1,4 +1,5 @@
 import type {LocalPhoto} from "./resources";
+import {diagnose, type DiagnosticContext} from "../diagnostics";
 import type {SearchResult} from "./search";
 import {ConsumerPreviewResources} from "../library/consumer-search";
 import {parseNaturalDateQuery} from "./natural-date";
@@ -113,6 +114,22 @@ export class SemanticFindSession {
   async search(photos: LocalPhoto[], query: string, current: () => boolean,
     progress: (scores: ReadonlyMap<string, number>) => void): Promise<SearchResult["visualStatus"]> {
     this.cancel();
+    const generation = this.generation;
+    return diagnose("search", async context => {
+      try {
+        const status = await context.stage("analysis", () => this.runSearch(photos, query, current, progress, context));
+        if (generation === this.failedGeneration) context.incomplete("unavailable");
+        else if (generation !== this.generation || !current()) context.incomplete("cancelled");
+        else if (status) context.incomplete("unavailable");
+        return status;
+      } catch (error) {
+        if (generation === this.failedGeneration) context.incomplete("unavailable");
+        throw error;
+      }
+    }, "prepare");
+  }
+  private async runSearch(photos: LocalPhoto[], query: string, current: () => boolean,
+    progress: (scores: ReadonlyMap<string, number>) => void, context: DiagnosticContext): Promise<SearchResult["visualStatus"]> {
     const token = this.generation, signal = this.controller.signal;
     const persistenceCurrent = this.persistence.scope?.(() => current() && token === this.generation) ?? (() => current() && token === this.generation);
     const valid = () => {
@@ -130,7 +147,7 @@ export class SemanticFindSession {
     if (!valid()) return;
     if (!selected.length) return scoped.length ? "missing-preview" : undefined;
     this.reconcile(photos);
-    const text = await this.request({kind: "text", text: parseNaturalDateQuery(query).text});
+    const text = await context.stage("prepare", () => this.request({kind: "text", text: parseNaturalDateQuery(query).text}));
     if (!valid()) return;
     const scores = new Map<string, number>();
     let missingPreviews = scoped.filter(photo => !hasSemanticPreview(photo)).length, modelErrors = 0;
@@ -160,7 +177,7 @@ export class SemanticFindSession {
       }
       if (!cached || (cached.digest ? cached.digest !== photo.digest : cached.source.deref() !== source)) {
         let blob: Blob | undefined;
-        try {blob = (await this.resources.load(photo, "thumbnail", signal)).blob;} catch {
+        try {blob = (await context.stage("transfer", () => this.resources.load(photo, "thumbnail", signal))).blob;} catch {
           if (!valid()) return;
           if (sourceCurrentFor(photo.id)) {
             missingPreviews++;
@@ -193,6 +210,7 @@ export class SemanticFindSession {
       if (!valid()) return;
       if (!sourceCurrentFor(photo.id)) continue;
       scores.set(photo.id, cosine(text, cached.vector));
+      context.items(scores.size);
       if ((index + 1) % 8 === 0) emit();
       // Cached vectors need only a dot product; yield in bounded batches rather than
       // paying a timer turn per photo. Uncached inference already yields to the worker.

@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import {clearDiagnostics, exportDiagnostics} from "../src/diagnostics";
 import {
   localFormat,
   localPhoto,
@@ -7,6 +8,7 @@ import {
   inLast30Days,
   LocalResources,
   LOCAL_RASTER_BUDGET,
+  collectLocalFiles,
 } from "../src/local/resources";
 const png = () => {
   const bytes = new Uint8Array(24);
@@ -16,6 +18,31 @@ const png = () => {
   view.setUint32(20, 3000);
   return bytes;
 };
+test("10,000 mixed imports stay in bounded batches, expose partial failure and omit file data from diagnostics", async t => {
+  clearDiagnostics();
+  const files = Array.from({length: 10000}, (_, index) => new File([index % 10 ? png() : "invalid"], "private-" + index + ".png", {type: "image/png"}));
+  let imported = 0, lastProgress = 0, largest = 0;
+  const started = performance.now();
+  const result = await collectLocalFiles(files, () => true, batch => {imported += batch.length; largest = Math.max(largest, batch.length);}, completed => {assert.ok(completed > lastProgress); lastProgress = completed;});
+  t.diagnostic(`10,000 mixed imports: ${(performance.now() - started).toFixed(1)} ms`);
+  assert.equal(result.skipped, 1000); assert.equal(imported, 9000); assert.equal(lastProgress, 10000); assert.ok(largest <= 50);
+  const events = JSON.parse(exportDiagnostics()).events;
+  assert.equal(events.length, 4); assert.equal(events.at(-1).outcome, "failed");
+  assert.equal(events.at(-1).reason, "unavailable"); assert.equal(events.at(-1).count, 9000);
+  assert.equal(exportDiagnostics().includes("private"), false);
+  clearDiagnostics();
+});
+test("cancelled import suppresses a late file and reports cancellation rather than successful completion", async () => {
+  clearDiagnostics();
+  let current = true, resolve!: (photo: Awaited<ReturnType<typeof localPhoto>>) => void, published = 0;
+  const file = new File([png()], "private-file.png", {type: "image/png"});
+  const pending = collectLocalFiles([file], () => current, batch => {published += batch.length;}, () => {}, () => new Promise(done => {resolve = done;}));
+  current = false; resolve(await localPhoto(file)); await pending;
+  assert.equal(published, 0);
+  assert.equal(JSON.parse(exportDiagnostics()).events.at(-1).outcome, "cancelled");
+  assert.equal(exportDiagnostics().includes("private"), false);
+  clearDiagnostics();
+});
 test("local trial retains exact source File and explicitly marks unknown capture date", async () => {
   const file = new File([png()], "photo.png", { type: "image/png" });
   const photo = await localPhoto(file);

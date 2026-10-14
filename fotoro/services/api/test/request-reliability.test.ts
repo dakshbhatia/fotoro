@@ -20,8 +20,9 @@ it("concurrent identical photo commits succeed once and changed retries conflict
     env.DB.prepare("DELETE FROM photos WHERE id=?").bind(m.photoId),
     env.DB.prepare("DELETE FROM changes WHERE entity_id=?").bind(m.photoId),
   ]);
-  const responses = await Promise.all(Array.from({ length: 6 }, () => http(0, "/v1/photos", "POST", s)));
-  expect(responses.map(response => response.status)).toEqual([200, 200, 200, 200, 200, 200]);
+  const responses = await Promise.all(Array.from({ length: 64 }, () => http(0, "/v1/photos", "POST", s)));
+  expect(responses.every(response => response.status === 200)).toBe(true);
+  expect(new Set(responses.map(response => response.headers.get("X-Request-Id"))).size).toBe(64);
   for (const response of responses) expect(await response.json()).toEqual(m);
   const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM changes WHERE entity_id=?").bind(m.photoId).first<{ n: number }>();
   expect(count?.n).toBe(1);

@@ -120,3 +120,17 @@ test("background media/access successes stay quiet while failures and explicit a
   assert.equal(diagnosticReason(new Error("NO_ACCOUNT_PASSKEY")), "unavailable");
   clearDiagnostics();
 });
+test("local stage sampling is bounded while failures, counts and account mismatches remain inspectable", async () => {
+  clearDiagnostics();
+  await diagnose("search", async context => {
+    for (let index = 0; index < 10000; index++) await context.stage("transfer", async () => index);
+    await assert.rejects(context.stage("analysis", async () => {throw new Error("private query");}));
+    context.items(10000); context.incomplete("unavailable");
+  }, "prepare");
+  assert.equal(entries().length, 15);
+  assert.equal(entries().at(-2)?.step, "analysis"); assert.equal(entries().at(-2)?.outcome, "failed");
+  assert.equal(entries().at(-1)?.count, 10000);
+  assert.equal(exportDiagnostics().includes("private"), false);
+  assert.equal(diagnosticReason(new Error("INVITATION_RECIPIENT_MISMATCH")), "account_changed");
+  clearDiagnostics();
+});
