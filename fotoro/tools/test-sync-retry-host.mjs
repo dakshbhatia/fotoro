@@ -8,6 +8,7 @@ const selected = spawnSync("xcode-select", ["-p"], { encoding: "utf8" });
 if (selected.status !== 0) throw new Error("Select the installed Xcode developer directory.");
 const developer = join(selected.stdout.trim(), "Platforms/MacOSX.platform/Developer");
 const libraries = join(developer, "usr/lib"), frameworks = join(developer, "Library/Frameworks");
+const privateFrameworks = join(developer, "Library/PrivateFrameworks");
 if (!existsSync(join(libraries, "XCTest.swiftmodule"))) throw new Error("Xcode's macOS XCTest runtime is unavailable.");
 
 const read = path => readFileSync(new URL(`../apps/ios/${path}`, import.meta.url), "utf8");
@@ -43,6 +44,7 @@ guard let run = suite.testRun, run.executionCount == ${expected}, run.failureCou
   const compilation = spawnSync("xcrun", ["swiftc", "-swift-version", "5", "-I", libraries,
     "-F", frameworks, "-L", libraries,
     "-Xlinker", "-rpath", "-Xlinker", frameworks,
+    "-Xlinker", "-rpath", "-Xlinker", privateFrameworks,
     "-Xlinker", "-rpath", "-Xlinker", libraries, source, "-o", executable],
   { stdio: "inherit", timeout: 60_000 });
   if (compilation.error) throw compilation.error;

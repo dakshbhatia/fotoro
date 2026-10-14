@@ -14,7 +14,7 @@ import { useLocalOcr, type LocalOcrPhoto } from "./useLocalOcr";
 import { collectLocalFiles, type LocalPhoto, LocalResources } from "./resources";
 import {loadLocalChoices, saveLocalChoices} from "./preferences";
 import {SavedSearchProjection, SavedMetadataProjection, accountSearchResultAsync, useAccountSearch, savedSearchPhotos, combineConsumerSearch, mergeConsumerSearchPhotos, ConsumerPreviewResources, type OwnedPhotoSnapshot} from "../library/consumer-search";
-import {inBrowseRange, recentBrowseActive} from "./consumer-range";
+import {browseFavoritePhotoIDs, inBrowseRange, recentBrowseActive} from "./consumer-range";
 import {metadataDatePhotoIDs, metadataBackgroundPhotoIDs} from "./metadata-work";
 import {usePhotoPicks} from "./usePhotoPicks";
 import {useDialogFocus} from "../library/dialog-focus";
@@ -144,12 +144,13 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
   const peopleScope = useMemo(() => ({sourceGeneration, token: ownedPhotos?.token}), [sourceGeneration, ownedPhotos?.token]);
   const peopleFind = usePeopleFilter(peopleRecords, peopleScope);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const favoriteIDs = useMemo(() => browseFavoritePhotoIDs(savedRecords, searchPhotos), [savedRecords, searchPhotos]);
   const browseFilter = peopleFind.filter.ids.size > 0 || favoritesOnly;
   const recentActive = recentBrowseActive(last30, query);
   const index = useMemo(() => new PhotoSearchIndex(photos.map(photo => photo.ocr && photo.ocr.processor !== OCR_PROCESSOR ? {...photo, ocr: undefined} : photo), feedback), [photos, feedback]);
   const savedIndex = useMemo(() => metadataSearch ? undefined : new PhotoSearchIndex(savedPhotos), [!!metadataSearch, savedPhotos]);
   const metadataIDs = useMemo(() => new Map((metadataSearch?.records ?? []).map((record, index) => [record.id, savedRecords[index].id])), [metadataSearch?.records, savedRecords]);
-  const metadataAllowed = useMemo(() => metadataDatePhotoIDs(peopleRecords, query, peopleMatchingPhotoIDs(peopleRecords.filter(photo => inBrowseRange(photo, recentActive, favoritesOnly)), peopleFind.filter)), [peopleRecords, recentActive, favoritesOnly, peopleFind.filter, query]);
+  const metadataAllowed = useMemo(() => metadataDatePhotoIDs(peopleRecords, query, peopleMatchingPhotoIDs(peopleRecords.filter(photo => (!favoritesOnly || favoriteIDs.has(photo.id)) && inBrowseRange(photo, recentActive, false)), peopleFind.filter)), [peopleRecords, recentActive, favoritesOnly, favoriteIDs, peopleFind.filter, query]);
   const metadataLocal = useMemo(() => index.search(query, {scope, allowedIds: metadataAllowed, committedMeaning: committed}), [index, query, metadataAllowed, committed]);
   const metadataSavedRequest = useMemo(() => metadataSearch ? (signal: AbortSignal, current: () => boolean) => accountSearchResultAsync(metadataSearch.searchAsync, metadataSearch.records, metadataIDs, query, {scope: "saved:" + (ownedPhotos?.accountId ?? ""), allowedIds: metadataAllowed, committedMeaning: committed}, signal, () => current() && metadataSearch.current()) : undefined, [metadataSearch?.token, metadataIDs, query, metadataAllowed, committed, ownedPhotos?.accountId]);
   const metadataSavedAsync = useAccountSearch(query, "saved:" + (ownedPhotos?.accountId ?? ""), metadataSavedRequest, active && ready);
@@ -190,8 +191,8 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
     && (normalizeSearch(query) || browseFilter || !photo.id.startsWith("saved:") || !metadataSearch || metadataSearch.browseIds.has(photo.id.slice(6)))), [searchPhotos, recentActive, favoritesOnly, browseScope, picks.recommendations, query, browseFilter, metadataSearch]);
   const permitted = useMemo(() => {
     const browseIDs = new Set(browsePhotos.map(photo => photo.id));
-    return peopleMatchingPhotoIDs(peopleRecords.filter(photo => browseIDs.has(photo.id) || browseScope === "photos" && (normalizeSearch(query) || browseFilter) && inBrowseRange(photo, recentActive, favoritesOnly)), peopleFind.filter);
-  }, [peopleRecords, browsePhotos, peopleFind.filter, browseScope, query, browseFilter, recentActive, favoritesOnly]);
+    return peopleMatchingPhotoIDs(peopleRecords.filter(photo => browseIDs.has(photo.id) || browseScope === "photos" && (normalizeSearch(query) || browseFilter) && (!favoritesOnly || favoriteIDs.has(photo.id)) && inBrowseRange(photo, recentActive, false)), peopleFind.filter);
+  }, [peopleRecords, browsePhotos, peopleFind.filter, browseScope, query, browseFilter, recentActive, favoritesOnly, favoriteIDs]);
   const permittedPhotos = useMemo(() => browsePhotos.filter(photo => permitted.has(photo.id)), [browsePhotos, permitted]);
   const scoped = useMemo(() => photos.filter(photo => permitted.has(photo.id)), [photos, permitted]);
   const hasPhotos = searchPhotos.length > 0;
