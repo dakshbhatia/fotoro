@@ -22,6 +22,18 @@ final class SemanticSearchTests: XCTestCase {
     XCTAssertTrue(try index.search("invoice 4827").results.isEmpty)
     XCTAssertTrue(try index.search("cake on 2026-10-01").permitsSemanticMatches)
   }
+  func testFilenameMeaningCannotGainUnrelatedVisualMatches() throws {
+    let index = try SearchIndex()
+    var file = SearchRecord(id: "file"); file.filename = "document.png"
+    let unrelated = SearchRecord(id: "unrelated")
+    try index.replacePermitted([file, unrelated])
+    try index.applySemantic(vector(0), photoID: unrelated.id, revision: unrelated.revision)
+    let base = try index.search("document")
+    XCTAssertEqual(base.meaning?.evidenceClass, 3)
+    XCTAssertEqual(base.results.map(\.id), [file.id])
+    XCTAssertFalse(base.permitsSemanticMatches)
+    XCTAssertEqual(try index.addingSemantic(vector(0), to: base).results.map(\.id), [file.id])
+  }
   @MainActor func testConsumerResultsUsesSemanticExecutorAndRejectsItsCancelledLateResult() async throws {
     let index = try SearchIndex()
     let record = SearchRecord(id: "permitted-scene")

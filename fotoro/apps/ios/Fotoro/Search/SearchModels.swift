@@ -250,7 +250,8 @@ struct SearchResponse: Sendable {
   // Visual similarity cannot prove numbers in receipts or other identifiers.
   // Recognized date constraints are removed before checking the search text.
   var permitsSemanticMatches: Bool {
-    NaturalDateQuery.parse(query).text.rangeOfCharacter(from: .decimalDigits) == nil
+    meaning?.evidenceClass != 3
+      && NaturalDateQuery.parse(query).text.rangeOfCharacter(from: .decimalDigits) == nil
   }
 }
 struct SearchWorkFence: Sendable {
