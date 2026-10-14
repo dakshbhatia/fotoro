@@ -36,9 +36,11 @@ export function semanticPreviewStatus(photos: LocalPhoto[], query: string, now?:
   const scoped = scopedSemanticPhotos(photos, query, now), available = scoped.filter(hasSemanticPreview).length;
   return available < scoped.length ? available ? "incomplete" : "missing-preview" : undefined;
 }
-// A filename meaning names specific files; visual similarity cannot add others.
+// Similarity cannot establish an exact identifier. Strip recognized dates first
+// so a scene query such as "fireworks on 2026-10-03" still uses visual search.
 export function permitsSemanticMatches(base: SearchResult, committedMeaning?: string) {
-  return !committedMeaning && base.meaning?.kind !== "filename";
+  return !committedMeaning && base.meaning?.kind !== "filename"
+    && !/\p{Nd}/u.test(parseNaturalDateQuery(base.query).text);
 }
 export function addSemanticMatches(base: SearchResult, scores: ReadonlyMap<string, number>, permitted: ReadonlySet<string>, committedMeaning?: string): SearchResult {
   if (!permitsSemanticMatches(base, committedMeaning)) return base;

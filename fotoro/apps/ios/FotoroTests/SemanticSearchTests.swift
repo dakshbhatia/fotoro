@@ -6,6 +6,22 @@ final class SemanticSearchTests: XCTestCase {
   private func vector(_ dimension: Int, value: Float = 1) -> [Float] {
     var result = [Float](repeating: 0, count: 512); result[dimension] = value; return result
   }
+  func testReceiptIdentifiersCannotGainUnrelatedVisualMatches() throws {
+    let index = try SearchIndex()
+    var receipt = SearchRecord(id: "receipt")
+    receipt.ocrText = "INVOICE 4826"; receipt.ocrStatus = .complete; receipt.ocrConfidence = 0.94
+    let unrelated = SearchRecord(id: "unrelated")
+    try index.replacePermitted([receipt, unrelated])
+    try index.applySemantic(vector(0), photoID: unrelated.id, revision: unrelated.revision)
+    for query in ["invoice 4826", "invoice 4827", "4826", "invoice ٤٨٢٦", "room A104"] {
+      let base = try index.search(query)
+      XCTAssertFalse(base.permitsSemanticMatches)
+      XCTAssertEqual(try index.addingSemantic(vector(0), to: base).results.map(\.id), base.results.map(\.id))
+    }
+    XCTAssertEqual(try index.search("invoice 4826").results.map(\.id), [receipt.id])
+    XCTAssertTrue(try index.search("invoice 4827").results.isEmpty)
+    XCTAssertTrue(try index.search("cake on 2026-10-01").permitsSemanticMatches)
+  }
   @MainActor func testConsumerResultsUsesSemanticExecutorAndRejectsItsCancelledLateResult() async throws {
     let index = try SearchIndex()
     let record = SearchRecord(id: "permitted-scene")

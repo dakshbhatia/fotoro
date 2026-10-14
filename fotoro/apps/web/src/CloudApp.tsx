@@ -87,7 +87,7 @@ import type {TimelineCandidate} from "./local/google-timeline";
 import {ConsumerPreviewResources, ConsumerSelectionRetention} from "./library/consumer-search";
 import {PeopleFilter, usePeopleFilter} from "./people/PeopleFilter";
 import {peopleMatchingPhotoIDs, peopleFilteredResult, peopleMetadataMatches} from "./people/filter";
-import {inRecentSelectedRange, recentBrowseActive} from "./local/consumer-range";
+import {inBrowseRange, recentBrowseActive} from "./local/consumer-range";
 import {peopleSourceCurrent} from "./people/groups";
 import type {PeopleUpdate} from "./people/People";
 import type {IncomingAlbumIntent} from "./albums/intent";
@@ -901,10 +901,11 @@ export default function CloudApp({
   const peopleRecords = useMemo(() => !received && searchCorpus?.admitted ? searchCorpus.records : cloudSearchRecords(searchable), [searchable, received, searchCorpus]);
   const peopleFind = usePeopleFilter(peopleRecords, receivedContext ?? ownedSnapshot?.token ?? account);
   const [recentOnly, setRecentOnly] = useState(true);
-  useEffect(() => {setRecentOnly(true);}, [account]);
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
+  useEffect(() => {setRecentOnly(true); setFavoritesOnly(false);}, [account]);
   const recentActive = !received && recentBrowseActive(recentOnly, query);
-  const familyFilter = peopleFind.filter.ids.size > 0;
-  const permitted = useMemo(() => peopleMatchingPhotoIDs(peopleRecords.filter(photo => !recentActive || inRecentSelectedRange(photo)), peopleFind.filter), [peopleRecords, peopleFind.filter, recentActive]);
+  const browseFilter = peopleFind.filter.ids.size > 0 || !received && favoritesOnly;
+  const permitted = useMemo(() => peopleMatchingPhotoIDs(peopleRecords.filter(photo => inBrowseRange(photo, recentActive, !received && favoritesOnly)), peopleFind.filter), [peopleRecords, peopleFind.filter, recentActive, received, favoritesOnly]);
   const loadedRecords = useMemo(() => cloudSearchRecords(searchable), [searchable]);
   const index = useMemo(() => !received && searchCorpus?.admitted ? searchCorpus.index! : new PhotoSearchIndex(loadedRecords), [loadedRecords, received, searchCorpus]);
   const accountQuery = useMemo(() => !received && searchCorpus?.admitted ? (signal: AbortSignal, current: () => boolean) => index.searchAsync(query, {scope: "account:" + account, allowedIds: permitted, committedMeaning}, signal, () => current() && searchCorpus.admitted).catch(error => {
@@ -914,7 +915,7 @@ export default function CloudApp({
   const asynchronousLexical = useAccountSearch(query, "account:" + account, accountQuery, active && unlocked && !received);
   const boundedLexical = useMemo(() => accountQuery ? undefined : index.search(query, {scope: "account:" + account, allowedIds: permitted, committedMeaning}), [accountQuery, index, query, account, committedMeaning, permitted]);
   const lexicalSearchResult = boundedLexical ?? asynchronousLexical;
-  const matchedMetadataIDs = normalizeSearch(query) ? lexicalSearchResult.photoIds : familyFilter ? [...permitted].slice(0, 200) : [];
+  const matchedMetadataIDs = normalizeSearch(query) ? lexicalSearchResult.photoIds : browseFilter ? [...permitted].slice(0, 200) : [];
   const matchedMetadataKey = JSON.stringify(matchedMetadataIDs);
   const loadedMetadataIDs = useMemo(() => new Set(searchable.map(photo => photo.manifest.photoId)), [searchable]);
   const metadataMatchesPending = !!searchCorpus?.admitted && matchedMetadataIDs.some(id => !loadedMetadataIDs.has(id));
@@ -952,7 +953,7 @@ export default function CloudApp({
   }, [searchable]);
   const shown = useMemo(() => normalizeSearch(query)
     ? filteredSearchResult.photoIds.flatMap(id => {const photo = searchableById.get(id); return photo ? [photo] : [];})
-    : searchable.filter(photo => permitted.has(photo.manifest.photoId) && (familyFilter || !searchAdded.current.has(photo.manifest.photoId))), [query, filteredSearchResult, searchableById, searchable, permitted, familyFilter]);
+    : searchable.filter(photo => permitted.has(photo.manifest.photoId) && (browseFilter || !searchAdded.current.has(photo.manifest.photoId))), [query, filteredSearchResult, searchableById, searchable, permitted, browseFilter]);
   const selectionInput = useMemo(() => ({shown, query, filter: peopleFind.filter, token: ownedSnapshot?.token, received}), [shown, query, peopleFind.filter, ownedSnapshot?.token, received]);
   const latestSelectionInput = useRef(selectionInput); latestSelectionInput.current = selectionInput;
   const applyPeople = async (updates: PeopleUpdate[]) => {
@@ -1316,14 +1317,16 @@ export default function CloudApp({
               if (event.key === "Escape") {event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();}
             }}><summary>Filters<span className="photo-browse-filter-state">{[
               recentBrowseActive(true, query) ? recentOnly ? "Last 30 days" : catalogIncomplete ? "All loaded photos" : "All photos" : undefined,
-              familyFilter ? `${peopleFind.filter.ids.size} ${peopleFind.filter.ids.size === 1 ? "person" : "people"}${peopleFind.filter.mode === "everyone" ? " · Everyone" : ""}` : undefined,
+              peopleFind.filter.ids.size > 0 ? `${peopleFind.filter.ids.size} ${peopleFind.filter.ids.size === 1 ? "person" : "people"}${peopleFind.filter.mode === "everyone" ? " · Everyone" : ""}` : undefined,
+              favoritesOnly ? "Favorites" : undefined,
             ].filter(Boolean).join(" · ")}</span></summary><div className="photo-browse-filter-options">
               {recentBrowseActive(true, query) && <label className="local-check"><input type="checkbox" checked={recentOnly} disabled={preparingOriginals || sharingOriginals} onChange={event => setRecentOnly(event.target.checked)} />Last 30 days</label>}
+              <label className="local-check"><input type="checkbox" checked={favoritesOnly} disabled={preparingOriginals || sharingOriginals} onChange={event => setFavoritesOnly(event.target.checked)} />Favorites</label>
               <PeopleFilter people={peopleFind.people} value={peopleFind.filter} onChange={peopleFind.change}
                 disabled={preparingOriginals || sharingOriginals} onReview={!publicDemo ? () => setPeopleOpen(true) : undefined} />
             </div></details>}
             </div>}
-            {!received && photos.length > 0 && (familyFilter || normalizeSearch(query)) && <div className="photo-browse-result-actions"><button disabled={busy || preparingOriginals || sharingOriginals || searchResult.searching || bestShots.busy || !shown.length} onClick={selectResults}>Select {shown.length} {shown.length === 1 ? "photo" : "photos"}</button></div>}
+            {!received && photos.length > 0 && (browseFilter || normalizeSearch(query)) && <div className="photo-browse-result-actions"><button disabled={busy || preparingOriginals || sharingOriginals || searchResult.searching || bestShots.busy || !shown.length} onClick={selectResults}>Select {shown.length} {shown.length === 1 ? "photo" : "photos"}</button></div>}
             {!received && metadataSearchError && <p className="hint" role="status">{metadataSearchError}</p>}
             {!received && catalogIncomplete && <div className="hint" aria-label="Saved coverage"><p role="status">{catalogCoverage!.loaded} Saved {catalogCoverage!.loaded === 1 ? "photo loaded" : "photos loaded"}. {searchCorpus?.admitted ? `Search and People cover ${searchCorpus.records.length} cached photos${searchCorpus.complete ? "" : " while the index updates"}; up to 200 matches are shown. More server photos may be available.` : "Date, search and People filters cover loaded photos only."}</p><button disabled={loadingSavedBrowse || busy && !catalogCoverage!.hasMore || preparingOriginals || sharingOriginals} onClick={() => void loadMoreSaved()}>Load more Saved photos</button>{savedBrowseError && <p role="alert">{savedBrowseError}</p>}</div>}
             {!received && (busy || localCount > 0 || summary.pending > 0 || summary.failed > 0 || needsAttention || annotationPending.length > 0) && <section className={"consumer-save-progress state-" + consumerSummary.state} aria-label="Save progress">
@@ -1371,7 +1374,7 @@ export default function CloudApp({
             ) : (
               <div className="empty" aria-busy={searchResult.searching || undefined}>
                 <p role={searchResult.searching || searchResult.visualStatus ? "status" : undefined}>
-                  {searchResult.searching ? "Searching photos…" : visualSearchFeedback(searchResult) ?? (searchResult.metadataIncomplete ? metadataSearchError || "Search coverage is incomplete." : bestShots.active ? bestShots.busy ? "Choosing best shots…" : "No best shots to suggest" : query || familyFilter
+                  {searchResult.searching ? "Searching photos…" : visualSearchFeedback(searchResult) ?? (searchResult.metadataIncomplete ? metadataSearchError || "Search coverage is incomplete." : bestShots.active ? bestShots.busy ? "Choosing best shots…" : "No best shots to suggest" : query || browseFilter
                     ? catalogIncomplete && !received ? "No matching loaded photos" : "No matching photos"
                     : received
                       ? "No received photos"
@@ -1379,7 +1382,7 @@ export default function CloudApp({
                 </p>
                 {bestShots.active && <p className="hint">All matches remain available. You choose what to Share.</p>}
                 {recentActive && photos.length > 0 && <button onClick={() => setRecentOnly(false)}>Show all photos</button>}
-                {!query && !familyFilter && !received && !photos.length && <button onClick={onBack}>Choose photos to Save</button>}
+                {!query && !browseFilter && !received && !photos.length && <button onClick={onBack}>Choose photos to Save</button>}
                 {query && (
                   <button onClick={() => setQuery("")}>Clear search</button>
                 )}

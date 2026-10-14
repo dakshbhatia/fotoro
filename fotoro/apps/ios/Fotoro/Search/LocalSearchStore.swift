@@ -110,7 +110,8 @@ enum SearchMetadataIntake {
       return lexical
     #else
     let phrase = NaturalDateQuery.parse(value).text.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard accepted == nil, phrase.count >= 3, let vector = try? await PhotoSemanticProcessor.shared.textIfReady(phrase) else { return lexical }
+    guard accepted == nil, lexical.permitsSemanticMatches, phrase.count >= 3,
+      let vector = try? await PhotoSemanticProcessor.shared.textIfReady(phrase) else { return lexical }
     try Task.checkCancellation()
     return try await Task.detached(priority: .userInitiated) { try index.addingSemantic(vector, to: lexical) }.value
     #endif

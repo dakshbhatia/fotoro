@@ -1259,3 +1259,37 @@ data are excluded from repository documentation.
 A public fixture, a synthetic 10,000-item index or a simulator pass does not prove
 that Fotoro is ten times better than an alternative. Compare the same real tasks
 and libraries using [the comparison protocol](competitive-baseline.md).
+# Finding, organizing and sync qualification — 2026-10-14
+
+The current repair adds automatic native retries after temporary transport/server
+failures, exact-number search fences on iOS/web, and web Favorites filters across
+Photos/Saved. [The 10+10 acceptance checklist](competitive-baseline.md#ten-photo-intelligence-expectations-and-ten-platform-checks)
+records the finding/organizing scope and remaining measured-quality/device gates.
+
+Local qualification: `pnpm check` passed (770 web tests); the standalone real Swift
+retry/background-upload host runner passed 17 tests. Targeted Simulator search,
+backup, retry and upload tests passed 79 tests. The full iPhone 18 Pro/iOS 27
+Simulator run passed 715 tests, skipped 2, and failed 0. The two existing skips are
+the explicit PhotoKit edited-metadata QA gate and unavailable Simulator Vision
+classification context; neither is a passed physical-device check.
+
+Numeric identifiers are checked after recognized date constraints are removed.
+Present/absent invoice numbers and Unicode digits cannot gain unrelated visual
+matches; ordinary scenes and scene/date queries retain semantic matching. This
+also avoids initializing the visual model or loading previews for exact-number
+queries. Favorites uses verified annotations and full cached metadata before the
+200-result cap and preview hydration. A favorite at row 240 of 250 remains
+findable while stale annotation favorites are rejected.
+
+Real browser checks use only public fixtures: the receipt is the sole match for
+`invoice 4826`; `invoice 4827` gains no fireworks match. Favoriting the receipt and
+enabling Favorites leaves only that photo. An OCR failure on the other fixture
+remains explicitly incomplete instead of claiming complete search coverage.
+
+Native distribution still requires an Apple Account and its distribution
+certificate/private key in Xcode. Build 73 archived from the prior release but
+was not uploaded; these additional native fixes are not on TestFlight yet.
+Physical iCloud/background, battery, frame pacing and VoiceOver acceptance remain
+open. Hosted checks, merge and deployment are qualified separately below when
+completed.
+

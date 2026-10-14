@@ -157,7 +157,7 @@ final class SearchIndex: @unchecked Sendable {
     }
   }
   func addingSemantic(_ vector: [Float], to base: SearchResponse, now: Date = Date()) throws -> SearchResponse {
-    guard let normalized = SemanticVector.normalized(vector) else { return base }
+    guard base.permitsSemanticMatches, let normalized = SemanticVector.normalized(vector) else { return base }
     return try database.read { db -> SearchResponse in
       let (condition, args) = filter(base.scope)
       let vectorArguments: StatementArguments = [SemanticVector.data(normalized), SemanticVector.processor]

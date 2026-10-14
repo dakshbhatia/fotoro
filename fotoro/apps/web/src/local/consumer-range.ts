@@ -8,3 +8,7 @@ export function inRecentSelectedRange(photo: Pick<LocalPhoto, "date" | "dateSour
   const captured = Date.parse(photo.date);
   return captured >= now - 30 * 86400000 && captured <= now;
 }
+export function inBrowseRange(photo: Pick<LocalPhoto, "date" | "dateSource" | "favorite">,
+  recent: boolean, favorites: boolean, now = Date.now()) {
+  return (!favorites || photo.favorite === true) && (!recent || inRecentSelectedRange(photo, now));
+}
