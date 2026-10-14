@@ -26,6 +26,16 @@ async function scoped(fn: () => Promise<void>) {
   for (const card of accounts.accounts) await clearAccount(card.accountId);
   try {await fn();} finally {globalThis.fetch = old; lockVault(); for (const card of accounts.accounts) await clearAccount(card.accountId);}
 }
+test("a sender opening their own invitation must switch accounts before identity acceptance", async () => scoped(async () => {
+  const session = await open(0);
+  const incoming = new IncomingShareIntent(parseShareLink(createMomentLink(crypto.randomUUID(), session.card)), session);
+  const markup = renderToStaticMarkup(createElement(Exchange, {selection: [], incoming, onClose() {}, onReceived() {}, onRefresh() {}, onRetryPassword() {}}));
+  assert.doesNotMatch(markup, /Accept this sender|Accept sender and open photos|Their name/);
+  assert.match(markup, /Use another Fotoro password/);
+  globalThis.fetch = (() => assert.fail("Wrong-account review must not make a request")) as typeof fetch;
+  await assert.rejects(loadExchangeContext(session, {}, () => assert.fail("Wrong-account identity must not be published"), session.card), /INVITATION_RECIPIENT_MISMATCH/);
+  assert.match(readableShareError(new Error("INVITATION_RECIPIENT_MISMATCH")), /another Fotoro password/);
+}));
 async function fixture() {
   const sender = await open(0), key = sodium.randombytes_buf(32), originalKey = sodium.randombytes_buf(32), photoId = crypto.randomUUID();
   const objects = new Map<string, Uint8Array>();

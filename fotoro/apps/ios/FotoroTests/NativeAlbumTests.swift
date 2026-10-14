@@ -1071,6 +1071,32 @@ final class NativeAlbumTests: XCTestCase {
     var other = pair.1; other.accountId = server.cards[1].accountId
     XCTAssertThrowsError(try c.photo(pair.0, manifestSigned: other, definition: opened.0, key: opened.1))
   }
+  @MainActor func testRetainedSavedCopyContributionKeepsImmutableCipherBindingsAndExportsVerifiedOriginal() async throws {
+    try await withAlbum(retainedCopy: true) { services, server, model in
+      XCTAssertNotEqual(server.source.id, server.source.manifest.metadataRepresentation.binding.photoId)
+      try await model.refresh(); try await model.open(server.definition.albumId)
+      let item = try XCTUnwrap(model.items.first)
+      XCTAssertEqual(item.id, server.source.id)
+      XCTAssertEqual(item.photo.manifest.representations, server.source.manifest.representations)
+      XCTAssertNil(try services.consumerSavedPhoto(item.id))
+      let preview = try await model.preview(item); XCTAssertNotNil(preview)
+      let urls = try await model.export(item)
+      XCTAssertEqual(try Data(contentsOf: urls[0]).digest, server.source.metadata.originalSha256)
+    }
+  }
+  func testRetainedCopyManifestStillRejectsInvalidBindingIDsAndTamperedCiphertext() throws {
+    let server = try AlbumTestServer(retainedCopy: true)
+    var manifest = server.source.manifest
+    manifest.representations[0].binding.photoId = "invalid"
+    XCTAssertThrowsError(try NativeAlbumWire.manifest(manifest))
+    let rep = server.source.manifest.representations[0]
+    let key = try Data(b64: XCTUnwrap(server.source.metadata.representationKeys[rep.binding.representationId]))
+    let bytes = try XCTUnwrap(server.objects[rep.objectId])
+    var rebound = rep; rebound.binding.photoId = server.source.id
+    XCTAssertThrowsError(try CryptoAdapter().decrypt(bytes, key: key, representation: rebound))
+    var corrupted = bytes; corrupted[corrupted.count - 1] ^= 1
+    XCTAssertThrowsError(try CryptoAdapter().decrypt(corrupted, key: key, representation: rep))
+  }
   func testActionsBindImmutableDefinitionAndOnlyOwnerCanEnd() throws {
     let server = try AlbumTestServer(), c = NativeAlbumCrypto()
     let accepted = try c.action(server.signed, albumId: server.definition.albumId, card: server.cards[1], bundle: server.bundles[1], ending: false)
@@ -1904,9 +1930,9 @@ final class NativeAlbumTests: XCTestCase {
     traversal.filename = "..\\outside.mov"
     XCTAssertThrowsError(try CameraMedia.encodeLivePhoto(still: pair.still, motion: traversal))
   }
-  @MainActor private func withAlbum(invited: Bool = false, owner: Bool = false, _ run: (AppServices, AlbumTestServer, NativeAlbumService) async throws -> Void) async throws {
+  @MainActor private func withAlbum(invited: Bool = false, owner: Bool = false, retainedCopy: Bool = false, _ run: (AppServices, AlbumTestServer, NativeAlbumService) async throws -> Void) async throws {
     let previous = UserDefaults.standard.object(forKey: "fotoro.pinnedCards")
-    let server = try AlbumTestServer(); server.accepted = !invited; AlbumTestProtocol.server = server
+    let server = try AlbumTestServer(retainedCopy: retainedCopy); server.accepted = !invited; AlbumTestProtocol.server = server
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("album-test-" + Wire.id())
     let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [AlbumTestProtocol.self]
     let services = try AppServices(root: root, networkConfiguration: config, diagnostics: NativeDiagnostics(fileURL: nil, emitSystemLog: false))
@@ -1955,7 +1981,7 @@ private final class AlbumFactsRequestGate: @unchecked Sendable {
 private final class AlbumTestServer: @unchecked Sendable {
   let cards: [AccountCardV1]; let bundles: [AccountBundle]; var signed: SignedPayloadV1; var definition: AlbumDefinitionV1
   let source: LocalPhoto; let metadataKey: Data; let entry: SignedPayloadV1; let manifest: SignedPayloadV1
-  private let objects: [String: Data]
+  let objects: [String: Data]
   private var originalIDs = Set<String>()
   private(set) var originalReads = 0
   var omitLastPageItem = false
@@ -1988,7 +2014,7 @@ private final class AlbumTestServer: @unchecked Sendable {
   private let lock = NSLock(); private var objectCount = 0; private var accessCount = 0
   var objectReads: Int { lock.lock(); defer { lock.unlock() }; return objectCount }
   var accessReads: Int { lock.lock(); defer { lock.unlock() }; return accessCount }
-  init() throws {
+  init(retainedCopy: Bool = false) throws {
     let f = try fixture(FixtureAccounts.self, "accounts")
     cards = f.accounts.prefix(2).map { var value = $0; value.accountId = Wire.id(); return value }
     bundles = f.testSecrets.prefix(2).map { AccountBundle(vaultKey: $0.vaultKey, boxSecretKey: $0.boxSecretKey, signingSecretKey: $0.signingSecretKey) }
@@ -2010,8 +2036,8 @@ private final class AlbumTestServer: @unchecked Sendable {
     let binding = MediaBinding(photoId: photoID, representationId: Wire.id(), kind: "metadata"), container = try crypto.encrypt(Wire.encode(metadata), key: metaKey, binding: binding), id = Wire.id()
     let rep = RepresentationV1(binding: binding, objectId: id, header: container.prefix(24).b64, ciphertextBytes: container.count, ciphertextSha256: container.digest)
     encrypted[id] = container; objects = encrypted; originalIDs = initialOriginalIDs
-    let value = PhotoManifestV1(photoId: photoID, ownerAccountId: cards[0].accountId, representations: reps, metadataRepresentation: rep, ownerWrappedMetadataKey: try crypto.wrap(metaKey, key: Data(b64: bundles[0].vaultKey)))
-    source = LocalPhoto(photoId: photoID, manifest: value, metadata: metadata, transferState: "committed")
+    let value = PhotoManifestV1(photoId: retainedCopy ? Wire.id() : photoID, ownerAccountId: cards[0].accountId, representations: reps, metadataRepresentation: rep, ownerWrappedMetadataKey: try crypto.wrap(metaKey, key: Data(b64: bundles[0].vaultKey)))
+    source = LocalPhoto(photoId: value.photoId, manifest: value, metadata: metadata, transferState: "committed")
     entry = try c.append(source, definition: definition, albumKey: key, card: cards[0], bundle: bundles[0]).0
     func text<T: Encodable>(_ value: T) throws -> String { String(data: try Wire.encode(value), encoding: .utf8)! }
     let browserBody = try "{\"version\":1,\"photoId\":" + text(value.photoId) + ",\"ownerAccountId\":" + text(value.ownerAccountId) + ",\"representations\":" + text(value.representations) + ",\"metadataRepresentation\":" + text(value.metadataRepresentation) + ",\"ownerWrappedMetadataKey\":" + text(value.ownerWrappedMetadataKey) + "}"

@@ -1,4 +1,5 @@
 import { imageDimensions, type LocalPhoto } from './resources';
+import {DiagnosticContext} from '../diagnostics';
 import {parseNaturalDateQuery} from './natural-date';
 /* Optional OCR. Every runtime asset is served by this origin. */
 export const OCR_PROCESSOR = 'tesseract.js-7.0.0/eng-1.0.0/lstm-orientation-v2';
@@ -171,6 +172,7 @@ export class LocalOcrQueue {
     const current = () => generation === this.generation && !signal.aborted && isCurrent();
     const operation = this.tail.then(async () => {
       if (!current()) return;
+      const trace = new DiagnosticContext('metadata', 'prepare'); trace.start();
       const progress = (status: string, value = 0) => {
         if (current()) this.onProgress?.({photoID, status, progress: value});
       };
@@ -178,7 +180,7 @@ export class LocalOcrQueue {
       try {
         progress('Preparing text preview');
         if (!current()) return;
-        const image = await untilCancelled(preview(), signal);
+        const image = await trace.stage('transfer', () => untilCancelled(preview(), signal));
         if (!current()) return;
         if (!image.blob.size || !['image/jpeg', 'image/png'].includes(image.blob.type))
           throw new Error('A readable JPEG or PNG preview is required for OCR.');
@@ -200,10 +202,10 @@ export class LocalOcrQueue {
             return this.factory(options, signal);
           }) };
         }
-        const worker = await untilCancelled(this.worker.promise, signal);
+        const worker = await trace.stage('prepare', () => untilCancelled(this.worker!.promise, signal));
         if (!current()) return;
         const read = async (options: {rotateAuto: boolean; rotateRadians?: number}) => {
-          const result = await untilCancelled(worker.recognize(image.blob, options), signal);
+          const result = await trace.stage('analysis', () => untilCancelled(worker.recognize(image.blob, options), signal));
           if (!current()) return;
           if (typeof result.data.text !== 'string' || !Number.isFinite(result.data.confidence))
             throw new Error('Local text recognition returned unreadable output.');
@@ -228,9 +230,11 @@ export class LocalOcrQueue {
         }
         progress('Text recognition complete', 1);
         if (!current()) return;
+        trace.items(1);
         return {photoID, revision, processor: OCR_PROCESSOR, status: 'complete' as const,
           text: best.text, confidence: best.confidence};
       } catch (error) {
+        trace.incomplete(current() ? 'unavailable' : 'cancelled');
         if (!current()) return;
         const failed = this.worker;
         this.worker = undefined;
@@ -244,6 +248,8 @@ export class LocalOcrQueue {
         return { photoID, revision, processor: OCR_PROCESSOR, status: 'failed' as const, text: '', confidence: 0,
           error: error instanceof Error ? error.message : String(error) };
       } finally {
+        if (!current()) trace.incomplete('cancelled');
+        trace.finish();
         if (generation === this.generation) this.report = undefined;
       }
     });

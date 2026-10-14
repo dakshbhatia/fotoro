@@ -50,6 +50,12 @@ contexts. Successful request detail is limited to 12 per action, with a terminal
 request count; failures remain visible within the bounded history. JSON decoding
 and wire validation must complete before a client request is marked successful.
 
+Local browser import, visual search and OCR also record scan, preview transfer,
+model preparation and analysis waits. Successful stage detail is limited to six
+stages per action. Terminal counts describe completed photos for these local
+operations; skipped previews, failed recognition and cancelled work do not claim
+successful completion. Stage events retain no filenames, queries or recognized text.
+
 The server emits one compact final `api.request` or `api.error` per `/v1/*` request.
 Fields include fixed method/area/phase, status, outcome, bounded elapsed time and,
 for failures, an allowlisted code and class. Staging and commit have distinct phases.

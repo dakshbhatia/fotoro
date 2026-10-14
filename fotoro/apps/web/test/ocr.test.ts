@@ -1,10 +1,33 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {clearDiagnostics, exportDiagnostics} from '../src/diagnostics';
 import { LocalOcrQueue, localOcrOptions, OCR_PROCESSOR, hasCurrentLocalOcr, currentOcrSource, localTextSearchStatus, type OcrWorker } from '../src/local/ocr';
 import type {LocalPhoto} from '../src/local/resources';
 const preview = async () => {const bytes=new Uint8Array(24);bytes.set([137,80,78,71,13,10,26,10]);const view=new DataView(bytes.buffer);view.setUint32(16,1600);view.setUint32(20,1000);return {blob:new Blob([bytes],{type:'image/png'}),width:1600,height:1000};};
 const deferred = <T>() => {let resolve!: (value:T)=>void;const promise=new Promise<T>(r=>{resolve=r});return {promise,resolve};};
 const worker = (recognize:OcrWorker['recognize'],terminate=async()=>{}) => ({recognize,terminate});
+
+test('OCR diagnostics classify waits, failures and cancellation without retaining recognized text or source IDs', async () => {
+ clearDiagnostics();
+ let fail = true;
+ const queue = new LocalOcrQueue({origin:'http://localhost',createWorker:async()=>worker(async()=>{
+  if(fail) throw new Error('private recognized text');
+  return {data:{text:'private recognized text',confidence:95}};
+ })});
+ try {
+  assert.equal((await queue.recognize('private-photo','private-revision',preview))?.status,'failed');
+  assert.equal(JSON.parse(exportDiagnostics()).events.at(-1).reason,'unavailable');
+  fail=false;
+  assert.equal((await queue.recognize('private-photo','private-revision',preview))?.status,'complete');
+  assert.equal(JSON.parse(exportDiagnostics()).events.at(-1).outcome,'succeeded');
+  const held=deferred<Awaited<ReturnType<typeof preview>>>(); let reading=false;
+  const pending=queue.recognize('private-photo','private-revision',()=>{reading=true;return held.promise;});
+  while(!reading) await Promise.resolve();
+  await queue.cancel(); held.resolve(await preview()); assert.equal(await pending,undefined);
+  assert.equal(JSON.parse(exportDiagnostics()).events.at(-1).outcome,'cancelled');
+  assert.equal(exportDiagnostics().includes('private'),false);
+ } finally {await queue.cancel();clearDiagnostics();}
+});
 
 test('OCR coverage requires current photo, revision and processor, while reopened sources may be scheduled again', () => {
  const source: LocalPhoto = {id:'photo',digest:'revision',filename:'photo.jpg',date:'2026-10-06',dateSource:'selected',file:new File(['public fixture'],'photo.jpg')};

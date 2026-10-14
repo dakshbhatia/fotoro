@@ -4,7 +4,8 @@ import {useEffect, useRef, useState} from "react";
 import type {AccountCardV1, GrantV1} from "@fotoro/contracts";
 import {createContactLink, createMomentLink, parseShareLink, type FotoroShareLink} from "@fotoro/contracts/share-links";
 import {Icon} from "../library/icons";
-import {api} from "./api";
+import {api, scopedApi} from "./api";
+import {diagnose, diagnosticReason} from "../diagnostics";
 import {mediaURL, requireVault, type UnlockedVault} from "../vault/vault";
 import {sameVault} from "../vault/scope";
 import {photoBytes, type Photo} from "../library/catalog";
@@ -18,29 +19,36 @@ interface ExchangeContextUpdate {
   names?: Map<string, string>; people?: AccountCardV1[]; grants?: GrantV1[]; inboxFailed?: boolean;
 }
 export async function loadExchangeContext(session: UnlockedVault, scope: ShareScope, publish: (update: ExchangeContextUpdate) => void, card?: AccountCardV1, contactsOnly = false) {
-  const current = () => sameVault(session) && !scope.signal?.aborted && (!scope.current || scope.current());
-  if (!current()) return;
-  if (card) {
-    // An invitation already carries its public sender. Its optional inbox is unrelated to acceptance.
-    publish({candidate: card, candidateChecked: false});
-    const identity = trustedCard(card.accountId, session, scope).catch(error => {
-      if (error instanceof Error && error.message === "PIN_ACCOUNT_CARD_FROM_TRUSTED_CHANNEL") return undefined;
-      throw error;
-    }).then(known => {if (current()) publish({identityChanged: !!known && !sameIdentity(card, known)});});
-    const names = contactNames(scope).then(storedNames => {
-      if (current()) publish({names: storedNames, candidateName: storedNames.get(card.accountId) ?? ""});
-    });
-    // Settle both local checks before allowing retry or another candidate to replace this one.
-    for (const result of await Promise.allSettled([identity, names])) if (result.status === "rejected") throw result.reason;
-    if (current()) publish({candidateChecked: true});
-    return;
-  }
-  await Promise.all([
-    Promise.all([contacts(scope), contactNames(scope)]).then(([people, names]) => {if (current()) publish({people, names});}),
-    !contactsOnly && api<{grants: GrantV1[]}>("/v1/grants", undefined, "GrantInboxV1", "GET", scope.signal)
-      .then(inbox => {if (current()) publish({grants: inbox.grants, inboxFailed: false});})
-      .catch(() => {if (current()) publish({inboxFailed: true});}),
-  ]);
+  return diagnose("share", async context => {
+    const current = () => {
+      const value = sameVault(session) && !scope.signal?.aborted && (!scope.current || scope.current());
+      if (!value) context.incomplete("cancelled");
+      return value;
+    };
+    if (!current()) return;
+    if (card) {
+      if (card.accountId === session.accountId) throw new Error("INVITATION_RECIPIENT_MISMATCH");
+      // An invitation already carries its public sender. Its optional inbox is unrelated to acceptance.
+      publish({candidate: card, candidateChecked: false});
+      const identity = trustedCard(card.accountId, session, scope).catch(error => {
+        if (error instanceof Error && error.message === "PIN_ACCOUNT_CARD_FROM_TRUSTED_CHANNEL") return undefined;
+        throw error;
+      }).then(known => {if (current()) publish({identityChanged: !!known && !sameIdentity(card, known)});});
+      const names = contactNames(scope).then(storedNames => {
+        if (current()) publish({names: storedNames, candidateName: storedNames.get(card.accountId) ?? ""});
+      });
+      // Settle both local checks before allowing retry or another candidate to replace this one.
+      for (const result of await Promise.allSettled([identity, names])) if (result.status === "rejected") throw result.reason;
+      if (current()) publish({candidateChecked: true});
+      return;
+    }
+    await Promise.all([
+      Promise.all([contacts(scope), contactNames(scope)]).then(([people, names]) => {if (current()) publish({people, names});}),
+      !contactsOnly && scopedApi(context)<{grants: GrantV1[]}>("/v1/grants", undefined, "GrantInboxV1", "GET", scope.signal)
+        .then(inbox => {if (current()) publish({grants: inbox.grants, inboxFailed: false});})
+        .catch(error => {context.incomplete(diagnosticReason(error)); if (current()) publish({inboxFailed: true});}),
+    ]);
+  }, card ? "accept" : "refresh");
 }
 
 function SharePreview({photo}: {photo: Photo}) {
@@ -122,7 +130,7 @@ export function Exchange({selection = [], incoming, onClose, onReceived, onRefre
   }, "Checking contact…");
   const accept = () => run(async () => {
     if (!candidate || !candidateChecked) return;
-    if (candidate.accountId === session.accountId && (!incoming || incoming.link.kind === "contact")) throw new Error("SHARE_OWN_ACCOUNT");
+    if (candidate.accountId === session.accountId) throw new Error(incoming?.link.kind === "moment" ? "INVITATION_RECIPIENT_MISMATCH" : "SHARE_OWN_ACCOUNT");
     if (!editingContact) await pinCard(candidate, scope);
     await saveContactName(candidate.accountId, candidateName, scope, editingContact ? candidate : undefined);
     if (!current()) return;
@@ -161,7 +169,7 @@ export function Exchange({selection = [], incoming, onClose, onReceived, onRefre
     {count > 0 && <div className="share-photo-strip" aria-label="Selected photos">{snapshot.photos.slice(0, 5).map(photo => <SharePreview key={photo.manifest.photoId} photo={photo} />)}{count > 5 && <span>+{count - 5}</span>}</div>}
     {isMoment && <p className="hint">Open with the Fotoro password this invitation was sent to. Photos stay here until you choose Save.</p>}
     {!isMoment && <ContactSyncReview session={session} scope={scope} busy={busy} run={run} />}
-    {candidate ? <div className="identity-confirmation">
+    {candidate && candidate.accountId !== session.accountId ? <div className="identity-confirmation">
       <h3>{identityChanged ? "This person’s identity changed" : isMoment ? "Accept this sender" : editingContact ? "Edit contact" : "Accept this contact"}</h3>
       {!editingContact && <p className="hint">Only accept a contact link sent to you by this person. {identityChanged && "Confirm the new link with them before continuing."}</p>}
       <p className="contact-identity">Fotoro {identityLabel(candidate)}</p>
@@ -189,7 +197,7 @@ export function Exchange({selection = [], incoming, onClose, onReceived, onRefre
     </>}
     {contactsOnly && !candidate && <form onSubmit={event => {event.preventDefault(); void inspectLink();}}><label>Add someone’s contact link<input type="url" autoComplete="off" value={linkInput} onChange={event => setLinkInput(event.target.value)} placeholder="https://fotoro.cloud/#contact=…" /></label><button disabled={busy || !linkInput.trim()}>Continue</button></form>}
     {contactsOnly && <button disabled={busy} onClick={onClose}>Back to trip</button>}
-    {outputLink && <details className="copy-link"><summary>Link</summary><label>{contactsOnly ? "Contact link" : "Photo link"}<input readOnly value={outputLink} onFocus={event => event.target.select()} /></label></details>}
+    {outputLink && <details className="copy-link"><summary>Link</summary><label>{contactsOnly || outputLink.includes("#contact=") ? "Contact link" : "Photo link"}<input readOnly value={outputLink} onFocus={event => event.target.select()} /></label></details>}
     <p role="status" className="share-status">{busy ? working : status}</p>
     {isMoment && onRetryPassword && <button disabled={busy} onClick={onRetryPassword}>Use another Fotoro password</button>}
     {!isMoment && !contactsOnly && <details className="share-inbox" open={!count}><summary>{count ? "Shared moments" : "Received and sent"}</summary>

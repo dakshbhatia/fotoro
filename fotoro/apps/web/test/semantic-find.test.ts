@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import {clearDiagnostics, exportDiagnostics, diagnosticEventLimit} from "../src/diagnostics";
 import {createElement} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
 import type {LocalPhoto} from "../src/local/resources";
@@ -24,6 +25,54 @@ class FakeWorker {
   terminate() {this.terminated = true;}
 }
 const resources = () => ({loads: 0, cleared: 0, async load(value: LocalPhoto) {this.loads++; return {blob: value.preview!, url: "", bytes: 1, decoded: 1, width: 1, height: 1, used: 0};}, clear() {this.cleared++;}});
+
+test("120 rapid query replacements fence late replies, retain one worker and report only the surviving result", async () => {
+  clearDiagnostics();
+  const worker = new FakeWorker(() => {}), raster = resources();
+  const engine = new SemanticFindSession(() => worker as unknown as Worker, raster);
+  const settled: Promise<unknown>[] = [], published: number[] = [];
+  try {
+    for (let index = 0; index < 120; index++) {
+      const pending = engine.search([photo("private-source")], "private query " + index, () => true, () => published.push(index));
+      settled.push(pending.catch(error => error));
+    }
+    const textRequests = worker.messages.filter(message => message.kind === "text");
+    assert.equal(textRequests.length, 120);
+    for (const message of textRequests) worker.reply(message.id, vector());
+    while (!worker.messages.some(message => message.kind === "image")) await new Promise(resolve => setTimeout(resolve, 0));
+    worker.reply(worker.messages.find(message => message.kind === "image").id, vector());
+    const results = await Promise.all(settled);
+    assert.ok(results.slice(0, -1).every(error => error instanceof Error && error.name === "AbortError"));
+    assert.equal(results.at(-1), undefined);
+    assert.deepEqual(published, [119]); assert.equal(raster.loads, 1);
+    const events = JSON.parse(exportDiagnostics()).events;
+    assert.ok(events.length <= diagnosticEventLimit);
+    const terminals = events.filter((event: any) => event.step === "action" && event.outcome !== "started");
+    assert.equal(terminals.filter((event: any) => event.outcome === "succeeded").length, 1);
+    assert.equal(terminals.at(-1).count, 1);
+    assert.equal(exportDiagnostics().includes("private"), false);
+  } finally {engine.clear(); clearDiagnostics();}
+});
+
+test("visual diagnostics expose model waits, incomplete previews and timeout recovery without query or source data", async () => {
+  clearDiagnostics();
+  const workers: FakeWorker[] = [];
+  const engine = new SemanticFindSession(() => {
+    const worker = new FakeWorker(workers.length ? undefined : () => {}); workers.push(worker); return worker as unknown as Worker;
+  }, resources(), 10);
+  try {
+    await assert.rejects(engine.search([photo("private-source")], "private query", () => true, () => {}));
+    let events = JSON.parse(exportDiagnostics()).events;
+    assert.ok(events.some((event: any) => event.step === "prepare" && event.outcome === "started"));
+    assert.equal(events.at(-1).outcome, "failed"); assert.equal(events.at(-1).reason, "unavailable");
+    assert.equal(await engine.search([photo("private-source"), {...photo("missing"), previewAvailable: false}], "private query", () => true, () => {}), "incomplete");
+    events = JSON.parse(exportDiagnostics()).events;
+    assert.equal(events.at(-1).outcome, "failed"); assert.equal(events.at(-1).count, 1);
+    await engine.search([photo("private-source")], "private query", () => true, () => {});
+    assert.equal(JSON.parse(exportDiagnostics()).events.at(-1).outcome, "succeeded");
+    assert.equal(exportDiagnostics().includes("private"), false);
+  } finally {engine.clear(); clearDiagnostics();}
+});
 
 test("missing retained previews are distinct from model failures and never initialize a model", async () => {
   let workers = 0;
