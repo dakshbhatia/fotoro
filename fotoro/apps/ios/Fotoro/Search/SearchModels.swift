@@ -247,6 +247,12 @@ struct SearchResponse: Sendable {
   var indexed = 0
   var total = 0
   var availablePreviews = 0
+  // Visual similarity cannot prove numbers in receipts or other identifiers.
+  // Recognized date constraints are removed before checking the search text.
+  var permitsSemanticMatches: Bool {
+    meaning?.evidenceClass != 3
+      && NaturalDateQuery.parse(query).text.rangeOfCharacter(from: .decimalDigits) == nil
+  }
 }
 struct SearchWorkFence: Sendable {
   private(set) var generation: UInt64 = 0

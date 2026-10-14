@@ -21,6 +21,7 @@
     "test:api": "pnpm --filter @fotoro/api test",
     "test:web": "pnpm --filter @fotoro/web test",
     "test:ios": "node tools/test-ios.mjs",
+    "test:sync:retry:host": "node tools/test-sync-retry-host.mjs",
     "test:ios-preview-audit": "node --experimental-vm-modules tools/check-ios-preview.test.mjs",
     "test:release-artifact": "node --experimental-vm-modules --test tools/build-testflight.test.mjs && node --experimental-vm-modules tools/check-ios-release.test.mjs",
     "test:asc-metadata": "node --test tools/asc-metadata.test.mjs",

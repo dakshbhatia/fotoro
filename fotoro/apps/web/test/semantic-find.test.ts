@@ -434,3 +434,24 @@ test("filename retrieval stays exact despite high visual scores and needs no inf
   const dated = new PhotoSearchIndex(photos).search("city 2026-10-03");
   assert.deepEqual(addSemanticMatches(dated, scores, new Set(eligibleSemanticPhotos(photos, dated.query).map(value => value.id))).photoIds, ["singapore"]);
 });
+
+test("receipt identifiers stay exact, including absent and Unicode numbers, without model or preview feedback", () => {
+  const receipt = {...photo("receipt"), previewAvailable: false,
+    ocr: {photoID: "receipt", revision: "receipt", processor: "fixture-v1", status: "complete" as const,
+      text: "INVOICE 4826", confidence: .94}};
+  const photos = [receipt, photo("singapore")];
+  for (const query of ["invoice 4826", "invoice 4827", "4826", "invoice ٤٨٢٦", "room A104"]) {
+    const base = new PhotoSearchIndex(photos).search(query);
+    assert.equal(addSemanticMatches(base, new Map([["singapore", .99]]), new Set(photos.map(p => p.id))), base);
+    let result!: SearchResult;
+    function ExactSearch() {
+      result = useSemanticFind(photos, base, true, "account:one");
+      return createElement("output", null, result.photoIds.join(","));
+    }
+    renderToStaticMarkup(createElement(ExactSearch));
+    assert.equal(result.searching, undefined);
+    assert.equal(result.visualStatus, undefined);
+  }
+  assert.deepEqual(new PhotoSearchIndex(photos).search("invoice 4826").photoIds, ["receipt"]);
+  assert.deepEqual(new PhotoSearchIndex(photos).search("invoice 4827").photoIds, []);
+});

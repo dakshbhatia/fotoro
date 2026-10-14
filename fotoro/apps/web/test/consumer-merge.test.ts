@@ -7,6 +7,7 @@ import {PhotoSearchIndex} from "../src/local/search";
 import type {LocalPhoto} from "../src/local/resources";
 import type {Photo} from "../src/library/catalog";
 import {withAnnotationLocation} from "@fotoro/contracts/location";
+import {browseFavoritePhotoIDs} from "../src/local/consumer-range";
 
 test("combined canvas keeps local objects and source order when saved originals overlap", () => {
   const a = {id: "a", source: "local"}, b = {id: "b", source: "local"};
@@ -45,6 +46,15 @@ function matchingCapture() {
   const snapshot: OwnedPhotoSnapshot = {accountId: "owner", token: {}, current: () => current, photos: [saved], preview: async () => new Blob()};
   return {now, captured, local, saved, snapshot, invalidate: () => {current = false;}};
 }
+
+test("a pending local Unfavorite cannot reappear through the overlapping Saved metadata scope", () => {
+  const {local, snapshot} = matchingCapture();
+  const saved = savedSearchPhotos(snapshot, [local]);
+  assert.equal(saved[0].favorite, true);
+  assert.deepEqual([...browseFavoritePhotoIDs(saved, merge([local], saved))], []);
+  const favorite = {...local, favorite: true};
+  assert.deepEqual([...browseFavoritePhotoIDs(saved, merge([favorite], saved))], [local.id]);
+});
 
 test("matching saved capture evidence reaches search details without replacing local originals or edits", () => {
   const {now, captured, local, snapshot} = matchingCapture(), before = {...local, labels: [...local.labels!]};

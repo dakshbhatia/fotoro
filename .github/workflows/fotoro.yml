@@ -47,6 +47,9 @@ jobs:
       - run: npm install --global pnpm@10.17.1
       - run: pnpm install --frozen-lockfile
         working-directory: fotoro
+      - name: Sync recovery host tests
+        working-directory: fotoro
+        run: pnpm test:sync:retry:host
       - name: Native tests against public local services
         working-directory: fotoro
         run: |

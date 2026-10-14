@@ -16,6 +16,7 @@ enum TransferResumeOutcome: Equatable { case idle, finished, cancelled }
   private(set) var running = false
   private(set) var activeTransfer: PhotoSyncItemStatus?
   var errors: [String: String] = [:]
+  private(set) var retryableErrors: Set<String> = []
   private var foregroundGeneration = UUID()
   private var settlementWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
   private let background = BackgroundUploadTransport.shared
@@ -99,6 +100,8 @@ enum TransferResumeOutcome: Equatable { case idle, finished, cancelled }
   @discardableResult func resumePending(only allowedPhotoIDs: Set<String>? = nil,
     stillAuthorized authorization: (() -> Bool)? = nil) async -> TransferResumeOutcome {
     guard vault.isUnlocked, !running else { return .idle }
+    if let allowedPhotoIDs { retryableErrors.subtract(allowedPhotoIDs) }
+    else { retryableErrors = [] }
     running = true
     defer {
       running = false
@@ -227,6 +230,7 @@ enum TransferResumeOutcome: Equatable { case idle, finished, cancelled }
           errors[e.photo.photoId] = nil
         } catch is CancellationError { return .cancelled } catch {
           errors[e.photo.photoId] = error.localizedDescription
+          if AutomaticPhotoSyncRetryPolicy.permits(error) { retryableErrors.insert(e.photo.photoId) }
         }
       }
     } catch is CancellationError { return .cancelled } catch { errors["journal"] = error.localizedDescription }

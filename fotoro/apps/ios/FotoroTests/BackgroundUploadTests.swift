@@ -3,6 +3,29 @@ import XCTest
 @testable import Fotoro
 
 final class BackgroundUploadTests: XCTestCase {
+  func testBackgroundRetryClassificationSurvivesReceiptRestartWithoutRetryingPermanentFailures() throws {
+    let cases: [(Int?, Int?, URL?, Bool)] = [
+      (nil, NSURLErrorNetworkConnectionLost, nil, true),
+      (503, nil, origin, true), (429, nil, origin, true),
+      (401, nil, origin, false), (403, nil, origin, false),
+      (nil, NSURLErrorCancelled, nil, false),
+      (nil, NSURLErrorSecureConnectionFailed, nil, false),
+      (503, nil, URL(string: "https://evil.example"), false),
+    ]
+    for (status, code, url, retryable) in cases {
+      let first = try ledger()
+      defer { try? FileManager.default.removeItem(at: first.root) }
+      try first.authorize(accountId: account, fixture: false, baseURL: origin)
+      let id = identity()
+      try first.register(id, ciphertextBytes: 100, ciphertextSha256: "digest")
+      try first.complete(id, statusCode: status, responseURL: url, errorCode: code)
+      let reopened = try BackgroundUploadLedger(root: first.root)
+      let record = try XCTUnwrap(reopened.record(id))
+      XCTAssertEqual(record.state, .failed)
+      XCTAssertEqual(AutomaticPhotoSyncRetryPolicy.permits(record.failure), retryable)
+    }
+  }
+
   private let account = "11111111-1111-4111-8111-111111111111"
   private let photo = "22222222-2222-4222-8222-222222222222"
   private let representation = "33333333-3333-4333-8333-333333333333"

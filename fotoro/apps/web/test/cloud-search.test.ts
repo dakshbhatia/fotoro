@@ -5,8 +5,24 @@ import { cloudSearchRecords } from "../src/library/search";
 import {savedSearchPhotos, savedMetadataRecords, accountSearchResult, accountSearchResultAsync, SavedMetadataProjection} from "../src/library/consumer-search";
 import type { Photo } from "../src/library/catalog";
 import {withAnnotationLocation} from "@fotoro/contracts/location";
+import {inBrowseRange} from "../src/local/consumer-range";
 const digest = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const photo = {manifest: {photoId: "cloud-id", ownerAccountId: "owner"}, metadata: {filename: "IMG_001.jpg", sourceDate: "2026-10-01T12:00:00Z", dateSource: "exif", originalSha256: digest}, annotations: {version: 1, photoId: "cloud-id", originalSha256: digest, labels: ["Family dinner"], ocr: {text: "Invoice number 1234", confidence: 0.9, processor: "native-vision-v1"}}} as Photo;
+test("Favorites scope uses verified annotations across cached metadata before the result limit", () => {
+  const photos = Array.from({length: 250}, (_, i) => ({...photo,
+    manifest: {...photo.manifest, photoId: `photo-${i}`},
+    annotations: {...photo.annotations!, photoId: `photo-${i}`, favorite: i === 240}}));
+  photos[241] = {...photos[241], annotations: {...photos[241].annotations!, favorite: true, originalSha256: "stale"}};
+  const records = cloudSearchRecords(photos);
+  const now = Date.parse("2026-10-14T12:00:00Z");
+  const allowedIds = new Set(records.filter(p => inBrowseRange(p, true, true, now)).map(p => p.id));
+  assert.deepEqual([...allowedIds], ["photo-240"]);
+  assert.deepEqual(new PhotoSearchIndex(records).search("family", {allowedIds}).photoIds, ["photo-240"]);
+  const saved = savedSearchPhotos({accountId: "owner", token: {}, current: () => true, photos, preview: async () => new Blob()}, []);
+  assert.deepEqual(saved.filter(p => inBrowseRange(p, true, true, now)).map(p => p.id), ["saved:photo-240"]);
+  assert.equal(inBrowseRange(records[240], false, true, now + 90 * 86400000), true);
+  assert.equal(inBrowseRange(records[240], true, true, now + 90 * 86400000), false);
+});
 test("saved private locations restore names and GPS search while machine facts stay hidden", () => {
   const location = {latitude: 41.9028, longitude: 12.4964, source: "photos" as const, name: "Villa Borghese"};
   const located = {...photo, annotations: withAnnotationLocation(photo.annotations!, location)};

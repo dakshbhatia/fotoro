@@ -180,7 +180,7 @@ import Observation
       waiters.removeValue(forKey: token)
       if record.state == .uploaded { continuation.resume() }
       else if record.state == .cancelled { continuation.resume(throwing: CancellationError()) }
-      else { continuation.resume(throwing: BackgroundUploadFailure(message: record.message ?? "Upload needs retry")) }
+      else { continuation.resume(throwing: record.failure) }
     }
   }
   private func interruptWaiters(where shouldInterrupt: (BackgroundUploadIdentity) -> Bool) {
@@ -223,7 +223,7 @@ import Observation
       task.originalRequest, identity: identity, authorizedOrigin: ledger.authorizedOrigin)
     // Apple follows background redirects without calling the redirect delegate. The dedicated
     // server route must never redirect; reject an unexpected final URL and do not promote it.
-    let sameURL = response?.url == task.originalRequest?.url
+    let sameURL = (response?.url ?? task.currentRequest?.url) == task.originalRequest?.url
     do {
       try ledger.complete(
         identity, statusCode: response?.statusCode, responseURL: response?.url,

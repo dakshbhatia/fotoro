@@ -177,6 +177,14 @@ extension LibraryStore {
   func putBackupSource(_ source: BackupSource) throws {
     try database.write { db in try putBackupSource(source, db: db) }
   }
+  func putBackupSource(_ source: BackupSource, replacing expected: BackupSource) throws {
+    guard source.id == expected.id else { throw CancellationError() }
+    try database.write { db in
+      guard let bytes = try Data.fetchOne(db, sql: "SELECT value FROM backupSources WHERE id=?", arguments: [source.id]),
+        try Wire.decode(BackupSource.self, bytes) == expected else { throw CancellationError() }
+      try putBackupSource(source, db: db)
+    }
+  }
   func retainQueuedBackup(_ source: BackupSource, currentRevision: String?) throws -> BackupSource {
     var retained = source
     retained.id = "fotoro-retained-original:" + source.photoId
@@ -184,11 +192,10 @@ extension LibraryStore {
     let current = BackupSource(id: source.id, photoId: Wire.id(), sourceRevision: currentRevision)
     try database.write { db in
       guard let bytes = try Data.fetchOne(db, sql: "SELECT value FROM backupSources WHERE id=?", arguments: [source.id]) else {
-        throw FotoroError("Photo changed during sync. Try again.")
+        throw CancellationError()
       }
       let previous = try Wire.decode(BackupSource.self, bytes)
-      guard previous.phase == .queued, previous.photoId == source.photoId,
-        previous.sourceRevision == source.sourceRevision else { throw FotoroError("Photo changed during sync. Try again.") }
+      guard previous.phase == .queued, previous == source else { throw CancellationError() }
       try putBackupSource(retained, db: db)
       try putBackupSource(current, db: db)
     }
@@ -388,6 +395,7 @@ struct BackupStatus: Codable {
   let store: LibraryStore
   private(set) var status: BackupStatus
   private(set) var activeSource: BackupSource?
+  private(set) var retryableFailure = false
   private var selectionIDs: Set<String>?
   private var selectionDirty = false
   private var task: Task<Void, Never>?
@@ -469,6 +477,7 @@ struct BackupStatus: Codable {
     reconcile: ((BackupSource, BackupCandidate) async throws -> Bool)? = nil
   ) {
     guard task == nil else { return }
+    retryableFailure = false
     task = Task {
       defer { task = nil }
       do {
@@ -622,6 +631,7 @@ struct BackupStatus: Codable {
             try store.putBackupSource(source)
           } catch {
             try fence()
+            retryableFailure = retryableFailure || AutomaticPhotoSyncRetryPolicy.permits(error)
             if (verificationIDs.contains(source.id)
               && NativeDiagnosticOutcome.failure(for: error, taskCancelled: Task.isCancelled) == .cancelled)
               || (error is CancellationError && source.phase == .queued) {
@@ -662,6 +672,7 @@ struct BackupStatus: Codable {
         status.message = "Resume while the app is open and your account is unlocked."
         try? refreshCounts()
       } catch {
+        retryableFailure = retryableFailure || AutomaticPhotoSyncRetryPolicy.permits(error)
         status.phase = .failed
         status.message = error.localizedDescription
         try? refreshCounts()

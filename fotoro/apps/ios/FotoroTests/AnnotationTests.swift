@@ -421,11 +421,13 @@ final class AnnotationTests: XCTestCase {
     try ledger.edit(value, photo: photo, bundle: bundle, card: card)
     await worker.resume(bundle: bundle, card: card, valid: { true }, send: { _ in throw URLError(.notConnectedToInternet) })
     XCTAssertNotNil(worker.errors[photo.id])
+    XCTAssertEqual(worker.retryableErrors, [photo.id])
     let acknowledged = try XCTUnwrap(ledger.state(photo.id)?.pending)
     try ledger.receive(acknowledged, photo: photo, bundle: bundle, card: card)
     XCTAssertTrue(try ledger.pendingIDs().isEmpty)
     await worker.resume(bundle: bundle, card: card, valid: { true }, send: { _ in XCTFail("Already acknowledged edits need no write") })
     XCTAssertTrue(worker.errors.isEmpty)
+    XCTAssertTrue(worker.retryableErrors.isEmpty)
   }
   @MainActor func testUnresolvedConflictErrorRemainsUntilTheUserChooses() async throws {
     let (store, photo, bundle, card) = try context()
@@ -434,6 +436,7 @@ final class AnnotationTests: XCTestCase {
     let mine = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256, labels: ["Mine"])
     try ledger.edit(mine, photo: photo, bundle: bundle, card: card)
     await worker.resume(bundle: bundle, card: card, valid: { true }, send: { _ in throw FotoroError("VERSION_CONFLICT") })
+    XCTAssertTrue(worker.retryableErrors.isEmpty)
     let remote = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256, labels: ["Other device"])
     try ledger.receive(AnnotationCrypto.seal(remote, revision: 1, photo: photo, accountId: card.accountId, bundle: bundle), photo: photo, bundle: bundle, card: card)
     await worker.resume(bundle: bundle, card: card, valid: { true }, send: { _ in XCTFail("An unresolved conflict cannot publish") })
@@ -538,23 +541,24 @@ final class AnnotationTests: XCTestCase {
         if let value { UserDefaults.standard.set(value, forKey: key) }
         else { UserDefaults.standard.removeObject(forKey: key) }
       }
-      try? FileManager.default.removeItem(at: firstRoot)
-      try? FileManager.default.removeItem(at: secondRoot)
+      for root in [firstRoot, secondRoot] where FileManager.default.fileExists(atPath: root.path) {
+        try? FileManager.default.removeItem(at: root)
+      }
     }
     let first = try AppServices(root: firstRoot)
     defer { first.vault.lock() }
     try first.configureAPI("http://127.0.0.1:8787")
-    // Hosted timeouts have occurred on initial loopback recovery after the build's
-    // readiness probe. Restart only this public-fixture setup on one timeout;
+    // Hosted transport losses have occurred on initial loopback recovery after
+    // the build's readiness probe. Restart only this setup on one timeout/reset;
     // recover obtains a fresh challenge rather than replaying a consumed proof.
     for attempt in 0..<2 {
       do {
         try await first.auth.recover("fotoro1.\(secret.accountId).\(secret.recoverySecret)")
         break
-      } catch let error as URLError where error.code == .timedOut && attempt == 0 {
+      } catch let error as URLError where [.timedOut, .networkConnectionLost].contains(error.code) && attempt == 0 {
         try Task.checkCancellation()
         XCTAssertEqual(first.api.baseURL.absoluteString, "http://127.0.0.1:8787")
-        print("Public fixture recovery setup timed out; starting the final fresh ceremony.")
+        print("Public fixture recovery setup lost transport; starting the final fresh ceremony.")
       }
     }
     XCTAssertTrue(first.session.isSignedIn)

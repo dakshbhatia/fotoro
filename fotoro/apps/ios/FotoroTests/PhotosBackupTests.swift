@@ -29,6 +29,256 @@ private final class BackupInventoryDecodeGate: @unchecked Sendable {
 }
 
 final class PhotosBackupTests: XCTestCase {
+  func testConditionalCheckpointWriteRejectsChangedAndRemovedSourcesWithoutResurrection() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try LibraryStore(root: root)
+    var source = BackupSource(id: "source", photoId: Wire.id(), sourceRevision: "current")
+    source.phase = .queued; source.originalSha256 = "earlier-digest"
+    try store.putBackupSource(source)
+    var changed = source
+    changed.originalSha256 = "newer-digest"; changed.message = "Newer checkpoint"
+    try store.putBackupSource(changed, replacing: source)
+    XCTAssertThrowsError(try store.putBackupSource(source, replacing: source)) { XCTAssertTrue($0 is CancellationError) }
+    XCTAssertThrowsError(try store.retainQueuedBackup(source, currentRevision: "after")) { XCTAssertTrue($0 is CancellationError) }
+    XCTAssertEqual(try store.backupSourceIfPresent(id: source.id), changed)
+    XCTAssertEqual(try store.backupSources().count, 1, "A stale retained-original write must not add a checkpoint")
+    try writeBackupFixture(store) { db in try db.execute(sql: "DELETE FROM backupSources WHERE id=?", arguments: [source.id]) }
+    XCTAssertThrowsError(try store.putBackupSource(source, replacing: changed)) { XCTAssertTrue($0 is CancellationError) }
+    XCTAssertThrowsError(try store.retainQueuedBackup(changed, currentRevision: "after")) { XCTAssertTrue($0 is CancellationError) }
+    XCTAssertNil(try store.backupSourceIfPresent(id: source.id))
+    XCTAssertTrue(try store.backupSources().isEmpty)
+  }
+
+  @MainActor func testAutomaticSyncRetriesFailedPreflightWithoutAnotherUserAction() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
+    let services = try await context.enroll()
+    defer { services.vault.lock() }
+    services.automaticPhotosAuthorization = { .limited }
+    services.photosBackupSnapshot = { _ in [] }
+    let gate = BackupGate(), waiting = expectation(description: "Automatic retry waits")
+    defer { gate.open() }
+    var delays: [Duration] = []
+    services.automaticSyncRetrySleep = { delay in
+      delays.append(delay); waiting.fulfill(); await gate.wait(); try Task.checkCancellation()
+    }
+    PausedUploadProtocol.server.failCatalogReads(1)
+    try services.enableAutomaticPhotoSync()
+    await services.waitForAutomaticPhotoSync()
+    await fulfillment(of: [waiting], timeout: 3)
+    XCTAssertEqual(services.automaticPhotoSync.phase, .needsAttention)
+    XCTAssertEqual(delays, [.seconds(5)])
+    let retry = Task { await services.waitForAutomaticPhotoSyncRetry() }
+    await Task.yield()
+    gate.open(); await retry.value
+    XCTAssertEqual(services.automaticPhotoSync.phase, .ready)
+    XCTAssertFalse(services.automaticSyncRetryPending)
+    XCTAssertEqual(PausedUploadProtocol.server.requests.filter { $0.path == "/v1/changes" }.count, 2)
+    XCTAssertTrue(PausedUploadProtocol.server.requests.allSatisfy { $0.method == "GET" })
+  }
+
+  @MainActor func testAutomaticRetryResumesQueuedCiphertextWithoutReadingOriginalAgain() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
+    let services = try await context.enroll()
+    defer { services.vault.lock() }
+    let bytes = try Data(contentsOf: context.sample), capturedAt = Date()
+    let reads = AutomaticSourceReads()
+    services.automaticPhotosAuthorization = { .limited }
+    services.photosBackupSnapshot = { _ in [BackupCandidate(id: "source", capturedAt: capturedAt, sourceRevision: "current")] }
+    services.importer = PhotoImport(store: services.store, sourceReader: { source in
+      await reads.record(source.resourceIdentifier); return (bytes, "public-sample.jpg", false)
+    }, sourceRevision: { _ in "current" })
+    let gate = BackupGate(), waiting = expectation(description: "Queued retry waits")
+    defer { gate.open() }
+    services.automaticSyncRetrySleep = { _ in waiting.fulfill(); await gate.wait(); try Task.checkCancellation() }
+    PausedUploadProtocol.server.failCommitReads(.networkConnectionLost)
+    try services.enableAutomaticPhotoSync()
+    await services.waitForAutomaticPhotoSync()
+    await fulfillment(of: [waiting], timeout: 3)
+    let queued = try services.store.backupSource("source")
+    XCTAssertEqual(queued.phase, .queued)
+    XCTAssertEqual(try services.journal.entries().count, 1)
+    let retry = Task { await services.waitForAutomaticPhotoSyncRetry() }
+    await Task.yield()
+    gate.open(); await retry.value
+    let current = try services.store.backupSource("source")
+    XCTAssertEqual(current.phase, .committed)
+    XCTAssertEqual(current.photoId, queued.photoId)
+    XCTAssertEqual(current.originalSha256, bytes.digest)
+    let readIDs = await reads.values()
+    XCTAssertEqual(readIDs, ["source"])
+    XCTAssertTrue(try services.journal.entries().isEmpty)
+    XCTAssertEqual(PausedUploadProtocol.server.publishedPhotoIDs, [queued.photoId])
+    XCTAssertFalse(services.automaticSyncRetryPending)
+  }
+
+  @MainActor func testRepeatedAutomaticFailuresBackOffAndSuccessfulRecoveryResetsDelay() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
+    let services = try await context.enroll()
+    defer { services.vault.lock() }
+    services.automaticPhotosAuthorization = { .limited }
+    services.photosBackupSnapshot = { _ in [] }
+    let gates = [BackupGate(), BackupGate(), BackupGate()]
+    let waits = (0..<3).map { expectation(description: "Retry delay \($0)") }
+    defer { gates.forEach { $0.open() } }
+    var delays: [Duration] = []
+    services.automaticSyncRetrySleep = { delay in
+      let index = delays.count
+      delays.append(delay)
+      guard gates.indices.contains(index) else { XCTFail("Unexpected extra retry"); throw CancellationError() }
+      waits[index].fulfill(); await gates[index].wait(); try Task.checkCancellation()
+    }
+    PausedUploadProtocol.server.failCatalogReads(2)
+    try services.enableAutomaticPhotoSync(); await services.waitForAutomaticPhotoSync()
+    await fulfillment(of: [waits[0]], timeout: 3)
+    let first = Task { await services.waitForAutomaticPhotoSyncRetry() }
+    await Task.yield(); gates[0].open(); await first.value
+    await fulfillment(of: [waits[1]], timeout: 3)
+    XCTAssertEqual(delays, [.seconds(5), .seconds(15)])
+    let second = Task { await services.waitForAutomaticPhotoSyncRetry() }
+    await Task.yield(); gates[1].open(); await second.value
+    XCTAssertEqual(services.automaticPhotoSync.phase, .ready)
+    XCTAssertFalse(services.automaticSyncRetryPending)
+    PausedUploadProtocol.server.failCatalogReads(1)
+    services.kickAutomaticPhotoSync(); await services.waitForAutomaticPhotoSync()
+    await fulfillment(of: [waits[2]], timeout: 3)
+    XCTAssertEqual(delays, [.seconds(5), .seconds(15), .seconds(5)])
+    let third = Task { await services.waitForAutomaticPhotoSyncRetry() }
+    await Task.yield(); gates[2].open(); await third.value
+    XCTAssertEqual(services.automaticPhotoSync.phase, .ready)
+    XCTAssertEqual(PausedUploadProtocol.server.requests.filter { $0.path == "/v1/changes" }.count, 5)
+  }
+
+  @MainActor func testTemporaryChangedOriginalVerificationRetriesAndPreservesItsEarlierSavedCopy() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
+    let services = try await context.enroll()
+    defer { services.vault.lock() }
+    let bytes = try Data(contentsOf: context.sample), capturedAt = Date()
+    var revision = "before"
+    services.automaticPhotosAuthorization = { .limited }
+    services.photosBackupSnapshot = { _ in [BackupCandidate(id: "source", capturedAt: capturedAt, sourceRevision: revision)] }
+    services.importer = PhotoImport(store: services.store,
+      sourceReader: { _ in (bytes, "public-sample.jpg", false) }, sourceRevision: { _ in "before" })
+    try services.enableAutomaticPhotoSync(); await services.waitForAutomaticPhotoSync()
+    let saved = try services.store.backupSource("source")
+    XCTAssertEqual(saved.phase, .committed)
+    let published = PausedUploadProtocol.server.publishedPhotoIDs
+    let reads = AutomaticSourceReads()
+    revision = "after"
+    services.importer = PhotoImport(store: services.store, sourceReader: { source in
+      await reads.record(source.resourceIdentifier)
+      if await reads.values().count == 1 { throw URLError(.networkConnectionLost) }
+      return (bytes, "public-sample.jpg", false)
+    }, sourceRevision: { _ in "after" })
+    let gate = BackupGate(), waiting = expectation(description: "Verification retry waits")
+    defer { gate.open() }
+    services.automaticSyncRetrySleep = { _ in waiting.fulfill(); await gate.wait(); try Task.checkCancellation() }
+    services.kickAutomaticPhotoSync(sourcesChanged: true); await services.waitForAutomaticPhotoSync()
+    await fulfillment(of: [waiting], timeout: 3)
+    let interrupted = try services.store.backupSource("source")
+    XCTAssertEqual(interrupted.phase, .committed)
+    XCTAssertEqual(interrupted.photoId, saved.photoId)
+    XCTAssertEqual(interrupted.sourceRevision, "before")
+    XCTAssertNotNil(interrupted.message)
+    XCTAssertEqual(services.automaticPhotoSync.phase, .needsAttention)
+    let retry = Task { await services.waitForAutomaticPhotoSyncRetry() }
+    await Task.yield(); gate.open(); await retry.value
+    let current = try services.store.backupSource("source")
+    XCTAssertEqual(current.photoId, saved.photoId)
+    XCTAssertEqual(current.sourceRevision, "after")
+    XCTAssertNil(current.message)
+    XCTAssertEqual(current.originalSha256, bytes.digest)
+    XCTAssertEqual(PausedUploadProtocol.server.publishedPhotoIDs, published)
+    XCTAssertEqual(services.automaticPhotoSync.phase, .ready)
+  }
+
+  @MainActor func testHeldOriginalVerificationCannotOverwriteAReplacementCheckpoint() async throws {
+    for unavailable in [false, true] {
+      let context = try PausedUploadContext()
+      defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
+      let services = try await context.enroll()
+      defer { services.vault.lock() }
+      let bytes = try Data(contentsOf: context.sample), capturedAt = Date()
+      var revision = "before"
+      services.automaticPhotosAuthorization = { .limited }
+      services.photosBackupSnapshot = { _ in [BackupCandidate(id: "source", capturedAt: capturedAt, sourceRevision: revision)] }
+      services.importer = PhotoImport(store: services.store,
+        sourceReader: { _ in (bytes, "public-sample.jpg", false) }, sourceRevision: { _ in "before" })
+      try services.enableAutomaticPhotoSync(); await services.waitForAutomaticPhotoSync()
+      let saved = try services.store.backupSource("source")
+      XCTAssertEqual(saved.phase, .committed)
+      revision = "after"
+      let gate = BackupGate(), entered = expectation(description: "Held original verification")
+      defer { gate.open() }
+      gate.didEnter = { entered.fulfill() }
+      services.importer = PhotoImport(store: services.store, sourceReader: { _ in
+        await gate.wait()
+        if unavailable { throw URLError(.networkConnectionLost) }
+        return (bytes, "public-sample.jpg", false)
+      }, sourceRevision: { _ in "after" })
+      services.kickAutomaticPhotoSync(sourcesChanged: true)
+      await fulfillment(of: [entered], timeout: 3)
+      var replacement = BackupSource(id: saved.id, photoId: Wire.id(), sourceRevision: "newer-checkpoint")
+      replacement.message = "Preserve this newer choice"
+      try services.store.putBackupSource(replacement)
+      gate.open(); await services.waitForAutomaticPhotoSync()
+      XCTAssertEqual(try services.store.backupSourceIfPresent(id: saved.id), replacement)
+      XCTAssertEqual(services.backup.status.phase, .paused)
+      XCTAssertFalse(services.automaticSyncRetryPending)
+      XCTAssertNotNil(try services.store.backupPhoto(saved.photoId), "Keep the earlier verified original")
+    }
+  }
+
+  @MainActor func testDelayedAutomaticRetryCannotResumeAfterAccessOrConsentWithdrawal() async throws {
+    for interruption in ["pause", "disable", "background", "lock", "account", "origin", "permission"] {
+      let context = try PausedUploadContext()
+      defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
+      let services = try await context.enroll()
+      defer { services.vault.lock() }
+      var permission = PHAuthorizationStatus.limited
+      services.automaticPhotosAuthorization = { permission }
+      services.photosBackupSnapshot = { _ in [] }
+      let gate = BackupGate(), waiting = expectation(description: "Held retry \(interruption)")
+      defer { gate.open() }
+      services.automaticSyncRetrySleep = { _ in waiting.fulfill(); await gate.wait(); try Task.checkCancellation() }
+      PausedUploadProtocol.server.failCatalogReads(1)
+      try services.enableAutomaticPhotoSync(); await services.waitForAutomaticPhotoSync()
+      await fulfillment(of: [waiting], timeout: 3)
+      let reads = PausedUploadProtocol.server.requests.count
+      let retry = Task { await services.waitForAutomaticPhotoSyncRetry() }
+      await Task.yield()
+      switch interruption {
+      case "pause": services.pauseAutomaticPhotoSync()
+      case "disable": try services.disableAutomaticPhotoSync()
+      case "background": services.setPhotoSyncForeground(false)
+      case "lock": services.lockAccount()
+      case "account": services.session.accountId = Wire.id()
+      case "origin": services.api.baseURL = URL(string: "https://other.test")!
+      default: permission = .denied
+      }
+      gate.open(); await retry.value
+      XCTAssertEqual(PausedUploadProtocol.server.requests.count, reads, interruption)
+      XCTAssertFalse(services.automaticSyncRetryPending, interruption)
+    }
+  }
+
+  @MainActor func testPermanentPreflightFailureDoesNotScheduleAutomaticRetry() async throws {
+    let context = try PausedUploadContext()
+    defer { context.restore(); try? FileManager.default.removeItem(at: context.root) }
+    let services = try await context.enroll()
+    defer { services.vault.lock() }
+    services.automaticPhotosAuthorization = { .limited }
+    services.photosBackupSnapshot = { _ in [] }
+    PausedUploadProtocol.server.failCatalogReads(1, code: .secureConnectionFailed)
+    try services.enableAutomaticPhotoSync(); await services.waitForAutomaticPhotoSync()
+    XCTAssertEqual(services.automaticPhotoSync.phase, .needsAttention)
+    XCTAssertFalse(services.automaticSyncRetryPending)
+  }
+
   @MainActor func testEarlierUploadCannotReplayLaterWorkAfterItsCheckpointChanges() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
     defer { try? FileManager.default.removeItem(at: root) }
@@ -2389,9 +2639,10 @@ private actor AutomaticSourceReads {
   var entered = false
   var allowed = true
   var continuation: CheckedContinuation<Void, Never>?
+  var didEnter: (() -> Void)?
   func wait() async {
     entered = true
-    await withCheckedContinuation { continuation = $0 }
+    await withCheckedContinuation { continuation = $0; didEnter?() }
   }
   func open() {
     continuation?.resume()
@@ -2466,9 +2717,12 @@ private final class PausedUploadServer: @unchecked Sendable {
   var commitGate: UploadRequestGate?
   private var annotationFailures = 0
   private var catalogFailures = 0
+  private var catalogFailureCode = URLError.Code.notConnectedToInternet
   private var commitFailure: URLError.Code?
   func failCommitReads(_ code: URLError.Code) { lock.lock(); defer { lock.unlock() }; commitFailure = code }
-  func failCatalogReads(_ count: Int) { lock.lock(); defer { lock.unlock() }; catalogFailures = count }
+  func failCatalogReads(_ count: Int, code: URLError.Code = .notConnectedToInternet) {
+    lock.lock(); defer { lock.unlock() }; catalogFailures = count; catalogFailureCode = code
+  }
   func failAnnotationWrites(_ count: Int) { lock.lock(); defer { lock.unlock() }; annotationFailures = count }
   var requests: [Request] {
     lock.lock()
@@ -2496,7 +2750,7 @@ private final class PausedUploadServer: @unchecked Sendable {
     recorded.append(Request(method: request.httpMethod ?? "GET", path: path, host: request.url?.host ?? ""))
     switch path {
     case "/v1/changes":
-      if catalogFailures > 0 { catalogFailures -= 1; throw URLError(.notConnectedToInternet) }
+      if catalogFailures > 0 { catalogFailures -= 1; throw URLError(catalogFailureCode) }
       return try Wire.encode(ChangePageV1(version: 1, mediaVersion: 1, changes: [], nextCursor: nil, hasMore: false))
     case "/v1/grants":
       return try Wire.encode(GrantInboxV1(version: 1, grants: []))
