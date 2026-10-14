@@ -1,4 +1,4 @@
-import {useEffect, useRef, useState} from "react";
+import {useEffect, useMemo, useRef, useState} from "react";
 import type {Photo, CatalogCoverage} from "./catalog";
 import {cloudSearchRecords} from "./search";
 import type {LocalPhoto} from "../local/resources";
@@ -101,9 +101,10 @@ export function useAccountSearch(query: string, scope: string, request: ((signal
     });
     return () => {controller.abort(); document.removeEventListener("visibilitychange", visibility); window.removeEventListener("fotoro-lock", withdraw); window.removeEventListener("pagehide", withdraw);};
   }, [request, enabled, visibleEpoch]);
-  if (published && published.request === request && enabled) return published.result.current?.() === false
-    ? {query, scope, meanings: [], photoIds: [], metadataIncomplete: true} satisfies SearchResult : published.result;
-  return {query, scope, meanings: [], photoIds: [], searching: !!request && enabled} satisfies SearchResult;
+  const pending = useMemo<SearchResult>(() => ({query, scope, meanings: [], photoIds: [], searching: !!request && enabled}), [query, scope, request, enabled]);
+  const stale = useMemo<SearchResult>(() => ({query, scope, meanings: [], photoIds: [], metadataIncomplete: true}), [query, scope]);
+  if (published && published.request === request && enabled) return published.result.current?.() === false ? stale : published.result;
+  return pending;
 }
 export function savedMetadataRecords(records: SearchPhoto[], local: LocalPhoto[]): SearchPhoto[] {
   const selected = new Map(local.flatMap(photo => {
@@ -122,7 +123,10 @@ export class SavedMetadataProjection {
   private binding = "";
   private records: SearchPhoto[] = [];
   read(source: SearchPhoto[] | undefined, local: LocalPhoto[]) {
-    if (!source) {this.source = undefined; this.binding = ""; this.records = []; return this.records;}
+    if (!source) {
+      if (this.source) this.records = [];
+      this.source = undefined; this.binding = ""; return this.records;
+    }
     const binding = JSON.stringify(local.filter(photo => photo.file instanceof File && comparableDigest(photo)).map(photo => [photo.id, comparableDigest(photo)]));
     if (this.source === source && this.binding === binding) return this.records;
     this.source = source; this.binding = binding;
@@ -202,7 +206,10 @@ export class SavedSearchProjection {
   private local: LocalPhoto[] = [];
   private photos: LocalPhoto[] = [];
   read(snapshot: OwnedPhotoSnapshot | null, local: LocalPhoto[]): LocalPhoto[] {
-    if (!snapshot?.current()) {this.snapshot = undefined; this.local = []; this.photos = []; return this.photos;}
+    if (!snapshot?.current()) {
+      if (this.snapshot) this.photos = [];
+      this.snapshot = undefined; this.local = []; return this.photos;
+    }
     if (this.snapshot?.current() && this.snapshot.token === snapshot.token && this.snapshot.accountId === snapshot.accountId
       && this.snapshot.photos === snapshot.photos && (this.local === local || !this.local.length && !local.length)) return this.photos;
     this.snapshot = snapshot; this.local = local;
