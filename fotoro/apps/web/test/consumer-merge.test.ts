@@ -113,6 +113,18 @@ test("matching saved location fills a selected original independently of date pr
   assert.deepEqual(index.search("gps").photoIds, [], "An already built location index cannot retain withdrawn account evidence");
 });
 
+test("local-only startup and a locked Saved library keep stable empty search inputs", () => {
+  const projection = new SavedSearchProjection(), initial = projection.read(null, []);
+  assert.equal(projection.read(null, []), initial);
+  const {snapshot, invalidate} = matchingCapture();
+  assert.equal(projection.read(snapshot, []).length, 1);
+  invalidate();
+  const locked = projection.read(snapshot, []);
+  assert.deepEqual(locked, []);
+  assert.equal(projection.read(snapshot, []), locked);
+  assert.equal(projection.read(null, []), locked);
+});
+
 test("Saved search and People sources survive Save availability and coverage updates", async () => {
   const {snapshot} = matchingCapture(), projection = new SavedSearchProjection();
   let release!: () => void, reads = 0;

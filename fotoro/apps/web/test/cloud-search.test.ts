@@ -110,6 +110,15 @@ test("asynchronous account index preserves literal, OCR, GPS and capture-date ev
 });
 
 
+test("metadata search keeps its empty input stable before account entry and after withdrawal", () => {
+  const projection = new SavedMetadataProjection(), initial = projection.read(undefined, []);
+  assert.equal(projection.read(undefined, []), initial);
+  assert.equal(projection.read(cloudSearchRecords([photo]), []).length, 1);
+  const withdrawn = projection.read(undefined, []);
+  assert.deepEqual(withdrawn, []);
+  assert.equal(projection.read(undefined, []), withdrawn);
+});
+
 test("the shared account index returns unloaded Saved display IDs and joins an exact local digest without broadening allowed sources", async () => {
   const records = cloudSearchRecords([photo]), shared = await PhotoSearchIndex.build(records, new AbortController().signal, () => true);
   const saved = savedMetadataRecords(records, []);
