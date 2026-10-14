@@ -6,7 +6,7 @@ final class AutomaticPhotoSyncRetryTests: XCTestCase {
   func testOnlyTemporaryTransportAndServerFailuresReceiveBoundedRetries() {
     for code in [URLError.Code.timedOut, .networkConnectionLost, .notConnectedToInternet,
       .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed] {
-      XCTAssertTrue(AutomaticPhotoSyncRetryPolicy.permits(URLError(code)))
+      XCTAssertTrue(AutomaticPhotoSyncRetryPolicy.permits(URLError(code)), "URL error \(code.rawValue) must be retryable")
     }
     for error in [CancellationError(), URLError(.cancelled), URLError(.secureConnectionFailed),
       URLError(.userAuthenticationRequired), FotoroError("STORAGE_QUOTA_EXCEEDED"),

@@ -39,11 +39,15 @@ suite.run()
 guard let run = suite.testRun, run.executionCount == ${expected}, run.failureCount == 0 else { exit(1) }
 `,
   ].join("\n"));
-  const result = spawnSync("xcrun", ["swift", "-swift-version", "5", "-I", libraries,
+  const executable = join(root, "sync-host-tests");
+  const compilation = spawnSync("xcrun", ["swiftc", "-swift-version", "5", "-I", libraries,
     "-F", frameworks, "-L", libraries,
     "-Xlinker", "-rpath", "-Xlinker", frameworks,
-    "-Xlinker", "-rpath", "-Xlinker", libraries, source],
+    "-Xlinker", "-rpath", "-Xlinker", libraries, source, "-o", executable],
   { stdio: "inherit", timeout: 60_000 });
+  if (compilation.error) throw compilation.error;
+  if (compilation.status !== 0) throw new Error("Sync host test compilation failed.");
+  const result = spawnSync(executable, [], {stdio: "inherit", timeout: 60_000});
   if (result.error) throw result.error;
   process.exitCode = result.status ?? 1;
 } finally { rmSync(root, { recursive: true, force: true }); }
