@@ -4,6 +4,53 @@ import XCTest
 @testable import Fotoro
 
 final class SearchStoreTests: XCTestCase {
+  func testCoveragePartitionsWholePhotosCatalogAndIgnoresStaleRetryAttempts() throws {
+    let index = try SearchIndex(), now = Date(timeIntervalSince1970: 1_790_000_000)
+    var records = ["complete", "pending", "failed", "unavailable"].map { SearchRecord(id: $0) }
+    records[0].ocrStatus = .complete; records[0].visualStatus = .complete
+    records[0].ocrText = "private text must never enter coverage"
+    try index.replacePermitted(records)
+    var saved = SearchRecord(id: "separate-saved-copy"); saved.scope = "saved"
+    try index.put(saved)
+    XCTAssertTrue(try index.applyOCR(nil, status: .failed, photoID: "failed", revision: "1", attemptedAt: now))
+    XCTAssertTrue(try index.applyOCR(nil, status: .unavailable, photoID: "unavailable", revision: "1", attemptedAt: now))
+    let ocr = try XCTUnwrap(index.analysisCoverage(now: now).first { $0.stage == .ocr })
+    XCTAssertEqual(ocr.total, 4); XCTAssertEqual(ocr.complete, 1); XCTAssertEqual(ocr.pending, 1)
+    XCTAssertEqual(ocr.failed, 1); XCTAssertEqual(ocr.unavailable, 1); XCTAssertEqual(ocr.deferred, 2)
+    XCTAssertEqual(ocr.nextRetry, now.addingTimeInterval(30))
+    let due = try XCTUnwrap(index.analysisCoverage(now: now.addingTimeInterval(301)).first { $0.stage == .ocr })
+    XCTAssertEqual(due.deferred, 0); XCTAssertNil(due.nextRetry)
+    XCTAssertEqual(due.failed, 1, "A retry becoming due does not mean recognition succeeded")
+    try index.database.write { db in
+      try db.execute(sql: "UPDATE searchAnalysisAttempts SET revision='withdrawn-revision'")
+    }
+    let stale = try XCTUnwrap(index.analysisCoverage(now: now).first { $0.stage == .ocr })
+    XCTAssertEqual(stale.deferred, 0); XCTAssertNil(stale.nextRetry)
+    try index.replacePermitted([])
+    XCTAssertTrue(try index.analysisCoverage(now: now).allSatisfy { $0.total == 0 && $0.complete == 0 && $0.deferred == 0 })
+  }
+  #if !FOTORO_LOCAL_PREVIEW
+  func testSemanticCoverageDistinguishesModelWaitFailuresAndCurrentVectors() throws {
+    let index = try SearchIndex(), now = Date(timeIntervalSince1970: 1_790_000_000)
+    try index.replacePermitted(["complete", "model", "failed", "unavailable", "pending"].map { SearchRecord(id: $0) })
+    var vector = [Float](repeating: 0, count: 512); vector[0] = 1
+    XCTAssertTrue(try index.applySemantic(vector, photoID: "complete", revision: "1"))
+    for (id, outcome) in [("model", SearchAnalysisOutcome.modelDeferred), ("failed", .failed), ("unavailable", .unavailable)] {
+      XCTAssertTrue(try index.deferSemantic(outcome, photoID: id, revision: "1", attemptedAt: now))
+    }
+    var semantic = try XCTUnwrap(index.analysisCoverage(now: now).first { $0.stage == .semantic })
+    XCTAssertEqual(semantic.total, 5); XCTAssertEqual(semantic.complete, 1); XCTAssertEqual(semantic.pending, 2)
+    XCTAssertEqual(semantic.failed, 1); XCTAssertEqual(semantic.unavailable, 1)
+    XCTAssertEqual(semantic.modelDeferred, 1); XCTAssertEqual(semantic.deferred, 3)
+    try index.database.write { db in
+      try db.execute(sql: "UPDATE searchVectors SET revision='old'")
+      try db.execute(sql: "UPDATE searchAnalysisAttempts SET processor='old'")
+    }
+    semantic = try XCTUnwrap(index.analysisCoverage(now: now).first { $0.stage == .semantic })
+    XCTAssertEqual(semantic.complete, 0); XCTAssertEqual(semantic.pending, 5)
+    XCTAssertEqual(semantic.deferred, 0); XCTAssertEqual(semantic.modelDeferred, 0)
+  }
+  #endif
   func testCancellingRunningSQLiteSearchUnblocksSuccessorAndPreservesAnalysisWrites() async throws {
     let index = try SearchIndex()
     var record = SearchRecord(id: "source"); record.labels = ["alpha"]

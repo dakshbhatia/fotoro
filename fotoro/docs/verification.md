@@ -1539,3 +1539,37 @@ without console warnings/errors. Runtime fixture files and screenshots stay outs
 the repository. This does not qualify a new phone build, complete the private OCR
 backlog, or measure physical frame pacing, battery, large-library ranking accuracy
 or background iCloud behavior. Distribution is a separate gate.
+
+## October 15 index and sync diagnostic status follow-up
+
+The released build 80 has action tracing but lacks a whole-library export-time
+coverage report. The last retained physical build-78 catalog has 21,481 Photos
+rows, 2,466 OCR-complete and 19,015 unchecked. This is an older local snapshot;
+current phone use is paused. Query speed and whole-library retrieval quality are
+separate acceptance questions. See [diagnostics](diagnostics.md) for the current
+operational limitations and the remaining acceptance order.
+
+This source change adds whole-catalog OCR/visual/semantic coverage to explicit
+native diagnostic exports, using one off-main SQL read with source-generation
+and permission publication checks. It distinguishes incomplete states, durable
+retry/model waits and scheduler activity. Export snapshots do not overwrite the
+persisted action ring. Cached Sync state includes its known last-check age and
+does not trigger an upload, network refresh or original read. The bounded reader
+keeps these snapshots separate from unfinished actions and reports capture age.
+
+Local verification passes 18 reader/privacy regressions, 141 targeted full-app
+Simulator tests and 24 targeted isolated-preview tests, with zero failures or
+skips. After the final Sync trace-isolation change, all three export/publication
+regressions pass again. The static preview artifact audit passes all 24 checks.
+All three stage aggregates were also executed read-only on
+the retained catalog five times: desktop SQLite median 35.8 ms, maximum 342.9 ms.
+This is export-query cost on a Mac, not iPhone latency evidence. Live service/API
+and app-association readiness checks pass. This follow-up is not released in
+build 80 and does not complete the personal-library or physical-device gates.
+
+A fresh read-only unauthenticated production probe also correlates its client
+trace, response/body request reference and exactly one final live server event
+(GET, 401, auth class, request phase). The sanitized reader matches one client/
+server request pair. Raw tail envelopes stay in private local artifacts and the
+tail is stopped. This verifies live correlation,
+not historical log access, authenticated photo flows or current phone state.

@@ -2799,6 +2799,18 @@ enum ReviewedPhotosBackupPolicy {
     try await NativeDiagnosticTrace.action(operation, diagnostics: diagnostics, action)
   }
   func diagnosticsJSON() -> String { String(decoding: diagnostics.exportJSON(), as: UTF8.self) }
+  func diagnosticsWithStatusJSON() async -> String {
+    var snapshot = await localSearch?.diagnosticIndexSnapshot() ?? [NativeDiagnosticEvent(
+      phase: .search, outcome: .changed, analysisActivity: .notReady, step: .snapshot, reason: .waiting)]
+    // This is the existing UI projection, not a new sync or network request.
+    snapshot.append(NativeDiagnosticEvent(phase: .sync, outcome: .changed,
+      state: consumerSyncSummary.state, accountState: diagnosticAccountState,
+      completed: consumerSyncSummary.completedPhotos, skipped: consumerSyncSummary.skippedPhotos,
+      total: consumerSyncSummary.totalPhotos, lastCheckedAt: consumerSyncSummary.lastCheckedAt,
+      trace: nil, step: .snapshot, reason: diagnosticSyncReason))
+    // Export-only snapshots cannot evict action history in the persisted ring.
+    return String(decoding: diagnostics.exportJSON(additionalEvents: snapshot), as: UTF8.self)
+  }
   @discardableResult
   func run(phase: NativeDiagnosticPhase? = nil, _ action: @escaping @MainActor () async throws -> Void) -> Task<Void, Never>? {
     guard !busy else { return nil }

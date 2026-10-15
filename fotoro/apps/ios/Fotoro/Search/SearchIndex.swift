@@ -1,8 +1,19 @@
 import Foundation
 import GRDB
 
-enum SearchAnalysisStage: String, Sendable, CaseIterable { case ocr, visual, semantic }
+enum SearchAnalysisStage: String, Codable, Sendable, CaseIterable { case ocr, visual, semantic }
 enum SearchAnalysisOutcome: String, Sendable { case unavailable, failed, modelDeferred }
+struct SearchStageCoverage: Sendable {
+  let stage: SearchAnalysisStage
+  let total: Int
+  let complete: Int
+  let pending: Int
+  let failed: Int
+  let unavailable: Int
+  let deferred: Int
+  let modelDeferred: Int
+  let nextRetry: Date?
+}
 struct SearchAnalysisWork: Sendable {
   let record: SearchRecord
   let stages: Set<SearchAnalysisStage>
@@ -402,6 +413,61 @@ final class SearchIndex: @unchecked Sendable {
     #else
     "FROM searchRecords r"
     #endif
+  }
+  // Support export only: one read transaction, no decoded records or text output.
+  // This describes the permitted local Photos catalog, independently of a query,
+  // traversal cursor or the in-memory batch's progress counters.
+  func analysisCoverage(now: Date = Date()) throws -> [SearchStageCoverage] {
+    try database.read { db in
+      try SearchAnalysisStage.allCases.compactMap { stage in
+        let state: String, processor: String, join: String
+        switch stage {
+        case .ocr: state = "r.ocrState"; processor = "json_extract(r.value,'$.processor')"; join = ""
+        case .visual: state = "r.visualState"; processor = "json_extract(r.value,'$.visualProcessor')"; join = ""
+        case .semantic:
+          #if FOTORO_LOCAL_PREVIEW
+          return nil
+          #else
+          state = "CASE WHEN v.photo IS NOT NULL AND v.revision=json_extract(r.value,'$.revision') AND v.processor=? THEN 'complete' WHEN a.outcome IN ('failed','unavailable') THEN a.outcome ELSE 'pending' END"
+          processor = "?"; join = " LEFT JOIN searchVectors v ON v.photo=r.id"
+          #endif
+        }
+        var arguments = StatementArguments()
+        if stage == .semantic {
+          #if !FOTORO_LOCAL_PREVIEW
+          arguments += [SemanticVector.processor]
+          #endif
+        }
+        arguments += [stage.rawValue]
+        if stage == .semantic {
+          #if !FOTORO_LOCAL_PREVIEW
+          arguments += [SemanticVector.processor]
+          #endif
+        }
+        arguments += [now.timeIntervalSince1970, now.timeIntervalSince1970]
+        let row = try Row.fetchOne(db, sql: """
+          WITH coverage AS (
+            SELECT \(state) state,a.outcome,a.retryAfter
+            FROM searchRecords r \(join)
+            LEFT JOIN searchAnalysisAttempts a ON a.photo=r.id AND a.stage=?
+              AND a.revision=json_extract(r.value,'$.revision') AND a.processor=\(processor)
+            WHERE r.scope='photos'
+          )
+          SELECT count(*) total,coalesce(sum(state='complete'),0) complete,
+            coalesce(sum(state='pending'),0) pending,coalesce(sum(state='failed'),0) failed,
+            coalesce(sum(state='unavailable'),0) unavailable,
+            coalesce(sum(state!='complete' AND retryAfter>?),0) deferred,
+            coalesce(sum(state!='complete' AND outcome='modelDeferred'),0) modelDeferred,
+            min(CASE WHEN state!='complete' AND retryAfter>? THEN retryAfter END) nextRetry
+          FROM coverage
+          """, arguments: arguments)!
+        let next: Double? = row["nextRetry"]
+        return SearchStageCoverage(stage: stage, total: row["total"], complete: row["complete"],
+          pending: row["pending"], failed: row["failed"], unavailable: row["unavailable"],
+          deferred: row["deferred"], modelDeferred: row["modelDeferred"],
+          nextRetry: next.map(Date.init(timeIntervalSince1970:)))
+      }
+    }
   }
   func pendingMetadataAnalysisCount(scope: PhotoAnalysisScope, after: PhotoAnalysisCursor? = nil,
     retryFailed: Bool = false, now: Date = Date(), bypassDeferred: Bool = false) throws -> Int {

@@ -77,6 +77,7 @@ struct PhotoSyncView: View {
   @State private var password: FotoroPassword?
   @State private var passkeyStatus = ""
   @State private var diagnosticExport: NativeDiagnosticExport?
+  @State private var diagnosticTask: Task<Void, Never>?
   @Environment(\.scenePhase) private var scenePhase
   @Environment(\.dismiss) private var dismiss
   init(services: AppServices, savedRefresh: SavedLibraryRefresh? = nil, requiresAuthentication: Bool = false,
@@ -248,12 +249,13 @@ struct PhotoSyncView: View {
         .toolbar {
           ToolbarItem(placement: .topBarLeading) {
             Menu("Diagnostics", systemImage: "stethoscope") {
-              Button("Copy diagnostics", systemImage: "doc.on.doc") { UIPasteboard.general.string = services.diagnosticsJSON() }
+              Button("Copy diagnostics", systemImage: "doc.on.doc") { exportDiagnostics(share: false) }
                 .accessibilityIdentifier("support.copyDiagnostics")
               Button("Share diagnostics", systemImage: "square.and.arrow.up") {
-                diagnosticExport = NativeDiagnosticExport(json: services.diagnosticsJSON())
+                exportDiagnostics(share: true)
               }.accessibilityIdentifier("support.shareDiagnostics")
             }
+            .disabled(diagnosticTask != nil)
           }
           ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
         }
@@ -262,14 +264,16 @@ struct PhotoSyncView: View {
         .task { resumeConsent() }
         .onChange(of: scenePhase) {
           if scenePhase == .active { resumeConsent() }
-          else if scenePhase == .background { cancelConsent(); password = nil; diagnosticExport = nil }
+          else if scenePhase == .background {
+            cancelConsent(); password = nil; diagnosticExport = nil; diagnosticTask?.cancel()
+          }
         }
         .onChange(of: services.photoAccountAccess) {
           if authenticationTask == nil { resumeConsent() }
           if services.photoAccountAccess == nil { password = nil }
         }
         .onChange(of: services.vault.generation) { password = nil; passkeyStatus = "" }
-        .onDisappear { cancelConsent(); password = nil }
+        .onDisappear { cancelConsent(); password = nil; diagnosticTask?.cancel() }
         .alert("Fotoro", isPresented: Binding(
           get: { !openingAccount && services.error != nil },
           set: { if !$0 && !openingAccount { services.error = nil } })) {
@@ -333,6 +337,16 @@ struct PhotoSyncView: View {
       } catch is CancellationError {} catch {
         if !Task.isCancelled { services.error = error.localizedDescription }
       }
+    }
+  }
+  private func exportDiagnostics(share: Bool) {
+    guard diagnosticTask == nil else { return }
+    diagnosticTask = Task {
+      defer { diagnosticTask = nil }
+      let json = await services.diagnosticsWithStatusJSON()
+      guard !Task.isCancelled, scenePhase == .active else { return }
+      if share { diagnosticExport = NativeDiagnosticExport(json: json) }
+      else { UIPasteboard.general.string = json }
     }
   }
   private func cancelConsent() {

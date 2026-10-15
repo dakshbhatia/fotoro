@@ -93,6 +93,7 @@ enum SearchMetadataIntake {
     @ObservationIgnored var automaticAnalysisBatchLimit = 500
     @ObservationIgnored var analysisPreview: (@MainActor (PHAsset) async -> SearchPreview?)?
     #if !FOTORO_LOCAL_PREVIEW
+      @ObservationIgnored var diagnosticCoverageRead: (@MainActor (SearchIndex, Date) async throws -> [SearchStageCoverage])?
       @ObservationIgnored var analysisSemanticPreparation: (@MainActor () async throws -> Void)?
       @ObservationIgnored var analysisSemanticReady: (@MainActor () async -> Bool)?
       @ObservationIgnored var analysisSemanticImage: (@MainActor (SearchPreview) async throws -> [Float])?
@@ -197,6 +198,46 @@ enum SearchMetadataIntake {
   private var automaticAnalysisRunning: Bool {
     automaticAnalysisTask != nil && automaticAnalysisTask?.isCancelled == false
   }
+  #if !FOTORO_LOCAL_PREVIEW
+  private var diagnosticAnalysisActivity: NativeAnalysisActivity {
+    if !ready || index == nil { return .notReady }
+    if indexing { return .running }
+    if !automaticAnalysisActive { return .inactive }
+    if browseInteractionActive { return .interacting }
+    if idleAnalysisTask != nil { return .waitingForIdle }
+    if automaticRetryTask != nil { return .retryScheduled }
+    return .idle
+  }
+  func diagnosticIndexSnapshot() async -> [NativeDiagnosticEvent] {
+    let trace = NativeDiagnosticTrace(.search), token = work.generation
+    let snapshotGeneration = libraryGeneration, now = analysisNow()
+    func unavailable(_ reason: NativeDiagnosticReason) -> [NativeDiagnosticEvent] {
+      [NativeDiagnosticEvent(phase: .search, outcome: .changed,
+        analysisActivity: diagnosticAnalysisActivity, trace: trace, step: .snapshot, reason: reason)]
+    }
+    guard ready, let index else { return unavailable(.waiting) }
+    guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)) else {
+      return unavailable(.permissionRequired)
+    }
+    do {
+      let coverage: [SearchStageCoverage]
+      #if DEBUG
+      if let diagnosticCoverageRead { coverage = try await diagnosticCoverageRead(index, now) }
+      else { coverage = try await SearchMetadataIntake.run { try index.analysisCoverage(now: now) } }
+      #else
+      coverage = try await SearchMetadataIntake.run { try index.analysisCoverage(now: now) }
+      #endif
+      guard !Task.isCancelled, token == work.generation, snapshotGeneration == libraryGeneration,
+        self.index === index, ready else { return unavailable(.contextChanged) }
+      guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)) else {
+        return unavailable(.permissionRequired)
+      }
+      return coverage.map { NativeDiagnosticEvent(phase: .search, outcome: .changed,
+        coverage: $0, analysisActivity: diagnosticAnalysisActivity, coverageTime: now,
+        trace: trace, step: .snapshot) }
+    } catch { return unavailable(Task.isCancelled ? .cancelled : .unknown) }
+  }
+  #endif
   private func cancelAutomaticAnalysis() {
     idleAnalysisTask?.cancel(); idleAnalysisTask = nil
     automaticRetryTask?.cancel(); automaticRetryTask = nil; automaticRetryID = UUID()

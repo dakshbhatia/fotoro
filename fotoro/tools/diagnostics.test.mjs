@@ -1,6 +1,50 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {parseDiagnostics, summarizeDiagnostics} from "./diagnostics.mjs";
+test("reports separate index stages and snapshot age without presenting status as an unfinished action", () => {
+  const snapshotTrace = "69224569-9dde-4c86-82c9-dcce1c56a375";
+  const events = ["ocr", "visual", "semantic"].map(analysisStage => ({phase: "search", outcome: "changed", step: "snapshot",
+    traceId: snapshotTrace, analysisStage, analysisActivity: "inactive", build: "80", timestamp: 1_790_000_000,
+    total: 100, completed: 20, pending: 70, failedCount: 3, unavailable: 7, deferred: 10, modelDeferred: 0, nextRetryMS: 30_000,
+    filename: "private-caption", query: "private-caption"}));
+  const report = summarizeDiagnostics(parseDiagnostics(JSON.stringify(events)), {now: 1_790_000_005});
+  assert.equal(report.indexSnapshot.ageMS, 5000);
+  assert.equal(report.indexSnapshot.activity, "inactive");
+  assert.equal(report.indexSnapshot.coverage.length, 3);
+  assert.equal(report.indexSnapshot.coverage[0].completed, 20);
+  assert.equal(report.indexSnapshot.coverage[0].nextRetryMS, 30_000);
+  assert.equal(report.flows.length, 0);
+  assert.ok(!JSON.stringify(report).includes("private-caption"));
+  assert.ok(!JSON.stringify(report).includes("1790000000"));
+  events.push({phase: "search", outcome: "changed", step: "snapshot", analysisActivity: "notReady", reason: "contextChanged", timestamp: 1_790_000_006});
+  const withdrawn = summarizeDiagnostics(parseDiagnostics(JSON.stringify(events)), {now: 1_790_000_007});
+  assert.deepEqual(withdrawn.indexSnapshot.coverage, []);
+  assert.equal(withdrawn.indexSnapshot.reason, "contextChanged");
+});
+test("drops private status labels and invalid coverage counters", () => {
+  const report = summarizeDiagnostics(parseDiagnostics(JSON.stringify({phase: "search", outcome: "changed", step: "snapshot",
+    analysisStage: "private-text", analysisActivity: "private-text", total: -1, deferred: 1_000_001, failedCount: "private-text",
+    modelDeferred: 1.5, nextRetryMS: Infinity, timestamp: 4_102_444_801, secret: "private-text"})));
+  assert.equal(report.indexSnapshot.activity, "unknown");
+  assert.deepEqual(report.indexSnapshot.coverage, []);
+  assert.equal(report.indexSnapshot.ageMS, undefined);
+  assert.ok(!JSON.stringify(report).includes("private-text"));
+});
+test("cached sync snapshots retain unknown freshness and never imply a server verification", () => {
+  const event = {phase: "sync", step: "snapshot", outcome: "changed", state: "paused", reason: "paused",
+    accountState: "unlocked", total: 120, completed: 20, skipped: 2, build: "80", timestamp: 1_790_000_000};
+  let report = summarizeDiagnostics([event], {now: 1_790_000_005});
+  assert.equal(report.syncSnapshot.basis, "cached_ui_projection");
+  assert.equal(report.syncSnapshot.state, "paused");
+  assert.equal(report.syncSnapshot.lastCheckedAgeMS, undefined);
+  assert.equal(report.syncSnapshot.ageMS, 5000);
+  assert.equal(report.flows.length, 0);
+  report = summarizeDiagnostics([{...event, lastCheckedAgeMS: 60_000}]);
+  assert.equal(report.syncSnapshot.lastCheckedAgeMS, 60_000);
+  report = summarizeDiagnostics([{...event, lastCheckedAgeMS: "private-value", state: "private-value"}]);
+  assert.equal(report.syncSnapshot.state, "unknown");
+  assert.ok(!JSON.stringify(report).includes("private-value"));
+});
 
 const traceId = "1522ba48-0ee4-4040-b0da-7202dc00388e";
 const requestId = "324244ec-8ead-4866-afee-3b7742ed7b46";

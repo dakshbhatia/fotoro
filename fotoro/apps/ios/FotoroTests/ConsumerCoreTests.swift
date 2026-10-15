@@ -1765,6 +1765,39 @@ extension ConsumerCoreTests {
     XCTAssertEqual(events.last?.lastCompletedStep, .credential)
     XCTAssertNil(NativeDiagnosticTrace.current)
   }
+  @MainActor func testStatusExportKeepsUnreadCatalogUnknownAndDoesNotPersistSnapshots() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
+    let diagnostics = NativeDiagnostics(fileURL: nil, emitSystemLog: false)
+    let services = try AppServices(root: root, diagnostics: diagnostics)
+    let data = Data(await services.diagnosticsWithStatusJSON().utf8)
+    let events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: data)
+    let search = try XCTUnwrap(events.last { $0.phase == .search && $0.step == .snapshot })
+    XCTAssertEqual(search.analysisActivity, .notReady)
+    XCTAssertNil(search.total, "An unopened catalog cannot claim zero photos or complete coverage")
+    let sync = try XCTUnwrap(events.last { $0.phase == .sync && $0.step == .snapshot })
+    XCTAssertEqual(sync.state, services.consumerSyncSummary.state)
+    let history = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: diagnostics.exportJSON())
+    XCTAssertFalse(history.contains { $0.step == .snapshot })
+  }
+  func testCoverageExportIsFreshBoundedAndDoesNotReplacePersistedActionHistory() throws {
+    let diagnostics = NativeDiagnostics(fileURL: nil, emitSystemLog: false)
+    for _ in 0..<160 { diagnostics.record(NativeDiagnosticEvent(phase: .sync, outcome: .completed)) }
+    let trace = NativeDiagnosticTrace(.search), now = Date()
+    let coverage = SearchStageCoverage(stage: .ocr, total: 100, complete: 20, pending: 70,
+      failed: 3, unavailable: 7, deferred: 10, modelDeferred: 0, nextRetry: now.addingTimeInterval(30))
+    let snapshot = NativeDiagnosticEvent(phase: .search, outcome: .changed, coverage: coverage,
+      analysisActivity: .inactive, coverageTime: now, trace: trace, step: .snapshot)
+    let data = diagnostics.exportJSON(additionalEvents: [snapshot])
+    let events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: data)
+    XCTAssertLessThanOrEqual(data.count, NativeDiagnostics.maximumBytes); XCTAssertEqual(events.count, 160)
+    XCTAssertEqual(events.last?.analysisStage, .ocr); XCTAssertEqual(events.last?.analysisActivity, .inactive)
+    XCTAssertEqual(events.last?.total, 100); XCTAssertEqual(events.last?.completed, 20)
+    XCTAssertEqual(events.last?.failedCount, 3); XCTAssertEqual(events.last?.deferred, 10)
+    XCTAssertEqual(events.last?.nextRetryMS, 30_000)
+    let history = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: diagnostics.exportJSON())
+    XCTAssertEqual(history.count, 160); XCTAssertTrue(history.allSatisfy { $0.phase == .sync })
+  }
   func testDiagnosticExportBoundsAndSanitizesLegacyRecordsWithoutTraceFields() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
     defer { try? FileManager.default.removeItem(at: root) }
