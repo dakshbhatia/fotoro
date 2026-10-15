@@ -225,6 +225,7 @@ enum ReviewedPhotosBackupPolicy {
     let catalog = store
     let origin = BackgroundUploadPolicy.origin(api.baseURL)
     let libraryGeneration = local.libraryGeneration
+    let localContext = local.consumerContextGeneration
     let deviceHits = try await local.consumerResults(query, includeVisual: includeVisual)
     try Task.checkCancellation()
     let saved: [LocalPhoto]
@@ -241,15 +242,19 @@ enum ReviewedPhotosBackupPolicy {
         BackgroundUploadPolicy.origin(api.baseURL) == origin else { throw CancellationError() }
     } else { saved = [] }
     try Task.checkCancellation()
-    guard local.peopleSelection == people else { throw CancellationError() }
-    // Recheck local permission/revision after the cloud lookup; a withdrawn device source cannot hide an owned saved copy.
-    let currentRecords = try await local.consumerRecords(deviceHits.flatMap { [$0.id] + $0.children })
+    guard local.peopleSelection == people, local.consumerContextGeneration == localContext else { throw CancellationError() }
+    let deviceIDs = deviceHits.flatMap { [$0.id] + $0.children }
+    let sources = account == nil ? [] : try await catalog.backupSources(ids: Set(deviceIDs))
+    try Task.checkCancellation()
+    // Recheck local permission/revision after every catalog read; a withdrawn
+    // device source cannot hide an owned saved copy.
+    let currentRecords = try await local.consumerRecords(deviceIDs)
     let records = local.libraryGeneration == libraryGeneration ? currentRecords : [:]
     if let account {
       guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account,
         BackgroundUploadPolicy.origin(api.baseURL) == origin else { throw CancellationError() }
     }
-    guard local.peopleSelection == people else { throw CancellationError() }
+    guard local.peopleSelection == people, local.consumerContextGeneration == localContext else { throw CancellationError() }
     var included = Set<String>()
     var result: [ConsumerSearchHit] = []
     for hit in deviceHits {
@@ -259,7 +264,6 @@ enum ReviewedPhotosBackupPolicy {
         result.append(ConsumerSearchHit(photo: .device(id), evidence: hit.reason))
       }
     }
-    let sources = account == nil ? [] : try catalog.backupSources()
     let copies = ConsumerSearchBinding.verifiedCopies(sources: sources, records: records)
     for photo in saved {
       if !ConsumerSearchBinding.duplicate(saved: photo, copies: copies) {
@@ -319,11 +323,7 @@ enum ReviewedPhotosBackupPolicy {
       savedVisualSnapshotOrigin = origin
       savedVisualSnapshotCatalog = ObjectIdentifier(catalog)
     }
-    let lexicalWorker = Task.detached(priority: .userInitiated) {
-      try index.search(query, scope: SearchScope(source: "saved", people: people))
-    }
-    let base = try await withTaskCancellationHandler { try await lexicalWorker.value }
-      onCancel: { lexicalWorker.cancel() }
+    let base = try await index.searchAsync(query, scope: SearchScope(source: "saved", people: people))
     try Task.checkCancellation()
     guard photoAccountAccess == access, consumerCatalogGeneration == catalogSnapshotGeneration,
       BackgroundUploadPolicy.origin(api.baseURL) == origin else { throw CancellationError() }

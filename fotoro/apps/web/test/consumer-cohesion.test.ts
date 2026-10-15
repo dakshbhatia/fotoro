@@ -14,18 +14,21 @@ test("foreground and reconnect read refresh survive paused writes, while hidden 
   const detach = subscribeSavedRefresh(windowTarget, documentTarget, () => {reads++;});
   windowTarget.dispatchEvent(new Event("online"));
   windowTarget.dispatchEvent(new Event("focus"));
+  windowTarget.dispatchEvent(new Event("pageshow"));
   documentTarget.dispatchEvent(new Event("visibilitychange"));
   assert.equal(reads, 0);
   documentTarget.visibilityState = "visible";
   documentTarget.dispatchEvent(new Event("visibilitychange"));
   windowTarget.dispatchEvent(new Event("online"));
   windowTarget.dispatchEvent(new Event("focus"));
-  assert.equal(reads, 3, "Returning to a visible window checks photos saved on another device");
+  windowTarget.dispatchEvent(new Event("pageshow"));
+  assert.equal(reads, 4, "Returning to a visible window, including browser Back, checks photos saved on another device");
   detach();
   documentTarget.dispatchEvent(new Event("visibilitychange"));
   windowTarget.dispatchEvent(new Event("online"));
   windowTarget.dispatchEvent(new Event("focus"));
-  assert.equal(reads, 3, "Account withdrawal removes every read trigger");
+  windowTarget.dispatchEvent(new Event("pageshow"));
+  assert.equal(reads, 4, "Account withdrawal removes every read trigger");
 });
 
 test("first use offers Saved and device photos without contacting the server or unlocking", () => {

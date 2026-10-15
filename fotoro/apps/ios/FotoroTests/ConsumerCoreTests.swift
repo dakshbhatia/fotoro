@@ -5,6 +5,36 @@ import Photos
 @testable import Fotoro
 
 final class ConsumerCoreTests: XCTestCase {
+  func testSearchCheckpointReadIsBoundedToHitsAndDoesNotDecodeUnrelatedInventory() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try LibraryStore(root: root)
+    let chosen = (0..<850).map { BackupSource(id: "hit-\($0)", photoId: "saved-\($0)", sourceRevision: "current") }
+    try await store.database.write { db in
+      for source in chosen {
+        try db.execute(sql: "INSERT INTO backupSources(id,value) VALUES(?,?)",
+          arguments: [source.id, try Wire.encode(source)])
+      }
+      for n in 0..<10_000 {
+        try db.execute(sql: "INSERT INTO backupSources(id,value) VALUES(?,?)",
+          arguments: ["unrelated-\(n)", Data("not-json".utf8)])
+      }
+    }
+    let ids = Set(chosen.map(\.id) + ["absent"])
+    let found = try await store.backupSources(ids: ids)
+    XCTAssertEqual(found, chosen.sorted { $0.id < $1.id })
+    let empty = try await store.backupSources(ids: [])
+    XCTAssertTrue(empty.isEmpty)
+    var changed = chosen[0]; changed.sourceRevision = "replaced"
+    try store.putBackupSource(changed)
+    let current = try await store.backupSources(ids: [changed.id])
+    XCTAssertEqual(current, [changed], "Fresh search deduplication must not reuse a stale checkpoint")
+    do {
+      _ = try await store.backupSources(ids: ["unrelated-0"])
+      XCTFail("Malformed matching checkpoints cannot silently establish a verified copy")
+    } catch is DecodingError {} catch { XCTFail("Unexpected error: \(error)") }
+  }
+
   @MainActor func testChangedAnnotationStagesCoalesceSummaryAndManualLabelsRemainImmediate() async throws {
     try await withSavedLibrary { services, _ in
       var photo = try self.samplePhoto(); photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
@@ -397,9 +427,33 @@ final class ConsumerCoreTests: XCTestCase {
       var record = SearchRecord(id: "screenshot")
       record.ocrText = "Alfred project notes"; record.ocrStatus = .complete; record.ocrConfidence = 0.95
       try index.replacePermitted([record])
+      try await services.store.database.write { db in
+        try db.execute(sql: "INSERT INTO backupSources(id,value) VALUES(?,?)",
+          arguments: ["unrelated-invalid", Data("not-json".utf8)])
+      }
       let hits = try await services.consumerSearch("alfred", local: LocalSearchStore(index: index), includeVisual: false)
       XCTAssertEqual(hits.map(\.photo), [.device(record.id)])
       XCTAssertEqual(encodingCalls, 0)
+    }
+  }
+  @MainActor func testOwnerEditDuringSavedLookupRejectsEarlierDeviceMatches() async throws {
+    try await withSavedLibrary { services, _ in
+      var photo = try self.samplePhoto()
+      photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+      try services.store.put(photo); try services.reload()
+      let index = try SearchIndex()
+      let record = SearchRecord(id: "reviewed-source", labels: ["receipt"])
+      try index.replacePermitted([record])
+      let local = LocalSearchStore(index: index)
+      let gate = CatalogScanGate()
+      services.catalogSearchWillRead = { gate.visit() }
+      defer { services.catalogSearchWillRead = nil; gate.release.signal() }
+      let pending = Task { try await services.consumerSearch("receipt", local: local, includeVisual: false) }
+      while gate.count == 0 { await Task.yield() }
+      XCTAssertTrue(local.setLabels([], photoID: record.id))
+      gate.release.signal()
+      do { _ = try await pending.value; XCTFail("A removed tag cannot survive the Saved lookup") }
+      catch { XCTAssertTrue(error is CancellationError) }
     }
   }
   @MainActor func testSavedVisualQueryRejectsWithdrawalWhileEncodingIncludingUnavailableModel() async throws {

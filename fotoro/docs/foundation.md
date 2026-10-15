@@ -86,8 +86,10 @@ records; native state is scoped to the account catalog and API origin.
 ## Intelligence wiring — October 2026
 
 Find resolves eligible photos through the existing index. Best shots applies the
-versioned `moment-highlights-v3` policy to that matching subset before grouping
-capture-time moments and choosing diverse representatives. Suggestions carry
+versioned `moment-highlights-v4` policy to that matching subset before grouping
+capture-time moments and choosing diverse representatives. Nonfavorite screenshots
+stay out of highlight suggestions, and every assessed eligible favorite remains
+available even when similar burst photos share a representative. Suggestions carry
 measured reasons and never become a Save
 intent or replace a user's selection. Preview work is serial and cancellable;
 query, source revision, permission and account changes invalidate the result.

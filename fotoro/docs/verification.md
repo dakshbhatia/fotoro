@@ -1474,4 +1474,68 @@ completed query generation; bulk result validation also excludes current Trash
 facts. The new failing regression passed after the guard, together with all 168
 affected search, date, semantic and consumer tests. Build 78 contains the primary
 latency repair; build 79 additionally carries this cache freshness correction.
-The original installed phone remained on build 77 at the last device readback.
+The original installed phone remained on build 77 at that initial readback.
+Subsequent authorized readback confirmed build 78 installed and the owner reported
+successful search. Its 48 completed catalog queries measured 46 ms median and
+59 ms maximum; 38 completed text-search actions measured 100.5 ms median and
+111 ms maximum. These bounded diagnostics exclude query contents and do not
+measure first paint, visual inference, scrolling or battery. OCR covered 2,466
+of 21,481 device records, leaving 19,015 unchecked. Build 79 was subsequently
+processed and linked to the existing internal TestFlight group; physical build 79
+acceptance was not performed. All hosted checks for the final PR 106 head passed
+or intentionally skipped.
+
+## Parallel foundation, indexing and organizing pass (October 15, 2026)
+
+Three isolated work streams addressed browser return/cross-device reads, native
+search/indexing churn, and consistent organizing policy. Browser foreground,
+reconnect and Back/Forward restoration events retain one deferred Saved refresh
+while another action is busy. A burst during an active read creates at most one
+trailing read. These are reads, with no upload intent or change to Pause. Cached
+and network snapshots publish inside a checked continuation; withdrawn snapshots
+wipe copied metadata keys. A microtask regression covers the publication boundary.
+
+Native OCR, classification and vector completion now share fixed 750 ms search
+refresh windows. The first text query can complete while new evidence accumulates;
+typing, corrections, permissions and account boundaries remain immediate. A
+separate context fence rejects pre-edit answers without treating additive OCR as
+an owner edit. Saved/device copy checks read only hit checkpoints in primary-key
+batches of at most 400, followed by current local-record validation. Saved lexical
+retrieval also uses the existing cancellable SQLite read. This reduces avoidable
+work; it does not establish a new physical-device latency or OCR completion rate.
+
+The versioned `moment-highlights-v4` policy retains all assessed eligible favorites
+when similar bursts group, and browser Picks excludes nonfavorite screenshots and
+Trash before preview work. Native Picks browsing also excludes Trash. Cleanup
+reuses preview measurements directly and keeps a favorite representative of exact
+duplicates. Suggestions still require review. Filename suggestions consume up to
+two distinct useful tags, omit duplicate place words and avoid reserved names;
+missing capture dates stay missing. The shared synthetic Find-to-Picks cases pass
+9/9; that evidence is functional policy coverage, not real-photo quality scoring.
+
+Native Fotoro screenshot corrections now drive Photos/Picks browse facts,
+continuation through sparse screenshot pages, Find Best shots and filename
+suggestions. Candidate identities retain the separately observed PhotoKit subtype
+for source validation. Source/revision-bound organization facts are cached only
+for loaded and recent photos; a separate correction signal invalidates them and
+coalesces a hydration batch into one deferred Picks restart. OCR/query publication
+does not trigger that restart. Pending Picks also respects screenshot eligibility.
+No original or Photos-library metadata is changed.
+
+Final local verification: workspace `pnpm check` passes core/crypto/contracts,
+release/preview audits and 129 API tests. The subsequent final web build and all
+801 browser tests pass with no skips; static startup JavaScript is 481,720 bytes
+across two chunks, below the existing 500 KiB ceiling. The actual pinned TinyCLIP
+public-image inference smoke passes. Full-app Simulator verification passes
+744 tests with zero failures and three existing/opt-in skips
+(`test_sim_2026-10-15T20-25-34-616Z_pid34826_005fe0b3.xcresult`); the isolated
+local-preview scheme passes 191 with zero failures and three skips
+(`test_sim_2026-10-15T20-27-55-272Z_pid34826_fd75b0f0.xcresult`).
+Controlled regressions cover continuous analysis bursts, slow first queries,
+owner edits during local validation and Saved reads, and correction changes while
+Picks is pending. A real browser using a fresh public encrypted fixture verifies
+filename search, a decrypted preview, stale-result clearing and usable Back return
+without console warnings/errors. Runtime fixture files and screenshots stay outside
+the repository. This does not qualify a new phone build, complete the private OCR
+backlog, or measure physical frame pacing, battery, large-library ranking accuracy
+or background iCloud behavior. Distribution is a separate gate.

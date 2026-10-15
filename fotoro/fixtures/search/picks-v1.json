@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "processor": "moment-highlights-v3",
+  "processor": "moment-highlights-v4",
   "clock": "2026-10-03T12:00:00Z",
   "qualification": "Synthetic source metadata and preview measurements. This evaluates Find-to-shortlist policy composition, not image recognition, held-out ranking accuracy or device latency.",
   "records": [
@@ -33,7 +33,13 @@
     {"id": "family-17","filename": "IMG_26.jpg","labels": ["Family"],"date": "2026-10-01T12:34:00Z","dateSource": "exif","width": 1200,"height": 800,"favorite": false,"signal": {"hash": "0","luminance": 0.5,"contrast": 0.15,"sharpness": 0.2,"color": [120,120,120]}},
     {"id": "family-18","filename": "IMG_27.jpg","labels": ["Family"],"date": "2026-10-01T12:36:00Z","dateSource": "exif","width": 1200,"height": 800,"favorite": false,"signal": {"hash": "0","luminance": 0.5,"contrast": 0.15,"sharpness": 0.2,"color": [120,120,120]}},
     {"id": "family-other-day","filename": "IMG_28.jpg","labels": ["Family"],"date": "2026-09-01T12:00:00Z","dateSource": "exif","width": 1200,"height": 800,"favorite": false,"signal": {"hash": "0","luminance": 0.5,"contrast": 0.15,"sharpness": 0.1,"color": [120,120,120]}},
-    {"id": "unreadable","filename": "IMG_29.jpg","labels": ["Unreadable"],"date": "2026-10-02T12:00:00Z","dateSource": "selected","width": 1200,"height": 800,"favorite": false,"signal": null}
+    {"id": "unreadable","filename": "IMG_29.jpg","labels": ["Unreadable"],"date": "2026-10-02T12:00:00Z","dateSource": "selected","width": 1200,"height": 800,"favorite": false,"signal": null},
+    {"id":"screen","filename":"screen.png","labels":["Screens"],"facts":["screenshot"],"date":"2026-10-01T12:00:00Z","dateSource":"exif","width":1200,"height":800,"favorite":false,"signal":{"hash":"3","luminance":0.5,"contrast":0.15,"sharpness":0.12,"color":[120,120,120]}},
+    {"id":"favorite-screen","filename":"favorite-screen.png","labels":["Screens"],"facts":["screenshot"],"date":"2026-10-01T12:00:10Z","dateSource":"exif","width":1200,"height":800,"favorite":true,"signal":{"hash":"3","luminance":0.5,"contrast":0.15,"sharpness":0.12,"color":[120,120,120]}},
+    {"id":"favorite-first","filename":"favorite-first.png","labels":["Review"],"facts":[],"date":"2026-10-01T12:00:00Z","dateSource":"exif","width":1200,"height":800,"favorite":true,"signal":{"hash":"3","luminance":0.5,"contrast":0.15,"sharpness":0.12,"color":[120,120,120]}},
+    {"id":"favorite-second","filename":"favorite-second.png","labels":["Review"],"facts":[],"date":"2026-10-01T12:00:10Z","dateSource":"exif","width":1200,"height":800,"favorite":true,"signal":{"hash":"3","luminance":0.5,"contrast":0.15,"sharpness":0.12,"color":[120,120,120]}},
+    {"id":"review-soft","filename":"review-soft.png","labels":["Review"],"facts":[],"date":"2026-10-01T12:00:20Z","dateSource":"exif","width":1200,"height":800,"favorite":false,"signal":{"hash":"3","luminance":0.5,"contrast":0.15,"sharpness":0.12,"color":[120,120,120]}},
+    {"id":"review-trash","filename":"review-trash.png","labels":["Review"],"facts":["fotoro.trash.v1:true"],"date":"2026-10-01T12:00:05Z","dateSource":"exif","width":1200,"height":800,"favorite":true,"signal":{"hash":"3","luminance":0.5,"contrast":0.15,"sharpness":0.12,"color":[120,120,120]}}
   ],
   "tasks": [
     {"id": "trip-quality-is-scoped","query": "Trip","picks": ["trip-clear"],"groups": 3,"unassessed": 1},
@@ -42,6 +48,8 @@
     {"id": "days-have-variety","query": "Family","picks": ["family-0","family-other-day"],"groups": 20,"unassessed": 0},
     {"id": "unavailable-never-fills-shortlist","query": "Unreadable","picks": [],"groups": 0,"unassessed": 1},
     {"id": "uncovered-visual-meaning-stays-uncovered","query": "sandy beach","picks": [],"groups": 0,"unassessed": 0},
-    {"id": "import-day-is-not-capture","query": "Unknown on 2026-10-02","picks": [],"groups": 0,"unassessed": 0}
+    {"id": "import-day-is-not-capture","query": "Unknown on 2026-10-02","picks": [],"groups": 0,"unassessed": 0},
+    {"id":"screenshots-stay-useful-without-crowding-highlights","query":"Screens","picks":["favorite-screen"],"groups":1,"unassessed":0},
+    {"id":"every-reviewed-favorite-survives-and-trash-stays-out","query":"Review","picks":["favorite-first","favorite-second"],"groups":1,"unassessed":0}
   ]
 }

@@ -614,6 +614,72 @@ import XCTest
     XCTAssertEqual(result.recommendations.unassessed, 0)
     XCTAssertEqual(analyzer.completed, 2)
   }
+  func testScreenshotCorrectionsDriveBrowseAndPicksWithoutChangingThePhotoKitSourceFence() async throws {
+    let (permission, photos, now) = try permittedPickPhotos(count: 3)
+    let photo = try XCTUnwrap(photos.first { !$0.isFavorite })
+    var correction = true, factReads = 0, previewReads = 0
+    let analyzer = PhotoPickAnalyzer(preview: { _ in previewReads += 1; return self.signal })
+    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in [photo] }, picks: analyzer)
+    defer { store.pauseAnalysis() }
+    store.setAutomaticAnalysisActive(false)
+    store.bindOrganizationSource { source in
+      XCTAssertEqual(source, RecentPhotoSource(photo)); factReads += 1
+      return [PhotoOrganizationFacts.screenshotPrefix + (correction ? "true" : "false")]
+    }
+    store.restoreAccess(now: now)
+    let corrected = try XCTUnwrap(store.pickCandidates.first)
+    XCTAssertTrue(corrected.isScreenshot)
+    XCTAssertTrue(store.visiblePickPhotos.isEmpty, "Pending Picks must apply corrected screenshot eligibility before analysis finishes")
+    XCTAssertFalse(corrected.sourceScreenshot)
+    XCTAssertTrue(PhotoPickAnalyzer.isCurrent([corrected]), "Corrected eligibility must retain the actual PhotoKit source subtype")
+    XCTAssertTrue(PhotoBrowseFilter.screenshots.includes(RecentPhotoFacts(capturedAt: photo.capturedAt,
+      favorite: photo.isFavorite, screenshot: store.isScreenshot(photo), livePhoto: photo.isLivePhoto, location: photo.location)))
+    let hidden = try await store.completedPicks()
+    XCTAssertTrue(hidden.recommendations.ids.isEmpty)
+    XCTAssertEqual(previewReads, 0)
+    XCTAssertEqual(factReads, 1, "Repeated candidate validation should reuse source-bound facts")
+    let page = store.browsePage
+    correction = false; store.organizationDidChange()
+    XCTAssertNotEqual(store.browsePage, page, "Correction changes must invalidate cached browse facts")
+    XCTAssertFalse(store.isScreenshot(photo))
+    XCTAssertEqual(store.visiblePickPhotos.map(\.id), [photo.id])
+    let visible = try await store.completedPicks()
+    XCTAssertEqual(visible.recommendations.ids, [photo.id])
+    XCTAssertEqual(previewReads, 1)
+    XCTAssertEqual(factReads, 2)
+    XCTAssertFalse(hidden.matches(store.pickCandidates))
+    var wrongSource = try XCTUnwrap(store.pickCandidates.first)
+    wrongSource.photoKitScreenshot = true
+    XCTAssertFalse(PhotoPickAnalyzer.isCurrent([wrongSource]), "A raw subtype change must still revoke the captured source")
+    XCTAssertFalse(photo.isScreenshot, "Fotoro corrections never change device Photos metadata")
+  }
+  func testScreenshotCorrectionCancelsAnInFlightPickAndBatchesOrganizationRestarts() async throws {
+    let (permission, photos, now) = try permittedPickPhotos(count: 3)
+    let photo = try XCTUnwrap(photos.first { !$0.isFavorite })
+    let gate = PickPreviewGate()
+    let began = expectation(description: "The uncorrected preview is in flight")
+    var correction = false, previewReads = 0, factReads = 0
+    let analyzer = PhotoPickAnalyzer(preview: { _ in
+      previewReads += 1; began.fulfill(); await gate.wait(); return self.signal
+    })
+    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in [photo] }, picks: analyzer)
+    defer { gate.open(); store.pauseAnalysis() }
+    store.bindOrganizationSource { _ in
+      factReads += 1; return [PhotoOrganizationFacts.screenshotPrefix + (correction ? "true" : "false")]
+    }
+    store.restoreAccess(now: now)
+    await fulfillment(of: [began], timeout: 3)
+    guard gate.entered else { return }
+    correction = true
+    for _ in 0..<10 { store.organizationDidChange() }
+    XCTAssertNil(store.picksSnapshot)
+    XCTAssertTrue(store.visiblePickPhotos.isEmpty, "A restart cannot flash corrected screenshots in the fallback grid")
+    gate.open()
+    let result = try await store.completedPicks()
+    XCTAssertTrue(result.recommendations.ids.isEmpty, "The earlier preview cannot republish a corrected screenshot as a Pick")
+    XCTAssertEqual(previewReads, 1)
+    XCTAssertEqual(factReads, 2, "A synchronous overlay batch should rebuild the bounded candidate facts once")
+  }
   func testSerialAnalysisCachesByRevisionWithoutOriginalOrUploadWork() async throws {
     var reads: [String] = []
     var active = 0
@@ -809,7 +875,7 @@ import XCTest
     XCTAssertEqual(review.snapshot?.recommendations.groupCount, 3)
     XCTAssertEqual(review.snapshot?.recommendations.reasons["photo-5"], ["Moment highlight"])
     XCTAssertEqual(review.snapshot?.candidates.map(\.id), matches.map(\.id))
-    XCTAssertEqual(AutomaticPhotoPickPolicy.processor, "moment-highlights-v3")
+    XCTAssertEqual(AutomaticPhotoPickPolicy.processor, "moment-highlights-v4")
     let unchanged = try await recent.snapshot(sources)
     XCTAssertEqual(unchanged.recommendations.ids, recentResult.recommendations.ids)
     XCTAssertEqual(recentReads, 20, "A Find review must not prune or replace the home Picks cache")

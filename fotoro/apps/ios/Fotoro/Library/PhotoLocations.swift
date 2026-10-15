@@ -189,11 +189,17 @@ enum PhotoOrganizationFacts {
     }
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withFullDate]; formatter.timeZone = TimeZone(secondsFromGMT: 0)
-    var parts = capturedAt.map { [formatter.string(from: $0)] } ?? []
+    var parts = capturedAt.flatMap { $0.timeIntervalSince1970.isFinite ? [formatter.string(from: $0)] : nil } ?? []
     var seen = Set<String>()
-    for text in [screenshot ? "Screenshot" : nil, place] + labels.prefix(2).map(Optional.some) {
-      if let text { let word = slug(text); if !word.isEmpty && seen.insert(word).inserted { parts.append(word) } }
+    func add(_ text: String?) -> Bool {
+      guard let text else { return false }
+      let word = slug(text)
+      guard !word.isEmpty && seen.insert(word.lowercased()).inserted else { return false }
+      parts.append(word); return true
     }
+    _ = add(screenshot ? "Screenshot" : nil); _ = add(place)
+    var tags = 0
+    for label in labels where tags < 2 { if add(label) { tags += 1 } }
     var identity: String?
     if let digest {
       var hex = digest.lowercased()
@@ -206,7 +212,8 @@ enum PhotoOrganizationFacts {
     var evidence = String(parts.joined(separator: "_").unicodeScalars.prefix(120))
     while evidence.utf8.count > 210 { evidence.removeLast() }
     let named = [evidence.isEmpty ? nil : evidence, identity].compactMap { $0 }.joined(separator: "_")
-    let stem = named.isEmpty ? "Photo" : named
+    var stem = named.isEmpty ? "Photo" : named
+    if stem.range(of: #"^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])$"#, options: [.regularExpression, .caseInsensitive]) != nil { stem = "Photo_" + stem }
     let ext = (original as NSString).pathExtension
     return stem + (ext.range(of: #"^[a-zA-Z0-9]{1,10}$"#, options: .regularExpression) == nil ? "" : "." + ext.lowercased())
   }

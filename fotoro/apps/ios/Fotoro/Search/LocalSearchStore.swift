@@ -47,6 +47,10 @@ enum SearchMetadataIntake {
   @ObservationIgnored private var analysisScope: PhotoAnalysisScope?
   @ObservationIgnored private var analysisCursor: PhotoAnalysisCursor?
   private(set) var libraryGeneration: UInt64 = 0
+  private(set) var organizationGeneration: UInt64 = 0 {
+    didSet { onOrganizationSnapshotChanged?() }
+  }
+  @ObservationIgnored var onOrganizationSnapshotChanged: (() -> Void)?
   private(set) var query = ""
   private(set) var peopleSelection = PeopleSearchSelection()
   private(set) var selectedPeopleNames: [String: String] = [:]
@@ -95,6 +99,16 @@ enum SearchMetadataIntake {
     #endif
   #endif
   @ObservationIgnored private var queryTask: Task<Void, Never>?
+  @ObservationIgnored private var analysisQueryRefreshTask: Task<Void, Never>?
+  @ObservationIgnored private var analysisQueryRefreshID = UUID()
+  @ObservationIgnored private var analysisRevision: UInt64 = 0
+  @ObservationIgnored private var responseAnalysisRevision: UInt64 = 0
+  @ObservationIgnored private(set) var consumerContextGeneration: UInt64 = 0
+  #if DEBUG
+    @ObservationIgnored var analysisQueryRefreshDelay: @MainActor () async throws -> Void = {
+      try await Task.sleep(for: .milliseconds(750))
+    }
+  #endif
   @ObservationIgnored private var work = SearchWorkFence()
   @ObservationIgnored private var queryGeneration: UInt64 = 0
   @ObservationIgnored private var priorPermittedResponse: SearchResponse?
@@ -161,6 +175,7 @@ enum SearchMetadataIntake {
     }
     refreshTask?.cancel()
     queryTask?.cancel()
+    cancelAnalysisQueryRefresh()
     imageRequest?.cancel()
     imageRequest = nil
     indexing = false
@@ -304,6 +319,7 @@ enum SearchMetadataIntake {
     // Immediately remove public UI references before awaiting database work on withdrawal.
     guard RecentPhotosPolicy.canRead(status) else {
       assets = [:]
+      organizationGeneration &+= 1
       response = SearchResponse()
       displayedID = nil
       acceptedMeaningID = nil
@@ -325,6 +341,7 @@ enum SearchMetadataIntake {
       ready = false
       response = SearchResponse()
       assets = [:]
+      organizationGeneration &+= 1
       displayedID = nil
       acceptedMeaningID = nil
       priorPermittedResponse = nil
@@ -562,7 +579,7 @@ enum SearchMetadataIntake {
         try onRecordChanged?(observed, false)
         guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled else { break }
         // Publish OCR/classification without waiting for a cold model download.
-        updateQuery(query)
+        metadataAnalysisDidChange()
         #if !FOTORO_LOCAL_PREVIEW
         // Warm inference uses this derivative. Cold installation cannot hold
         // later photos' OCR/classification or retain a cancelled browse worker.
@@ -605,7 +622,7 @@ enum SearchMetadataIntake {
               }.value
             }
             guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled else { break }
-            updateQuery(query)
+            metadataAnalysisDidChange()
           } else {
             try Task.checkCancellation()
             guard analysisIsCurrent(scope, token: token, explicit: explicit), analysisSourceCurrent(record) else { break }
@@ -763,6 +780,7 @@ enum SearchMetadataIntake {
       priorPermittedResponse = prior
     }
     ready = false
+    cancelAnalysisQueryRefresh()
     queryGeneration &+= 1
     queryTask?.cancel()
     searching = false
@@ -774,6 +792,7 @@ enum SearchMetadataIntake {
   func completePermittedSnapshotRefresh(photos: [RecentPhoto]) {
     ready = true
     assets = Dictionary(uniqueKeysWithValues: photos.map { ($0.id, $0) })
+    organizationGeneration &+= 1
     updateQuery(query)
   }
   // Uses the same ranking and accepted meaning without recording a new choice or query history.
@@ -783,13 +802,15 @@ enum SearchMetadataIntake {
     let token = work.generation
     let library = libraryGeneration
     let queryToken = queryGeneration
+    let context = consumerContextGeneration
     let currentQuery = SearchNormalization.text(query)
     let previous = response
     let accepted = acceptedMeaningID
     let scope = SearchScope(people: peopleSelection)
     // An older answer may remain visible during enrichment, but only this
     // completed generation can be reused after edits or annotation changes.
-    var next = hasCurrentResponse && response.generation == queryToken && SearchNormalization.text(value) == currentQuery
+    var next = hasCurrentResponse && response.generation == queryToken && responseAnalysisRevision == analysisRevision
+      && SearchNormalization.text(value) == currentQuery
       ? response : try await queryExecutor(index, value, scope, accepted, previous, queryToken)
     #if !FOTORO_LOCAL_PREVIEW
     let phrase = NaturalDateQuery.parse(value).text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -807,11 +828,13 @@ enum SearchMetadataIntake {
     #endif
     try Task.checkCancellation()
     guard ready, token == work.generation, library == libraryGeneration else { return [] }
-    guard currentQuery == SearchNormalization.text(query), accepted == acceptedMeaningID,
+    guard context == consumerContextGeneration,
+      currentQuery == SearchNormalization.text(query), accepted == acceptedMeaningID,
       scope.people == peopleSelection else { throw CancellationError() }
     let permitted = try await consumerRecords(next.results.flatMap { [$0.id] + $0.children })
     try Task.checkCancellation()
-    guard currentQuery == SearchNormalization.text(query), accepted == acceptedMeaningID,
+    guard context == consumerContextGeneration,
+      currentQuery == SearchNormalization.text(query), accepted == acceptedMeaningID,
       scope.people == peopleSelection else { throw CancellationError() }
     return next.results.compactMap { hit in
       let current = ([hit.id] + hit.children).filter { permitted[$0] != nil }
@@ -825,11 +848,13 @@ enum SearchMetadataIntake {
   func consumerRecords(_ ids: [String]) async throws -> [String: SearchRecord] {
     guard ready, let index else { return [:] }
     let token = work.generation, library = libraryGeneration, people = peopleSelection
+    let context = consumerContextGeneration
     let worker = Task.detached(priority: .userInitiated) { try index.records(ids) }
     let records = try await withTaskCancellationHandler { try await worker.value }
       onCancel: { worker.cancel() }
     try Task.checkCancellation()
-    guard ready, token == work.generation, library == libraryGeneration, people == peopleSelection else {
+    guard ready, token == work.generation, library == libraryGeneration,
+      context == consumerContextGeneration, people == peopleSelection else {
       throw CancellationError()
     }
     #if !FOTORO_LOCAL_PREVIEW
@@ -852,7 +877,49 @@ enum SearchMetadataIntake {
     #endif
     return record
   }
+  private func cancelAnalysisQueryRefresh() {
+    analysisQueryRefreshTask?.cancel()
+    analysisQueryRefreshTask = nil
+    analysisQueryRefreshID = UUID()
+  }
+  // Analysis only adds derived evidence. Keep a completed answer visible and
+  // publish bursts together, without starving refreshes during continuous OCR.
+  // Owner edits and permission changes still use the immediate query path.
+  func metadataAnalysisDidChange() {
+    analysisRevision &+= 1
+    guard ready, hasSearch, analysisQueryRefreshTask == nil else { return }
+    let id = UUID(), token = work.generation
+    analysisQueryRefreshID = id
+    analysisQueryRefreshTask = Task { [weak self] in
+      #if DEBUG
+        guard let delay = self?.analysisQueryRefreshDelay else { return }
+      #endif
+      do {
+        #if DEBUG
+          try await delay()
+        #else
+          try await Task.sleep(for: .milliseconds(750))
+        #endif
+        try Task.checkCancellation()
+        // A slow text query is allowed to finish. Repeated OCR checkpoints
+        // cannot cancel it before the first useful response is displayed.
+        await self?.queryTask?.value
+        try Task.checkCancellation()
+        guard let self, ready, token == work.generation,
+          analysisQueryRefreshID == id else { return }
+        analysisQueryRefreshTask = nil
+        if responseAnalysisRevision != analysisRevision { refreshQuery(query) }
+      } catch {}
+    }
+  }
   func updateQuery(_ value: String) {
+    // Owner/sync edits and explicit query choices invalidate in-flight consumer
+    // answers even when their text and people selection happen to stay equal.
+    consumerContextGeneration &+= 1
+    refreshQuery(value)
+  }
+  private func refreshQuery(_ value: String) {
+    cancelAnalysisQueryRefresh()
     let normalized = SearchNormalization.text(value)
     let changed = normalized != SearchNormalization.text(query)
     if changed, ready, indexing, !automaticAnalysisRunning { pause() }
@@ -884,6 +951,7 @@ enum SearchMetadataIntake {
     guard ready, let index else { searching = false; return }
     searching = true
     let accepted = acceptedMeaningID
+    let analysisAtStart = analysisRevision
     let execute = queryExecutor
     let scope = SearchScope(people: peopleSelection)
     queryTask = Task {
@@ -895,6 +963,7 @@ enum SearchMetadataIntake {
         guard generation == queryGeneration, !Task.isCancelled else { return }
         if accepted != nil, next.meaning?.id != accepted { acceptedMeaningID = nil }
         response = next
+        responseAnalysisRevision = analysisAtStart
         displayedID = next.leading?.id
         priorPermittedResponse = nil
         searching = false
@@ -966,14 +1035,17 @@ enum SearchMetadataIntake {
     } catch { self.error = error.localizedDescription }
   }
   func clearSyncedAnnotations() {
-    do { try index?.clearSyncedAnnotations(); updateQuery(query) }
+    do { try index?.clearSyncedAnnotations(); organizationGeneration &+= 1; updateQuery(query) }
     catch { self.error = error.localizedDescription }
   }
   func record(_ photoID: String) throws -> SearchRecord? { try index?.record(photoID) }
   #if !FOTORO_LOCAL_PREVIEW
   func applyAnnotations(_ value: PhotoAnnotationsV1, source: BackupSource, accountId: String) throws {
-    guard ready, let revision = source.sourceRevision,
-      try index?.applyAnnotations(value, photoID: source.id, revision: revision, accountId: accountId) == true else { return }
+    guard ready, let index, let revision = source.sourceRevision else { return }
+    let before = try index.record(source.id)?.facts.filter { PhotoOrganizationFacts.category($0) != nil }
+    guard try index.applyAnnotations(value, photoID: source.id, revision: revision, accountId: accountId) else { return }
+    let after = try index.record(source.id)?.facts.filter { PhotoOrganizationFacts.category($0) != nil }
+    if before != after { organizationGeneration &+= 1 }
     updateQuery(query)
   }
   #endif
@@ -984,6 +1056,7 @@ enum SearchMetadataIntake {
       // A linked account mutation reads the latest ledger instead of copying stale local facts.
       try onOrganizationChanged?(record, change)
       guard try index.setOrganization(change, photoID: photoID) else { return false }
+      organizationGeneration &+= 1
       updateQuery(query)
       return true
     } catch { self.error = error.localizedDescription; return false }

@@ -18,7 +18,7 @@ struct PhotoPicksSnapshot: Sendable {
     candidates.map(identity) == current.map(identity)
   }
   private static func identity(_ value: AutomaticPhotoPickCandidate) -> String {
-    "\(value.id)|\(value.sourceRevision)|\(value.capturedAt.map { String($0.timeIntervalSince1970) } ?? "nil")|\(value.width)x\(value.height)|\(value.favorite)|\(value.isScreenshot)"
+    "\(value.id)|\(value.sourceRevision)|\(value.capturedAt.map { String($0.timeIntervalSince1970) } ?? "nil")|\(value.width)x\(value.height)|\(value.favorite)|\(value.isScreenshot)|\(value.sourceScreenshot)"
   }
 }
 
@@ -166,7 +166,7 @@ struct PhotoPicksSnapshot: Sendable {
       guard let asset = current[value.id] else { return false }
       return !asset.isHidden && asset.mediaType == .image && RecentPhoto.sourceRevision(asset) == value.sourceRevision
         && asset.creationDate == value.capturedAt
-        && asset.isFavorite == value.favorite && asset.mediaSubtypes.contains(.photoScreenshot) == value.isScreenshot
+        && asset.isFavorite == value.favorite && asset.mediaSubtypes.contains(.photoScreenshot) == value.sourceScreenshot
     }
   }
   static func preview(_ candidate: AutomaticPhotoPickCandidate) async throws -> AutomaticPhotoPickSignals? {

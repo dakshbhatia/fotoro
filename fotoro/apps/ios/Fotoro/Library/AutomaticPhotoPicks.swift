@@ -8,6 +8,10 @@ struct AutomaticPhotoPickCandidate: Sendable {
   var height: Int
   var favorite: Bool
   var isScreenshot: Bool
+  // Eligibility may be corrected in Fotoro. Source validation still checks
+  // the unmodified PhotoKit subtype observed when this candidate was created.
+  var photoKitScreenshot: Bool? = nil
+  var sourceScreenshot: Bool { photoKitScreenshot ?? isScreenshot }
 }
 struct AutomaticPhotoPickSignals: Sendable {
   var hash: UInt64
@@ -27,7 +31,7 @@ struct AutomaticPhotoPickRecommendations: Sendable {
   var unassessed = 0
 }
 enum AutomaticPhotoPickPolicy {
-  static let processor = "moment-highlights-v3"
+  static let processor = "moment-highlights-v4"
   enum MeasurementError: Error { case unavailable }
   static func analyzePixels(width: Int, height: Int, rgba: [UInt8]) throws
     -> AutomaticPhotoPickSignals
@@ -192,6 +196,12 @@ enum AutomaticPhotoPickPolicy {
         if moments.count > 1, group.representative.time != nil { reason.append("Variety across moments") }
         reasons[photo.id] = reason
       }
+    }
+    // Similarity chooses a representative, never overrides another explicit
+    // favorite the owner expects in the suggested set.
+    for candidate in scored where candidate.photo.favorite && !ids.contains(candidate.photo.id) {
+      ids.insert(candidate.photo.id)
+      reasons[candidate.photo.id] = ["Favorite"]
     }
     return AutomaticPhotoPickRecommendations(
       ids: ids, reasons: reasons, groupCount: groups.count,
