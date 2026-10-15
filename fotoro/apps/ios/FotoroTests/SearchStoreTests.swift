@@ -473,6 +473,67 @@ final class SearchStoreTests: XCTestCase {
     let afterReuse = await counter.count
     XCTAssertEqual(afterReuse, afterRefresh, "The completed current revision is reusable again")
   }
+  @MainActor func testSuspendedConsumerRejectsOwnerEditButSurvivesAdditiveAnalysisRefresh() async throws {
+    for ownerEdit in [false, true] {
+      let index = try SearchIndex(), counter = SearchQueryCounter(), gate = SearchQueryGate(), delay = SearchQueryGate()
+      var record = SearchRecord(id: "source"); record.labels = ["before"]
+      try index.replacePermitted([record])
+      let store = LocalSearchStore(index: index, queryExecutor: { index, query, scope, accepted, previous, generation in
+        let call = await counter.next()
+        let snapshot = try await index.searchAsync(query, scope: scope, acceptedMeaningID: accepted, previous: previous, generation: generation)
+        if call == 2 { await gate.wait("consumer") }
+        return snapshot
+      })
+      store.analysisQueryRefreshDelay = { await delay.wait("refresh") }
+      defer { store.pause() }
+      store.updateQuery("before")
+      try await waitFor(store, query: "before")
+      let generation = store.response.generation
+      store.metadataAnalysisDidChange()
+      try await waitForGate(delay, query: "refresh")
+      let consumer = Task { try await store.consumerResults("before", includeVisual: false) }
+      try await waitForGate(gate, query: "consumer")
+      if ownerEdit { XCTAssertTrue(store.setLabels(["after"], photoID: record.id)) }
+      await delay.resume("refresh")
+      try await waitForResponseGeneration(store, after: generation)
+      await gate.resume("consumer")
+      if ownerEdit {
+        do { _ = try await consumer.value; XCTFail("A removed label cannot return from an older suspended search") }
+        catch { XCTAssertTrue(error is CancellationError) }
+      } else {
+        let hits = try await consumer.value
+        XCTAssertEqual(hits.map(\.id), [record.id], "Additive analysis refresh cannot cancel otherwise current consumer results")
+      }
+    }
+  }
+  @MainActor func testConsumerRecordReadRejectsEditWhileWaitingForDatabase() async throws {
+    let index = try SearchIndex()
+    var record = SearchRecord(id: "source"); record.labels = ["before"]
+    try index.replacePermitted([record])
+    let store = LocalSearchStore(index: index)
+    let blocked = expectation(description: "Database queue is held"), began = expectation(description: "Consumer entered record read")
+    let release = DispatchSemaphore(value: 0)
+    let blocker = Task.detached {
+      try await index.database.write { _ in
+        blocked.fulfill()
+        _ = release.wait(timeout: .now() + 5)
+      }
+    }
+    await fulfillment(of: [blocked], timeout: 2)
+    let consumer = Task {
+      began.fulfill()
+      return try await store.consumerRecords([record.id])
+    }
+    await fulfillment(of: [began], timeout: 2)
+    // An explicit same-text update represents an owner/synced annotation edit;
+    // it must be fenced without requiring the replacement query to finish.
+    store.updateQuery("before")
+    release.signal()
+    try await blocker.value
+    do { _ = try await consumer.value; XCTFail("An edit during a queued validation read must reject its earlier context") }
+    catch { XCTAssertTrue(error is CancellationError) }
+    store.pause()
+  }
   @MainActor func testAnalysisRefreshLetsSlowFirstTextQueryFinishBeforeSuccessor() async throws {
     let index = try SearchIndex(), gate = SearchQueryGate()
     var record = SearchRecord(id: "source"); record.labels = ["receipt"]
@@ -647,6 +708,7 @@ final class SearchStoreTests: XCTestCase {
 private actor SearchQueryCounter {
   private(set) var count = 0
   func record() { count += 1 }
+  func next() -> Int { count += 1; return count }
 }
 
 private actor SearchQueryGate {

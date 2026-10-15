@@ -99,6 +99,7 @@ enum SearchMetadataIntake {
   @ObservationIgnored private var analysisQueryRefreshID = UUID()
   @ObservationIgnored private var analysisRevision: UInt64 = 0
   @ObservationIgnored private var responseAnalysisRevision: UInt64 = 0
+  @ObservationIgnored private var consumerContextGeneration: UInt64 = 0
   #if DEBUG
     @ObservationIgnored var analysisQueryRefreshDelay: @MainActor () async throws -> Void = {
       try await Task.sleep(for: .milliseconds(750))
@@ -794,6 +795,7 @@ enum SearchMetadataIntake {
     let token = work.generation
     let library = libraryGeneration
     let queryToken = queryGeneration
+    let context = consumerContextGeneration
     let currentQuery = SearchNormalization.text(query)
     let previous = response
     let accepted = acceptedMeaningID
@@ -819,11 +821,13 @@ enum SearchMetadataIntake {
     #endif
     try Task.checkCancellation()
     guard ready, token == work.generation, library == libraryGeneration else { return [] }
-    guard currentQuery == SearchNormalization.text(query), accepted == acceptedMeaningID,
+    guard context == consumerContextGeneration,
+      currentQuery == SearchNormalization.text(query), accepted == acceptedMeaningID,
       scope.people == peopleSelection else { throw CancellationError() }
     let permitted = try await consumerRecords(next.results.flatMap { [$0.id] + $0.children })
     try Task.checkCancellation()
-    guard currentQuery == SearchNormalization.text(query), accepted == acceptedMeaningID,
+    guard context == consumerContextGeneration,
+      currentQuery == SearchNormalization.text(query), accepted == acceptedMeaningID,
       scope.people == peopleSelection else { throw CancellationError() }
     return next.results.compactMap { hit in
       let current = ([hit.id] + hit.children).filter { permitted[$0] != nil }
@@ -837,11 +841,13 @@ enum SearchMetadataIntake {
   func consumerRecords(_ ids: [String]) async throws -> [String: SearchRecord] {
     guard ready, let index else { return [:] }
     let token = work.generation, library = libraryGeneration, people = peopleSelection
+    let context = consumerContextGeneration
     let worker = Task.detached(priority: .userInitiated) { try index.records(ids) }
     let records = try await withTaskCancellationHandler { try await worker.value }
       onCancel: { worker.cancel() }
     try Task.checkCancellation()
-    guard ready, token == work.generation, library == libraryGeneration, people == peopleSelection else {
+    guard ready, token == work.generation, library == libraryGeneration,
+      context == consumerContextGeneration, people == peopleSelection else {
       throw CancellationError()
     }
     #if !FOTORO_LOCAL_PREVIEW
@@ -895,11 +901,17 @@ enum SearchMetadataIntake {
         guard let self, ready, token == work.generation,
           analysisQueryRefreshID == id else { return }
         analysisQueryRefreshTask = nil
-        if responseAnalysisRevision != analysisRevision { updateQuery(query) }
+        if responseAnalysisRevision != analysisRevision { refreshQuery(query) }
       } catch {}
     }
   }
   func updateQuery(_ value: String) {
+    // Owner/sync edits and explicit query choices invalidate in-flight consumer
+    // answers even when their text and people selection happen to stay equal.
+    consumerContextGeneration &+= 1
+    refreshQuery(value)
+  }
+  private func refreshQuery(_ value: String) {
     cancelAnalysisQueryRefresh()
     let normalized = SearchNormalization.text(value)
     let changed = normalized != SearchNormalization.text(query)
