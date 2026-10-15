@@ -325,11 +325,7 @@ enum ReviewedPhotosBackupPolicy {
       savedVisualSnapshotOrigin = origin
       savedVisualSnapshotCatalog = ObjectIdentifier(catalog)
     }
-    let lexicalWorker = Task.detached(priority: .userInitiated) {
-      try index.search(query, scope: SearchScope(source: "saved", people: people))
-    }
-    let base = try await withTaskCancellationHandler { try await lexicalWorker.value }
-      onCancel: { lexicalWorker.cancel() }
+    let base = try await index.searchAsync(query, scope: SearchScope(source: "saved", people: people))
     try Task.checkCancellation()
     guard photoAccountAccess == access, consumerCatalogGeneration == catalogSnapshotGeneration,
       BackgroundUploadPolicy.origin(api.baseURL) == origin else { throw CancellationError() }

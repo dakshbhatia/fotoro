@@ -457,7 +457,13 @@ struct RecentPhotosView: View {
   private var homeGroups: [PhotoBrowseGroup] {
     homeProjection.groups(for: browseProjectionID) {
       let items = homeItemsProjection.value(for: browseProjectionID.metadata) {
-        homePhotoLookup.values.map { photo in
+        homePhotoLookup.values.filter { photo in
+          #if !FOTORO_LOCAL_PREVIEW
+          !PhotoOrganizationFacts.trashed((try? search.record(photo.id))?.facts)
+          #else
+          true
+          #endif
+        }.map { photo in
           PhotoBrowseItem(source: RecentPhotoSource(photo), facts: RecentPhotoFacts(
             capturedAt: photo.capturedAt, favorite: photo.isFavorite, screenshot: photo.isScreenshot,
             livePhoto: photo.isLivePhoto, location: photo.location))
