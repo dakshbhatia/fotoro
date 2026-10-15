@@ -1467,3 +1467,11 @@ it was removed while retaining GRDB cancellation on the live async path, and the
 complete suite passed again. Build 78's archive and distribution-signed IPA passed
 the production identity, dSYM, static crypto and encryption audits. Upload,
 processing, internal availability and a physical-phone rerun are separate gates.
+
+The subsequent cache review reproduced a removed tag reappearing from a completed
+response while its replacement query was pending. Reuse now requires the exact
+completed query generation; bulk result validation also excludes current Trash
+facts. The new failing regression passed after the guard, together with all 168
+affected search, date, semantic and consumer tests. Build 78 contains the primary
+latency repair; build 79 additionally carries this cache freshness correction.
+The original installed phone remained on build 77 at the last device readback.

@@ -417,7 +417,18 @@ final class SearchStoreTests: XCTestCase {
     XCTAssertFalse(store.searching)
     XCTAssertNil(store.error)
   }
-  @MainActor func testConsumerTextReusesCompletedResponseWhileBackgroundRefreshIsHeld() async throws {
+  @MainActor func testConsumerTextNeverReusesMatchesAfterTheirLabelWasRemoved() async throws {
+    let index = try SearchIndex()
+    var record = SearchRecord(id: "source"); record.labels = ["before"]
+    try index.replacePermitted([record])
+    let store = LocalSearchStore(index: index)
+    store.updateQuery("before")
+    try await waitFor(store, query: "before")
+    XCTAssertTrue(store.setLabels(["after"], photoID: record.id))
+    let hits = try await store.consumerResults("before", includeVisual: false)
+    XCTAssertTrue(hits.isEmpty, "A completed response from before an edit cannot become the new answer")
+  }
+  @MainActor func testConsumerTextReusesCompletedResponseWithoutRerunningQuery() async throws {
     let index = try SearchIndex()
     var record = SearchRecord(id: "screenshot")
     record.ocrText = "Alfred project notes"; record.ocrStatus = .complete; record.ocrConfidence = 0.95
@@ -427,14 +438,10 @@ final class SearchStoreTests: XCTestCase {
     try await waitForGate(gate, query: "alfred")
     await gate.resume("alfred")
     try await waitFor(store, query: "alfred")
-    store.updateQuery("alfred")
-    try await waitForGate(gate, query: "alfred", count: 2)
     let hits = try await store.consumerResults("alfred", includeVisual: false)
-    XCTAssertEqual(hits.map(\.id), [record.id], "Existing OCR must not wait for the held refresh or visual model")
+    XCTAssertEqual(hits.map(\.id), [record.id], "Completed OCR retrieval must not wait for visual inference")
     let calls = await gate.count("alfred", returned: false)
-    XCTAssertEqual(calls, 2, "Consumer presentation must not enqueue duplicate lexical retrieval")
-    await gate.resume("alfred")
-    try await waitFor(store, query: "alfred")
+    XCTAssertEqual(calls, 1, "Consumer presentation must not enqueue duplicate lexical retrieval")
   }
   @MainActor func testSameQueryEnrichmentKeepsCompletedMatchesWhileSearching() async throws {
     let index = try SearchIndex()

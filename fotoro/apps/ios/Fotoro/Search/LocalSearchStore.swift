@@ -787,9 +787,9 @@ enum SearchMetadataIntake {
     let previous = response
     let accepted = acceptedMeaningID
     let scope = SearchScope(people: peopleSelection)
-    // The presentation already ran lexical retrieval. Reuse it rather than
-    // enqueuing the same SQLite work again behind background analysis.
-    var next = hasCurrentResponse && SearchNormalization.text(value) == currentQuery
+    // An older answer may remain visible during enrichment, but only this
+    // completed generation can be reused after edits or annotation changes.
+    var next = hasCurrentResponse && response.generation == queryToken && SearchNormalization.text(value) == currentQuery
       ? response : try await queryExecutor(index, value, scope, accepted, previous, queryToken)
     #if !FOTORO_LOCAL_PREVIEW
     let phrase = NaturalDateQuery.parse(value).text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -835,12 +835,12 @@ enum SearchMetadataIntake {
     #if !FOTORO_LOCAL_PREVIEW
     if !people.isEmpty {
       return records.filter { _, record in
-        canEditPeoplePhoto(record.id, revision: record.revision)
+        !PhotoOrganizationFacts.trashed(record.facts) && canEditPeoplePhoto(record.id, revision: record.revision)
           && people.matches(Set(PhotoPeopleFacts.read(record.facts, enforceWireLimits: false).map(\.p)))
       }
     }
     #endif
-    return records
+    return records.filter { !PhotoOrganizationFacts.trashed($0.value.facts) }
   }
   func consumerRecord(_ id: String) throws -> SearchRecord? {
     guard ready, let record = try index?.record(id) else { return nil }
