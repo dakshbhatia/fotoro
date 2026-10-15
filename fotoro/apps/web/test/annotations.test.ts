@@ -563,3 +563,22 @@ test("remote conflict choice preserves independent non-facts field edits", async
     assert.equal((await annotations.pendingAnnotations()).length, 1);
   } finally {globalThis.fetch = old; await clean();}
 });
+
+test("organization queues preserve latest private facts, survive an exact retry, and Restore keeps name and tags", async () => {
+  const session = await open();
+  try {
+    await annotations.cacheAnnotations(signed(1, {facts: ["Exact private words"], labels: ["BTS"], caption: "Exact caption"}), photoId);
+    await annotations.queuePhotoOrganization(identity, {name: "BTS Seoul.jpg"}, session);
+    await annotations.queuePhotoOrganization(identity, {trash: true, screenshot: true}, session);
+    const before = (await annotations.pendingAnnotations(session))[0].signed;
+    assert.equal(await annotations.queuePhotoOrganization(identity, {trash: true}, session), false);
+    assert.deepEqual((await annotations.pendingAnnotations(session))[0].signed, before);
+    await annotations.queuePhotoOrganization(identity, {trash: false}, session);
+    const value = (await annotations.readAnnotations(identity, session))!.value;
+    assert.deepEqual(value.labels, ["BTS"]); assert.equal(value.caption, "Exact caption");
+    assert.deepEqual(value.facts, ["Exact private words", "fotoro.name.v1:BTS Seoul.jpg", "fotoro.screenshot.v1:true"]);
+    assert.doesNotMatch(JSON.stringify(await all("settings")), /BTS Seoul|Exact private words|fotoro\.name/);
+    await assert.rejects(() => annotations.queuePhotoOrganization({...identity, ownerAccountId: other}, {trash: true}, session));
+    lockVault(); await assert.rejects(() => annotations.queuePhotoOrganization(identity, {trash: true}, session));
+  } finally {await clean();}
+});

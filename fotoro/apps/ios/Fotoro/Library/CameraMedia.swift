@@ -243,12 +243,21 @@ enum CameraMedia {
   }
   // File reads, verification and Live Photo expansion must not stall UI gestures.
   // The caller owns the export directory and removes it on failure or cancellation.
-  static func exportOriginalFile(_ url: URL, metadata: PhotoMetadataV1) async throws -> [URL] {
+  static func exportOriginalFile(_ url: URL, metadata: PhotoMetadataV1, name: String? = nil) async throws -> [URL] {
     let work = Task.detached(priority: .userInitiated) {
       try Task.checkCancellation()
       let bytes = try Data(contentsOf: url)
       try Task.checkCancellation()
-      let urls = try exportOriginals(bytes, metadata: metadata, directory: url.deletingLastPathComponent())
+      var urls = try exportOriginals(bytes, metadata: metadata, directory: url.deletingLastPathComponent())
+      if let name, name != metadata.filename {
+        guard PhotoOrganizationFacts.validName(name) else { throw PhotoOrganizationError.invalid }
+        urls = try urls.map { source in
+          let filename = urls.count == 1 ? name : (name as NSString).deletingPathExtension + "." + source.pathExtension
+          let destination = source.deletingLastPathComponent().appendingPathComponent(filename)
+          if destination != source { try FileManager.default.moveItem(at: source, to: destination) }
+          return destination
+        }
+      }
       try Task.checkCancellation()
       return urls
     }

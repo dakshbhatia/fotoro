@@ -656,7 +656,7 @@ struct PhotoPreviewProgress {
     thumbnailGeneration = UUID()
     thumbnailAuthorization = nil
   }
-  func shareOriginals(_ photos: [RecentPhoto]) async throws -> [URL] {
+  func shareOriginals(_ photos: [RecentPhoto], names: [String: String] = [:]) async throws -> [URL] {
     func checkAccess(_ photo: RecentPhoto) throws -> PHAsset {
       guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
         let current = PHAsset.fetchAssets(withLocalIdentifiers: [photo.id], options: nil).firstObject,
@@ -693,7 +693,10 @@ struct PhotoPreviewProgress {
         for resource in resources {
           try Task.checkCancellation()
           _ = try checkAccess(photo)
-          let url = folder.appendingPathComponent(resource.originalFilename)
+          let chosen = names[photo.id]
+          if let chosen, !PhotoOrganizationFacts.validName(chosen) { throw PhotoOrganizationError.invalid }
+          let filename = chosen.map { resources.count == 1 ? $0 : ($0 as NSString).deletingPathExtension + "." + (resource.originalFilename as NSString).pathExtension } ?? resource.originalFilename
+          let url = folder.appendingPathComponent(filename)
           let options = PHAssetResourceRequestOptions()
           options.isNetworkAccessAllowed = true
           try await withCheckedThrowingContinuation {

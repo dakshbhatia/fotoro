@@ -360,6 +360,8 @@ struct RecentPhotosView: View {
   @State private var savedRefresh = SavedLibraryRefresh()
   @State private var savedHasMore = true
   @State private var savedFavoritesOnly = false
+  @State private var savedOrganization = "photos"
+  @State private var cleanupOpen = false
 #endif
   @State private var selectedPhotos: [String: SelectedRecentPhoto] = [:]
   @State private var homeVisible = false
@@ -490,7 +492,7 @@ struct RecentPhotosView: View {
           photo.metadata.originalSha256 + "|" + photo.manifest.metadataRepresentation.ciphertextSha256 == source.revision {
           let annotation = services?.annotation(photo)
           return RecentPhotoFacts(capturedAt: ["exif", "photos"].contains(photo.metadata.dateSource) ? Wire.parseDate(photo.metadata.sourceDate) : nil,
-            favorite: annotation?.favorite == true, screenshot: annotation?.facts?.contains("screenshot") == true,
+            favorite: annotation?.favorite == true, screenshot: PhotoOrganizationFacts.screenshot(annotation?.facts, originalSha256: photo.metadata.originalSha256),
             livePhoto: photo.metadata.mediaType == CameraMedia.liveType, location: annotation?.location?.displayName)
         }
         let id = allPhotos ? String(source.id.dropFirst("device:".count)) : source.id
@@ -565,10 +567,15 @@ struct RecentPhotosView: View {
     let calendar = Calendar.current
     let identity = SavedPhotoBrowseProjectionID(binding: services.map(SavedLibraryOpenBinding.init),
       permitted: services?.photoAccountAccess != nil, catalog: services?.consumerCatalogGeneration ?? 0,
-      favoritesOnly: savedFavoritesOnly, calendar: calendar, origin: services?.api.baseURL.absoluteString)
+      favoritesOnly: savedFavoritesOnly, organization: savedOrganization, calendar: calendar, origin: services?.api.baseURL.absoluteString)
     return savedProjection.value(for: identity) {
       guard let services, identity.permitted else { return SavedPhotoBrowseSnapshot() }
-      let photos = allOwnedPhotos.filter { !savedFavoritesOnly || services.annotation($0).favorite == true }
+      let photos = allOwnedPhotos.filter { photo in
+        let value = services.annotation(photo), trash = PhotoOrganizationFacts.trashed(value.facts)
+        return (savedOrganization == "trash" ? trash : !trash)
+          && (savedOrganization != "screenshots" || PhotoOrganizationFacts.screenshot(value.facts, originalSha256: photo.metadata.originalSha256))
+          && (!savedFavoritesOnly || value.favorite == true)
+      }
       let groups = Dictionary(grouping: photos) { photo in
         Wire.parseDate(photo.metadata.sourceDate).map { calendar.startOfDay(for: $0).timeIntervalSince1970.description }
           ?? "unknown"
@@ -594,16 +601,16 @@ struct RecentPhotosView: View {
   private var timelineGroups: [PhotoBrowseGroup] {
     timelineProjection.groups(for: browseProjectionID) {
       let items = timelineItemsProjection.value(for: browseProjectionID.metadata) {
-        let device = homePhotoLookup.values.map { photo in
+        let device = homePhotoLookup.values.filter { !PhotoOrganizationFacts.trashed((try? search.record($0.id))?.facts) }.map { photo in
           PhotoBrowseItem(source: RecentPhotoSource(photo), facts: RecentPhotoFacts(
             capturedAt: photo.capturedAt, favorite: photo.isFavorite, screenshot: photo.isScreenshot,
             livePhoto: photo.isLivePhoto, location: photo.location))
         }
-        let saved = allOwnedPhotos.map { photo in
+        let saved = allOwnedPhotos.filter { !PhotoOrganizationFacts.trashed(services?.annotation($0).facts) }.map { photo in
           let annotation = services?.annotation(photo)
           return PhotoTimelineSavedItem(photo: photo, facts: RecentPhotoFacts(
             capturedAt: ["exif", "photos"].contains(photo.metadata.dateSource) ? Wire.parseDate(photo.metadata.sourceDate) : nil, favorite: annotation?.favorite == true,
-            screenshot: annotation?.facts?.contains("screenshot") == true,
+            screenshot: PhotoOrganizationFacts.screenshot(annotation?.facts, originalSha256: photo.metadata.originalSha256),
             livePhoto: photo.metadata.mediaType == CameraMedia.liveType, location: annotation?.location?.displayName))
         }
         return PhotoTimelineBrowseItems(device: device, saved: saved)
@@ -654,11 +661,11 @@ struct RecentPhotosView: View {
           }
           if ownedPhotos.isEmpty && !savedRefresh.isRefreshing,
             !savedHasMore || services.photos.isEmpty {
-            ContentUnavailableView("No saved photos", systemImage: "photo.stack",
+            ContentUnavailableView(savedOrganization == "trash" ? "Trash is empty" : savedOrganization == "screenshots" ? "No saved screenshots" : "No saved photos", systemImage: "photo.stack",
               description: Text(savedLibraryEmptyMessage(sync: services.automaticPhotoSync,
                 favoritesOnly: savedFavoritesOnly)))
           }
-        }.id(savedFavoritesOnly).scrollDismissesKeyboard(.interactively)
+        }.id("\(savedFavoritesOnly)|\(savedOrganization)").scrollDismissesKeyboard(.interactively)
           .defaultScrollAnchor(.top, for: .initialOffset).scrollBounceBehavior(.basedOnSize)
           .onScrollPhaseChange { _, phase in setBrowseInteractionActive(phase != .idle) }
           .onDisappear { setBrowseInteractionActive(false) }
@@ -704,6 +711,7 @@ struct RecentPhotosView: View {
       .fullScreenCover(item: $savedViewer) { presentation in
         if let services { PhotoViewer(services: services, initialID: presentation.initial.id, displayedPhotos: presentation.photos) }
       }
+      .sheet(isPresented: $cleanupOpen) { if let services { PhotoCleanupReview(services: services) } }
       .sheet(item: $sharedSavedPhotos) { presentation in
         if let services { ExchangeView(services: services, selected: presentation.photos) }
       }
@@ -1255,7 +1263,7 @@ struct RecentPhotosView: View {
               candidates.append(AutomaticPhotoPickCandidate(id: hit.id, sourceRevision: revision,
                 capturedAt: ["photos", "exif"].contains(current.metadata.dateSource) ? Wire.parseDate(current.metadata.sourceDate) : nil,
                 width: preview?.width ?? 0, height: preview?.height ?? 0,
-                favorite: annotations.favorite == true, isScreenshot: annotations.facts?.contains("screenshot") == true))
+                favorite: annotations.favorite == true, isScreenshot: PhotoOrganizationFacts.screenshot(annotations.facts, originalSha256: current.metadata.originalSha256)))
               saved[hit.id] = current
               previews[hit.id] = preview
             }
@@ -1273,7 +1281,7 @@ struct RecentPhotosView: View {
                 now.metadata == captured.metadata, now.manifest == captured.manifest else { return false }
               let annotations = originalServices.annotation(now)
               guard (annotations.favorite == true) == source.favorite,
-                (annotations.facts?.contains("screenshot") == true) == source.isScreenshot,
+                PhotoOrganizationFacts.screenshot(annotations.facts, originalSha256: now.metadata.originalSha256) == source.isScreenshot,
                 previews[source.id]?.isCurrent ?? true else { return false }
             }
             return true
@@ -1597,6 +1605,12 @@ struct RecentPhotosView: View {
       }
       #if !FOTORO_LOCAL_PREVIEW
         if !search.hasSearch, scope == .saved, let services, services.photoAccountAccess != nil {
+          Picker("Show", selection: $savedOrganization) {
+            Text("Photos").tag("photos")
+            Text("Screenshots").tag("screenshots")
+            Text("Fotoro Trash").tag("trash")
+          }.accessibilityLabel("Photo type")
+          Button("Review cleanup", systemImage: "sparkles") { cleanupOpen = true }
           Toggle("Favorites", isOn: $savedFavoritesOnly)
           Button("Shared photos", systemImage: "person.2") { sharedSavedPhotos = SharedPhotosPresentation() }
         }
@@ -2119,13 +2133,20 @@ struct RecentPhotosView: View {
       var pending: PhotoOriginalShareBatch.Exports?
       do {
         pending = try await PhotoOriginalShareBatch.prepare(device: sources, saved: saved, valid: check,
-          exportDevice: { _ in try await store.shareOriginals(device) },
+          exportDevice: { _ in
+            let names = Dictionary(uniqueKeysWithValues: device.compactMap { photo -> (String, String)? in
+              guard let record = try? search.record(photo.id), record.revision == photo.sourceRevision else { return nil }
+              let name = PhotoOrganizationFacts.name(record.facts, original: record.filename)
+              return name == record.filename ? nil : (photo.id, name)
+            })
+            return try await store.shareOriginals(device, names: names)
+          },
           exportSaved: { photo in
             guard let services else { throw CancellationError() }
             return try await services.consumerShareOriginal(photo)
           }, expandSaved: { url, photo in
             if photo.metadata.mediaType == CameraMedia.liveType {
-              return try await CameraMedia.exportOriginalFile(url, metadata: photo.metadata)
+              return try await CameraMedia.exportOriginalFile(url, metadata: photo.metadata, name: PhotoOrganizationFacts.name(services?.annotation(photo).facts, original: photo.metadata.filename))
             }
             return [url]
           }, removeDevice: removeShareFiles, removeSaved: ConsumerShareExports.remove)

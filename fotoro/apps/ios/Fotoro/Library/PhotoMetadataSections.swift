@@ -1,34 +1,48 @@
 import SwiftUI
+import ImageIO
 
 // Presents measured capture details without turning technical metadata into user tags.
 struct PhotoMetadataSections: View {
   private let summary: PhotoMetadataPresentation
-  init(metadata: PhotoCaptureMetadata) {
-    summary = PhotoMetadataPresentation(metadata)
+  private let filename: String?
+  init(metadata: PhotoCaptureMetadata?, filename: String? = nil) {
+    summary = PhotoMetadataPresentation(metadata ?? PhotoCaptureMetadata(items: []))
+    self.filename = filename
   }
 
   var body: some View {
-    if !summary.media.isEmpty {
-      Section("Photo") {
-        ForEach(summary.media) { PhotoMetadataRow(row: $0) }
-      }
-    }
-    if !summary.camera.isEmpty {
-      Section("Camera") {
-        ForEach(summary.camera) { PhotoMetadataRow(row: $0) }
-      }
-    }
-    if !summary.details.isEmpty {
+    if filename != nil || !(summary.media + summary.camera + summary.details).isEmpty {
       Section {
-        DisclosureGroup("Capture details") {
-          ForEach(summary.details) { PhotoMetadataRow(row: $0) }
+        DisclosureGroup("Technical details") {
+          if let filename { Text(filename).textSelection(.enabled) }
+          ForEach(summary.media + summary.camera + summary.details) { PhotoMetadataRow(row: $0) }
         }
       }
     }
   }
 }
 
-// Keeps current Photos dimensions prominent; original file measurements remain available.
+struct PhotoLocationSection: View {
+  let location: PhotoLocationV1
+  var body: some View {
+    if location.isValid {
+      Section("Place") {
+        if let url = location.mapURL {
+          Link(location.name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? location.displayName : "View on map", destination: url)
+        }
+        DisclosureGroup("Location details") {
+          Text(location.coordinates).textSelection(.enabled)
+          Text(location.provenance).font(.caption).foregroundStyle(.secondary)
+          if let accuracy = location.accuracyMeters {
+            Text("Accuracy: about \(Int(accuracy.rounded())) m").font(.caption).foregroundStyle(.secondary)
+          }
+        }
+      }
+    }
+  }
+}
+
+// Current Photos measurements and original measurements stay distinct inside optional details.
 struct PhotoMetadataPresentation {
   var media: [PhotoCaptureMetadata.Row] = []
   var camera: [PhotoCaptureMetadata.Row] = []
@@ -123,3 +137,140 @@ private struct PhotoMetadataRow: View {
     }.accessibilityElement(children: .combine)
   }
 }
+
+#if !FOTORO_LOCAL_PREVIEW
+struct SavedPhotoOrganizationSection: View {
+  @Bindable var services: AppServices
+  let photo: LocalPhoto
+  @State private var draft = ""
+  private var value: PhotoAnnotationsV1 { services.annotation(photo) }
+  private var name: String { PhotoOrganizationFacts.name(value.facts, original: photo.metadata.filename) }
+  private var screenshot: Bool { PhotoOrganizationFacts.screenshot(value.facts, originalSha256: photo.metadata.originalSha256) }
+  private var valid: Bool { PhotoOrganizationFacts.validName(draft) && (draft as NSString).pathExtension.lowercased() == (photo.metadata.filename as NSString).pathExtension.lowercased() }
+  var body: some View {
+    Section("Photo name") {
+      TextField("Filename", text: $draft).autocorrectionDisabled().textInputAutocapitalization(.never)
+        .accessibilityLabel("Photo filename").submitLabel(.done).onSubmit { if valid && draft != name { apply(.name(draft)) } }
+      Button("Suggest name") {
+        draft = PhotoOrganizationFacts.suggestedName(original: photo.metadata.filename, digest: photo.metadata.originalSha256,
+          capturedAt: CameraMedia.captureDate(photo.metadata), labels: value.labels ?? [], place: value.location?.name, screenshot: screenshot)
+      }
+      Button("Apply name") { apply(.name(draft)) }.disabled(!valid || draft == name)
+      if name != photo.metadata.filename { Button("Use original name") { apply(.name(nil)) } }
+      Text("Names follow this photo in Fotoro and on exported copies. The original stays unchanged.").font(.caption).foregroundStyle(.secondary)
+      Toggle("Screenshot", isOn: Binding(get: { screenshot }, set: { apply(.screenshot($0)) }))
+    }.onAppear { draft = name }.onChange(of: name) { _, value in draft = value }
+    Section {
+      Button(PhotoOrganizationFacts.trashed(value.facts) ? "Restore photo" : "Move to Fotoro Trash") { apply(.trash(!PhotoOrganizationFacts.trashed(value.facts))) }
+      Text("Trash hides this photo in Fotoro. You can Restore it. Device Photos and storage use stay unchanged.").font(.caption).foregroundStyle(.secondary)
+    }
+  }
+  private func apply(_ change: PhotoOrganizationChange) {
+    do { try services.setOrganization(change, photo: photo) } catch { services.error = error.localizedDescription }
+  }
+}
+#endif
+
+#if !FOTORO_LOCAL_PREVIEW
+struct PhotoCleanupReview: View {
+  @Bindable var services: AppServices
+  @State private var reasons: [String: [String]] = [:]
+  @State private var done = 0
+  @State private var total = 0
+  @State private var unassessed = 0
+  @State private var busy = true
+  @State private var error: String?
+  @State private var opened: LocalPhoto?
+  @Environment(\.dismiss) private var dismiss
+  @Environment(\.scenePhase) private var scenePhase
+  private var candidates: [LocalPhoto] {
+    services.photos.filter { reasons[$0.id] != nil && !PhotoOrganizationFacts.trashed(services.annotation($0).facts) }
+  }
+  var body: some View {
+    NavigationStack {
+      List {
+        Section {
+          Text("Review possible duplicates, blurry shots, and photos with little detail. Nothing is selected or removed automatically.")
+          Text("Up to 200 loaded Saved photos. Trash is recoverable and does not affect device Photos or free storage.").font(.caption).foregroundStyle(.secondary)
+          if busy { ProgressView("Checking previews… \(done) / \(total)") }
+          else { Text("\(candidates.count) to review · \(unassessed) previews unassessed") }
+        }
+        if services.vault.isUnlocked {
+          ForEach(candidates) { photo in
+            Section {
+              LibraryPhotoCell(photo: photo, isSelected: false, open: { opened = photo }, toggleSelection: {}, services: services).frame(maxHeight: 220)
+              Text(PhotoOrganizationFacts.name(services.annotation(photo).facts, original: photo.metadata.filename))
+              ForEach(reasons[photo.id] ?? [], id: \.self) { Text($0).font(.footnote) }
+              if services.annotation(photo).favorite == true { Label("Favorite · review carefully", systemImage: "heart") }
+              Button("Move to Fotoro Trash") {
+                do { try services.setOrganization(.trash(true), photo: photo) } catch { self.error = error.localizedDescription }
+              }
+            }
+          }
+          if !busy && candidates.isEmpty { Text("No candidates found in this review. Unassessed photos have not been judged.") }
+          Section {
+            Text("Changes wait for Sync. You can find removed photos in Saved → Fotoro Trash.").font(.caption).foregroundStyle(.secondary)
+            Button("Sync changes") { Task { await services.syncAnnotations() } }
+          }
+        }
+        if let error { Text(error).foregroundStyle(.secondary) }
+      }.navigationTitle("Review cleanup").navigationBarTitleDisplayMode(.inline)
+        .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+        .task { await review() }
+        .onChange(of: scenePhase) { _, value in if value != .active { dismiss() } }
+        .onChange(of: services.vault.isUnlocked) { _, unlocked in if !unlocked { dismiss() } }
+        .sheet(item: $opened) { photo in PhotoViewer(services: services, initialID: photo.id, displayedPhotos: [photo]) }
+    }
+  }
+  @MainActor private func review() async {
+    let account = services.session.accountId, vault = services.vault.generation, catalog = services.store
+    let source = Array(services.photos.filter { !PhotoOrganizationFacts.trashed(services.annotation($0).facts) }.prefix(200))
+    total = source.count
+    var digestKeepers: [String: String] = [:]
+    // Keep a favorite as the representative when identical originals are loaded.
+    for photo in source.sorted(by: { services.annotation($0).favorite == true && services.annotation($1).favorite != true }) {
+      if digestKeepers[photo.metadata.originalSha256] == nil { digestKeepers[photo.metadata.originalSha256] = photo.id }
+    }
+    func current(_ photo: LocalPhoto) -> Bool {
+      !Task.isCancelled && scenePhase == .active && services.vault.isUnlocked && services.vault.generation == vault
+        && services.session.accountId == account && services.store === catalog
+        && ((try? services.consumerSavedPhoto(photo.id)).map { $0.metadata == photo.metadata && $0.manifest == photo.manifest } ?? false)
+    }
+    defer { busy = false }
+    for photo in source {
+      guard current(photo) else { return }
+      var why: [String] = []
+      if digestKeepers[photo.metadata.originalSha256] != photo.id { why.append("Identical original · keep another copy") }
+      do {
+        try await services.ensurePreview(photo)
+        guard current(photo), let url = try services.consumerSavedPhoto(photo.id)?.previewURL else { throw CancellationError() }
+        let task = Task.detached(priority: .utility) { () throws -> AutomaticPhotoPickSignals? in
+          try Task.checkCancellation()
+          let data = try Data(contentsOf: url, options: .mappedIfSafe)
+          guard data.count <= 2 * 1024 * 1024, let image = CGImageSourceCreateWithData(data as CFData, nil),
+            let thumbnail = CGImageSourceCreateThumbnailAtIndex(image, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceThumbnailMaxPixelSize: 64] as CFDictionary) else { return nil }
+          return try PhotoPickAnalyzer.measure(thumbnail)
+        }
+        let signals = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+        guard current(photo) else { return }
+        let annotation = services.annotation(photo)
+        if let signals {
+          if annotation.favorite != true && !PhotoOrganizationFacts.screenshot(annotation.facts, originalSha256: photo.metadata.originalSha256) {
+            if signals.luminance < 0.025 || signals.luminance > 0.985 { why.append("Possibly too dark or bright") }
+            else if signals.contrast < 0.012 { why.append("Very little visible detail") }
+            else if signals.sharpness < 0.008 && signals.contrast > 0.025 { why.append("Possibly blurry") }
+          }
+        } else { unassessed += 1 }
+      } catch {
+        guard current(photo) else { return }
+        unassessed += 1
+      }
+      guard current(photo) else { return }
+      if !why.isEmpty { reasons[photo.id] = why }
+      done += 1
+      await Task.yield()
+    }
+    NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .metadata, outcome: .completed, completed: done, unavailable: unassessed, step: .analysis))
+  }
+}
+#endif

@@ -17,7 +17,7 @@ export function validPlace(location: PhotoLocationV1 | undefined): location is P
   return validatedPhotoLocation(location) !== undefined;
 }
 export function placeTitle(location: PhotoLocationV1): string {
-  return location.name || `${location.latitude.toFixed(4)}, ${location.longitude.toFixed(4)}`;
+  return location.name?.trim() ? location.name : "Location on map";
 }
 export function placeSource(location: PhotoLocationV1): string {
   return location.source === "google-timeline" ? "Estimated from Google Timeline" : "Location from the photo";

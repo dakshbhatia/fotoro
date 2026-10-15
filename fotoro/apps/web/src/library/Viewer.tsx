@@ -1,5 +1,7 @@
+import {PhotoOrganization} from "./PhotoOrganization";
+import type {PhotoOrganizationPatch} from "@fotoro/contracts/organization";
 import {isCameraMedia, LIVE_PHOTO_TYPE} from "@fotoro/contracts/camera-media";
-import {cameraOriginalFiles, readCameraPlayback} from "../media/camera-original";
+import {photoOriginalFiles, readCameraPlayback} from "../media/camera-original";
 import { lazy, Suspense, useState, useEffect, useRef } from "react";
 import { photoBytes, type Photo } from "./catalog";
 import { Icon } from "./icons";
@@ -17,6 +19,7 @@ import {CaptureMetadataInfo} from "./CaptureMetadataInfo";
 import type {PhotoObservationV1} from "@fotoro/contracts/intelligence";
 import {KeptObservations} from "../intelligence/KeptObservations";
 import {intelligenceScope} from "../intelligence/scope";
+import {newPhotoTag} from "../local/tags";
 const CloudPhotoUnderstanding = lazy(() => import("../intelligence/CloudPhotoUnderstanding").then(module => ({default: module.CloudPhotoUnderstanding})));
 export function viewerPhotoIndex(photos: Photo[], selected: string) {
   return Math.max(0, photos.findIndex(photo => photo.manifest.photoId === selected));
@@ -27,6 +30,7 @@ export function Viewer({
   onClose,
   onSaved,
   onLabels,
+  onOrganization,
   onShare,
   onFavorite,
   changes,
@@ -36,6 +40,7 @@ export function Viewer({
   initial: string;
   onClose: () => void;
   onSaved: () => void;
+  onOrganization?: (photo: Photo, patch: PhotoOrganizationPatch) => void | Promise<void>;
   onLabels?: (photo: Photo, labels: string[]) => void | Promise<void>;
   onShare?: (photo: Photo) => void;
   onFavorite?: (photo: Photo, favorite: boolean) => void | Promise<void>;
@@ -181,7 +186,7 @@ export function Viewer({
       const bytes = await photoBytes(photo, "original", controller.signal);
       try {
         if (!current()) return;
-        const files = await cameraOriginalFiles(bytes, photo.metadata);
+        const files = await photoOriginalFiles(bytes, photo);
         if (!current()) {files.length = 0; return;}
         preparedRef.current = {files, photo, session}; setPrepared(preparedRef.current); setStatus("");
       } finally {bytes.fill(0);}
@@ -320,19 +325,12 @@ export function Viewer({
         <aside className="details" inert={prepared ? true : undefined}>
           {!isCameraMedia(photo.metadata.mediaType) && <button onClick={() => setZoom(!zoom)}>{zoom ? "Fit" : "Zoom"}</button>}
           {onShare && !photo.grantId && <button disabled={preparingShare || sharing} onClick={() => onShare(photo)}>Share in Fotoro</button>}
-          <p>{photo.metadata.filename}</p>
-          <p>
-            {photo.metadata.mediaType} ·{" "}
-            {photo.metadata.originalBytes.toLocaleString()} bytes
-          </p>
           <p>
             {photo.metadata.dateSource === "import"
-              ? "Import date · original capture date unavailable"
-              : "Capture date"}{" "}
-            · {new Date(photo.metadata.sourceDate).toLocaleString()}
+              ? "Capture date unavailable"
+              : new Date(photo.metadata.sourceDate).toLocaleString()}
           </p>
           {!photo.grantId && <PhotoLocation location={annotationLocation(photo.annotations ?? {})} />}
-          {!photo.grantId && <CaptureMetadataInfo facts={photo.annotations?.facts} originalSha256={photo.metadata.originalSha256} />}
           {!photo.grantId && <>
             <KeptObservations facts={photo.annotations?.facts} photoId={photo.manifest.photoId} sourceRevision={photo.metadata.originalSha256} />
             {onObservation && intelligenceSession && photo.manifest.ownerAccountId === intelligenceSession.accountId && <Suspense fallback={null}>
@@ -354,17 +352,25 @@ export function Viewer({
               }}>{savingChanges ? "Saving changes…" : correction.conflict ? "Review changes" : "Save changes"}</button>}
             </section>}
             {onFavorite && <button aria-pressed={photo.annotations?.favorite === true} onClick={() => void applyChange(() => onFavorite(photo, photo.annotations?.favorite !== true))}>{photo.annotations?.favorite ? "Unfavorite" : "Favorite"}</button>}
-            <h3>Labels</h3>
-            <div className="local-labels">{(photo.annotations?.labels ?? []).map((value, index) => onLabels ? <button key={index} aria-label={"Remove label " + value} onClick={() => void applyChange(() => onLabels(photo, photo.annotations!.labels!.filter((_, position) => position !== index)))}>{value} ×</button> : <span key={index}>{value}</span>)}</div>
+            <PhotoOrganization key={photo.manifest.photoId} source={{...photo.annotations, filename: photo.metadata.filename, digest: photo.metadata.originalSha256, date: photo.metadata.sourceDate, dateSource: photo.metadata.dateSource, location: annotationLocation(photo.annotations ?? {})}} saved={!photo.grantId} onChange={onOrganization && !photo.grantId ? patch => Promise.resolve(onOrganization(photo, patch)) : undefined} />
+            <h3>Tags</h3>
+            <div className="local-labels">{(photo.annotations?.labels ?? []).map((value, index) => <span key={index}>{value}{onLabels && <button aria-label={"Remove tag " + value} onClick={() => void applyChange(() => onLabels(photo, photo.annotations!.labels!.filter((_, position) => position !== index)))}>×</button>}</span>)}</div>
             {onLabels && <form className="local-label-form" onSubmit={event => {
               event.preventDefault();
               const labels = photo.annotations?.labels ?? [];
-              if (!label.trim() || labels.length >= 64) return;
-              if (!labels.includes(label)) void applyChange(() => onLabels(photo, [...labels, label]));
+              const tag = newPhotoTag(label, labels);
+              if (!tag) return;
+              void applyChange(() => onLabels(photo, [...labels, tag]));
               setLabel("");
-            }}><label>New label<input aria-label="New label" value={label} maxLength={120} onChange={event => setLabel(event.target.value)} /></label><button disabled={!label.trim() || (photo.annotations?.labels?.length ?? 0) >= 64}>Add label</button></form>}
+            }}><label>New tag<input aria-label="New tag" placeholder="BTS, a place, or your own words" value={label} maxLength={120} onChange={event => setLabel(event.target.value)} /></label><button disabled={!newPhotoTag(label, photo.annotations?.labels ?? [])}>Add tag</button></form>}
             {photo.annotations?.ocr && <details><summary>Text in photo</summary><p className="local-ocr-text">{photo.annotations.ocr.text || "No readable text found."}</p></details>}
           </>}
+          <details><summary>Technical details</summary>
+            <p>{photo.metadata.filename}</p>
+            <p>{photo.metadata.mediaType} · {photo.metadata.originalBytes.toLocaleString()} bytes</p>
+            {photo.metadata.dateSource === "import" && <p>Added to Fotoro: {new Date(photo.metadata.sourceDate).toLocaleString()}</p>}
+            {!photo.grantId && <CaptureMetadataInfo facts={photo.annotations?.facts} originalSha256={photo.metadata.originalSha256} />}
+          </details>
         </aside>
       )}
       <p role="status" className="viewer-status">

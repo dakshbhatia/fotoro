@@ -86,3 +86,28 @@ photos, query text, recognized text, locations, passwords and recipient identiti
 The [roadmap](product-backlog.md) is the only active queue. The [screen rules](../design/interaction-reference.md)
 own presentation; [foundation](foundation.md) owns architecture;
 [verification](verification.md) owns shipped proof and limits.
+
+## Organizing photos: ten decisions (October 15, 2026)
+
+The core organizing jobs are finding, naming, reviewing clutter, handling
+screenshots, and keeping deliberate changes on other devices.
+
+| Decision | Result |
+| --- | --- |
+| 1. Show the useful name in Info. | An editable Fotoro filename is prominent; the original camera filename is in Technical details. |
+| 2. Suggest a consistent filename from evidence. | Recorded UTC capture date, known place, up to two supplied tags, and a stable original-digest suffix. Missing dates and places stay missing. |
+| 3. Preview before applying a name. | Suggest name fills the editor; Apply name makes the deliberate change. Original bytes and camera-library names remain unchanged. Exported copies use the chosen name. |
+| 4. Separate names from captions. | Private name records never replace user captions, tags, OCR or original metadata. |
+| 5. Review cleanup before removing anything. | A bounded review shows reasons for identical originals, possible soft shots or very little detail. Nothing is selected automatically; unknown previews stay unassessed. |
+| 6. Use Fotoro-only Trash with Restore. | Normal library/search excludes trashed saved photos. Restore preserves names, tags and evidence. This release does not empty Trash, free storage, delete device Photos or revoke earlier shared copies. |
+| 7. Give screenshots an explicit view. | Trusted Photos subtype evidence and deliberate corrections drive Screenshots. Dimensions and suggestive filenames do not establish screenshot status. |
+| 8. Put useful words ahead of technical facts. | Place names and tags such as BTS are visible. Coordinates, camera settings, dimensions, source and accuracy remain available under disclosures. A typed place tag never invents GPS. |
+| 9. Make tag entry quick and hard to mis-tap. | Enter adds a tag; normalized duplicates are refused; removal has a separate labeled control. Exact-tag search is explicit. |
+| 10. Keep one private correction per photo across devices. | Names, screenshot corrections and Trash use existing encrypted owner/digest-bound annotations, conflict review and explicit Save changes/Sync. Search covers available dates while ordinary browsing starts at 30 days. |
+
+Current clients implement these organization records. Older clients preserve the
+reserved records but do not provide the new naming, screenshot or Trash behavior.
+Quality hints are review suggestions, not a calibrated judgment of a photo’s value.
+Cleanup covers at most 200 currently loaded previews per review; load further
+Saved pages deliberately. Personal-library retrieval, physical battery and frame
+pacing acceptance remain separate from functional source and simulator tests.

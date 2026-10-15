@@ -5,6 +5,22 @@ import XCTest
 @testable import Fotoro
 
 final class AnnotationTests: XCTestCase {
+  func testIndependentNameTrashAndScreenshotMergeButCompetingNamesNeedReview() throws {
+    var base = PhotoAnnotationsV1(photoId: "photo", originalSha256: "digest")
+    base.facts = ["Exact words"]
+    var local = base, remote = base
+    local.facts = try PhotoOrganizationFacts.replacing(base.facts, change: .name("my name.jpg"))
+    remote.facts = try PhotoOrganizationFacts.replacing(base.facts, change: .trash(true))
+    remote.facts = try PhotoOrganizationFacts.replacing(remote.facts, change: .screenshot(true))
+    let merged = AnnotationMerge.merge(base: base, local: local, remote: remote)
+    XCTAssertTrue(merged.conflicts.isEmpty)
+    XCTAssertEqual(PhotoOrganizationFacts.name(merged.local.facts, original: "old.jpg"), "my name.jpg")
+    XCTAssertTrue(PhotoOrganizationFacts.trashed(merged.local.facts))
+    XCTAssertTrue(PhotoOrganizationFacts.screenshot(merged.local.facts))
+    remote.facts = try PhotoOrganizationFacts.replacing(base.facts, change: .name("other name.jpg"))
+    XCTAssertEqual(AnnotationMerge.merge(base: base, local: local, remote: remote).conflicts, ["facts.name"])
+  }
+
   func testFactsMergeCategoriesAndRetainsRemoteChangesWhenChoosingLocal() {
     var base = PhotoAnnotationsV1(photoId: "photo", originalSha256: "digest")
     base.facts = ["supplied", "fotoro:people-source:v1:base", "fotoro.location.v1:base"]
@@ -602,6 +618,26 @@ final class AnnotationTests: XCTestCase {
     XCTAssertEqual(second.annotation(restored).visual, scenes())
     XCTAssertTrue(second.matches(restored, query: "beach"))
     XCTAssertEqual(restored.metadata.originalSha256, bytes.digest)
+    try second.setOrganization(.name("Seoul BTS.jpg"), photo: restored)
+    try second.setOrganization(.screenshot(true), photo: restored)
+    try second.setOrganization(.trash(true), photo: restored)
+    await second.syncAnnotations()
+    XCTAssertTrue(try second.annotations.ledger.pendingIDs().isEmpty)
+    try await first.sync()
+    let trashed = try XCTUnwrap(first.photos.first { $0.id == photo.id })
+    XCTAssertEqual(PhotoOrganizationFacts.name(first.annotation(trashed).facts, original: trashed.metadata.filename), "Seoul BTS.jpg")
+    XCTAssertTrue(PhotoOrganizationFacts.trashed(first.annotation(trashed).facts))
+    XCTAssertTrue(PhotoOrganizationFacts.screenshot(first.annotation(trashed).facts))
+    XCTAssertFalse(first.matches(trashed, query: "private fixture"))
+    try first.setOrganization(.trash(false), photo: trashed)
+    await first.syncAnnotations()
+    try await second.sync()
+    let recovered = try XCTUnwrap(second.photos.first { $0.id == photo.id })
+    XCTAssertFalse(PhotoOrganizationFacts.trashed(second.annotation(recovered).facts))
+    XCTAssertEqual(PhotoOrganizationFacts.name(second.annotation(recovered).facts, original: recovered.metadata.filename), "Seoul BTS.jpg")
+    XCTAssertTrue(second.matches(recovered, query: "Seoul"))
+    XCTAssertEqual(second.annotation(recovered).labels, value.labels)
+    XCTAssertEqual(second.annotation(recovered).ocr?.text, value.ocr?.text)
     second.vault.lock()
     XCTAssertTrue(second.photoAnnotations.isEmpty)
   }

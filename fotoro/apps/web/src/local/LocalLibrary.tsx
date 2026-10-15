@@ -1,3 +1,4 @@
+import {photoName} from "@fotoro/contracts/organization";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { type LocalPhoto, LocalResources } from "./resources";
@@ -33,13 +34,13 @@ function Tile({
         className="photo"
         id={"local-photo-" + photo.id}
         data-photo-navigation-id={photo.id}
-        aria-label={(selection?.editing ? "Select " : "Open ") + photo.filename}
+        aria-label={(selection?.editing ? "Select " : "Open ") + photoName(photo, photo.filename)}
         aria-pressed={selection?.editing ? selection.ids.has(photo.id) : undefined}
         disabled={selection?.editing && selection.disabled}
         onClick={() => selection?.editing ? selection.onChange(photo.id, !selection.ids.has(photo.id)) : onOpen()}
       >
         {url ? (
-          <img src={url} alt={photo.filename} />
+          <img src={url} alt={photoName(photo, photo.filename)} />
         ) : error || (!photo.file && photo.previewAvailable === false) ? (
           <span className="unavailable-photo">Preview unavailable<br /><small>Open details</small></span>
         ) : (
@@ -48,7 +49,7 @@ function Tile({
       </button>
       {selection && (selection.editing || selection.ids.has(photo.id)) && <>
         <label className="photo-pick-toggle">
-          <input type="checkbox" aria-label={"Select " + photo.filename} checked={selection.ids.has(photo.id)} disabled={selection.disabled}
+          <input type="checkbox" aria-label={"Select " + photoName(photo, photo.filename)} checked={selection.ids.has(photo.id)} disabled={selection.disabled}
             onChange={event => selection.onChange(photo.id, event.target.checked)} />
         </label>
       </>}

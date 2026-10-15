@@ -53,7 +53,7 @@ test("search details distinguish approved People and machine observations from s
   assert.match(render("Ronald"),/Person · Ronald/); assert.doesNotMatch(render("Ronald"),/Supplied label|Source fact/);
   assert.match(render("bicycle"),/Machine observation · bicycle/); assert.doesNotMatch(render("bicycle"),/Source fact|Caption ·/);
   assert.match(render("Menu"),/Machine observation · Menu/);
-  assert.match(render("Family"),/Supplied label · Family/);
+  assert.match(render("Family"),/Your tag · Family/);
   assert.match(render("My exact caption"),/Caption · My exact caption/);
   assert.deepEqual(index.search("moonlight").photoIds,[]);
   assert.equal(photo.caption,"My exact caption"); assert.deepEqual(photo.labels,["Family"]);
@@ -70,10 +70,10 @@ test("visual-only match details preserve evidence without unsupported acceptance
   const labeled = {...photo, labels: ["fireworks"]};
   const mixed = addSemanticMatches(new PhotoSearchIndex([labeled]).search("fireworks"), new Map([["visual", .4]]), new Set(["a", "visual"]));
   const labelMarkup = renderToStaticMarkup(createElement(SearchMatchDetails, {...props, meaning: mixed.meaning!, committed: mixed.meaning!.id}));
-  assert.match(labelMarkup, /Supplied label · fireworks/); assert.match(labelMarkup, /aria-pressed="true"[^>]*>Search this label/);
+  assert.match(labelMarkup, /Your tag · fireworks/); assert.match(labelMarkup, /aria-pressed="true"[^>]*>Search this tag/);
   assert.match(labelMarkup, /This is the photo/); assert.match(labelMarkup, /Prefer this photo/);
   const visualMember = renderToStaticMarkup(createElement(SearchMatchDetails, {...props, photo: {...photo, id: "visual"}, meaning: mixed.meaning!}));
-  assert.match(visualMember, /Visual similarity/); assert.match(visualMember, /Search this label/);
+  assert.match(visualMember, /Visual similarity/); assert.match(visualMember, /Search this tag/);
 });
 
 const facts = {unlocked: true, paused: false, online: true, preparing: false, busy: false, needsAttention: false, committedPhotos: 3, queuedPhotos: 2, failedPhotos: 0, skippedPhotos: 0, pendingEdits: 0, conflictingEdits: 0, localPhotos: 0, lastCheckedAt: "2026-10-01T12:00:00Z"};
@@ -151,9 +151,9 @@ test("recent browser browsing uses the thirty-day boundary and capture provenanc
   }
   assert.equal(inRecentSelectedRange({date: "2000-01-01", dateSource: "selected"}, now), true);
   assert.equal(inRecentSelectedRange({date: "invalid", dateSource: "selected"}, now), true);
-  assert.equal(recentBrowseActive(true, "Paris"), true);
+  assert.equal(recentBrowseActive(true, "Paris"), false);
   assert.equal(recentBrowseActive(true, "Paris in 2018"), false);
-  assert.equal(recentBrowseActive(true, "Paris on 2018-02-31"), true);
+  assert.equal(recentBrowseActive(true, "Paris on 2018-02-31"), false);
   assert.equal(recentBrowseActive(false, "Paris"), false);
 });
 test("joining saved hits preserves local ranking, preferred default and engine result caps", async () => {

@@ -11,6 +11,7 @@
     "./share-links": "./src/share-links.ts",
     "./visual": "./src/visual.ts",
     "./camera-media": "./src/camera-media.ts",
+    "./organization": "./src/organization.ts",
     "./location": "./src/location.ts",
     "./intelligence": "./src/intelligence.ts",
     "./people": "./src/people.ts",

@@ -834,7 +834,7 @@ struct LibraryPhotoCell: View {
         .overlay(alignment: .topTrailing) {
           if let status = syncStatus { PhotoSyncTileIndicator(status: status) }
         }
-    }.buttonStyle(.plain).accessibilityLabel(photo.metadata.filename)
+    }.buttonStyle(.plain).accessibilityLabel(PhotoOrganizationFacts.name(services?.annotation(photo).facts, original: photo.metadata.filename))
       .accessibilityValue([isSelected ? "Selected" : nil, syncStatus?.accessibilityText].compactMap { $0 }.joined(separator: ", "))
       .contextMenu {
         Button(isSelected ? "Deselect" : "Select", action: toggleSelection)

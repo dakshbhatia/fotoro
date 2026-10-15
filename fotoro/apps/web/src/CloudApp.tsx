@@ -1,3 +1,5 @@
+import type {PhotoOrganizationScope} from "@fotoro/contracts/organization";
+import type {PhotoOrganizationPatch} from "@fotoro/contracts/organization";
 import {SelectionTray} from "./components/SelectionTray";
 import {diagnose, diagnosticReason, type DiagnosticContext} from "./diagnostics";
 import {CopyDiagnostics} from "./components/CopyDiagnostics";
@@ -53,14 +55,14 @@ import {
   clearSkipped,
 } from "./exchange/sync";
 import { syncSelectedSequential } from "./exchange/selected";
-import { localOriginalDigest, queueAnnotations, queuePhotoLocation, queuePhotoObservation, queuePhotoPeople, queueLocalAnnotations, pendingAnnotations, resolveAnnotationConflict, type PendingAnnotation } from "./exchange/annotations";
+import { localOriginalDigest, queueAnnotations, queuePhotoOrganization, queuePhotoLocation, queuePhotoObservation, queuePhotoPeople, queueLocalAnnotations, pendingAnnotations, resolveAnnotationConflict, type PendingAnnotation } from "./exchange/annotations";
 import type {PhotoObservationV1} from "@fotoro/contracts/intelligence";
 import type {PeopleAssignment} from "@fotoro/contracts/people";
 import {useSemanticFind} from "./local/useSemanticFind";
 import {visualSearchFeedback} from "./local/LocalSearch";
 import { PhotoSearchIndex, normalizeSearch } from "./local/search";
 import type { LocalPhoto } from "./local/resources";
-import { cloudSearchRecords, mergeSearchPhotos } from "./library/search";
+import { currentSearchRecords, cloudSearchRecords, mergeSearchPhotos } from "./library/search";
 import {subscribeCachedMetadata} from "./exchange/cache";
 import {deriveConsumerSyncSummary, syncStateLabel} from "./library/consumer-sync";
 import {loadUploadPause, saveUploadPause} from "./library/consumer-preferences";
@@ -80,7 +82,7 @@ import {readSavedBrowsePage, subscribeSavedRefresh} from "./library/consumer-ref
 import {saveQueuedAnnotations} from "./library/consumer-annotation-save";
 import type {ConsumerPhotoChanges} from "./library/consumer-changes";
 import {canShareOriginals, downloadOriginal, OriginalShareAttempt, prepareSavedOriginals, savedOriginalSelectionCurrent} from "./library/system-share";
-import {cameraOriginalFiles} from "./media/camera-original";
+import {photoOriginalFiles} from "./media/camera-original";
 import {Places} from "./local/PhotoPlaces";
 import {currentTimelineCandidates} from "./local/places";
 import type {TimelineCandidate} from "./local/google-timeline";
@@ -110,6 +112,7 @@ const PlusIcon = () => (
     <path d="M12 3v18M3 12h18" />
   </svg>
 );
+const PhotoCleanup = lazy(() => import("./local/PhotoCleanup").then(module => ({default: module.PhotoCleanup})));
 export default function CloudApp({
   onBack,
   localPhotos = noLocalPhotos,
@@ -786,7 +789,7 @@ export default function CloudApp({
   const metadataSearch = useMemo<OwnedPhotoSnapshot["metadataSearch"]>(() => {
     const corpus = searchCorpus;
     if (!corpus?.admitted) return undefined;
-    return {token: corpus, records: corpus.records, get complete() {return corpus.complete;}, browseIds: new Set(photos.filter(photo => !searchAdded.current.has(photo.manifest.photoId)).map(photo => photo.manifest.photoId)),
+    return {token: corpus, records: currentSearchRecords(corpus.records, cloudSearchRecords(photos)), get complete() {return corpus.complete;}, browseIds: new Set(photos.filter(photo => !searchAdded.current.has(photo.manifest.photoId)).map(photo => photo.manifest.photoId)),
       current: () => corpus.admitted, search: (query, options) => corpus.index!.search(query, options),
       searchAsync: (query, options, signal, current) => corpus.index!.searchAsync(query, options, signal, () => corpus.admitted && (current?.() ?? true)).catch(error => {
         if (error instanceof Error && error.message === "CACHED_SEARCH_SOURCE_CHANGED" && corpus.admitted) requestMetadataRefresh.current();
@@ -898,14 +901,16 @@ export default function CloudApp({
     }
     return () => {clearTimeout(restartTimer); controller?.abort(); if (!sameVaultSafe() || document.visibilityState !== "visible" || !metadataMounted.current) discard(); unsubscribe(); window.removeEventListener("fotoro-lock", discard); window.removeEventListener("pagehide", discard); document.removeEventListener("visibilitychange", hidden);};
   }, [unlocked, account, metadataEpoch]);
-  const peopleRecords = useMemo(() => !received && searchCorpus?.admitted ? searchCorpus.records : cloudSearchRecords(searchable), [searchable, received, searchCorpus]);
+  const peopleRecords = useMemo(() => !received && searchCorpus?.admitted ? currentSearchRecords(searchCorpus.records, cloudSearchRecords(searchable)) : cloudSearchRecords(searchable), [searchable, received, searchCorpus]);
   const peopleFind = usePeopleFilter(peopleRecords, receivedContext ?? ownedSnapshot?.token ?? account);
   const [recentOnly, setRecentOnly] = useState(true);
+  const [cleanupOpen, setCleanupOpen] = useState(false);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [organizationScope, setOrganizationScope] = useState<PhotoOrganizationScope>("photos");
   useEffect(() => {setRecentOnly(true); setFavoritesOnly(false);}, [account]);
-  const recentActive = !received && recentBrowseActive(recentOnly, query);
-  const browseFilter = peopleFind.filter.ids.size > 0 || !received && favoritesOnly;
-  const permitted = useMemo(() => peopleMatchingPhotoIDs(peopleRecords.filter(photo => inBrowseRange(photo, recentActive, !received && favoritesOnly)), peopleFind.filter), [peopleRecords, peopleFind.filter, recentActive, received, favoritesOnly]);
+  const recentActive = !received && organizationScope === "photos" && recentBrowseActive(recentOnly, query);
+  const browseFilter = peopleFind.filter.ids.size > 0 || !received && (favoritesOnly || organizationScope !== "photos");
+  const permitted = useMemo(() => peopleMatchingPhotoIDs(peopleRecords.filter(photo => inBrowseRange(photo, recentActive, !received && favoritesOnly, Date.now(), received ? "photos" : organizationScope)), peopleFind.filter), [peopleRecords, peopleFind.filter, recentActive, received, favoritesOnly, organizationScope]);
   const loadedRecords = useMemo(() => cloudSearchRecords(searchable), [searchable]);
   const index = useMemo(() => !received && searchCorpus?.admitted ? searchCorpus.index! : new PhotoSearchIndex(loadedRecords), [loadedRecords, received, searchCorpus]);
   const accountQuery = useMemo(() => !received && searchCorpus?.admitted ? (signal: AbortSignal, current: () => boolean) => index.searchAsync(query, {scope: "account:" + account, allowedIds: permitted, committedMeaning}, signal, () => current() && searchCorpus.admitted).catch(error => {
@@ -987,15 +992,16 @@ export default function CloudApp({
     }) : previous);
     setAnnotationPending(previous => sameVault(session) && current() ? edits : previous);
   };
-  const editAnnotations = async (photo: Photo, changes: {labels?: string[]; favorite?: boolean; location?: PhotoLocationV1; observation?: PhotoObservationV1; people?: PeopleAssignment[]}, session = requireVault()) => {
+  const editAnnotations = async (photo: Photo, changes: {labels?: string[]; favorite?: boolean; location?: PhotoLocationV1; observation?: PhotoObservationV1; people?: PeopleAssignment[]; organization?: PhotoOrganizationPatch}, session = requireVault()) => {
     if (!sameVault(session) || !currentCatalog.current.includes(photo) || photo.grantId || photo.manifest.ownerAccountId !== session.accountId) throw new Error("VAULT_LOCKED");
     try {
       setAnnotationError(null);
-      const {location, observation, people, ...patch} = changes;
+      const {location, observation, people, organization, ...patch} = changes;
       const identity = {ownerAccountId: photo.manifest.ownerAccountId, photoId: photo.manifest.photoId, originalSha256: photo.metadata.originalSha256};
       if (location && !await queuePhotoLocation(identity, location, session)) throw new Error("Photo location changed");
       if (observation) await queuePhotoObservation(identity, observation, session);
       if (people) await queuePhotoPeople(identity, people, session);
+      if (organization) await queuePhotoOrganization(identity, organization, session);
       if (Object.keys(patch).length) await queueAnnotations(identity, patch, session);
       await publishLocalAnnotations([photo], session);
     } catch (error) {if (sameVault(session)) {
@@ -1094,7 +1100,7 @@ export default function CloudApp({
     originalContext.current = context;
     setPreparingOriginals(true); setStatus(""); setOriginalShareError("");
     try {
-      const files = await prepareSavedOriginals(context.snapshot.photos, context.controller.signal, () => originalsCurrent(context), photoBytes, (bytes, photo) => cameraOriginalFiles(bytes, photo.metadata));
+      const files = await prepareSavedOriginals(context.snapshot.photos, context.controller.signal, () => originalsCurrent(context), photoBytes, (bytes, photo) => photoOriginalFiles(bytes, photo));
       if (originalsCurrent(context)) setPreparedOriginals({files, context});
     } catch (error) {
       if (originalsCurrent(context) && (error as Error).name !== "AbortError") setStatus("Photos could not be prepared. Check your connection and try again.");
@@ -1319,7 +1325,8 @@ export default function CloudApp({
               recentBrowseActive(true, query) ? recentOnly ? "Last 30 days" : catalogIncomplete ? "All loaded photos" : "All photos" : undefined,
               peopleFind.filter.ids.size > 0 ? `${peopleFind.filter.ids.size} ${peopleFind.filter.ids.size === 1 ? "person" : "people"}${peopleFind.filter.mode === "everyone" ? " · Everyone" : ""}` : undefined,
               favoritesOnly ? "Favorites" : undefined,
-            ].filter(Boolean).join(" · ")}</span></summary><div className="photo-browse-filter-options">
+          organizationScope === "photos" ? undefined : organizationScope === "trash" ? "Trash" : "Screenshots",
+            ].filter(Boolean).join(" · ")}</span></summary><div className="photo-browse-filter-options"><button disabled={busy} onClick={() => setCleanupOpen(true)}>Review cleanup</button><label>Show<select aria-label="Photo type" value={organizationScope} onChange={event => setOrganizationScope(event.target.value as PhotoOrganizationScope)}><option value="photos">Photos</option><option value="screenshots">Screenshots</option><option value="trash">Fotoro Trash</option></select></label>
               {recentBrowseActive(true, query) && <label className="local-check"><input type="checkbox" checked={recentOnly} disabled={preparingOriginals || sharingOriginals} onChange={event => setRecentOnly(event.target.checked)} />Last 30 days</label>}
               <label className="local-check"><input type="checkbox" checked={favoritesOnly} disabled={preparingOriginals || sharingOriginals} onChange={event => setFavoritesOnly(event.target.checked)} />Favorites</label>
               <PeopleFilter people={peopleFind.people} value={peopleFind.filter} onChange={peopleFind.change}
@@ -1356,6 +1363,7 @@ export default function CloudApp({
                 <span>Also try</span>{searchResult.meanings.filter(meaning => meaning.id !== searchResult.meaning?.id && meaning.photoIds.some(id => !searchResult.photoIds.includes(id))).slice(0, 3).map(meaning => <button key={meaning.id} onClick={() => setCommittedMeaning(meaning.id)}>{meaning.term}</button>)}
               </div>
             )}
+            {normalizeSearch(query) && !received && searchResult.meaning?.kind === "label" && <button aria-pressed={committedMeaning === searchResult.meaning.id} onClick={() => setCommittedMeaning(searchResult.meaning!.id)}>Only this tag</button>}
             {normalizeSearch(query) && !received && (findMatches.length > 0 || bestShots.active) && <FindBestShots total={findMatches.length} review={bestShots} showCount onSelect={selectBestShots} disabled={busy || preparingOriginals || sharingOriginals} />}
             {shown.length ? (
               <>
@@ -1641,9 +1649,15 @@ export default function CloudApp({
         }}
         onClose={closeAlbums} onIncomingDone={() => {setAlbumDestination(null); onAlbumIncomingDone?.();}} onChoosePhotos={albumId => {const session = effectVault(); if (!session) return; const origin = location.origin; const invitation = albumIncomingRef.current?.pending && albumIncomingRef.current.link.albumId === albumId ? albumIncomingRef.current : undefined; setAlbumDestination({albumId, current: () => sameVault(session) && location.origin === origin && activeRef.current && (!invitation || invitation.current(session))}); setReceived(null); setReceivedContext(null); setSelecting(true);}} incoming={incomingAlbum ?? undefined}
         onRetryAccount={incomingAlbum?.pending ? () => {incomingAlbum.retryPassword(); setAlbumsOpen(false); setAlbumSelection(null); lockVault();} : undefined} />}
+      {active && cleanupOpen && ownedSnapshot?.current() && <Suspense fallback={<p role="status">Opening cleanup…</p>}><PhotoCleanup photos={peoplePhotos} resources={() => placeResources} canTrash={() => !publicDemo} onTrash={async photo => {
+        const saved = currentCatalog.current.find(item => item.manifest.photoId === photo.id.replace(/^saved:/, ""));
+        if (!saved || photo.current?.() === false) throw new Error("Photo source changed");
+        await editAnnotations(saved, {organization: {trash: true}});
+      }} changes={photoChanges ?? undefined} onOpen={photo => {setCleanupOpen(false); setViewer(photo.id.replace(/^saved:/, ""));}} onClose={() => setCleanupOpen(false)} /></Suspense>}
       {active && viewing && viewer && unlocked && (
-        <Viewer
-          photos={shown}
+        <Viewer key={viewer}
+          onOrganization={!received && !publicDemo ? (photo, organization) => editAnnotations(photo, {organization}) : undefined}
+          photos={searchable.filter(photo => shown.includes(photo) || photo.manifest.photoId === viewer)}
           initial={viewer}
           onSaved={() => run(refresh)}
           onShare={!received ? photo => {setViewer(null); openSharing([photo]);} : undefined}

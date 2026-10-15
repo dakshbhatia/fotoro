@@ -1,3 +1,5 @@
+import {PhotoOrganization} from "../library/PhotoOrganization";
+import {photoName, renamedPhotoFile, type PhotoOrganizationPatch} from "@fotoro/contracts/organization";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Icon } from "../library/icons";
 import { type LocalPhoto, LocalResources } from "./resources";
@@ -8,14 +10,20 @@ import {PhotoLocation} from "./PhotoLocation";
 import type {CloudPhotoUnderstandingProps} from "../intelligence/CloudPhotoUnderstanding";
 import {KeptObservations} from "../intelligence/KeptObservations";
 import {CaptureMetadataInfo} from "../library/CaptureMetadataInfo";
+import {newPhotoTag} from "./tags";
+import type {ConsumerPhotoChanges} from "../library/consumer-changes";
+import type {Photo} from "../library/catalog";
+import {PhotoChangesNotice} from "../library/PhotoChangesNotice";
 const CloudPhotoUnderstanding = lazy(() => import("../intelligence/CloudPhotoUnderstanding").then(module => ({default: module.CloudPhotoUnderstanding})));
-export function LocalViewer({photos, initial, resources, onClose, onLabels, onFavorite, onUse, onConfirm, onPin, meaning, onReselect, onSave, isSaved, intelligence}: {
+export function LocalViewer({photos, initial, resources, onClose, onLabels, onFavorite, onUse, onConfirm, onPin, meaning, onReselect, onSave, isSaved, intelligence, changes, savedPhotoFor, onOrganization}: {
   photos: LocalPhoto[]; initial: string; resources: LocalResources; onClose: () => void;
+  onOrganization?: (photo: LocalPhoto, patch: PhotoOrganizationPatch) => Promise<void>;
   onLabels?: (id: string, labels: string[]) => void;
   onFavorite?: (id: string, favorite: boolean) => void;
   onUse?: (id: string) => void; onConfirm?: (id: string) => void; onPin?: (id: string) => void;
   meaning?: string; onReselect?: () => void;
   onSave?: (photo: LocalPhoto) => void; isSaved?: (photo: LocalPhoto) => boolean;
+  changes?: ConsumerPhotoChanges; savedPhotoFor?: (photo: LocalPhoto) => Photo | undefined;
   intelligence?: {scopeKey: string; expectedAccountId: string; current: () => boolean; keep: (photo: LocalPhoto, observation: Parameters<CloudPhotoUnderstandingProps["onObservation"]>[0]) => Promise<void>};
 }) {
   const [selected, setSelected] = useState(initial), [loaded, setLoaded] = useState<{id: string; source?: unknown; url: string}>({id: "", url: ""}),
@@ -49,9 +57,10 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
   if (!photo) return null;
   const download = () => {
     if (!photo.file || !alive.current || currentPhoto.current !== photo) return;
-    downloadOriginal(photo.file); onUse?.(photo.id);
+    downloadOriginal(renamedPhotoFile(photo.file, photoName(photo, photo.filename))); onUse?.(photo.id);
   };
   const saved = isSaved?.(photo) ?? false;
+  const owned = savedPhotoFor?.(photo);
   return <div className="viewer" ref={panel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Photo viewer">
     <div className="viewer-top glass">
       <button onClick={onClose} aria-label="Close viewer"><Icon kind="close" /></button>
@@ -76,7 +85,7 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
         if (!photo.file || shareAttempt.pending) return;
         const current = () => alive.current && currentPhoto.current === photo && photo.current?.() !== false && document.visibilityState !== "hidden";
         setSharing(true); setStatus("");
-        try {const result = await shareAttempt.run(photo.file, current); if (current() && result !== "cancelled" && result !== "busy") onUse?.(photo.id);}
+        try {const result = await shareAttempt.run(renamedPhotoFile(photo.file, photoName(photo, photo.filename)), current); if (current() && result !== "cancelled" && result !== "busy") onUse?.(photo.id);}
         catch (error) {if (current()) setStatus("The photo could not be shared. Download the original from More.");}
         finally {if (alive.current) setSharing(false);}
       }}>{sharing ? "Sharing…" : "Share"}</button>
@@ -84,16 +93,12 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
     </div>
     {details && <aside className="details local-details">
       <button onClick={() => setZoom(!zoom)}>{zoom ? "Fit" : "Zoom"}</button>
-      <p>{photo.filename}</p><p>{photo.width} × {photo.height}{(photo.originalSize ?? photo.file?.size) ? ` · ${((photo.originalSize ?? photo.file!.size) / 1024 / 1024).toFixed(1)} MB` : ""}</p>
-      <p>{new Date(photo.date).toLocaleString()}</p><p>{photo.dateSource === "photos" ? "Date from Photos" : photo.dateSource === "exif" ? "Date from the photo" : "Capture date unavailable · date selected"}</p>
+      <p>{photo.dateSource === "selected" ? "Capture date unavailable" : new Date(photo.date).toLocaleString()}</p>
       <PhotoLocation location={photo.location} />
-      <CaptureMetadataInfo facts={photo.facts} originalSha256={photo.digest ?? ""} />
-      <KeptObservations facts={photo.facts} photoId={photo.id} sourceRevision={photo.digest ?? photo.id} />
       {intelligence && <Suspense fallback={null}><CloudPhotoUnderstanding apiBase="" expectedAccountId={intelligence.expectedAccountId} photoId={photo.id} sourceRevision={photo.digest ?? photo.id} scopeKey={intelligence.scopeKey}
         current={() => alive.current && currentPhoto.current?.id === photo.id && currentPhoto.current.digest === photo.digest && photo.current?.() !== false && intelligence.current()}
         getPreview={async signal => {const loaded = await resources.load(photo, "preview", signal); return loaded.blob;}}
         onObservation={observation => intelligence.keep(photo, observation)} /></Suspense>}
-      <p>{photo.file ? "Original file unchanged" : "Retained preview · original not selected"}</p>
       {onSave && <button disabled={!photo.file || sharing || saved} onClick={() => {
         if (photo.file && !isSaved?.(photo) && alive.current && currentPhoto.current === photo) onSave(photo);
       }}>{saved ? "Saved" : "Save to Fotoro"}</button>}
@@ -101,14 +106,25 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
         if (alive.current && currentPhoto.current === photo) onFavorite(photo.id, !photo.favorite);
       }}>{photo.favorite ? "Unfavorite" : "Favorite"}</button>}
       {photo.file && <button onClick={download} disabled={sharing}>Download original</button>}
-      <h3>Labels</h3>
-      <div className="local-labels">{(photo.labels ?? []).map((value, i) => <button key={i} aria-label={"Remove label " + value} onClick={() => onLabels?.(photo.id, photo.labels!.filter((_, position) => position !== i))}>{value} ×</button>)}</div>
+      <PhotoOrganization key={photo.id} source={photo} saved={!!owned} onChange={onOrganization ? patch => onOrganization(photo, patch) : undefined} />
+      <h3>Tags</h3>
+      <div className="local-labels">{(photo.labels ?? []).map((value, i) => <span key={i}>{value}{onLabels && <button aria-label={"Remove tag " + value} onClick={() => onLabels(photo.id, photo.labels!.filter((_, position) => position !== i))}>×</button>}</span>)}</div>
       {onLabels && <form className="local-label-form" onSubmit={event => {
         event.preventDefault();
-        if (!label.trim() || (photo.labels?.length ?? 0) >= 64) return;
-        if (!photo.labels?.includes(label)) onLabels(photo.id, [...(photo.labels ?? []), label]);
+        const tag = newPhotoTag(label, photo.labels ?? []);
+        if (!tag) return;
+        onLabels(photo.id, [...(photo.labels ?? []), tag]);
         setLabel("");
-      }}><label>New label<input aria-label="New label" value={label} maxLength={120} onChange={event => setLabel(event.target.value)} /></label><button disabled={!label.trim() || (photo.labels?.length ?? 0) >= 64}>Add label</button></form>}
+      }}><label>New tag<input aria-label="New tag" placeholder="BTS, a place, or your own words" value={label} maxLength={120} onChange={event => setLabel(event.target.value)} /></label><button disabled={!newPhotoTag(label, photo.labels ?? [])}>Add tag</button></form>}
+      {changes && owned && <PhotoChangesNotice key={owned.manifest.ownerAccountId + owned.manifest.photoId} changes={changes} photoId={owned.manifest.photoId} digest={owned.metadata.originalSha256} accountId={owned.manifest.ownerAccountId}
+        current={() => alive.current && currentPhoto.current?.id === photo.id && currentPhoto.current?.digest === photo.digest && photo.current?.() !== false && changes.current() && !!savedPhotoFor?.(photo)} />}
+      <KeptObservations facts={photo.facts} photoId={photo.id} sourceRevision={photo.digest ?? photo.id} />
+      <details><summary>Technical details</summary>
+        <p>{photo.filename}</p><p>{photo.width} × {photo.height}{(photo.originalSize ?? photo.file?.size) ? ` · ${((photo.originalSize ?? photo.file!.size) / 1024 / 1024).toFixed(1)} MB` : ""}</p>
+        <p>{photo.dateSource === "photos" ? "Date from Photos" : photo.dateSource === "exif" ? "Date from the photo" : "Opened on " + new Date(photo.date).toLocaleString()}</p>
+        <p>{photo.file ? "Original file unchanged" : "Retained preview · original not selected"}</p>
+        <CaptureMetadataInfo facts={photo.facts} originalSha256={photo.digest ?? ""} />
+      </details>
       {photo.ocr?.status === "complete" && <details><summary>Text in photo</summary><p className="local-ocr-text">{photo.ocr.text || "No readable text found."}</p></details>}
       {photo.ocr?.status === "failed" && <p>Text unavailable · {photo.ocr.error ?? "This preview could not be read."}</p>}
       {meaning && <details><summary>Adjust future matches</summary><div className="actions">{onConfirm && <button onClick={() => {onConfirm(photo.id); setStatus("Photo choice saved on this device.");}}>This is the photo</button>}{onPin && <button onClick={() => {onPin(photo.id); setStatus("Preferred photo saved on this device.");}}>Prefer this photo</button>}</div></details>}

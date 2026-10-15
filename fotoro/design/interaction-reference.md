@@ -106,3 +106,18 @@ search during indexing, selecting through sign-in, Pause/Resume, interrupted
 restore, system sharing, a private recipient and reopening. Record actual
 failures in the [active queue](../docs/product-backlog.md). UI fixtures are test
 data, never fake personal-library content in a release.
+
+## Photo organization
+
+Info starts with recorded date/place, useful filename and Tags. Technical details
+holds original filename, dimensions, size and camera evidence. A proposed filename
+stays in its editor until Apply name; its original extension is preserved. Tags
+accept Enter and have separate Remove controls. Save changes is available from
+an owned photo’s current Photos viewer as well as Saved.
+
+Photos/Saved filters expose Screenshots and Fotoro Trash. A screenshot correction
+is an explicit toggle, independent of dimensions. Trash has a Restore action and
+uses the ordinary pending-changes/conflict flow. Review cleanup opens a bounded
+preview review, explains each suggestion and never preselects removals. Its copy
+states that device Photos and storage use are unchanged. Opening a different
+photo after a Save starts that photo’s own viewer selection.

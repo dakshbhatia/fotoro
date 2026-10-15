@@ -4,7 +4,7 @@ import { type LocalPhoto, LocalResources } from "./resources";
 import { normalizeSearch, type SearchResult, type SearchMeaning } from "./search";
 import type { LocalOcrPhoto } from "./useLocalOcr";
 export function meaningRelation(meaning: SearchMeaning) {
-  return meaning.kind === "visual" ? "Visual similarity" : meaning.kind === "label" ? "Supplied label"
+  return meaning.kind === "visual" ? "Visual similarity" : meaning.kind === "label" ? "Your tag"
     : meaning.kind === "person" ? "Person" : meaning.kind === "observation" ? "Machine observation" : meaning.kind === "date" ? "Date" : "Text mention";
 }
 export function visualSearchFeedback(result: SearchResult) {
@@ -19,7 +19,7 @@ export function textSearchFeedback(result: SearchResult) {
 function evidence(photo: LocalOcrPhoto, meaning: SearchMeaning) {
   const source = meaning.evidence[photo.id] ?? meaning.kind;
   if (source === "visual") return "Visual similarity";
-  if (source === "label") return "Supplied label · " + meaning.term;
+  if (source === "label") return "Your tag · " + meaning.term;
   if (source === "person") return "Person · " + meaning.term;
   if (source === "observation") return "Machine observation · " + meaning.term;
   if (source === "date") return photo.dateSource === "photos" ? "Date from Photos" : photo.dateSource === "exif" ? "Date from the photo" : "Date selected · capture date unavailable";
@@ -41,7 +41,7 @@ export function SearchMatchDetails({photo, meaning, coverage, committed, pinned,
   return <aside className="search-info" aria-label="About this match">
     <p className="hint">{coverage}</p><p className="local-evidence">{evidence(photo as LocalOcrPhoto, meaning)}</p>
     {meaning.kind !== "visual" && <>
-      <button aria-pressed={committed === meaning.id} onClick={() => onAccept(meaning)}>Search this {meaning.kind === "label" ? "label" : meaning.kind === "person" ? "person" : meaning.kind === "observation" ? "observation" : meaning.kind === "date" ? "date" : "text"}</button>
+      <button aria-pressed={committed === meaning.id} onClick={() => onAccept(meaning)}>Search this {meaning.kind === "label" ? "tag" : meaning.kind === "person" ? "person" : meaning.kind === "observation" ? "observation" : meaning.kind === "date" ? "date" : "text"}</button>
       {canCorrect && <details><summary>Adjust future matches</summary><p className="hint">These choices stay on this device.</p><div className="actions"><button onClick={() => onConfirm(photo.id)}>This is the photo</button><button aria-pressed={pinned === photo.id} onClick={() => onPin(photo.id)}>{pinned === photo.id ? "Preferred photo" : "Prefer this photo"}</button></div></details>}
     </>}
   </aside>;
@@ -79,7 +79,9 @@ export function LocalSearch({photos, result, resources, committed, pinned, canCo
   };
   const selecting = !!photo && !!selection?.eligible(photo.id);
   return <section className="local-search" aria-label="Search result" aria-busy={result.searching || undefined}>
-    <div className="search-caption">{result.photoIds.length > 1 && <p className="local-coverage" role="status">{result.photoIds.length} matches</p>}<button className="text-button" aria-label="Search details" aria-expanded={details} onClick={() => setDetails(!details)}><Icon kind="info" /></button></div>
+    <div className="search-caption">{result.photoIds.length > 1 && <p className="local-coverage" role="status">{result.photoIds.length} matches</p>}
+      {meaning?.kind === "label" && <button aria-pressed={committed === meaning.id} onClick={() => onAccept(meaning)}>Only this tag</button>}
+      <button className="text-button" aria-label="Search details" aria-expanded={details} onClick={() => setDetails(!details)}><Icon kind="info" /></button></div>
     {photo && meaning ? <>
       <button className="local-leading" id={"local-photo-" + photo.id} aria-label={(selecting ? "Select " : "Open ") + photo.filename} aria-pressed={selecting ? selection!.ids.has(photo.id) : undefined} disabled={selecting && selection!.disabled}
         onClick={() => {if (swiped.current) {swiped.current = false; return;} if (selecting) selection!.onChange(photo.id, !selection!.ids.has(photo.id)); else onOpen(photo.id);}} onTouchStart={event => {swiped.current = false; touch.current = event.touches.length === 1 ? {x: event.touches[0].clientX, y: event.touches[0].clientY} : undefined;}}
@@ -102,6 +104,6 @@ export function LocalSearch({photos, result, resources, committed, pinned, canCo
       {details && <SearchMatchDetails photo={photo} meaning={meaning} coverage={coverage} committed={committed} pinned={pinned} canCorrect={canCorrect} onAccept={onAccept} onConfirm={onConfirm} onPin={onPin} />}
       {visualSearchFeedback(result) && <p className="hint" role="status">{visualSearchFeedback(result)}</p>}
       {textSearchFeedback(result) && <p className="hint" role="status">{textSearchFeedback(result)}</p>}
-    </> : <div className="empty"><p role={result.searching || result.visualStatus || result.textStatus ? "status" : undefined}>{result.searching ? "Searching photos…" : visualSearchFeedback(result) ?? textSearchFeedback(result) ?? emptyMessage ?? "No matching photos"}</p>{!result.searching && result.visualStatus && textSearchFeedback(result) && <p role="status">{textSearchFeedback(result)}</p>}{!result.searching && !result.textStatus && <p className="hint">{emptyHint ?? "Try a label, a date or words in the photo."}</p>}{details && <p className="hint">{coverage}. Text is searchable after it has been read on this device.</p>}</div>}
+    </> : <div className="empty"><p role={result.searching || result.visualStatus || result.textStatus ? "status" : undefined}>{result.searching ? "Searching photos…" : visualSearchFeedback(result) ?? textSearchFeedback(result) ?? emptyMessage ?? "No matching photos"}</p>{!result.searching && result.visualStatus && textSearchFeedback(result) && <p role="status">{textSearchFeedback(result)}</p>}{!result.searching && !result.textStatus && <p className="hint">{emptyHint ?? "Try a tag, a place, a date or words in the photo."}</p>}{details && <p className="hint">{coverage}. Text is searchable after it has been read on this device.</p>}</div>}
   </section>;
 }

@@ -2,6 +2,16 @@ import XCTest
 @testable import Fotoro
 
 final class PhotoMetadataPresentationTests: XCTestCase {
+  func testNewTagsPreserveWordsAndRefuseDuplicateSearchIdentity() {
+    let tags = ["BTS", "Café", "Family  trip"]
+    XCTAssertEqual(SearchNormalization.newPhotoTag("  Grandma’s house  ", existing: tags), "Grandma’s house")
+    for value in ["bts", "CAFE", "family trip", " ", String(repeating: "a", count: 121)] {
+      XCTAssertNil(SearchNormalization.newPhotoTag(value, existing: tags))
+    }
+    XCTAssertNil(SearchNormalization.newPhotoTag("new", existing: (0..<64).map(String.init)))
+    XCTAssertEqual(tags, ["BTS", "Café", "Family  trip"])
+  }
+
   func testEditedPhotoDimensionsStayDistinctFromTheOriginal() {
     let metadata = PhotoCaptureMetadata(items: [
       .init(k: "width", p: .original, v: "4032"), .init(k: "height", p: .original, v: "3024"),

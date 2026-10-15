@@ -62,6 +62,13 @@ Cloudflare proposals become tasks here only when a consumer need admits them.
    phone, cross-device restoration and accessibility. Source tests and a browser
    release do not establish installed-device acceptance.
 
+Organization now includes explicit filename suggestions/apply/reset, a screenshot
+filter and correction, and a bounded cleanup review with Fotoro-only Trash and
+Restore. These use existing encrypted annotations; original bytes, captions and
+shared copies remain intact. Current-client two-device convergence is covered by
+functional tests; physical installed-device acceptance and calibrated cleanup
+quality remain open. The ten decisions are recorded in [product](product.md).
+
 Use existing account/owner IDs, photo IDs, original digests and source revisions
 for joins. Native records, vectors, terms, postings, feedback and People tables
 already exist; do not add a parallel photo database. Browser inference now reuses

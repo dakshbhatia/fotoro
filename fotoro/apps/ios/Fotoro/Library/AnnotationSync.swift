@@ -99,8 +99,9 @@ enum AnnotationCrypto {
 }
 
 enum AnnotationMerge {
-  static let factCategories = ["supplied", "people", "location", "capture", "observation", "reserved"]
+  static let factCategories = ["supplied", "people", "location", "capture", "observation", "name", "trash", "screenshot", "reserved"]
   static func factCategory(_ fact: String) -> String {
+    if let organization = PhotoOrganizationFacts.category(fact) { return organization }
     if PhotoPeopleFacts.isReserved(fact) { return "people" }
     if PhotoLocationFacts.isReserved(fact) { return "location" }
     if PhotoCaptureFacts.isReserved(fact) { return "capture" }

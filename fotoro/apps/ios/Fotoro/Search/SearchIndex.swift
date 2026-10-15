@@ -59,7 +59,7 @@ final class SearchIndex: @unchecked Sendable {
               && tokens.contains { last.contains(where: \.isLetter) ? $0.hasPrefix(last) : $0 == last }
           }
           if matches((record.captions + record.keywords).joined(separator: " ")) { return 2 }
-          if matches((record.filename as NSString).deletingPathExtension) { return 3 }
+          if matches((PhotoOrganizationFacts.name(record.facts, original: record.filename) as NSString).deletingPathExtension) { return 3 }
           if record.ocrStatus == .complete, matches(record.ocrText) { return 4 }
           return -1
         })
@@ -530,6 +530,7 @@ final class SearchIndex: @unchecked Sendable {
             }
             #endif
             if old.revision == r.revision {
+              r.facts = r.facts.filter { PhotoOrganizationFacts.category($0) == nil } + old.facts.filter { PhotoOrganizationFacts.category($0) != nil }
               if let prior = old.captureMetadata {
                 let original = PhotoCaptureMetadata(items: prior.items.filter { $0.p == .original })
                 r.captureMetadata = (r.captureMetadata ?? PhotoCaptureMetadata()).merging(original)
@@ -589,7 +590,7 @@ final class SearchIndex: @unchecked Sendable {
       sql: "INSERT INTO searchFTS(id,text) VALUES(?,?)",
       arguments: [
         r.id,
-        (r.captions + r.keywords + [r.filename, r.ocrStatus == .complete ? r.ocrText : ""]).joined(
+        (r.captions + r.keywords + [PhotoOrganizationFacts.name(r.facts, original: r.filename), r.ocrStatus == .complete ? r.ocrText : ""]).joined(
           separator: " "),
       ])
     func add(
@@ -620,8 +621,11 @@ final class SearchIndex: @unchecked Sendable {
       }
     }
     if let metadata = r.captureMetadata { try add(metadata.searchText, relation: .metadata, evidence: 1, supplied: true) }
+    let screenshot = PhotoOrganizationFacts.screenshot(r.facts, detected: r.captureMetadata?.items.contains { $0.k == "subtypes" && $0.p == .photos && $0.v.split(separator: ",").contains("screenshot") } == true)
+    if screenshot { try add("Screenshot", relation: .metadata, evidence: 1, supplied: true) }
     for fact in r.facts {
-      if PhotoCaptureFacts.isReserved(fact) { continue }
+      if fact == "screenshot" && !screenshot { continue }
+      if PhotoCaptureFacts.isReserved(fact) || PhotoOrganizationFacts.category(fact) != nil { continue }
       #if !FOTORO_LOCAL_PREVIEW
       if PhotoPeopleFacts.isReserved(fact) || fact.hasPrefix("fotoro.ai.v1:") { continue }
       #endif
@@ -644,7 +648,7 @@ final class SearchIndex: @unchecked Sendable {
         try add(word, relation: .text, evidence: 2)
       }
     }
-    for word in Self.words((r.filename as NSString).deletingPathExtension)
+    for word in Self.words((PhotoOrganizationFacts.name(r.facts, original: r.filename) as NSString).deletingPathExtension)
     where Self.suggestible(word) { try add(word, relation: .text, evidence: 3) }
     if r.ocrStatus == .complete {
       for word in Self.words(r.ocrText) where Self.suggestible(word) {
@@ -668,6 +672,16 @@ final class SearchIndex: @unchecked Sendable {
   ]
   private static func suggestible(_ word: String) -> Bool {
     word.count > 1 && !noise.contains(word) && word.contains(where: { $0.isLetter })
+  }
+  @discardableResult func setOrganization(_ change: PhotoOrganizationChange, photoID: String) throws -> Bool {
+    try database.write { db in
+      guard var record = try Row.fetchOne(db, sql: "SELECT value FROM searchRecords WHERE id=?", arguments: [photoID]).map(decode) else { return false }
+      if case .name(let name) = change, let name,
+        (name as NSString).pathExtension.lowercased() != (record.filename as NSString).pathExtension.lowercased() { throw PhotoOrganizationError.invalid }
+      record.facts = try PhotoOrganizationFacts.replacing(record.facts, change: change)
+      try put(record, db: db)
+      return true
+    }
   }
   @discardableResult func setLabels(_ labels: [String], photoID: String) throws -> Bool {
     try database.write { db in
@@ -695,7 +709,7 @@ final class SearchIndex: @unchecked Sendable {
     }
   }
   private func filter(_ scope: SearchScope) -> (String, StatementArguments) {
-    var sql = "r.scope=?"
+    var sql = "r.scope=? AND NOT ((SELECT count(*) FROM json_each(r.value,'$.facts') WHERE value LIKE 'fotoro.trash.v1:%')=1 AND EXISTS(SELECT 1 FROM json_each(r.value,'$.facts') WHERE value='fotoro.trash.v1:true'))"
     var args: StatementArguments = [scope.source]
     if let from = scope.from {
       sql += " AND r.capture>=?"
