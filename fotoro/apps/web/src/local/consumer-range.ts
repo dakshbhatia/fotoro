@@ -14,7 +14,8 @@ export function inBrowseRange(photo: Pick<LocalPhoto, "date" | "dateSource" | "f
 }
 export function browseFavoritePhotoIDs(records: readonly Pick<LocalPhoto, "id" | "favorite">[],
   displayed: readonly Pick<LocalPhoto, "id" | "favorite">[]) {
-  // A pending local Unfavorite takes precedence over older Saved metadata.
-  const sources = new Map([...records, ...displayed].map(photo => [photo.id, photo]));
-  return new Set([...sources.values()].filter(photo => photo.favorite === true).map(photo => photo.id));
+  // Explicit local choices win; an imported file with no choice retains Saved state.
+  const sources = new Map(records.map(photo => [photo.id, photo.favorite === true]));
+  for (const photo of displayed) if (photo.favorite !== undefined || !sources.has(photo.id)) sources.set(photo.id, photo.favorite === true);
+  return new Set([...sources].filter(([, favorite]) => favorite).map(([id]) => id));
 }

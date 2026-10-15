@@ -27,11 +27,13 @@ export function mergeConsumerSearchPhotos<T extends {id: string}>(local: T[], sa
   const displayed = local.map(photo => {
     const savedPhoto = savedByID.get(photo.id), source = savedPhoto && savedSources.get(savedPhoto);
     const original = photo as T & Partial<LocalPhoto>;
-    if (!source || !(original.file instanceof File) || original.file !== source.file || !source.digest || comparableDigest(original) !== source.digest) return photo;
+    if (!source || !(original.file instanceof File) || original.file !== source.file || !source.digest || comparableDigest(original) !== source.digest
+      || (savedPhoto as Partial<LocalPhoto>).current?.() === false) return photo;
     const location = original.location ?? source.location;
+    const favorite = original.favorite ?? (savedPhoto as Partial<LocalPhoto>).favorite;
     const promoteDate = original.dateSource === "selected" && ["photos", "exif"].includes(source.dateSource) && Number.isFinite(Date.parse(source.date));
-    if (!promoteDate && location === original.location) return photo;
-    return {...photo, ...(promoteDate ? {date: source.date, dateSource: source.dateSource, captureVerified: source.dateSource === "exif" ? true : original.captureVerified} : {}), ...(location ? {location} : {}),
+    if (!promoteDate && location === original.location && favorite === original.favorite) return photo;
+    return {...photo, ...(promoteDate ? {date: source.date, dateSource: source.dateSource, captureVerified: source.dateSource === "exif" ? true : original.captureVerified} : {}), ...(location ? {location} : {}), ...(favorite !== undefined ? {favorite} : {}),
       current: () => source.snapshot.current() && original.current?.() !== false && (savedPhoto as Partial<LocalPhoto>).current?.() !== false};
   });
   return [...displayed, ...currentSaved.filter(photo => !localIDs.has(photo.id))];

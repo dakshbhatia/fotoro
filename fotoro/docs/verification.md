@@ -30,9 +30,27 @@ Catalog and visual query results recheck origin, account access and metadata
 snapshot, including an unavailable model response. Parent cancellation reaches
 lexical and semantic workers. The three initial regressions failed before the fix;
 126 affected native search, annotation and consumer tests now pass. Hosted
-qualification and a replacement release build remain pending for this follow-up.
+web/API, full native and isolated Photos preview qualification passed at
+`0408fba9f32303ec8f19d186c859b983562afe84`; PR 101 merged as
+`201551bb7a7c462662659b57142526f6d3a9af3a` with the same source tree. Build 76
+passed archive and distribution IPA audits and uploaded successfully; Apple
+processing/internal availability remain to be confirmed.
 This source evidence does not establish physical frame pacing or broad retrieval
 quality.
+
+## October 14 reselected originals retain Saved Favorites — source qualified
+
+Reopening an original on the web could hide its Saved favorite because an absent
+local choice replaced verified Saved metadata. Only explicit local true/false
+choices now override Saved state. The displayed original inherits Favorite status
+only for its exact current file/digest and account; withdrawal removes that overlay.
+Unloaded favorite metadata can admit a reselected original for bounded hydration.
+
+Both new regressions failed before repair. All 773 web tests and the full local
+check pass. An isolated real-browser account journey verified Saved Favorite →
+reopen original → Favorites returns one copy → Unfavorite removes it → Favorite
+restores it, with no console errors. Hosted checks and production deployment remain
+pending for this web-only follow-up; native runtime source is unchanged from build 76.
 
 ## October 11 durable native retries — awaiting hosted qualification
 
