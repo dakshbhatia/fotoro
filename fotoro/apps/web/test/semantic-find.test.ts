@@ -248,14 +248,15 @@ test("the initial semantic search render is busy without a false empty result, w
     return renderToStaticMarkup(createElement(InitialSearch));
   };
   const pending = render([photo("one")], "fireworks");
-  assert.match(pending, /aria-busy="true"/); assert.match(pending, /Searching photos…/);
+  assert.match(pending, /aria-busy="true"/); assert.match(pending, /Preparing visual search…/);
   assert.doesNotMatch(pending, /No matching photos|Try a label/);
   const lexical = render([{...photo("one"), labels: ["fireworks"]}], "fireworks");
   assert.match(lexical, /aria-label="Open one.jpg"/); assert.doesNotMatch(lexical, /Searching photos…|No matching photos/);
+  assert.match(lexical, /Preparing visual search…/);
   for (const markup of [render([photo("one")], "fireworks", false), render([photo("one")], "fireworks", true, "label:fireworks"),
     render([photo("one")], "2026-10-03"), render([{...photo("one"), current: () => false}], "fireworks"),
     render([{...photo("one"), previewAvailable: false}], "fireworks")]) {
-    assert.doesNotMatch(markup, /aria-busy="true"|Searching photos…/);
+    assert.doesNotMatch(markup, /aria-busy="true"|Searching photos…|Preparing visual search…|Checking more photos…/);
   }
   const finished: SearchResult = {query: "fireworks", scope: "account:one", photoIds: [], meanings: []};
   const fallback = renderToStaticMarkup(createElement(LocalSearch, {photos: [photo("one")], result: finished, resources: new LocalResources(), coverage: "1 photo", onAccept() {}, onNavigate() {}, onOpen() {}, onConfirm() {}, onPin() {}, onFailure() {}}));
@@ -302,20 +303,66 @@ test("worker startup is lazy; completed vectors survive same-digest metadata ref
   assert.equal(updates.at(-1)?.get("one"), 1); engine.clear();
   assert.equal(workers[0].terminated, true); assert.ok(raster.cleared > 0);
 });
+test("the first visual score publishes before a later image stalls", async () => {
+  let images = 0;
+  const held = deferred<number>();
+  const worker = new FakeWorker((message, own) => {
+    if (message.kind === "cancel") return;
+    if (message.kind === "image" && ++images === 2) held.resolve(message.id);
+    else queueMicrotask(() => own.reply(message.id, vector()));
+  });
+  const engine = new SemanticFindSession(() => worker as unknown as Worker, resources());
+  const updates: ReadonlyMap<string, number>[] = [];
+  try {
+    const pending = engine.search([photo("first"), photo("second"), photo("third")], "city", () => true, scores => updates.push(scores));
+    const id = await held.promise;
+    assert.equal(updates.length, 1);
+    assert.deepEqual([...updates[0].keys()], ["first"]);
+    worker.reply(id, vector()); await pending;
+    assert.deepEqual([...updates.at(-1)!.keys()], ["first", "second", "third"]);
+  } finally {engine.clear();}
+});
+test("repeated phrases reuse bounded session-only text vectors and clearing requires fresh inference", async () => {
+  const workers: FakeWorker[] = [];
+  const engine = new SemanticFindSession(() => {const worker = new FakeWorker(); workers.push(worker); return worker as unknown as Worker;}, resources());
+  const photos = [photo("one")];
+  const texts = () => workers.reduce((sum, worker) => sum + worker.messages.filter(message => message.kind === "text").length, 0);
+  try {
+    assert.equal(engine.canSearchCached(photos, "city"), false);
+    await engine.search(photos, "city", () => true, () => {});
+    assert.equal(engine.canSearchCached(photos, "city"), true, "A fully cached query can skip the cold-inference debounce");
+    assert.equal(engine.canSearchCached(photos, "beach"), false);
+    assert.equal(engine.canSearchCached([{...photos[0], digest: "changed"}], "city"), false);
+    assert.equal(engine.canSearchCached([photo("uncached")], "city"), false);
+    assert.equal(engine.canSearchCached([{...photos[0], current: () => false}], "city"), false);
+    await engine.search([{...photos[0], labels: ["new label"]}], "city", () => true, () => {});
+    assert.equal(texts(), 1, "A metadata refresh should not re-encode the same phrase");
+    for (let index = 0; index < 16; index++) await engine.search(photos, "other scene " + index, () => true, () => {});
+    await engine.search(photos, "city", () => true, () => {});
+    assert.equal(texts(), 18, "Older phrases must leave the bounded cache");
+    engine.clear();
+    assert.equal(engine.canSearchCached(photos, "city"), false);
+    await engine.search(photos, "city", () => true, () => {});
+    assert.equal(texts(), 19); assert.equal(workers.length, 2);
+    assert.equal(workers[0].terminated, true);
+  } finally {engine.clear();}
+});
 test("a warm visual search ranks cached photos without scheduling one event-loop turn per photo", async t => {
   const worker = new FakeWorker(), raster = resources(), engine = new SemanticFindSession(() => worker as unknown as Worker, raster);
   const photos = Array.from({length: 4096}, (_, index) => photo("warm-" + index));
   try {
     await engine.search(photos, "city", () => true, () => {});
-    let turns = 0, latest: ReadonlyMap<string, number> | undefined;
+    let turns = 0, publications = 0, latest: ReadonlyMap<string, number> | undefined;
     const schedule = globalThis.setTimeout;
     t.mock.method(globalThis, "setTimeout", (callback: (...args: any[]) => void, delay?: number, ...args: any[]) => {
       if (delay === 0) turns++;
       return schedule(callback, delay, ...args);
     });
     const started = performance.now();
-    await engine.search(photos, "fireworks", () => true, scores => {latest = scores;});
-    t.diagnostic(`4096 cached vectors: ${turns} scheduled turns, ${(performance.now() - started).toFixed(1)} ms`);
+    await engine.search(photos, "fireworks", () => true, scores => {latest = scores; publications++;});
+    const elapsed = performance.now() - started;
+    t.diagnostic(`4096 cached vectors: ${turns} scheduled turns, ${publications} publications, ${elapsed.toFixed(1)} ms`);
+    assert.ok(publications <= Math.ceil(elapsed / 100) + 3, "Progress snapshots should scale with elapsed time, not library size");
     assert.equal(latest?.size, 4096); assert.equal(latest?.get("warm-4095"), 1);
     assert.equal(raster.loads, 4096); assert.equal(worker.messages.filter(value => value.kind === "image").length, 4096);
     assert.equal(worker.messages.filter(value => value.kind === "text").length, 2);

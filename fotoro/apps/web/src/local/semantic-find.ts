@@ -74,6 +74,7 @@ export class SemanticFindSession {
   private controller = new AbortController();
   private failedGeneration?: number;
   private vectors = new Map<string, {source: WeakRef<object>; digest?: string; vector: Float32Array}>();
+  private textVectors = new Map<string, Float32Array>();
   constructor(private createWorker = () => new Worker(new URL("./semantic-worker.ts", import.meta.url), {type: "module"}),
     private resources: Pick<ConsumerPreviewResources, "load" | "clear"> = new ConsumerPreviewResources(), private requestTimeout = 90000,
     private persistence: SemanticInferenceStore = new DurableSemanticInference()) {}
@@ -91,6 +92,14 @@ export class SemanticFindSession {
         cached.vector.fill(0); this.vectors.delete(id);
       }
     }
+  }
+  canSearchCached(photos: LocalPhoto[], query: string) {
+    if (!this.textVectors.has(parseNaturalDateQuery(query).text.slice(0, 2048))) return false;
+    const selected = eligibleSemanticPhotos(photos, query);
+    return selected.length > 0 && selected.every(photo => {
+      const cached = this.vectors.get(photo.id), source = photo.file ?? photo.preview ?? photo.previewLoader;
+      return !!cached && (cached.digest ? cached.digest === photo.digest : cached.source.deref() === source);
+    });
   }
   private request(payload: {kind: "text"; text: string} | {kind: "image"; blob: Blob}) {
     if (!this.worker) {
@@ -149,13 +158,32 @@ export class SemanticFindSession {
     if (!valid()) return;
     if (!selected.length) return scoped.length ? "missing-preview" : undefined;
     this.reconcile(photos);
-    const text = await context.stage("prepare", () => this.request({kind: "text", text: parseNaturalDateQuery(query).text}));
+    const phrase = parseNaturalDateQuery(query).text.slice(0, 2048);
+    let text = this.textVectors.get(phrase);
+    if (!text) {
+      text = await context.stage("prepare", () => this.request({kind: "text", text: phrase}));
+      if (!valid()) {text.fill(0); return;}
+      this.textVectors.set(phrase, text);
+      if (this.textVectors.size > 16) {
+        const oldest = this.textVectors.entries().next().value!;
+        oldest[1].fill(0); this.textVectors.delete(oldest[0]);
+      }
+    }
     if (!valid()) return;
     const scores = new Map<string, number>();
     let missingPreviews = scoped.filter(photo => !hasSemanticPreview(photo)).length, modelErrors = 0;
     const selectedByID = new Map(selected.map(photo => [photo.id, photo]));
-    const emit = () => {if (valid()) progress(new Map([...scores].filter(([id]) => sourceCurrentFor(id))));};
+    let lastPublished = 0, publishedAt = performance.now(), deadline = publishedAt + 4;
+    const emit = () => {
+      if (valid()) {
+        progress(new Map([...scores].filter(([id]) => sourceCurrentFor(id))));
+        lastPublished = scores.size; publishedAt = performance.now();
+      }
+    };
     for (let index = 0; index < selected.length; index++) {
+      if (performance.now() >= deadline) {
+        await new Promise(resolve => setTimeout(resolve, 0)); deadline = performance.now() + 4;
+      }
       const photo = selected[index];
       if (!valid()) return;
       if (!sourceCurrentFor(photo.id)) continue;
@@ -213,10 +241,15 @@ export class SemanticFindSession {
       if (!sourceCurrentFor(photo.id)) continue;
       scores.set(photo.id, cosine(text, cached.vector));
       context.items(scores.size);
-      if ((index + 1) % 8 === 0) emit();
-      // Cached vectors need only a dot product; yield in bounded batches rather than
-      // paying a timer turn per photo. Uncached inference already yields to the worker.
-      if ((index + 1) % 32 === 0 && index + 1 < selected.length) await new Promise(resolve => setTimeout(resolve, 0));
+      // Publish the first result promptly. Further snapshots are time-bounded,
+      // rather than repeatedly copying the growing score map every eight photos.
+      const first = lastPublished === 0 && selected.length > 1;
+      if (first || performance.now() - publishedAt >= 100) emit();
+      // Cached dot products can run many times within one small CPU slice.
+      // Yield after the first publication and every 4 ms to admit replacement queries.
+      if (first && index + 1 < selected.length) {
+        await new Promise(resolve => setTimeout(resolve, 0)); deadline = performance.now() + 4;
+      }
     }
     emit();
     if (valid() && (missingPreviews || modelErrors)) return [...scores.keys()].some(id => selectedByID.get(id)?.current?.() !== false)
@@ -237,6 +270,7 @@ export class SemanticFindSession {
     this.cancel();
     if (this.worker) {this.worker.onmessage = null; this.worker.onerror = null; this.worker.terminate(); this.worker = undefined;}
     for (const cached of this.vectors.values()) cached.vector.fill(0);
-    this.vectors.clear(); this.resources.clear();
+    for (const cached of this.textVectors.values()) cached.fill(0);
+    this.textVectors.clear(); this.vectors.clear(); this.resources.clear();
   }
 }
