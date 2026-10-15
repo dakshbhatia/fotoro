@@ -13,15 +13,40 @@ struct SearchStageCoverage: Sendable {
   let deferred: Int
   let modelDeferred: Int
   let nextRetry: Date?
+  var lastAttemptAt: Date? = nil
+  var lastCompleteAt: Date? = nil
 }
 struct SearchAnalysisWork: Sendable {
   let record: SearchRecord
   let stages: Set<SearchAnalysisStage>
 }
+struct SearchOCRCheckpoint: Sendable {
+  var result: SearchOCRResult?
+  var status: SearchOCRStatus
+  var processor: String?
+}
+struct SearchVisualCheckpoint: Sendable {
+  var result: SearchVisualResult?
+  var status: SearchVisualStatus
+  var processor: String?
+}
+struct SearchAnalysisCheckpoint: Sendable {
+  var photoID: String
+  var revision: String
+  var attemptedAt: Date?
+  var ocr: SearchOCRCheckpoint? = nil
+  var visual: SearchVisualCheckpoint? = nil
+}
 
 // A device-local index. Network synchronization is handled by the owner annotation journal.
 final class SearchIndex: @unchecked Sendable {
   let database: DatabaseQueue
+  // Used only by put(..., db:) on the serialized database connection.
+  private let captureDayFormatter: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withFullDate]; formatter.timeZone = TimeZone(secondsFromGMT: 0)
+    return formatter
+  }()
   private let generationLock = NSLock()
   private var workGeneration: UInt64 = 0
   init(root: URL? = nil) throws {
@@ -95,6 +120,7 @@ final class SearchIndex: @unchecked Sendable {
           CREATE TABLE IF NOT EXISTS searchVectors(photo TEXT PRIMARY KEY REFERENCES searchRecords(id) ON DELETE CASCADE, revision TEXT NOT NULL, processor TEXT NOT NULL, vector BLOB NOT NULL);
           CREATE TABLE IF NOT EXISTS searchAnalysisAttempts(photo TEXT NOT NULL REFERENCES searchRecords(id) ON DELETE CASCADE, stage TEXT NOT NULL, revision TEXT NOT NULL, processor TEXT NOT NULL, outcome TEXT NOT NULL, attempts INTEGER NOT NULL, retryAfter REAL NOT NULL, PRIMARY KEY(photo,stage));
           CREATE INDEX IF NOT EXISTS searchAnalysisRetryAt ON searchAnalysisAttempts(retryAfter);
+          CREATE TABLE IF NOT EXISTS searchAnalysisProgress(stage TEXT PRIMARY KEY, lastAttempt REAL NOT NULL, lastComplete REAL);
           CREATE TABLE IF NOT EXISTS searchTerms(meaning TEXT NOT NULL, term TEXT NOT NULL, display TEXT NOT NULL, relation TEXT NOT NULL, PRIMARY KEY(meaning,term));
           CREATE INDEX IF NOT EXISTS searchTermPrefix ON searchTerms(term,meaning);
           CREATE TABLE IF NOT EXISTS searchPostings(meaning TEXT NOT NULL, photo TEXT NOT NULL REFERENCES searchRecords(id) ON DELETE CASCADE, evidence INTEGER NOT NULL, confidence REAL NOT NULL, display TEXT NOT NULL DEFAULT '', PRIMARY KEY(meaning,photo));
@@ -173,7 +199,7 @@ final class SearchIndex: @unchecked Sendable {
       arguments: [photoID, revision, SemanticVector.processor]) == 0 }
   }
   @discardableResult func applySemantic(_ vector: [Float], photoID: String, revision: String,
-    generation: UInt64? = nil) throws -> Bool {
+    generation: UInt64? = nil, attemptedAt: Date = Date()) throws -> Bool {
     guard let normalized = SemanticVector.normalized(vector) else { return false }
     return try database.write { db in
       guard acceptsGeneration(generation), let current = try Row.fetchOne(db,
@@ -182,6 +208,7 @@ final class SearchIndex: @unchecked Sendable {
       try db.execute(sql: "INSERT OR REPLACE INTO searchVectors(photo,revision,processor,vector) VALUES(?,?,?,?)",
         arguments: [photoID, revision, SemanticVector.processor, SemanticVector.data(normalized)])
       try clearAnalysisAttempt(photoID: photoID, stage: .semantic, db: db)
+      try recordAnalysisProgress(stage: .semantic, completed: true, at: attemptedAt, db: db)
       return true
     }
   }
@@ -217,96 +244,152 @@ final class SearchIndex: @unchecked Sendable {
     _ result: SearchOCRResult?, status: SearchOCRStatus, photoID: String, revision: String,
     generation: UInt64? = nil, attemptedAt: Date? = nil, expectedProcessor: String? = nil
   ) throws -> Bool {
-    try database.write { db in
-      guard acceptsGeneration(generation) else { return false }
-      guard
-        var r = try Row.fetchOne(
-          db, sql: "SELECT value FROM searchRecords WHERE id=?", arguments: [photoID]
-        ).map(decode), r.revision == revision
-      else { return false }
-      guard expectedProcessor == nil || expectedProcessor == r.processor else { return false }
-      r.ocrText = result?.text ?? ""
-      r.ocrConfidence = result?.confidence ?? 0
-      r.ocrStatus = status
-      if r.beforeSync != nil {
-        r.beforeSync?.ocrText = r.ocrText
-        r.beforeSync?.ocrConfidence = r.ocrConfidence
-        r.beforeSync?.ocrStatus = r.ocrStatus
-      }
-      r.previewAvailable = result != nil || status == .failed
-      try put(r, db: db)
-      try updateAnalysisAttempt(record: r, stage: .ocr, processor: r.processor,
-        outcome: status == .unavailable ? .unavailable : status == .failed ? .failed : nil,
-        attemptedAt: attemptedAt, db: db)
-      return true
-    }
+    try !applyAnalysisBatch([SearchAnalysisCheckpoint(photoID: photoID, revision: revision,
+      attemptedAt: attemptedAt, ocr: SearchOCRCheckpoint(result: result, status: status, processor: expectedProcessor))],
+      generation: generation).isEmpty
   }
   @discardableResult func applyVisual(
     _ result: SearchVisualResult?, status: SearchVisualStatus, photoID: String, revision: String,
     generation: UInt64? = nil, attemptedAt: Date? = nil, expectedProcessor: String? = nil
   ) throws -> Bool {
-    try database.write { db in
-      guard acceptsGeneration(generation), var record = try Row.fetchOne(
-        db, sql: "SELECT value FROM searchRecords WHERE id=?", arguments: [photoID]
-      ).map(decode), record.revision == revision else { return false }
-      guard expectedProcessor == nil || expectedProcessor == record.visualProcessor else { return false }
-      guard result == nil || result?.processor == record.visualProcessor else { return false }
-      record.visualLabels = result.map {
-        SearchVisualPolicy.validated($0.labels, processor: $0.processor)
-      } ?? []
-      record.visualStatus = status
-      if record.beforeSync != nil {
-        record.beforeSync?.visualLabels = record.visualLabels
-        record.beforeSync?.visualStatus = record.visualStatus
-        record.beforeSync?.visualProcessor = record.visualProcessor
+    try !applyAnalysisBatch([SearchAnalysisCheckpoint(photoID: photoID, revision: revision,
+      attemptedAt: attemptedAt, visual: SearchVisualCheckpoint(result: result, status: status, processor: expectedProcessor))],
+      generation: generation).isEmpty
+  }
+  // OCR and classification share one decode, transaction and posting rebuild.
+  // A bounded caller may group ready checkpoints; no inference occurs under SQL.
+  func applyAnalysisBatch(_ checkpoints: [SearchAnalysisCheckpoint], generation: UInt64? = nil) throws -> [SearchRecord] {
+    guard checkpoints.count <= 32 else { throw FotoroError("Photo analysis batch exceeds 32 photos") }
+    guard !checkpoints.isEmpty else { return [] }
+    do {
+      return try database.write { db in
+        guard acceptsGeneration(generation) else { return [] }
+        var committed: [SearchRecord] = []
+        for checkpoint in checkpoints {
+          guard acceptsGeneration(generation) else { throw CancellationError() }
+          guard checkpoint.ocr != nil || checkpoint.visual != nil,
+            var record = try Row.fetchOne(db, sql: "SELECT value FROM searchRecords WHERE id=?", arguments: [checkpoint.photoID]).map(decode),
+            record.revision == checkpoint.revision else { continue }
+          if let ocr = checkpoint.ocr, let processor = ocr.processor, processor != record.processor { continue }
+          if let visual = checkpoint.visual {
+            guard visual.processor == nil || visual.processor == record.visualProcessor,
+              visual.result == nil || visual.result?.processor == record.visualProcessor else { continue }
+          }
+          let prior = record
+          if let ocr = checkpoint.ocr {
+            record.ocrText = ocr.result?.text ?? ""; record.ocrConfidence = ocr.result?.confidence ?? 0
+            record.ocrStatus = ocr.status
+            record.previewAvailable = ocr.result != nil || ocr.status == .failed
+            if record.beforeSync != nil {
+              record.beforeSync?.ocrText = record.ocrText; record.beforeSync?.ocrConfidence = record.ocrConfidence
+              record.beforeSync?.ocrStatus = record.ocrStatus
+            }
+          }
+          if let visual = checkpoint.visual {
+            record.visualLabels = visual.result.map { SearchVisualPolicy.validated($0.labels, processor: $0.processor) } ?? []
+            record.visualStatus = visual.status
+            record.previewAvailable = record.previewAvailable || visual.result != nil || visual.status == .failed
+            if record.beforeSync != nil {
+              record.beforeSync?.visualLabels = record.visualLabels; record.beforeSync?.visualStatus = record.visualStatus
+              record.beforeSync?.visualProcessor = record.visualProcessor
+            }
+          }
+          if record != prior { try put(record, db: db) }
+          if let ocr = checkpoint.ocr {
+            try updateAnalysisAttempt(record: record, stage: .ocr, processor: record.processor,
+              outcome: ocr.status == .unavailable ? .unavailable : ocr.status == .failed ? .failed : nil,
+              attemptedAt: checkpoint.attemptedAt, db: db)
+          }
+          if let visual = checkpoint.visual {
+            try updateAnalysisAttempt(record: record, stage: .visual, processor: record.visualProcessor,
+              outcome: visual.status == .unavailable ? .unavailable : visual.status == .failed ? .failed : nil,
+              attemptedAt: checkpoint.attemptedAt, db: db)
+          }
+          committed.append(record)
+        }
+        guard acceptsGeneration(generation) else { throw CancellationError() }
+        return committed
       }
-      record.previewAvailable = record.previewAvailable || result != nil || status == .failed
-      try put(record, db: db)
-      try updateAnalysisAttempt(record: record, stage: .visual, processor: record.visualProcessor,
-        outcome: status == .unavailable ? .unavailable : status == .failed ? .failed : nil,
-        attemptedAt: attemptedAt, db: db)
-      return true
-    }
+    } catch is CancellationError { return [] }
   }
   #if !FOTORO_LOCAL_PREVIEW
+  struct AnnotationUpdate: Sendable {
+    let value: PhotoAnnotationsV1
+    let photoID: String
+    let revision: String
+    let accountId: String
+  }
+  struct AnnotationBatchResult: Sendable {
+    var acceptedPhotoIDs: Set<String> = []
+    var changedRecords: [SearchRecord] = []
+    var organizationChanged = false
+  }
   @discardableResult func applyAnnotations(_ value: PhotoAnnotationsV1, photoID: String, revision: String, accountId: String) throws -> Bool {
-    try database.write { db in
-      guard var record = try Row.fetchOne(db, sql: "SELECT value FROM searchRecords WHERE id=?", arguments: [photoID]).map(decode), record.revision == revision else { return false }
-      if record.beforeSync == nil {
-        record.beforeSync = LocalSearchFields(labels: record.labels, captions: record.captions, keywords: record.keywords, facts: record.facts, favorite: record.favorite, ocrText: record.ocrText, ocrConfidence: record.ocrConfidence, ocrStatus: record.ocrStatus,
-          visualLabels: record.visualLabels, visualStatus: record.visualStatus, visualProcessor: record.visualProcessor, captureMetadata: record.captureMetadata)
+    try applyAnnotationsBatch([AnnotationUpdate(value: value, photoID: photoID, revision: revision, accountId: accountId)])
+      .acceptedPhotoIDs.contains(photoID)
+  }
+  func applyAnnotationsBatch(_ updates: [AnnotationUpdate]) throws -> AnnotationBatchResult {
+    guard updates.count <= 200 else { throw FotoroError("Photo annotation batch exceeds 200 photos") }
+    guard !updates.isEmpty else { return AnnotationBatchResult() }
+    return try database.write { db in
+      // Read the current OCR/beforeSync baseline inside this transaction. A
+      // snapshot captured before admission could overwrite newly completed work.
+      let ids = Array(Set(updates.map(\.photoID)))
+      let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+      var records: [String: SearchRecord] = [:]
+      for row in try Row.fetchAll(db, sql: "SELECT value FROM searchRecords WHERE id IN (\(placeholders))", arguments: StatementArguments(ids)) {
+        let record = try decode(row); records[record.id] = record
       }
-      record.syncedAccountId = accountId
-      let capture = PhotoCaptureFacts.read(value.facts, originalSha256: value.originalSha256)
-      let localCapture = record.beforeSync?.captureMetadata ?? PhotoCaptureMetadata()
-      record.captureMetadata = record.scope == "photos" ? (capture ?? PhotoCaptureMetadata()).merging(localCapture) : capture
-      record.labels = value.labels ?? []
-      record.captions = value.caption.map { [$0] } ?? []
-      record.keywords = value.keywords ?? []
-      record.facts = PhotoLocationFacts.userFacts(value.facts).filter { !PhotoPeopleFacts.isReserved($0) && !PhotoCaptureFacts.isReserved($0) } + (value.location?.searchTerms ?? [])
-      record.facts = try PhotoPeopleFacts.replacing(record.facts, with: PhotoPeopleFacts.read(value.facts ?? [], originalSha256: value.originalSha256), enforceWireLimits: false)
-      record.favorite = value.favorite ?? record.favorite
-      if let ocr = value.ocr, ocr.processor == record.processor {
-        record.ocrText = ocr.text
-        record.ocrConfidence = ocr.confidence
-        record.ocrStatus = .complete
-      } else {
-        record.ocrText = record.beforeSync?.ocrText ?? ""
-        record.ocrConfidence = record.beforeSync?.ocrConfidence ?? 0
-        record.ocrStatus = record.beforeSync?.ocrStatus ?? .pending
+      var result = AnnotationBatchResult()
+      for update in updates {
+        guard let prior = records[update.photoID], prior.revision == update.revision else { continue }
+        let record = try applyingAnnotations(update.value, to: prior, accountId: update.accountId)
+        result.acceptedPhotoIDs.insert(record.id)
+        guard record != prior else { continue }
+        let organization = { (record: SearchRecord) in record.facts.filter { PhotoOrganizationFacts.category($0) != nil } }
+        result.organizationChanged = result.organizationChanged || organization(record) != organization(prior)
+        try put(record, db: db)
+        records[record.id] = record
+        result.changedRecords.append(record)
       }
-      if let visual = value.visual, visual.processor == record.visualProcessor,
-        visual.processor == SearchVisualPolicy.processor {
-        record.visualLabels = SearchVisualPolicy.validated(visual)
-        record.visualStatus = .complete
-      } else {
-        record.visualLabels = record.beforeSync?.visualLabels ?? []
-        record.visualStatus = record.beforeSync?.visualStatus ?? .pending
-        record.visualProcessor = record.beforeSync?.visualProcessor ?? SearchVisualPolicy.processor
-      }
-      try put(record, db: db)
-      return true
+      return result
     }
+  }
+  private func applyingAnnotations(_ value: PhotoAnnotationsV1, to prior: SearchRecord, accountId: String) throws -> SearchRecord {
+    var record = prior
+    if record.beforeSync == nil {
+      record.beforeSync = LocalSearchFields(labels: record.labels, captions: record.captions, keywords: record.keywords, facts: record.facts, favorite: record.favorite, ocrText: record.ocrText, ocrConfidence: record.ocrConfidence, ocrStatus: record.ocrStatus,
+        visualLabels: record.visualLabels, visualStatus: record.visualStatus, visualProcessor: record.visualProcessor, captureMetadata: record.captureMetadata)
+    }
+    record.syncedAccountId = accountId
+    let capture = PhotoCaptureFacts.read(value.facts, originalSha256: value.originalSha256)
+    let localCapture = record.beforeSync?.captureMetadata ?? PhotoCaptureMetadata()
+    record.captureMetadata = record.scope == "photos" ? (capture ?? PhotoCaptureMetadata()).merging(localCapture) : capture
+    record.labels = value.labels ?? []
+    record.captions = value.caption.map { [$0] } ?? []
+    record.keywords = value.keywords ?? []
+    record.facts = PhotoLocationFacts.userFacts(value.facts).filter { !PhotoPeopleFacts.isReserved($0) && !PhotoCaptureFacts.isReserved($0) } + (value.location?.searchTerms ?? [])
+    record.facts = try PhotoPeopleFacts.replacing(record.facts, with: PhotoPeopleFacts.read(value.facts ?? [], originalSha256: value.originalSha256), enforceWireLimits: false)
+    record.favorite = value.favorite ?? record.favorite
+    if let ocr = value.ocr, ocr.processor == record.processor {
+      record.ocrText = ocr.text
+      record.ocrConfidence = ocr.confidence
+      record.ocrStatus = .complete
+    } else {
+      record.ocrText = record.beforeSync?.ocrText ?? ""
+      record.ocrConfidence = record.beforeSync?.ocrConfidence ?? 0
+      record.ocrStatus = record.beforeSync?.ocrStatus ?? .pending
+    }
+    if let visual = value.visual, visual.processor == record.visualProcessor,
+      visual.processor == SearchVisualPolicy.processor {
+      record.visualLabels = SearchVisualPolicy.validated(visual)
+      record.visualStatus = .complete
+    } else {
+      record.visualLabels = record.beforeSync?.visualLabels ?? []
+      record.visualStatus = record.beforeSync?.visualStatus ?? .pending
+      record.visualProcessor = record.beforeSync?.visualProcessor ?? SearchVisualPolicy.processor
+    }
+    return record
   }
   #endif
   @discardableResult func applyCaptureMetadata(_ value: PhotoCaptureMetadata, photoID: String, revision: String, generation: UInt64? = nil) throws -> Bool {
@@ -417,9 +500,10 @@ final class SearchIndex: @unchecked Sendable {
   // Support export only: one read transaction, no decoded records or text output.
   // This describes the permitted local Photos catalog, independently of a query,
   // traversal cursor or the in-memory batch's progress counters.
-  func analysisCoverage(now: Date = Date()) throws -> [SearchStageCoverage] {
+  func analysisCoverage(now: Date = Date(), scope: PhotoAnalysisScope? = nil) throws -> [SearchStageCoverage] {
     try database.read { db in
-      try SearchAnalysisStage.allCases.compactMap { stage in
+      let (filter, filterArguments) = scope.map { metadataAnalysisFilter($0) } ?? ("r.scope='photos'", StatementArguments())
+      return try SearchAnalysisStage.allCases.compactMap { stage in
         let state: String, processor: String, join: String
         switch stage {
         case .ocr: state = "r.ocrState"; processor = "json_extract(r.value,'$.processor')"; join = ""
@@ -444,6 +528,7 @@ final class SearchIndex: @unchecked Sendable {
           arguments += [SemanticVector.processor]
           #endif
         }
+        arguments += filterArguments
         arguments += [now.timeIntervalSince1970, now.timeIntervalSince1970]
         let row = try Row.fetchOne(db, sql: """
           WITH coverage AS (
@@ -451,7 +536,7 @@ final class SearchIndex: @unchecked Sendable {
             FROM searchRecords r \(join)
             LEFT JOIN searchAnalysisAttempts a ON a.photo=r.id AND a.stage=?
               AND a.revision=json_extract(r.value,'$.revision') AND a.processor=\(processor)
-            WHERE r.scope='photos'
+            WHERE \(filter)
           )
           SELECT count(*) total,coalesce(sum(state='complete'),0) complete,
             coalesce(sum(state='pending'),0) pending,coalesce(sum(state='failed'),0) failed,
@@ -462,10 +547,14 @@ final class SearchIndex: @unchecked Sendable {
           FROM coverage
           """, arguments: arguments)!
         let next: Double? = row["nextRetry"]
+        let progress = try Row.fetchOne(db, sql: "SELECT lastAttempt,lastComplete FROM searchAnalysisProgress WHERE stage=?", arguments: [stage.rawValue])
+        let lastAttempt: Double? = progress?["lastAttempt"], lastComplete: Double? = progress?["lastComplete"]
         return SearchStageCoverage(stage: stage, total: row["total"], complete: row["complete"],
           pending: row["pending"], failed: row["failed"], unavailable: row["unavailable"],
           deferred: row["deferred"], modelDeferred: row["modelDeferred"],
-          nextRetry: next.map(Date.init(timeIntervalSince1970:)))
+          nextRetry: next.map(Date.init(timeIntervalSince1970:)),
+          lastAttemptAt: lastAttempt.map(Date.init(timeIntervalSince1970:)),
+          lastCompleteAt: lastComplete.map(Date.init(timeIntervalSince1970:)))
       }
     }
   }
@@ -531,8 +620,20 @@ final class SearchIndex: @unchecked Sendable {
   private func clearAnalysisAttempt(photoID: String, stage: SearchAnalysisStage, db: Database) throws {
     try db.execute(sql: "DELETE FROM searchAnalysisAttempts WHERE photo=? AND stage=?", arguments: [photoID, stage.rawValue])
   }
+  private func recordAnalysisProgress(stage: SearchAnalysisStage, completed: Bool, at: Date, db: Database) throws {
+    let time = at.timeIntervalSince1970
+    guard time.isFinite, time >= 0 else { return }
+    try db.execute(sql: """
+      INSERT INTO searchAnalysisProgress(stage,lastAttempt,lastComplete) VALUES(?,?,?)
+      ON CONFLICT(stage) DO UPDATE SET lastAttempt=max(lastAttempt,excluded.lastAttempt),
+        lastComplete=CASE WHEN excluded.lastComplete IS NULL THEN lastComplete
+          ELSE max(coalesce(lastComplete,0),excluded.lastComplete) END
+      """, arguments: [stage.rawValue, time, completed ? time : nil])
+  }
   private func updateAnalysisAttempt(record: SearchRecord, stage: SearchAnalysisStage, processor: String,
     outcome: SearchAnalysisOutcome?, attemptedAt: Date?, db: Database) throws {
+    let completed = outcome == nil && (stage == .ocr ? record.ocrStatus == .complete : record.visualStatus == .complete)
+    try recordAnalysisProgress(stage: stage, completed: completed, at: attemptedAt ?? Date(), db: db)
     guard let outcome, let attemptedAt else {
       try clearAnalysisAttempt(photoID: record.id, stage: stage, db: db)
       return
@@ -652,7 +753,7 @@ final class SearchIndex: @unchecked Sendable {
         }
         #endif
         if records.isEmpty {
-          try db.execute(sql: "DELETE FROM searchEvents; DELETE FROM searchPins")
+          try db.execute(sql: "DELETE FROM searchEvents; DELETE FROM searchPins; DELETE FROM searchAnalysisProgress")
         }
         return true
       }
@@ -660,23 +761,22 @@ final class SearchIndex: @unchecked Sendable {
   }
   func put(_ record: SearchRecord) throws { try database.write { try put(record, db: $0) } }
   func put(_ r: SearchRecord, db: Database) throws {
-    try db.execute(
+    try db.cachedStatement(
       sql:
-        "INSERT INTO searchRecords(id,scope,capture,favorite,moment,ocrState,visualState,preview,burst,value) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET scope=excluded.scope,capture=excluded.capture,favorite=excluded.favorite,moment=excluded.moment,ocrState=excluded.ocrState,visualState=excluded.visualState,preview=excluded.preview,burst=excluded.burst,value=excluded.value",
-      arguments: [
+        "INSERT INTO searchRecords(id,scope,capture,favorite,moment,ocrState,visualState,preview,burst,value) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET scope=excluded.scope,capture=excluded.capture,favorite=excluded.favorite,moment=excluded.moment,ocrState=excluded.ocrState,visualState=excluded.visualState,preview=excluded.preview,burst=excluded.burst,value=excluded.value")
+      .execute(arguments: [
         r.id, r.scope, r.capturedAt?.timeIntervalSince1970, r.favorite, r.currentMoment,
         r.ocrStatus.rawValue, r.visualStatus.rawValue, r.previewAvailable, r.burstID, try JSONEncoder().encode(r),
       ])
-    try db.execute(
-      sql: "DELETE FROM searchPostings WHERE photo=?; DELETE FROM searchFTS WHERE id=?",
-      arguments: [r.id, r.id])
-    try db.execute(
-      sql: "INSERT INTO searchFTS(id,text) VALUES(?,?)",
-      arguments: [
+    try db.cachedStatement(sql: "DELETE FROM searchPostings WHERE photo=?").execute(arguments: [r.id])
+    try db.cachedStatement(sql: "DELETE FROM searchFTS WHERE id=?").execute(arguments: [r.id])
+    try db.cachedStatement(sql: "INSERT INTO searchFTS(id,text) VALUES(?,?)").execute(arguments: [
         r.id,
         (r.captions + r.keywords + [PhotoOrganizationFacts.name(r.facts, original: r.filename), r.ocrStatus == .complete ? r.ocrText : ""]).joined(
           separator: " "),
       ])
+    let terms = try db.cachedStatement(sql: "INSERT OR IGNORE INTO searchTerms(meaning,term,display,relation) VALUES(?,?,?,?)")
+    let postings = try db.cachedStatement(sql: "INSERT INTO searchPostings(meaning,photo,evidence,confidence,display) VALUES(?,?,?,?,?) ON CONFLICT(meaning,photo) DO UPDATE SET evidence=min(evidence,excluded.evidence),confidence=max(confidence,excluded.confidence),display=excluded.display")
     func add(
       _ display: String, relation: SearchRelation, evidence: Int, confidence: Double = 1,
       supplied: Bool = false
@@ -689,14 +789,9 @@ final class SearchIndex: @unchecked Sendable {
       let meaning = relation.rawValue + ":" + phrase
       let searchable = Set(words + [phrase])
       for word in searchable {
-        try db.execute(
-          sql: "INSERT OR IGNORE INTO searchTerms(meaning,term,display,relation) VALUES(?,?,?,?)",
-          arguments: [meaning, word, display, relation.rawValue])
+        try terms.execute(arguments: [meaning, word, display, relation.rawValue])
       }
-      try db.execute(
-        sql:
-          "INSERT INTO searchPostings(meaning,photo,evidence,confidence,display) VALUES(?,?,?,?,?) ON CONFLICT(meaning,photo) DO UPDATE SET evidence=min(evidence,excluded.evidence),confidence=max(confidence,excluded.confidence),display=excluded.display",
-        arguments: [meaning, r.id, evidence, confidence, display])
+      try postings.execute(arguments: [meaning, r.id, evidence, confidence, display])
     }
     for label in r.labels { try add(label, relation: .label, evidence: 0, supplied: true) }
     if r.visualStatus == .complete {
@@ -720,10 +815,7 @@ final class SearchIndex: @unchecked Sendable {
     #endif
     if r.favorite { try add("favorite", relation: .metadata, evidence: 1) }
     if let date = r.capturedAt {
-      let iso = ISO8601DateFormatter()
-      iso.formatOptions = [.withFullDate]
-      iso.timeZone = TimeZone(secondsFromGMT: 0)
-      try add(iso.string(from: date), relation: .metadata, evidence: 1, supplied: true)
+      try add(captureDayFormatter.string(from: date), relation: .metadata, evidence: 1, supplied: true)
       for word in Self.words(date.formatted(date: .complete, time: .omitted))
       where Self.suggestible(word) { try add(word, relation: .metadata, evidence: 1) }
     }

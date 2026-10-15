@@ -1573,3 +1573,73 @@ trace, response/body request reference and exactly one final live server event
 server request pair. Raw tail envelopes stay in private local artifacts and the
 tail is stopped. This verifies live correlation,
 not historical log access, authenticated photo flows or current phone state.
+
+## October 15 ten-day iteration and batched processing
+
+PR 108 merged as `adbd01b485` after all 23 checks completed (seven success,
+16 intentional skips), with the merged tree matching qualified head
+`6e9d216600541e5c8692deab02e3f5d8e7256f25`. It is included in this follow-up's
+source; the last released native artifact remains build 80 until a later
+distribution checkpoint records otherwise.
+
+The requested experiment uses ten calendar days. Native automatic heavy analysis
+defaults to Latest 10 days and offers an explicit persisted All photos choice;
+original-backup scope and existing indexed metadata/OCR remain independent.
+Query-scoped work can preempt automatic analysis, retains its pagination state,
+and resumes automatic work afterward. Completed inference stages still commit
+before the next inference await. The read-only retained build-78 catalog's
+October 6–15 window contains 218 photos, all with completed OCR/classification
+and current semantic vectors. This is an older snapshot, not a fresh device read
+or recognition-quality qualification. Physical phone use remains paused.
+
+Native annotation hydration reads current records inside batches of up to 200,
+skips unchanged writes, preserves local OCR/beforeSync baselines and publishes
+search/organization changes once per changed chunk. A fixed 500 ms window groups
+derived annotation upload intent, including one trailing window for edits during
+a drain; account/vault/catalog/origin/worker/Pause changes withdraw old work.
+Explicit owner changes retain the immediate path. SQL posting writes reuse
+prepared statements and one serialized date formatter. Already bounded OCR
+derivatives avoid a redundant redraw. Ready analysis checkpoint batches have a
+32-photo bound and transactional rollback; the foreground photo pipeline retains
+its per-stage durability rather than buffering inference across interruptions.
+
+On the same public synthetic ten-day cohort (1,000 records, 100/day), the observed
+unchanged hydration comparison was 108.11 ms per-photo versus 14.91 ms in
+200-record batches (7.25×). A fresh native metadata index took 192.65 ms.
+Earlier repeated samples ranged around 7.3–7.5× for hydration. These are Mac
+Simulator SQL/component measurements excluding decryption, PhotoKit, inference,
+network and rendering; they are not a 100× whole-app claim. The existing 10k
+synthetic regression remains a software scaling check, not a larger personal-photo
+experiment. Web `--benchmark` now fixes its cohort to ten days × 100 records and
+checks first/warm/batched retrieval plus daily ingestion. All 24 retrieval checks
+and ten ingestion checks pass. The fix makes a supplied multiword fact such as
+“Backstage rehearsal” searchable by its component word, retaining provenance and
+reserved-field exclusions.
+
+Browser diagnostics persist across same-tab reloads with bounded sanitized,
+batched session-storage writes, clear/sign-out and late-operation fences; denied
+storage remains a memory-only fallback. Native index snapshots now include
+whole-catalog/automatic-window coverage and durable per-stage attempt/completion
+ages. The reader separates standalone stage events from request-only traces and
+flags a long active unfinished run with no recent checkpoint without inventing
+a failure or starting retries.
+
+Real Safari clients on independent local origins, backed by the actual local
+Worker/D1/R2, pass Save → rename → screenshot correction → sync → Trash → return
+refresh → Restore → second-client refresh → reload/unlock/reopen. The downloaded
+public fixture is byte-identical (613,520 bytes) to the source. Empty Saved now
+opens its existing picker with one click; Cancel stays in Saved, selection waits
+for explicit Save, and no picker appears automatically after account recovery.
+No private photos/accounts or physical phone were used for these journeys.
+
+Workspace `pnpm check` passes, including 807 browser and 129 API tests. Host sync
+regressions pass 20/20 and the bounded diagnostic reader passes 21/21. A full
+native Simulator run passes 763 with zero failures and three existing/opt-in skips
+(`test_sim_2026-10-15T22-47-31-232Z_pid34826_e457e8b6.xcresult`). Final
+pagination/range/search lifecycle checks pass 62/62 after the last manual-priority
+changes. The complete isolated-preview suite passes 199 with zero failures and
+three existing/opt-in skips
+(`test_sim_2026-10-15T22-54-50-225Z_pid34826_7c2563b8.xcresult`).
+Hosted checks, merge, web deployment and native distribution remain
+separate gates; these results do not establish physical latency, battery, iCloud
+background behavior or held-out personal retrieval quality.

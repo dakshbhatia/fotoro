@@ -16,7 +16,196 @@ private actor AdmissionQueryProbe {
 }
 
 final class SearchLifecycleTests: XCTestCase {
+  @MainActor func testManualNextBatchKeepsItsCursorAndPreemptsAutomaticWork() async throws {
+    let fetched = PHAsset.fetchAssets(with: .image, options: nil)
+    guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)), fetched.count >= 2 else {
+      throw XCTSkip("Permit two public Simulator photos for manual analysis priority.")
+    }
+    let photos = (0..<2).map { RecentPhoto(asset: fetched.object(at: $0)) }, index = try SearchIndex()
+    try index.replacePermitted(photos.map { photo in
+      var record = SearchRecord(id: photo.id); record.revision = photo.sourceRevision
+      record.capturedAt = Date(); record.labels = ["public fixture"]; return record
+    })
+    let store = LocalSearchStore(index: index), gate = AdmissionPreviewGate()
+    store.setAutomaticAnalysisActive(false); store.completePermittedSnapshotRefresh(photos: photos)
+    defer { store.pause(); gate.open() }
+    let automaticHeld = expectation(description: "Automatic preview held after explicit batch")
+    let nextFinished = expectation(description: "Explicit next batch publishes")
+    var previews = 0, publications = 0
+    store.analysisPreview = { _ in
+      previews += 1
+      if previews == 2 { automaticHeld.fulfill(); await gate.wait() }
+      return nil
+    }
+    store.onRecordChanged = { _, _ in
+      publications += 1
+      if publications == 2 { nextFinished.fulfill() }
+    }
+    store.updateQuery("public fixture"); store.analyzeMetadataMatches(batchLimit: 1)
+    store.setAutomaticAnalysisActive(true)
+    await fulfillment(of: [automaticHeld], timeout: 5)
+    XCTAssertEqual(store.analysisRemaining, 1)
+    XCTAssertTrue(store.canAnalyzeMetadataMatches)
+    store.analyzeMetadataMatches(nextBatch: true, batchLimit: 1)
+    gate.open()
+    await fulfillment(of: [nextFinished], timeout: 5)
+    store.setAutomaticAnalysisActive(false)
+    for _ in 0..<200 where store.indexing { try await Task.sleep(for: .milliseconds(10)) }
+    XCTAssertEqual(previews, 3); XCTAssertEqual(store.analysisRemaining, 0)
+  }
+  @MainActor func testAutomaticRangeChangePreservesHeldExplicitBatchRemainingCount() async throws {
+    let fetched = PHAsset.fetchAssets(with: .image, options: nil)
+    guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)), fetched.count >= 2 else {
+      throw XCTSkip("Permit two public Simulator photos for explicit-batch range controls.")
+    }
+    let photos = (0..<2).map { RecentPhoto(asset: fetched.object(at: $0)) }, index = try SearchIndex()
+    try index.replacePermitted(photos.map { photo in
+      var record = SearchRecord(id: photo.id); record.revision = photo.sourceRevision
+      record.capturedAt = Date(); record.labels = ["public fixture"]; return record
+    })
+    let store = LocalSearchStore(index: index), gate = AdmissionPreviewGate()
+    store.setAutomaticAnalysisActive(false); store.completePermittedSnapshotRefresh(photos: photos)
+    defer { store.pause(); gate.open() }
+    let held = expectation(description: "Explicit preview is held")
+    store.analysisPreview = { _ in held.fulfill(); await gate.wait(); return nil }
+    store.updateQuery("public fixture"); store.analyzeMetadataMatches(batchLimit: 1)
+    await fulfillment(of: [held], timeout: 3)
+    XCTAssertEqual(store.analysisRemaining, 1)
+    store.setAutomaticAnalysisWindow(.tenDays)
+    XCTAssertTrue(store.indexing); XCTAssertEqual(store.analysisRemaining, 1)
+    gate.open()
+    for _ in 0..<200 where store.indexing { try await Task.sleep(for: .milliseconds(10)) }
+    XCTAssertFalse(store.indexing); XCTAssertEqual(store.analysisRemaining, 1)
+    XCTAssertEqual(store.analysisUnavailable, 1)
+  }
+  @MainActor func testExplicitScopedCheckResumesAutomaticWorkWithoutAnotherScrollOrForegroundEvent() async throws {
+    let fetched = PHAsset.fetchAssets(with: .image, options: nil)
+    guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)), fetched.count >= 2 else {
+      throw XCTSkip("Permit two public Simulator photos for analysis continuation.")
+    }
+    let photos = (0..<2).map { RecentPhoto(asset: fetched.object(at: $0)) }
+    let index = try SearchIndex()
+    let records = photos.enumerated().map { offset, photo -> SearchRecord in
+      var record = SearchRecord(id: photo.id); record.revision = photo.sourceRevision
+      record.capturedAt = Date(); record.labels = [offset == 0 ? "scoped fixture" : "other fixture"]
+      return record
+    }
+    try index.replacePermitted(records)
+    let store = LocalSearchStore(index: index)
+    store.setAutomaticAnalysisActive(false); store.completePermittedSnapshotRefresh(photos: photos)
+    defer { store.pause() }
+    store.analysisPreview = { _ in nil }
+    let continued = expectation(description: "Unmatched photo analyzed after explicit work")
+    store.onRecordChanged = { record, _ in if record.id == records[1].id { continued.fulfill() } }
+    store.updateQuery("scoped fixture"); store.analyzeMetadataMatches()
+    store.setAutomaticAnalysisActive(true)
+    await fulfillment(of: [continued], timeout: 5)
+    XCTAssertEqual(try index.record(records[0].id)?.ocrStatus, .unavailable)
+    XCTAssertEqual(try index.record(records[1].id)?.ocrStatus, .unavailable)
+  }
   #if !FOTORO_LOCAL_PREVIEW
+  func testAnnotationBatchAcceptsUnchangedRowsWithoutRebuildingPostingsAndRejectsStaleSources() throws {
+    let index = try SearchIndex(), records = [SearchRecord(id: "a"), SearchRecord(id: "b")]
+    try index.replacePermitted(records)
+    try index.database.write { db in
+      try db.execute(sql: """
+        CREATE TABLE annotationWrites(count INTEGER NOT NULL);
+        INSERT INTO annotationWrites VALUES(0);
+        CREATE TRIGGER count_annotation_writes AFTER UPDATE ON searchRecords
+        BEGIN UPDATE annotationWrites SET count=count+1; END;
+        """)
+    }
+    let updates = records.map { record in
+      SearchIndex.AnnotationUpdate(value: PhotoAnnotationsV1(photoId: Wire.id(), originalSha256: Data("public fixture".utf8).digest,
+        labels: ["Batch receipt"], facts: [PhotoOrganizationFacts.screenshotPrefix + "true"]),
+        photoID: record.id, revision: record.revision, accountId: "fixture-owner")
+    }
+    let first = try index.applyAnnotationsBatch(updates)
+    XCTAssertEqual(first.acceptedPhotoIDs, Set(["a", "b"]))
+    XCTAssertEqual(first.changedRecords.count, 2); XCTAssertTrue(first.organizationChanged)
+    let unchanged = try index.applyAnnotationsBatch(updates)
+    XCTAssertEqual(unchanged.acceptedPhotoIDs, first.acceptedPhotoIDs)
+    XCTAssertTrue(unchanged.changedRecords.isEmpty); XCTAssertFalse(unchanged.organizationChanged)
+    XCTAssertTrue(try index.applyAnnotations(updates[0].value, photoID: "a", revision: "1", accountId: "fixture-owner"),
+      "The existing single-photo API accepts current unchanged overlays")
+    XCTAssertEqual(try index.database.read { try Int.fetchOne($0, sql: "SELECT count FROM annotationWrites") }, 2)
+    let stale = SearchIndex.AnnotationUpdate(value: updates[0].value, photoID: "a", revision: "obsolete", accountId: "fixture-owner")
+    let missing = SearchIndex.AnnotationUpdate(value: updates[0].value, photoID: "missing", revision: "1", accountId: "fixture-owner")
+    XCTAssertTrue(try index.applyAnnotationsBatch([stale, missing]).acceptedPhotoIDs.isEmpty)
+    XCTAssertThrowsError(try index.applyAnnotationsBatch(Array(repeating: updates[0], count: 201)))
+    XCTAssertEqual(try index.database.read { try Int.fetchOne($0, sql: "SELECT count FROM annotationWrites") }, 2)
+  }
+  func testAnnotationBatchRollsBackRecordsBaselinesAndSearchPostingsWhenALaterWriteFails() throws {
+    let index = try SearchIndex(), records = [SearchRecord(id: "a"), SearchRecord(id: "b")]
+    try index.replacePermitted(records)
+    try index.database.write { db in
+      try db.execute(sql: """
+        CREATE TRIGGER reject_second_annotation BEFORE UPDATE ON searchRecords WHEN NEW.id='b'
+        BEGIN SELECT RAISE(ABORT,'injected annotation failure'); END;
+        """)
+    }
+    let updates = records.map { record in
+      SearchIndex.AnnotationUpdate(value: PhotoAnnotationsV1(photoId: Wire.id(), originalSha256: Data("public fixture".utf8).digest,
+        labels: ["Batch receipt"]), photoID: record.id, revision: record.revision, accountId: "fixture-owner")
+    }
+    XCTAssertThrowsError(try index.applyAnnotationsBatch(updates))
+    for record in records { XCTAssertEqual(try index.record(record.id), record) }
+    XCTAssertNil(try index.search("batch receipt").leading, "Earlier posting writes roll back with the later failed record")
+  }
+  func testAnnotationBatchReadsTheLatestCompletedOCRAndRetainsItsBeforeSyncBaseline() throws {
+    let index = try SearchIndex()
+    var local = SearchRecord(id: "a"); local.labels = ["Local label"]
+    try index.replacePermitted([local])
+    var value = PhotoAnnotationsV1(photoId: Wire.id(), originalSha256: Data("public fixture".utf8).digest,
+      labels: ["Saved label"], ocr: PhotoAnnotationsV1.OCR(text: "Saved receipt", confidence: 0.8, processor: local.processor))
+    XCTAssertTrue(try index.applyAnnotations(value, photoID: local.id, revision: local.revision, accountId: "fixture-owner"))
+    let incoming = SearchIndex.AnnotationUpdate(value: value, photoID: local.id, revision: local.revision, accountId: "fixture-owner")
+    XCTAssertTrue(try index.applyOCR(SearchOCRResult(text: "Newest device receipt", confidence: 0.9), status: .complete,
+      photoID: local.id, revision: local.revision))
+    value.ocr = nil
+    let update = SearchIndex.AnnotationUpdate(value: value, photoID: incoming.photoID, revision: incoming.revision, accountId: incoming.accountId)
+    _ = try index.applyAnnotationsBatch([update])
+    let hydrated = try XCTUnwrap(index.record(local.id))
+    XCTAssertEqual(hydrated.ocrText, "Newest device receipt")
+    XCTAssertEqual(hydrated.beforeSync?.ocrText, "Newest device receipt")
+    XCTAssertEqual(hydrated.ocrStatus, .complete); XCTAssertTrue(hydrated.previewAvailable)
+    try index.clearSyncedAnnotations()
+    let restored = try XCTUnwrap(index.record(local.id))
+    XCTAssertEqual(restored.labels, ["Local label"])
+    XCTAssertEqual(restored.ocrText, "Newest device receipt"); XCTAssertEqual(restored.ocrStatus, .complete)
+  }
+  @MainActor func testAnnotationBatchPublishesOneOrganizationAndQueryChangeOnlyAfterCommit() throws {
+    let index = try SearchIndex(), records = [SearchRecord(id: "a"), SearchRecord(id: "b")]
+    try index.replacePermitted(records)
+    let store = LocalSearchStore(index: index)
+    store.setAutomaticAnalysisActive(false)
+    defer { store.pause() }
+    var publications = 0
+    store.onOrganizationSnapshotChanged = { publications += 1 }
+    let organization = store.organizationGeneration, query = store.consumerContextGeneration
+    let updates = records.map { record in
+      SearchIndex.AnnotationUpdate(value: PhotoAnnotationsV1(photoId: Wire.id(), originalSha256: Data("public fixture".utf8).digest,
+        facts: [PhotoOrganizationFacts.screenshotPrefix + "true"]), photoID: record.id, revision: record.revision, accountId: "fixture-owner")
+    }
+    try store.applyAnnotationsBatch(updates)
+    XCTAssertEqual(publications, 1); XCTAssertEqual(store.organizationGeneration, organization + 1)
+    XCTAssertEqual(store.consumerContextGeneration, query + 1)
+    try store.applyAnnotationsBatch(updates)
+    XCTAssertEqual(publications, 1); XCTAssertEqual(store.consumerContextGeneration, query + 1)
+    try index.database.write { db in
+      try db.execute(sql: """
+        CREATE TRIGGER reject_annotation_publication BEFORE UPDATE ON searchRecords WHEN NEW.id='b'
+        BEGIN SELECT RAISE(ABORT,'injected annotation failure'); END;
+        """)
+    }
+    let failed = updates.map { update in
+      var value = update.value; value.facts = [PhotoOrganizationFacts.screenshotPrefix + "false"]
+      return SearchIndex.AnnotationUpdate(value: value, photoID: update.photoID, revision: update.revision, accountId: update.accountId)
+    }
+    XCTAssertThrowsError(try store.applyAnnotationsBatch(failed))
+    XCTAssertEqual(publications, 1); XCTAssertEqual(store.consumerContextGeneration, query + 1)
+    for record in records { XCTAssertTrue(PhotoOrganizationFacts.screenshot(try index.record(record.id)?.facts)) }
+  }
   @MainActor func testDiagnosticSnapshotDoesNotPublishCoverageAcrossSourceWithdrawal() async throws {
     guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)) else {
       throw XCTSkip("Permit public Simulator Photos for the current-index status export.")

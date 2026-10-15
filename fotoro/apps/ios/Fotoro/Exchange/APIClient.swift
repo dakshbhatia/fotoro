@@ -9,6 +9,7 @@ enum NativeDiagnosticStep: String, Codable, Sendable { case action, request, res
 enum NativeAnalysisActivity: String, Codable, Sendable {
   case notReady, inactive, interacting, waitingForIdle, running, retryScheduled, idle
 }
+enum NativeIndexCoverageScope: String, Codable, Sendable { case catalog, automaticWindow }
 enum NativeDiagnosticReason: String, Codable, Sendable {
   case cancelled, contextChanged, inactive, background, recoveryProbe, network, http, decode, validation, unknown
   case signedOut, locked, permissionRequired, paused, offline, retryRequired, waiting, pendingTransfers, unpreparedSources, skippedSources, pendingAnnotations, sourceUnavailable, current
@@ -118,6 +119,11 @@ struct NativeDiagnosticEvent: Codable, Sendable {
   let lastCheckedAgeMS: Int?
   let analysisStage: SearchAnalysisStage?
   let analysisActivity: NativeAnalysisActivity?
+  let analysisWindow: PhotoAnalysisWindow?
+  let coverageScope: NativeIndexCoverageScope?
+  let lastAttemptAgeMS: Int?
+  let lastCompleteAgeMS: Int?
+  let analysisRunAgeMS: Int?
   let currentStep: NativeDiagnosticStep?
   let parentTraceId: UUID?
   let traceId: UUID?
@@ -135,6 +141,8 @@ struct NativeDiagnosticEvent: Codable, Sendable {
     cacheHits: Int? = nil, unavailable: Int? = nil, skipped: Int? = nil,
     total: Int? = nil, lastCheckedAt: Date? = nil,
     coverage: SearchStageCoverage? = nil, analysisActivity: NativeAnalysisActivity? = nil,
+    analysisWindow: PhotoAnalysisWindow? = nil, coverageScope: NativeIndexCoverageScope? = nil,
+    analysisRunStartedAt: Date? = nil,
     coverageTime: Date = Date(),
     trace: NativeDiagnosticTrace? = NativeDiagnosticTrace.current,
     step: NativeDiagnosticStep? = nil, reason: NativeDiagnosticReason? = nil) {
@@ -167,6 +175,15 @@ struct NativeDiagnosticEvent: Codable, Sendable {
       return Int(max(0, min(milliseconds.isFinite ? milliseconds : 0, 31_536_000_000)))
     }
     analysisStage = coverage?.stage; self.analysisActivity = analysisActivity
+    self.analysisWindow = analysisWindow; self.coverageScope = coverageScope
+    func age(_ date: Date?) -> Int? {
+      guard let date else { return nil }
+      let milliseconds = coverageTime.timeIntervalSince(date) * 1000
+      guard milliseconds.isFinite, milliseconds >= 0 else { return nil }
+      return Int(min(milliseconds, 31_536_000_000))
+    }
+    lastAttemptAgeMS = age(coverage?.lastAttemptAt); lastCompleteAgeMS = age(coverage?.lastCompleteAt)
+    analysisRunAgeMS = age(analysisRunStartedAt)
     currentStep = trace?.currentStep; parentTraceId = trace?.parentTraceId
     traceId = trace?.id; operation = trace?.operation; self.step = step
     lastCompletedStep = trace?.lastCompletedStep; self.reason = reason

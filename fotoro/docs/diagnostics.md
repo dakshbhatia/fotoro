@@ -12,8 +12,12 @@ Neither ID grants access to anything.
   The local history persists across app launches, capped at 160 events and 64 KiB.
   This control is available from TestFlight 0.1.0 (45).
 - Browser: open Settings in Photos or Saved, then **Copy diagnostics**. If clipboard
-  access fails, select the displayed report. History is in memory, capped at 128
-  events; copy it before reloading or closing the tab.
+  access fails, select the displayed report. This source change retains up to 128
+  sanitized events in tab-session storage across reloads (64 KiB input cap).
+  Writes share a 250 ms window and flush on pagehide/hidden. Closing the tab ends
+  retention; denied/quota-limited storage falls back to memory. **Clear diagnostics**
+  and manual sign-out clear retained history and fence late operations. An expired
+  session preserves troubleshooting history. There is no automatic upload.
 - Server: from `fotoro/services/api/`, use `pnpm exec wrangler tail --env production
   --format json`. Reproduce the action, then stop the tail. Raw Wrangler envelopes
   can contain request URLs and capabilities; retain them privately, never paste
@@ -37,10 +41,11 @@ It never prints input filenames or parser error text.
 
 ## Current understanding and gaps (October 15)
 
-Production and TestFlight build 80 contain bounded action/request diagnostics.
+The released build-80 checkpoint contains bounded action/request diagnostics.
 These explain observed requests and interrupted stages; they do not establish
-complete indexing or a healthy personal library. Browser history disappears on
-reload. Native history is a short ring, not a full session archive. Historical
+complete indexing or a healthy personal library. Build 80's browser history
+disappears on reload; this change adds the bounded tab-session retention above.
+Native history is a short ring, not a full session archive. Historical
 production log access has not been established with the current credentials.
 
 The last retained physical build-78 audit counted 21,481 local catalog records,
@@ -50,6 +55,11 @@ not text-recognition accuracy. Its catalog query samples had a 46 ms median and
 measure different boundaries and are not full UI-to-result latency percentiles.
 The user reported fast results but weak relevance. Builds 79/80 and the library's
 current coverage have not been qualified on physical hardware; phone use is paused.
+
+Restricting that retained catalog to the latest ten calendar days (October 6–15,
+America/New_York) yields 218 photos: all 218 have completed OCR, visual
+classification and current semantic vectors. This supports a smaller experiment;
+it does not score recognition or relevance and does not refresh phone state.
 
 This source change adds an **export-time local index snapshot** to native Copy/
 Share diagnostics. It is not present in build 80. Each stage (OCR, visual,
@@ -65,9 +75,26 @@ for idle, running, retry scheduled or idle). These are observed states, not a
 diagnosis: idle does not mean complete and a retry timer does not prove a source
 will become available. The reader shows build and snapshot age without printing
 absolute timestamps. A changed/withdrawn source generation discards all coverage
-from the unfinished read. Counts run off the UI actor in one database read and
-only when explicitly exporting; they are not queried per keystroke or polled.
+from the unfinished read. Catalog and selected-window counts run off the UI actor
+in read transactions only when explicitly exporting; they are not queried
+per keystroke or polled. Whole-catalog and automatic-window coverage stay separate.
 Export snapshots do not replace the persisted action history.
+
+Automatic heavy analysis starts with **Latest 10 days** for this iteration. The
+Photo analysis range control can explicitly expand to **All photos**; the choice
+persists on the device. Existing metadata, completed OCR and older search results
+remain available. The original-backup date horizon and Pause remain independent.
+Debug runs may pin the experiment with `FOTORO_ANALYSIS_WINDOW_DAYS=10`.
+
+Each stage now persists aggregate last-attempt and last-completed-commit times
+alongside the index. Exports contain their ages, not photo identifiers or text.
+An older index starts with unknown progress ages; retries do not invent completed
+work. Clearing the permitted catalog clears these aggregates. Progress ages are
+for the stage in this index, including work outside the selected automatic window.
+The reader flags `no_recent_checkpoint` only for an active unfinished run lasting
+at least 60 seconds without a recent durable attempt. A long preview/model/
+inference wait can explain this signal; it is not proof of a stall or permission
+to retry, upload or delete anything. There is no new polling or alert service.
 
 The same export includes the cached Sync UI projection (state, reason, account
 state, completed/total/skipped counts and last server-check age when known).
@@ -76,10 +103,12 @@ last-check age stays unknown; a freshly exported cached state is not a fresh
 server verification or proof that another device can see a change. Last-check
 age is measured at capture; the reader separately reports the export's age.
 
-Still missing: durable browser session history, a verified historical server
-query path, per-stage last-progress history and stall detection, an end-to-end
-latency distribution, and repeated personal-library retrieval/second-device
-acceptance. No automatic diagnostic upload or alerting is implied by this report.
+Still missing: a verified historical server query path, a complete event archive,
+an end-to-end latency distribution, held-out personal retrieval scoring, and
+physical second-device/performance acceptance. Independent browser clients pass
+the public-fixture rename/screenshot/Trash/Restore/reload/original-byte journey;
+that does not qualify installed-phone behavior. No automatic diagnostic upload
+or alerting is implied by this report.
 
 The remaining acceptance order is: measure current coverage and its waiting
 reasons; verify OCR continues through idle/resume and finishes without starving

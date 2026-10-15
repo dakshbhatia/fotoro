@@ -147,7 +147,10 @@ export class PhotoSearchIndex {
         for (const word of words(keyword)) add(word, "keyword", photo.id);
       }
       if (isPhotoScreenshot(photo)) add("Screenshot", "fact", photo.id);
-      for (const fact of photo.facts ?? []) if (!(fact === "screenshot" && !isPhotoScreenshot(photo)) && !organizationFactCategory(fact) && !isLocationFact(fact) && !isCloudObservationFact(fact) && !isPeopleFact(fact) && !isCaptureMetadataFact(fact)) { add(fact, "fact", photo.id); phraseSource(fact, "fact", photo.id); }
+      for (const fact of photo.facts ?? []) if (!(fact === "screenshot" && !isPhotoScreenshot(photo)) && !organizationFactCategory(fact) && !isLocationFact(fact) && !isCloudObservationFact(fact) && !isPeopleFact(fact) && !isCaptureMetadataFact(fact)) {
+        add(fact, "fact", photo.id); phraseSource(fact, "fact", photo.id);
+        for (const word of words(fact)) add(word, "fact", photo.id);
+      }
       for (const term of captureMetadataSearchText(photo, photo.digest ?? "")) {
         add(term, "fact", photo.id); phraseSource(term, "fact", photo.id);
         for (const word of words(term)) add(word, "fact", photo.id);

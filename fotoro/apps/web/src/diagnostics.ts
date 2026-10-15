@@ -1,4 +1,4 @@
-// Ephemeral troubleshooting data. Never accept free-form event labels or payloads.
+// Bounded troubleshooting data retained in this tab. Never accept free-form labels or payloads.
 export const diagnosticOperations = ["auth", "sync", "catalog", "share", "album", "media", "request", "search", "metadata"] as const;
 export const diagnosticSteps = ["action", "request", "decode", "transfer", "scan", "prepare", "analysis"] as const;
 export const diagnosticOutcomes = ["started", "succeeded", "failed", "cancelled"] as const;
@@ -16,22 +16,68 @@ export interface DiagnosticEvent {
 }
 const events: DiagnosticEvent[] = [];
 export const diagnosticEventLimit = 128;
+const storageKey = "fotoro:diagnostics:v1", storageByteLimit = 64 * 1024;
+let restored = false, historyGeneration = 0, persistTimer: ReturnType<typeof setTimeout> | undefined;
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 export function diagnosticUUID(value: unknown): string | undefined {
   return typeof value === "string" && uuid.test(value.toLowerCase()) ? value.toLowerCase() : undefined;
 }
 const bounded = (value: unknown, maximum: number) => typeof value === "number" && Number.isFinite(value) ? Math.min(maximum, Math.max(0, Math.round(value))) : undefined;
 const clock = () => performance.now();
-function record(event: DiagnosticEvent) {
+function sanitizedEvent(value: unknown): DiagnosticEvent | undefined {
+  if (!value || typeof value !== "object") return;
+  const event = value as DiagnosticEvent;
   if (!diagnosticOperations.includes(event.operation) || !diagnosticSteps.includes(event.step) || !diagnosticOutcomes.includes(event.outcome)
     || !diagnosticReasons.includes(event.reason) || !diagnosticUUID(event.traceId)) return;
   const elapsedMs = bounded(event.elapsedMs, 86_400_000) ?? 0, count = bounded(event.count, 1_000_000);
   const status = bounded(event.status, 599), requestId = diagnosticUUID(event.requestId);
   // Reconstruct rather than spread: excess properties must never enter an export.
-  events.push({operation: event.operation, step: event.step, outcome: event.outcome, reason: event.reason, traceId: event.traceId,
+  return {operation: event.operation, step: event.step, outcome: event.outcome, reason: event.reason, traceId: diagnosticUUID(event.traceId)!,
     elapsedMs, ...(event.action && diagnosticActions.includes(event.action) ? {action: event.action} : {}),
-    ...(requestId ? {requestId} : {}), ...(count === undefined ? {} : {count}), ...(status && status >= 100 ? {status} : {})});
+    ...(requestId ? {requestId} : {}), ...(count === undefined ? {} : {count}), ...(status && status >= 100 ? {status} : {})};
+}
+function storage() {try {return globalThis.sessionStorage;} catch {return undefined;}}
+function retainedJSON() {return JSON.stringify({version: 1, client: "web", events});}
+function removeRetained() {
+  const target = storage();
+  try {target?.removeItem(storageKey);}
+  catch {try {target?.setItem(storageKey, JSON.stringify({version: 1, client: "web", events: []}));} catch {}}
+}
+function restore() {
+  if (restored) return;
+  restored = true;
+  const target = storage();
+  try {
+    const raw = target?.getItem(storageKey);
+    if (!raw) return;
+    if (raw.length > storageByteLimit) throw new Error("INVALID_DIAGNOSTICS");
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") throw new Error("INVALID_DIAGNOSTICS");
+    const envelope = parsed as {version?: unknown; client?: unknown; events?: unknown};
+    if (envelope.version !== 1 || envelope.client !== "web" || !Array.isArray(envelope.events))
+      throw new Error("INVALID_DIAGNOSTICS");
+    const candidates = envelope.events.slice(-diagnosticEventLimit);
+    events.push(...candidates.map(sanitizedEvent).filter((value): value is DiagnosticEvent => !!value));
+    // Rewrite only reconstructed fields; injected/free-form values never remain retained.
+    const safe = retainedJSON();
+    if (raw !== safe) target?.setItem(storageKey, safe);
+  } catch {removeRetained();}
+}
+function persist() {
+  if (persistTimer !== undefined) clearTimeout(persistTimer);
+  persistTimer = undefined;
+  if (!restored) return;
+  try {storage()?.setItem(storageKey, retainedJSON());} catch {}
+}
+function record(event: DiagnosticEvent, generation: number) {
+  if (generation !== historyGeneration) return;
+  restore();
+  const safe = sanitizedEvent(event);
+  if (!safe) return;
+  events.push(safe);
   if (events.length > diagnosticEventLimit) events.splice(0, events.length - diagnosticEventLimit);
+  // Batch frequent progress events rather than synchronously rewriting storage per event.
+  if (persistTimer === undefined && storage()) persistTimer = setTimeout(persist, 250);
 }
 export function diagnosticReason(error: unknown): DiagnosticReason {
   if (!(error instanceof Error)) return "unknown";
@@ -51,6 +97,7 @@ export function diagnosticReason(error: unknown): DiagnosticReason {
 }
 export class DiagnosticContext {
   readonly traceId = crypto.randomUUID();
+  private generation = historyGeneration;
   private started = clock();
   private requests = 0;
   private lastRequestId?: string;
@@ -59,14 +106,14 @@ export class DiagnosticContext {
   private stages = 0;
   private itemCount?: number;
   constructor(readonly operation: DiagnosticOperation, readonly action?: DiagnosticAction) {}
-  start() {record({operation: this.operation, action: this.action, traceId: this.traceId, step: "action", outcome: "started", reason: "none", elapsedMs: 0});}
+  start() {record({operation: this.operation, action: this.action, traceId: this.traceId, step: "action", outcome: "started", reason: "none", elapsedMs: 0}, this.generation);}
   incomplete(reason: DiagnosticReason) {this.completionReason = reason;}
   items(count: number) {this.itemCount = bounded(count, 1_000_000);}
   // Local stages show where work is waiting without retaining its inputs or outputs.
   async stage<T>(step: Step, task: () => Promise<T>): Promise<T> {
     const started = clock(), detailed = ++this.stages <= 6;
     const event = (outcome: Outcome, reason: DiagnosticReason) => record({operation: this.operation, action: this.action,
-      traceId: this.traceId, step, outcome, reason, elapsedMs: clock() - started});
+      traceId: this.traceId, step, outcome, reason, elapsedMs: clock() - started}, this.generation);
     if (detailed) event("started", "none");
     try {const result = await task(); if (detailed) event("succeeded", "none"); return result;}
     catch (error) {const reason = diagnosticReason(error); event(reason === "cancelled" ? "cancelled" : "failed", reason); throw error;}
@@ -77,14 +124,14 @@ export class DiagnosticContext {
     this.lastReason = reason;
     // Batch success details are bounded; failures remain visible and terminal count covers the batch.
     if (outcome === "succeeded" && (this.requests > 12 || !this.action && ["media", "album"].includes(this.operation))) return;
-    record({operation: this.operation, action: this.action, traceId: this.traceId, step, outcome, reason, elapsedMs, requestId: this.lastRequestId, status});
+    record({operation: this.operation, action: this.action, traceId: this.traceId, step, outcome, reason, elapsedMs, requestId: this.lastRequestId, status}, this.generation);
   }
   finish(error?: unknown, failed = false) {
     failed ||= this.completionReason !== "none";
     const classified = this.completionReason !== "none" ? this.completionReason : failed ? diagnosticReason(error) : "none";
     const reason = failed && classified === "unknown" && this.lastReason !== "none" ? this.lastReason : classified;
     record({operation: this.operation, action: this.action, traceId: this.traceId, step: "action", outcome: reason === "cancelled" ? "cancelled" : failed ? "failed" : "succeeded",
-      reason, elapsedMs: clock() - this.started, count: this.itemCount ?? this.requests, requestId: this.lastRequestId});
+      reason, elapsedMs: clock() - this.started, count: this.itemCount ?? this.requests, requestId: this.lastRequestId}, this.generation);
   }
 }
 export async function diagnose<T>(operation: DiagnosticOperation, task: (context: DiagnosticContext) => Promise<T>, action?: DiagnosticAction): Promise<T> {
@@ -92,5 +139,17 @@ export async function diagnose<T>(operation: DiagnosticOperation, task: (context
   try {const result = await task(context); context.finish(); return result;}
   catch (error) {context.finish(error, true); throw error;}
 }
-export function exportDiagnostics() {return JSON.stringify({version: 1, client: "web", events: events.map(event => ({...event}))}, null, 2);}
-export function clearDiagnostics() {events.length = 0;}
+export function exportDiagnostics() {restore(); return JSON.stringify({version: 1, client: "web", events: events.map(event => ({...event}))}, null, 2);}
+export function clearDiagnostics() {
+  historyGeneration++; restored = true; events.length = 0;
+  if (persistTimer !== undefined) clearTimeout(persistTimer);
+  persistTimer = undefined;
+  removeRetained();
+}
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", persist);
+  window.addEventListener("fotoro-lock", event => {
+    if ((event as CustomEvent<{reason?: unknown}>).detail?.reason === "manual") clearDiagnostics();
+  });
+  if (typeof document !== "undefined") document.addEventListener("visibilitychange", () => {if (document.visibilityState === "hidden") persist();});
+}

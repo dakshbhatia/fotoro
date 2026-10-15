@@ -37,6 +37,9 @@ actor VisionTextProcessor {
     return (max(1, Int(Double(width) * scale)), max(1, Int(Double(height) * scale)))
   }
   private static func boundedImage(_ preview: SearchPreview, maximumEdge: Int) throws -> CGImage {
+    // PhotoKit already supplies a bounded derivative. Keep its original pixels
+    // when no resize is needed instead of redrawing another RGBA copy for OCR.
+    if max(preview.image.width, preview.image.height) <= maximumEdge { return preview.image }
     let (width, height) = boundedSize(width: preview.image.width, height: preview.image.height,
       maximumEdge: maximumEdge)
     guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,

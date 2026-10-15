@@ -8,6 +8,8 @@ const values = {
   step: "action request response decode credential unlock catalog verify persist transfer annotation scan prepare analysis export settlePrevious settleBackup settleJournal snapshot".split(" "),
   analysisStage: ["ocr", "visual", "semantic"],
   analysisActivity: "notReady inactive interacting waitingForIdle running retryScheduled idle".split(" "),
+  analysisWindow: ["allPhotos", "tenDays"],
+  coverageScope: ["catalog", "automaticWindow"],
   action: "passkey password enrollment refresh save create accept end add receive contribute prepare".split(" "),
   outcome: "started completed succeeded failed cancelled changed".split(" "),
   reason: "none cancelled contextChanged inactive background recoveryProbe network http decode validation unknown signedOut locked permissionRequired paused offline retryRequired waiting pendingTransfers unpreparedSources skippedSources pendingAnnotations sourceUnavailable current invalid_wire account_changed source_changed quota unavailable verification".split(" "),
@@ -37,7 +39,7 @@ export function sanitizeEvent(value) {
   const outcome = server ? value.event === "api.error" || value.status >= 400 ? "failed" : "completed" : pick("outcome", value.outcome);
   if (!operation || !outcome) return;
   const event = {source: server ? "server" : "client", operation, outcome};
-  for (const key of ["step", "action", "reason", "state", "area", "errorClass", "endpoint", "method", "accountState", "analysisStage", "analysisActivity"]) {
+  for (const key of ["step", "action", "reason", "state", "area", "errorClass", "endpoint", "method", "accountState", "analysisStage", "analysisActivity", "analysisWindow", "coverageScope"]) {
     const v = pick(key, value[key]); if (v !== undefined) event[key] = v;
   }
   const current = pick("step", value.currentStep); if (current) event.currentStep = current;
@@ -57,6 +59,9 @@ export function sanitizeEvent(value) {
   if (retry !== undefined) event.nextRetryMS = retry;
   const checkedAge = integer(value.lastCheckedAgeMS, 31_536_000_000);
   if (checkedAge !== undefined) event.lastCheckedAgeMS = checkedAge;
+  for (const key of ["lastAttemptAgeMS", "lastCompleteAgeMS", "analysisRunAgeMS"]) {
+    const age = integer(value[key], 31_536_000_000); if (age !== undefined) event[key] = age;
+  }
   if (status !== undefined) event.status = status;
   return event;
 }
@@ -125,10 +130,11 @@ export function summarizeDiagnostics(events, {now = Date.now() / 1000} = {}) {
     const actions = trace.filter(e => e.source === "client" && e.step === "action");
     const terminal = actions.filter(e => ["completed", "succeeded", "failed", "cancelled"].includes(e.outcome)).at(-1);
     const latest = trace.at(-1), action = terminal ?? actions.at(-1);
+    const stageOnly = !actions.length && trace.some(e => e.source === "client" && e.step && !["action", "request", "response", "decode"].includes(e.step));
     const last = terminal?.lastCompletedStep ?? [...trace].reverse().find(e => e.lastCompletedStep)?.lastCompletedStep;
     const flow = {
       traceId, operation: action?.operation ?? trace.find(e => e.source === "client")?.operation ?? "api",
-      result: terminal?.outcome ?? (actions.length ? "no_terminal_in_window" : "requests_only"),
+      result: terminal?.outcome ?? (actions.length ? "no_terminal_in_window" : stageOnly ? "stage_events_only" : "requests_only"),
       events: trace.length,
       requests: new Set(trace.map(e => e.requestId).filter(Boolean)).size,
       failures: trace.filter(e => e.outcome === "failed").slice(-5).map(e => detail(e, firstTime)),
@@ -196,12 +202,31 @@ export function summarizeDiagnostics(events, {now = Date.now() / 1000} = {}) {
   let indexSnapshot;
   if (snapshot) {
     const rows = snapshot.traceId ? safe.filter(e => e.source === "client" && e.operation === "search" && e.step === "snapshot" && e.traceId === snapshot.traceId) : [snapshot];
-    indexSnapshot = {scope: "permitted_local_photos", activity: snapshot.analysisActivity ?? "unknown", coverage: rows.filter(e => e.analysisStage).map(e => ({stage: e.analysisStage, ...counters(e), ...(e.nextRetryMS === undefined ? {} : {nextRetryMS: e.nextRetryMS})}))};
+    const stage = e => {
+      const result = {stage: e.analysisStage, ...counters(e)};
+      for (const key of ["nextRetryMS", "lastAttemptAgeMS", "lastCompleteAgeMS"]) if (e[key] !== undefined) result[key] = e[key];
+      return result;
+    };
+    indexSnapshot = {scope: "permitted_local_photos", activity: snapshot.analysisActivity ?? "unknown",
+      coverage: rows.filter(e => e.analysisStage && e.coverageScope !== "automaticWindow").map(stage)};
+    if (snapshot.analysisWindow) indexSnapshot.analysisWindow = snapshot.analysisWindow;
+    const windowRows = rows.filter(e => e.analysisStage && e.coverageScope === "automaticWindow");
+    if (windowRows.length) indexSnapshot.automaticWindowCoverage = windowRows.map(stage);
+    if (snapshot.analysisRunAgeMS !== undefined) indexSnapshot.analysisRunAgeMS = snapshot.analysisRunAgeMS;
+    const activeCoverage = windowRows.length ? windowRows : rows.filter(e => e.analysisStage);
+    const unfinished = activeCoverage.some(e => e.total !== undefined && e.completed !== undefined && e.total > e.completed);
+    const attemptAges = rows.map(e => e.lastAttemptAgeMS).filter(age => age !== undefined);
+    indexSnapshot.progressSignal = snapshot.analysisActivity === undefined || snapshot.analysisActivity === "notReady" ? "unknown"
+      : snapshot.analysisActivity !== "running" ? "not_running"
+      : snapshot.analysisRunAgeMS === undefined ? "unknown"
+      : snapshot.analysisRunAgeMS < 60_000 ? "starting"
+      : !unfinished ? "unknown"
+      : attemptAges.some(age => age < 60_000) ? "recent_checkpoint" : "no_recent_checkpoint";
     if (snapshot.build) indexSnapshot.build = snapshot.build;
     if (snapshot.reason) indexSnapshot.reason = snapshot.reason;
     const age = snapshot.timestamp === undefined ? undefined : integer(Math.round((now - snapshot.timestamp) * 1000), Number.MAX_SAFE_INTEGER);
     if (age !== undefined) indexSnapshot.ageMS = age;
-    indexSnapshot.limitation = "Coverage was captured for this export, not live monitoring. Pending excludes failed/unavailable; deferred overlaps unfinished states. OCR complete includes photos with no recognized text. Saved/web coverage is separate. Idle does not mean complete.";
+    indexSnapshot.limitation = "Coverage was captured for this export, not live monitoring. Pending excludes failed/unavailable; deferred overlaps unfinished states. OCR complete includes photos with no recognized text. Automatic-window coverage is separate from the whole catalog. Attempt/completion ages describe the last durable commit for this stage in this index; older indexes may have unknown ages. no_recent_checkpoint means an active unfinished run has lasted at least 60 seconds without a recent durable attempt; a long preview/model/inference wait can explain it, so it is a diagnostic signal, not a proven stall or retry instruction. Saved/web coverage is separate. Idle does not mean complete.";
   }
   const sync = safe.findLast(e => e.source === "client" && e.operation === "sync" && e.step === "snapshot");
   let syncSnapshot;
@@ -244,6 +269,8 @@ async function main(args) {
   if (summary.indexSnapshot) {
     console.log(`Local index snapshot: ${summary.indexSnapshot.activity}; build ${summary.indexSnapshot.build ?? "unknown"}; age ${summary.indexSnapshot.ageMS === undefined ? "unknown" : summary.indexSnapshot.ageMS + "ms"}${summary.indexSnapshot.reason ? "; " + summary.indexSnapshot.reason : ""}.`);
     for (const stage of summary.indexSnapshot.coverage) console.log(`${stage.stage}: ${JSON.stringify(stage)}`);
+    if (summary.indexSnapshot.analysisWindow) console.log(`Automatic analysis window: ${summary.indexSnapshot.analysisWindow}`);
+    for (const stage of summary.indexSnapshot.automaticWindowCoverage ?? []) console.log(`Automatic window ${stage.stage}: ${JSON.stringify(stage)}`);
     console.log(summary.indexSnapshot.limitation);
   }
   if (summary.syncSnapshot) console.log(`Cached sync snapshot: ${JSON.stringify(summary.syncSnapshot)}`);

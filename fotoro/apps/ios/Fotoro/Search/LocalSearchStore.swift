@@ -38,7 +38,13 @@ enum SearchMetadataIntake {
   typealias QueryExecutor = @Sendable (SearchIndex, String, SearchScope, String?, SearchResponse, UInt64) async throws -> SearchResponse
   private(set) var response = SearchResponse()
   private(set) var assets: [String: RecentPhoto] = [:]
-  private(set) var indexing = false
+  private(set) var indexing = false {
+    didSet {
+      if indexing && !oldValue { analysisRunStartedAt = Date() }
+      else if !indexing { analysisRunStartedAt = nil }
+    }
+  }
+  @ObservationIgnored private var analysisRunStartedAt: Date?
   private(set) var searching = false
   private(set) var analysisProgress: SearchAnalysisProgress?
   private(set) var analysisRemaining = 0
@@ -69,6 +75,8 @@ enum SearchMetadataIntake {
   @ObservationIgnored private var automaticAnalysisRestartRequested = false
   @ObservationIgnored private var automaticAnalysisID = UUID()
   @ObservationIgnored private var automaticAnalysisScope: PhotoAnalysisScope?
+  private(set) var automaticAnalysisWindow: PhotoAnalysisWindow = .allPhotos
+  @ObservationIgnored private var analysisWindowPreferences: UserDefaults?
   @ObservationIgnored private var automaticAnalysisCursor: PhotoAnalysisCursor?
   @ObservationIgnored private var idleAnalysisTask: Task<Void, Never>?
   @ObservationIgnored private var automaticRetryTask: Task<Void, Never>?
@@ -130,9 +138,18 @@ enum SearchMetadataIntake {
   }
   @ObservationIgnored private(set) var root = LocalSearchStore.defaultIndexRoot(in: FileManager.default.urls(
     for: .applicationSupportDirectory, in: .userDomainMask)[0])
-  override init() { super.init() }
-  init(index: SearchIndex, queryExecutor: QueryExecutor? = nil) {
+  override init() {
+    analysisWindowPreferences = .standard
+    automaticAnalysisWindow = UserDefaults.standard.string(forKey: "fotoro.search.analysisWindow")
+      .flatMap(PhotoAnalysisWindow.init(rawValue:)) ?? .tenDays
+    #if DEBUG
+    if ProcessInfo.processInfo.environment["FOTORO_ANALYSIS_WINDOW_DAYS"] == "10" { automaticAnalysisWindow = .tenDays }
+    #endif
+    super.init()
+  }
+  init(index: SearchIndex, queryExecutor: QueryExecutor? = nil, analysisWindow: PhotoAnalysisWindow = .allPhotos) {
     self.index = index
+    automaticAnalysisWindow = analysisWindow
     if let queryExecutor { self.queryExecutor = queryExecutor }
     ready = true
     super.init()
@@ -198,6 +215,18 @@ enum SearchMetadataIntake {
   private var automaticAnalysisRunning: Bool {
     automaticAnalysisTask != nil && automaticAnalysisTask?.isCancelled == false
   }
+  func setAutomaticAnalysisWindow(_ window: PhotoAnalysisWindow) {
+    guard automaticAnalysisWindow != window else { return }
+    let preserveManualProgress = analysisScope?.query == query && analysisScope?.scope.people == peopleSelection
+    cancelAutomaticAnalysis()
+    automaticAnalysisWindow = window
+    automaticAnalysisScope = nil; automaticAnalysisCursor = nil
+    // A manual query/date batch owns its own cursor and remaining count. Only
+    // the automatic range changes; its UI must not erase that explicit progress.
+    if !preserveManualProgress { analysisRemaining = 0; analysisUnavailableIDs = [] }
+    analysisWindowPreferences?.set(window.rawValue, forKey: "fotoro.search.analysisWindow")
+    scheduleAutomaticAnalysis()
+  }
   #if !FOTORO_LOCAL_PREVIEW
   private var diagnosticAnalysisActivity: NativeAnalysisActivity {
     if !ready || index == nil { return .notReady }
@@ -211,9 +240,11 @@ enum SearchMetadataIntake {
   func diagnosticIndexSnapshot() async -> [NativeDiagnosticEvent] {
     let trace = NativeDiagnosticTrace(.search), token = work.generation
     let snapshotGeneration = libraryGeneration, now = analysisNow()
+    let window = automaticAnalysisWindow
+    let windowScope = window.scope(now: now)
     func unavailable(_ reason: NativeDiagnosticReason) -> [NativeDiagnosticEvent] {
       [NativeDiagnosticEvent(phase: .search, outcome: .changed,
-        analysisActivity: diagnosticAnalysisActivity, trace: trace, step: .snapshot, reason: reason)]
+        analysisActivity: diagnosticAnalysisActivity, analysisWindow: window, trace: trace, step: .snapshot, reason: reason)]
     }
     guard ready, let index else { return unavailable(.waiting) }
     guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)) else {
@@ -227,14 +258,22 @@ enum SearchMetadataIntake {
       #else
       coverage = try await SearchMetadataIntake.run { try index.analysisCoverage(now: now) }
       #endif
+      let windowCoverage = window == .tenDays
+        ? try await SearchMetadataIntake.run { try index.analysisCoverage(now: now, scope: windowScope) } : []
       guard !Task.isCancelled, token == work.generation, snapshotGeneration == libraryGeneration,
         self.index === index, ready else { return unavailable(.contextChanged) }
       guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)) else {
         return unavailable(.permissionRequired)
       }
-      return coverage.map { NativeDiagnosticEvent(phase: .search, outcome: .changed,
-        coverage: $0, analysisActivity: diagnosticAnalysisActivity, coverageTime: now,
+      let catalogEvents = coverage.map { NativeDiagnosticEvent(phase: .search, outcome: .changed,
+        coverage: $0, analysisActivity: diagnosticAnalysisActivity, analysisWindow: window,
+        coverageScope: .catalog, analysisRunStartedAt: analysisRunStartedAt, coverageTime: now,
         trace: trace, step: .snapshot) }
+      let windowEvents = windowCoverage.map { NativeDiagnosticEvent(phase: .search, outcome: .changed,
+        coverage: $0, analysisActivity: diagnosticAnalysisActivity, analysisWindow: window,
+        coverageScope: .automaticWindow, analysisRunStartedAt: analysisRunStartedAt, coverageTime: now,
+        trace: trace, step: .snapshot) }
+      return catalogEvents + windowEvents
     } catch { return unavailable(Task.isCancelled ? .cancelled : .unknown) }
   }
   #endif
@@ -306,7 +345,7 @@ enum SearchMetadataIntake {
             if semanticRetryRequested { scheduleAutomaticAnalysis() }
           #endif
           if !Task.isCancelled, !automaticAnalysisRestartRequested {
-            scheduleAutomaticRetry(scope: automaticAnalysisScope ?? PhotoAnalysisScope(includesOlder: true), token: token)
+            scheduleAutomaticRetry(scope: automaticAnalysisScope ?? automaticAnalysisWindow.scope(now: analysisNow()), token: token)
           }
         }
       }
@@ -316,7 +355,7 @@ enum SearchMetadataIntake {
       // Search covers every permitted photo. Prepare newest first, then continue
       // into older and undated sources in bounded batches while the home is idle.
       // A query cannot filter out photos whose text has not yet been read.
-      let scope = automaticAnalysisScope ?? PhotoAnalysisScope(includesOlder: true)
+      let scope = automaticAnalysisScope ?? automaticAnalysisWindow.scope(now: analysisNow())
       automaticAnalysisScope = scope
       var after = automaticAnalysisCursor
       #if !FOTORO_LOCAL_PREVIEW
@@ -463,7 +502,7 @@ enum SearchMetadataIntake {
     !Task.isCancelled && ready && token == work.generation && (explicit
       ? query == scope.query && peopleSelection == scope.scope.people : automaticAnalysisAdmitted)
   }
-  var canAnalyzeMetadataMatches: Bool { ready }
+  var canAnalyzeMetadataMatches: Bool { ready && (!indexing || automaticAnalysisRunning) }
   #if !FOTORO_LOCAL_PREVIEW
     private func semanticReady() async -> Bool {
       #if DEBUG
@@ -500,8 +539,8 @@ enum SearchMetadataIntake {
       }
     }
   #endif
-  func analyzeMetadataMatches(nextBatch: Bool = false) {
-    guard ready, index != nil, !indexing else { return }
+  func analyzeMetadataMatches(nextBatch: Bool = false, batchLimit: Int = 500) {
+    guard ready, index != nil, !indexing || automaticAnalysisRunning else { return }
     let priorScope = analysisScope
     let priorCursor = analysisCursor
     let priorUnavailable = analysisUnavailableIDs
@@ -518,14 +557,15 @@ enum SearchMetadataIntake {
     refreshTask = Task {
       await previousAutomatic?.value
       guard !Task.isCancelled, token == work.generation else { return }
-      _ = await runScopedAnalysis(scope: scope, after: after, retryFailed: true, token: token, explicit: true)
-      if token == work.generation { indexing = false; analysisProgress = nil }
+      _ = await runScopedAnalysis(scope: scope, after: after, retryFailed: true, token: token, explicit: true,
+        limit: max(1, min(500, batchLimit)))
+      if token == work.generation { indexing = false; analysisProgress = nil; scheduleAutomaticAnalysis() }
     }
   }
   private func runScopedAnalysis(scope: PhotoAnalysisScope, after: PhotoAnalysisCursor?, retryFailed retryFailedOCR: Bool,
     token: UInt64, explicit: Bool, limit: Int = 500) async -> PhotoAnalysisCursor? {
     guard let localIndex = index else { return nil }
-    analysisScope = scope
+    if explicit { analysisScope = scope }
     do {
       let now = analysisNow()
       let batch = try await Task.detached(priority: .utility) {
@@ -536,7 +576,7 @@ enum SearchMetadataIntake {
       }.value
       let pending = batch.1
       guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled else { return nil }
-      analysisRemaining = max(0, batch.0 - pending.count)
+      if explicit || analysisScope == nil { analysisRemaining = max(0, batch.0 - pending.count) }
       guard !pending.isEmpty else { return nil }
       var attempted: [SearchRecord] = []
       #if !FOTORO_LOCAL_PREVIEW
@@ -547,8 +587,8 @@ enum SearchMetadataIntake {
       #endif
       defer {
         if analysisIsCurrent(scope, token: token, explicit: explicit) {
-          analysisRemaining += pending.count - attempted.count
-          if let last = attempted.last { analysisCursor = PhotoAnalysisCursor(last) }
+          if explicit || analysisScope == nil { analysisRemaining += pending.count - attempted.count }
+          if explicit, let last = attempted.last { analysisCursor = PhotoAnalysisCursor(last) }
         }
         #if !FOTORO_LOCAL_PREVIEW
         let cancelled = Task.isCancelled || !analysisIsCurrent(scope, token: token, explicit: explicit) || attempted.count < pending.count
@@ -606,7 +646,6 @@ enum SearchMetadataIntake {
             catch { state = .failed }
           }
           guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled, analysisSourceCurrent(record) else { break }
-          // Both writes verify the revision and permitted generation inside the transaction.
           let ocrResult = result
           let ocrState = state
           let attemptedAt = analysisNow()
@@ -964,7 +1003,12 @@ enum SearchMetadataIntake {
     let normalized = SearchNormalization.text(value)
     let changed = normalized != SearchNormalization.text(query)
     if changed, ready, indexing, !automaticAnalysisRunning { pause() }
-    if changed, !automaticAnalysisRunning { analysisRemaining = 0; analysisScope = nil; analysisCursor = nil; analysisUnavailableIDs = [] }
+    if changed {
+      let hadManualProgress = analysisScope != nil
+      analysisScope = nil; analysisCursor = nil
+      if !automaticAnalysisRunning { analysisRemaining = 0; analysisUnavailableIDs = [] }
+      else if hadManualProgress { analysisRemaining = 0 }
+    }
     query = value
     queryGeneration &+= 1
     queryTask?.cancel()
@@ -1031,7 +1075,10 @@ enum SearchMetadataIntake {
       return
     }
     if ready, indexing, !automaticAnalysisRunning { pause() }
-    if !automaticAnalysisRunning { analysisRemaining = 0; analysisScope = nil; analysisCursor = nil; analysisUnavailableIDs = [] }
+    let hadManualProgress = analysisScope != nil
+    analysisScope = nil; analysisCursor = nil
+    if !automaticAnalysisRunning { analysisRemaining = 0; analysisUnavailableIDs = [] }
+    else if hadManualProgress { analysisRemaining = 0 }
     peopleSelection = selection
     selectedPeopleNames = names.filter { selection.personIDs.contains($0.key) }
     acceptedMeaningID = nil
@@ -1082,11 +1129,14 @@ enum SearchMetadataIntake {
   func record(_ photoID: String) throws -> SearchRecord? { try index?.record(photoID) }
   #if !FOTORO_LOCAL_PREVIEW
   func applyAnnotations(_ value: PhotoAnnotationsV1, source: BackupSource, accountId: String) throws {
-    guard ready, let index, let revision = source.sourceRevision else { return }
-    let before = try index.record(source.id)?.facts.filter { PhotoOrganizationFacts.category($0) != nil }
-    guard try index.applyAnnotations(value, photoID: source.id, revision: revision, accountId: accountId) else { return }
-    let after = try index.record(source.id)?.facts.filter { PhotoOrganizationFacts.category($0) != nil }
-    if before != after { organizationGeneration &+= 1 }
+    guard let revision = source.sourceRevision else { return }
+    try applyAnnotationsBatch([SearchIndex.AnnotationUpdate(value: value, photoID: source.id, revision: revision, accountId: accountId)])
+  }
+  func applyAnnotationsBatch(_ updates: [SearchIndex.AnnotationUpdate]) throws {
+    guard ready, let index else { return }
+    let result = try index.applyAnnotationsBatch(updates)
+    guard !result.changedRecords.isEmpty else { return }
+    if result.organizationChanged { organizationGeneration &+= 1 }
     updateQuery(query)
   }
   #endif

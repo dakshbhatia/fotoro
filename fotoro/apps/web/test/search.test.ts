@@ -8,6 +8,30 @@ const now = Date.parse("2026-10-01T12:00:00Z");
 const photo = (id: string, filename: string, labels: string[] = [], date = "2020-01-01T00:00:00Z"): SearchPhoto =>
   ({ id, filename, labels, date, dateSource: "exif" });
 
+test("words inside supplied facts remain findable through batched ingestion and corrected successors", async () => {
+  const rehearsal = {...photo("rehearsal", "neutral-a.png"), facts: ["Backstage rehearsal", "fotoro.trash.v1:false"]};
+  const other = {...photo("other", "neutral-b.png"), facts: ["Frontstage show"]};
+  const rows = [rehearsal, other];
+  const sync = new PhotoSearchIndex(rows);
+  const first = await PhotoSearchIndex.build(rows, new AbortController().signal, () => true);
+  let successor: PhotoSearchIndex | undefined;
+  try {
+    for (const index of [sync, first]) {
+      const result = await index.searchAsync("rehearsal", {now});
+      assert.equal(result.photoId, rehearsal.id);
+      assert.equal(result.meaning?.evidence[rehearsal.id], "fact");
+      assert.equal(index.search("trash", {now}).photoId, undefined, "Reserved organization syntax cannot become a supplied word");
+    }
+    successor = await PhotoSearchIndex.build([{...rehearsal, facts: ["Audience concert"]}, other], new AbortController().signal, () => true,
+      undefined, {index: first, unchanged: new Set([other.id])});
+    assert.equal(successor.search("rehearsal", {now}).photoId, undefined);
+    assert.equal(successor.search("concert", {now}).photoId, rehearsal.id);
+    assert.equal(successor.search("show", {now}).photoId, other.id);
+    assert.equal(first.search("rehearsal", {now}).photoId, rehearsal.id, "A corrected successor cannot mutate the preceding index");
+    assert.deepEqual(rows[0].facts, ["Backstage rehearsal", "fotoro.trash.v1:false"]);
+  } finally {sync.dispose(); first.dispose(); successor?.dispose();}
+});
+
 test("successor indexes tokenize only changed receipts while keeping predecessor postings and new source fences independent", async () => {
   const rows = Array.from({length: 1000}, (_, n) => ({...photo(String(n), "neutral.jpg"), caption: "Indexed caption " + n}));
   const match = String.prototype.match;

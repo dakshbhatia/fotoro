@@ -210,6 +210,13 @@ enum ReviewedPhotosBackupPolicy {
   private(set) var automaticPhotoSyncBusy = false
   @ObservationIgnored private var automaticSyncSettling: Task<Void, Never>?
   @ObservationIgnored private var automaticSyncGeneration = UUID()
+  private struct DerivedAnnotationBinding: Equatable {
+    let generation: UUID
+    let access: PhotoAccountAccess
+    let origin: String
+    let worker: ObjectIdentifier
+  }
+  @ObservationIgnored private let derivedAnnotationBatch = FixedWindowWorkBatch<DerivedAnnotationBinding>()
   @ObservationIgnored private var automaticSyncCancellationReasons: [UUID: NativeDiagnosticReason] = [:]
   @ObservationIgnored private var automaticSyncNeedsScan = false
   @ObservationIgnored private var automaticPrioritySource: BackupSource?
@@ -1033,6 +1040,7 @@ enum ReviewedPhotosBackupPolicy {
     return .contextChanged
   }
   private func suspendAutomaticPhotoSync(cancelBackground: Bool = false, reason: NativeDiagnosticReason = .contextChanged) {
+    derivedAnnotationBatch.cancel()
     cancelAutomaticPhotoSyncRetry(resetAttempts: true)
     if automaticSyncTask != nil { automaticSyncCancellationReasons[automaticSyncGeneration] = reason }
     automaticSyncGeneration = UUID()
@@ -1976,9 +1984,10 @@ enum ReviewedPhotosBackupPolicy {
     search.onRecordChanged = { [weak self] record, labelsChanged in
       guard let self else { return }
       let derivedOnly = self.automaticSyncPreference.enabled && !labelsChanged
-      try self.captureLocalAnnotation(record, labelsChanged: labelsChanged, derivedOnly: derivedOnly)
-      if derivedOnly, self.automaticPhotoSyncAdmitted {
-        Task { [weak self] in await self?.syncAnnotations(derivedOnly: true) }
+      let changed = try self.captureLocalAnnotation(record, labelsChanged: labelsChanged, derivedOnly: derivedOnly)
+      if changed, derivedOnly, let binding = self.derivedAnnotationBinding {
+        self.derivedAnnotationBatch.enqueue(binding: binding, current: { [weak self] in self?.derivedAnnotationBinding },
+          run: { [weak self] in await self?.syncAnnotations(derivedOnly: true) })
       }
     }
     search.onSnapshotReady = { [weak self] in
@@ -2126,13 +2135,13 @@ enum ReviewedPhotosBackupPolicy {
       !asset.isHidden, CameraMedia.sourceSkipReason(asset) == nil else { return false }
     return source.sourceRevision != nil && RecentPhoto.sourceRevision(asset) == source.sourceRevision
   }
-  private func captureLocalAnnotation(_ record: SearchRecord, labelsChanged: Bool, source knownSource: BackupSource? = nil, refreshSummary: Bool = true, derivedOnly: Bool = false) throws {
+  @discardableResult private func captureLocalAnnotation(_ record: SearchRecord, labelsChanged: Bool, source knownSource: BackupSource? = nil, refreshSummary: Bool = true, derivedOnly: Bool = false) throws -> Bool {
     guard vault.isUnlocked, let account = session.accountId,
       let source = try knownSource ?? store.backupSourceIfPresent(id: record.id),
       source.id == record.id,
       AnnotationSourceBinding.accepts(sourceRevision: source.sourceRevision, recordRevision: record.revision),
-      let photo = try store.backupPhoto(source.photoId) else { return }
-    if derivedOnly, !automaticPhotoSyncAdmitted || !automaticDerivedSourceCurrent(source) { return }
+      let photo = try store.backupPhoto(source.photoId) else { return false }
+    if derivedOnly, !automaticPhotoSyncAdmitted || !automaticDerivedSourceCurrent(source) { return false }
     let bundle = try vault.requireBundle()
     let card = try session.requireCard(account)
     var value = try annotations.ledger.current(photo: photo, bundle: bundle, card: card) ?? PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
@@ -2189,9 +2198,9 @@ enum ReviewedPhotosBackupPolicy {
           PhotoAnnotationsV1.Visual.Label(label: $0.label, identifier: $0.identifier, confidence: $0.confidence)
         })
     }
-    guard !derivedOnly || hasCompletedDerivedResult else { return }
+    guard !derivedOnly || hasCompletedDerivedResult else { return false }
     // Repeated stage callbacks must not republish unchanged overlays or rescan sync inventory.
-    guard value != priorValue else { return }
+    guard value != priorValue else { return false }
     try annotations.ledger.edit(value, photo: photo, bundle: bundle, card: card)
     photoAnnotations[photo.id] = value
     if priorFavorite != value.favorite || priorLocation != value.location
@@ -2202,6 +2211,13 @@ enum ReviewedPhotosBackupPolicy {
       if labelsChanged { refreshConsumerSyncSummary() }
       else { scheduleAnnotationSummaryRefresh() }
     }
+    return true
+  }
+  private var derivedAnnotationBinding: DerivedAnnotationBinding? {
+    guard automaticPhotoSyncAdmitted, let access = photoAccountAccess,
+      let origin = BackgroundUploadPolicy.origin(api.baseURL) else { return nil }
+    return DerivedAnnotationBinding(generation: automaticSyncGeneration, access: access,
+      origin: origin, worker: ObjectIdentifier(annotations))
   }
   private func scheduleAnnotationSummaryRefresh() {
     guard annotationSummaryTask == nil, let access = photoAccountAccess else { return }
@@ -2259,11 +2275,18 @@ enum ReviewedPhotosBackupPolicy {
     guard let localSearch, vault.isUnlocked, let account = session.accountId else { return }
     let bundle = try vault.requireBundle()
     let card = try session.requireCard(account)
+    var updates: [SearchIndex.AnnotationUpdate] = []
+    updates.reserveCapacity(200)
     for source in try store.backupSources() {
-      guard let photo = try store.backupPhoto(source.photoId),
+      guard let revision = source.sourceRevision, let photo = try store.backupPhoto(source.photoId),
         let value = try annotations.ledger.current(photo: photo, bundle: bundle, card: card) else { continue }
-      try localSearch.applyAnnotations(value, source: source, accountId: account)
+      updates.append(SearchIndex.AnnotationUpdate(value: value, photoID: source.id, revision: revision, accountId: account))
+      if updates.count == 200 {
+        try localSearch.applyAnnotationsBatch(updates)
+        updates.removeAll(keepingCapacity: true)
+      }
     }
+    if !updates.isEmpty { try localSearch.applyAnnotationsBatch(updates) }
   }
   func syncAnnotations(derivedOnly: Bool = false) async {
     guard session.isSignedIn || session.fixture,
