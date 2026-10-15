@@ -78,7 +78,7 @@ import {ChosenSaveIntent, continueChosenSave, type ChosenSaveSnapshot} from "./e
 import type {UnlockedVault} from "./vault/vault";
 import {syncContacts, subscribeContacts} from "./exchange/contacts";
 import {syncPeopleLinks, subscribePeopleLinks} from "./exchange/people-links";
-import {readSavedBrowsePage, subscribeSavedRefresh} from "./library/consumer-refresh";
+import {DeferredSavedRefresh, readSavedBrowsePage, readSavedSnapshot, subscribeSavedRefresh} from "./library/consumer-refresh";
 import {saveQueuedAnnotations} from "./library/consumer-annotation-save";
 import type {ConsumerPhotoChanges} from "./library/consumer-changes";
 import {canShareOriginals, downloadOriginal, OriginalShareAttempt, prepareSavedOriginals, savedOriginalSelectionCurrent} from "./library/system-share";
@@ -193,6 +193,7 @@ export default function CloudApp({
   const [catalogCoverage, setCatalogCoverage] = useState<CatalogCoverage | null>(null);
   const catalogBrowse = useRef<{session: UnlockedVault; limit: number} | null>(null);
   const savedBrowseRead = useRef<AbortController | null>(null);
+  const deferredSavedRefresh = useRef<DeferredSavedRefresh | null>(null);
   const [loadingSavedBrowse, setLoadingSavedBrowse] = useState(false);
   const [savedBrowseError, setSavedBrowseError] = useState("");
   const cancelSavedBrowse = () => {savedBrowseRead.current?.abort(); savedBrowseRead.current = null; setLoadingSavedBrowse(false); setSavedBrowseError("");};
@@ -432,9 +433,8 @@ export default function CloudApp({
     check();
     const session = requireVault();
     const browse = browseFor(session);
-    const cached = await cachedSync(session, diagnostic, browse);
-    check();
-    if (!sameVault(session)) return;
+    const snapshotCurrent = () => sameVault(session) && current();
+    const cached = await readSavedSnapshot({signal, current: snapshotCurrent, read: () => cachedSync(session, diagnostic, browse)});
     setPhotos(cached.photos);
     setCatalogCoverage(cached.coverage);
     const recoveredSelection = expiredSelection.current;
@@ -461,16 +461,17 @@ export default function CloudApp({
       return;
     }
     check();
-    let result = await (send ? saveSync(session, signal, diagnostic) : refreshSync(session, {...browse, signal, current}));
-    // Cached paging can expand while this network read waits. Its larger window
-    // must not collapse when the earlier, smaller refresh finishes.
-    if (sameVault(session) && catalogBrowse.current?.session === session && catalogBrowse.current.limit > browse.limit && result.coverage.hasMore) {
-      const previous = result;
-      try {result = await cachedSync(session, diagnostic, browseFor(session));}
-      finally {for (const photo of previous.photos) photo.metadataKey.fill(0);}
-    }
-    check();
-    if (!sameVault(session)) return;
+    const result = await readSavedSnapshot({signal, current: snapshotCurrent, read: async () => {
+      let result = await (send ? saveSync(session, signal, diagnostic) : refreshSync(session, {...browse, signal, current}));
+      // Cached paging can expand while this network read waits. Its larger window
+      // must not collapse when the earlier, smaller refresh finishes.
+      if (sameVault(session) && catalogBrowse.current?.session === session && catalogBrowse.current.limit > browse.limit && result.coverage.hasMore) {
+        const previous = result;
+        try {result = await cachedSync(session, diagnostic, browseFor(session));}
+        finally {for (const photo of previous.photos) photo.metadataKey.fill(0);}
+      }
+      return result;
+    }});
     if (send && catalogBrowse.current?.session === session) catalogBrowse.current.limit = Math.max(catalogBrowse.current.limit, result.photos.length);
     setPhotos((previous) => (sameVault(session) ? result.photos : previous));
     setCatalogCoverage(result.coverage);
@@ -527,6 +528,7 @@ export default function CloudApp({
       }
       running.current = false;
       setBusy(false);
+      deferredSavedRefresh.current?.flush();
     }
     return accepted;
   };
@@ -583,8 +585,17 @@ export default function CloudApp({
   }, [account]);
   useEffect(() => {
     if (!account) return;
-    if (!effectVault()) return;
-    return subscribeSavedRefresh(window, document, () => {void run(refresh);});
+    const session = effectVault(); if (!session) return;
+    const controller = new AbortController(), origin = location.origin;
+    const current = () => !controller.signal.aborted && sameVault(session) && location.origin === origin;
+    const queue = new DeferredSavedRefresh(() => running.current ? false : run(() => refresh(false, current, controller.signal)),
+      () => current() && navigator.onLine && document.visibilityState === "visible");
+    deferredSavedRefresh.current = queue;
+    const detach = subscribeSavedRefresh(window, document, () => queue.request());
+    return () => {
+      controller.abort(); queue.dispose(); detach();
+      if (deferredSavedRefresh.current === queue) deferredSavedRefresh.current = null;
+    };
   }, [account]);
   useEffect(() => {
     if (!active || !account) return;
