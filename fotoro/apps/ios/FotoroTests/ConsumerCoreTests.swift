@@ -436,6 +436,26 @@ final class ConsumerCoreTests: XCTestCase {
       XCTAssertEqual(encodingCalls, 0)
     }
   }
+  @MainActor func testOwnerEditDuringSavedLookupRejectsEarlierDeviceMatches() async throws {
+    try await withSavedLibrary { services, _ in
+      var photo = try self.samplePhoto()
+      photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+      try services.store.put(photo); try services.reload()
+      let index = try SearchIndex()
+      let record = SearchRecord(id: "reviewed-source", labels: ["receipt"])
+      try index.replacePermitted([record])
+      let local = LocalSearchStore(index: index)
+      let gate = CatalogScanGate()
+      services.catalogSearchWillRead = { gate.visit() }
+      defer { services.catalogSearchWillRead = nil; gate.release.signal() }
+      let pending = Task { try await services.consumerSearch("receipt", local: local, includeVisual: false) }
+      while gate.count == 0 { await Task.yield() }
+      XCTAssertTrue(local.setLabels([], photoID: record.id))
+      gate.release.signal()
+      do { _ = try await pending.value; XCTFail("A removed tag cannot survive the Saved lookup") }
+      catch { XCTAssertTrue(error is CancellationError) }
+    }
+  }
   @MainActor func testSavedVisualQueryRejectsWithdrawalWhileEncodingIncludingUnavailableModel() async throws {
     for change in ["origin", "metadata", "lock", "cancel", "metadata-without-vector"] {
       try await withSavedLibrary { services, _ in

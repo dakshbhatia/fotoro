@@ -99,7 +99,7 @@ enum SearchMetadataIntake {
   @ObservationIgnored private var analysisQueryRefreshID = UUID()
   @ObservationIgnored private var analysisRevision: UInt64 = 0
   @ObservationIgnored private var responseAnalysisRevision: UInt64 = 0
-  @ObservationIgnored private var consumerContextGeneration: UInt64 = 0
+  @ObservationIgnored private(set) var consumerContextGeneration: UInt64 = 0
   #if DEBUG
     @ObservationIgnored var analysisQueryRefreshDelay: @MainActor () async throws -> Void = {
       try await Task.sleep(for: .milliseconds(750))
