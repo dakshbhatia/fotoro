@@ -76,7 +76,7 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
         }
         touch.current = undefined;
       }}>
-      {loaded.id === photo.id && loaded.source === source && loaded.url && <img className={zoom ? "zoomed" : ""} src={loaded.url} alt={photo.filename} />}
+      {loaded.id === photo.id && loaded.source === source && loaded.url && <img className={zoom ? "zoomed" : ""} src={loaded.url} alt={photoName(photo, photo.filename)} />}
     </div>
     {!photo.file && <p className="original-gate">Reselect the original to Save or Share. <button onClick={onReselect}>Reselect</button></p>}
     <div className="viewer-bottom glass">

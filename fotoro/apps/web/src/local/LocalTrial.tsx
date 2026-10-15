@@ -576,14 +576,14 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
         <details className="photo-browse-filters" onKeyDown={event => {
           if (event.key === "Escape") {event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();}
         }}><summary>Filters<span className="photo-browse-filter-state">{[
-          recentBrowseActive(true, query) ? last30 ? "Last 30 days" : "All photos" : undefined,
+          organizationScope === "photos" && recentBrowseActive(true, query) ? last30 ? "Last 30 days" : "All photos" : undefined,
           peopleFind.filter.ids.size > 0 ? `${peopleFind.filter.ids.size} ${peopleFind.filter.ids.size === 1 ? "person" : "people"}${peopleFind.filter.mode === "everyone" ? " · Everyone" : ""}` : undefined,
           favoritesOnly ? "Favorites" : undefined,
           organizationScope === "photos" ? undefined : organizationScope === "trash" ? "Trash" : "Screenshots",
           !normalizeSearch(query) && photoView === "table" ? "Table" : undefined,
         ].filter(Boolean).join(" · ")}</span></summary>
           <div className="photo-browse-filter-options"><button disabled={shareBusy} onClick={() => setCleanupOpen(true)}>Review cleanup</button><label>Show<select aria-label="Photo type" value={organizationScope} onChange={event => setOrganizationScope(event.target.value as PhotoOrganizationScope)}><option value="photos">Photos</option><option value="screenshots">Screenshots</option><option value="trash">Fotoro Trash</option></select></label>
-            {recentBrowseActive(true, query) && <label className="local-check"><input type="checkbox" checked={last30} disabled={shareBusy} onChange={event => setLast30(event.target.checked)} />Last 30 days</label>}
+            {organizationScope === "photos" && recentBrowseActive(true, query) && <label className="local-check"><input type="checkbox" checked={last30} disabled={shareBusy} onChange={event => setLast30(event.target.checked)} />Last 30 days</label>}
             <label className="local-check"><input type="checkbox" checked={favoritesOnly} disabled={shareBusy} onChange={event => setFavoritesOnly(event.target.checked)} />Favorites</label>
             <PeopleFilter people={peopleFind.people} value={peopleFind.filter} onChange={peopleFind.change} disabled={shareBusy} onReview={() => setPeopleOpen(true)} />
             {!normalizeSearch(query) && <>

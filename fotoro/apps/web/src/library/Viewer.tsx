@@ -1,3 +1,4 @@
+import {photoName} from "@fotoro/contracts/organization";
 import {PhotoOrganization} from "./PhotoOrganization";
 import type {PhotoOrganizationPatch} from "@fotoro/contracts/organization";
 import {isCameraMedia, LIVE_PHOTO_TYPE} from "@fotoro/contracts/camera-media";
@@ -251,7 +252,7 @@ export function Viewer({
           <img
             className={zoom ? "zoomed" : ""}
             src={previewURL}
-            alt={photo.metadata.filename}
+            alt={photoName(photo.annotations ?? {}, photo.metadata.filename)}
             onError={() => {
               if (mounted.current && currentPreviewSource.current === previewSource)
                 setPreview(previous => failedViewerPreview(previous, previewSource, previewURL));
