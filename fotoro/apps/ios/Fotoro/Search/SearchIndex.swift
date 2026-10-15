@@ -120,6 +120,24 @@ final class SearchIndex: @unchecked Sendable {
         decode)
     }
   }
+  func records(_ ids: [String]) throws -> [String: SearchRecord] {
+    let ids = Array(Set(ids))
+    guard !ids.isEmpty else { return [:] }
+    return try database.read { db in
+      var records: [String: SearchRecord] = [:]
+      for start in stride(from: 0, to: ids.count, by: 400) {
+        try Task.checkCancellation()
+        let batch = Array(ids[start..<min(ids.count, start + 400)])
+        let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
+        for row in try Row.fetchAll(db, sql: "SELECT value FROM searchRecords WHERE id IN (\(placeholders))",
+          arguments: StatementArguments(batch)) {
+          let record = try decode(row)
+          records[record.id] = record
+        }
+      }
+      return records
+    }
+  }
   #if !FOTORO_LOCAL_PREVIEW
   func pendingSemanticRecords(after: String? = nil, limit: Int = 64, scope: PhotoAnalysisScope? = nil) throws -> [SearchRecord] {
     var conditions = ["(? IS NULL OR r.id>?)",
@@ -739,134 +757,158 @@ final class SearchIndex: @unchecked Sendable {
     previous: SearchResponse? = nil, now: Date = Date(), generation: UInt64 = 0,
     calendar: Calendar = .current
   ) throws -> SearchResponse {
+    try database.read { db in
+      try performSearch(query, scope: scope, acceptedMeaningID: acceptedMeaningID,
+        previous: previous, now: now, generation: generation, calendar: calendar, db: db)
+    }
+  }
+  func searchAsync(
+    _ query: String, scope: SearchScope = SearchScope(), acceptedMeaningID: String? = nil,
+    previous: SearchResponse? = nil, now: Date = Date(), generation: UInt64 = 0,
+    calendar: Calendar = .current
+  ) async throws -> SearchResponse {
+    // GRDB's async read interrupts only this operation on cancellation, then
+    // resets the connection before admitting the next read or analysis write.
+    try await database.read { db in
+      try self.performSearch(query, scope: scope, acceptedMeaningID: acceptedMeaningID,
+        previous: previous, now: now, generation: generation, calendar: calendar, db: db)
+    }
+  }
+  private func performSearch(
+    _ query: String, scope: SearchScope, acceptedMeaningID: String?,
+    previous: SearchResponse?, now: Date, generation: UInt64,
+    calendar: Calendar, db: Database
+  ) throws -> SearchResponse {
     let parsed = NaturalDateQuery.parse(query, scope: scope, now: now, calendar: calendar)
     let scope = parsed.scope
     let previousQuery = previous.map {
       NaturalDateQuery.parse($0.query, now: now, calendar: calendar).text
     } ?? ""
-    return try database.read { db in
-      var response = SearchResponse(query: query, generation: generation)
-      response.scope = scope
-      response.datePhrase = parsed.datePhrase
-      let (condition, scopeArgs) = filter(scope)
-      let coverage = try Row.fetchOne(
-        db,
-        sql:
-          "SELECT count(*) total,sum(ocrState='complete') ocrComplete,sum(preview) previews FROM searchRecords r WHERE \(condition)",
-        arguments: scopeArgs)!
-      response.total = coverage["total"]
-      response.indexed = coverage["ocrComplete"] ?? 0
-      response.availablePreviews = coverage["previews"] ?? 0
-      let q = parsed.text.trimmingCharacters(in: .whitespacesAndNewlines)
-      guard !q.isEmpty else {
-        return parsed.datePhrase == nil && scope.people.isEmpty ? response : try dateOnly(response, scope: scope, now: now, db: db)
-      }
-      // Query the full indexed prefix range before LIMIT. Scope and eligibility are applied in SQL.
-      var meaningArgs: StatementArguments = [
-        q, now.timeIntervalSince1970, scope.key, q, q + "\u{10ffff}", Self.permitsTermPrefix(q), q,
-      ]
-      meaningArgs += scopeArgs
-      meaningArgs += [acceptedMeaningID ?? ""]
-      let rows = try Row.fetchAll(
-        db,
-        sql: """
-          SELECT t.meaning,min(t.term) term,min(p.display) display,t.relation,min(p.evidence) evidence,count(DISTINCT p.photo) eligible,
-            max(t.term=?) exact,max(r.moment) moment,
-            coalesce((SELECT sum(searchDecay(e.at,?)) FROM searchEvents e WHERE e.kind='accept' AND e.meaning=t.meaning AND e.scope=?),0) accepted
-          FROM searchTerms t JOIN searchPostings p ON p.meaning=t.meaning JOIN searchRecords r ON r.id=p.photo
-          WHERE t.term>=? AND t.term<? AND (? OR t.term=?) AND \(condition)
-          GROUP BY t.meaning
-          ORDER BY (t.meaning=?) DESC,exact DESC,accepted DESC,moment DESC,evidence ASC,term ASC,t.meaning ASC LIMIT 6
-          """, arguments: meaningArgs)
-      response.meanings = rows.map { row in
-        SearchMeaning(
-          id: row["meaning"], term: row["term"], display: row["display"],
-          relation: SearchRelation(rawValue: row["relation"])!, evidenceClass: row["evidence"],
-          eligibleCount: row["eligible"])
-      }
-      guard let meaning = response.meanings.first else {
-        return try fullText(q, response: response, scope: scope, now: now, db: db)
-      }
-      response.meaning = meaning
-      let useSQL =
-        "coalesce((SELECT sum(searchDecay(e.at,\(now.timeIntervalSince1970))) FROM searchEvents e WHERE e.kind='use' AND e.meaning=p.meaning AND e.photo=r.id AND e.scope=?),0)"
-      let base =
-        "SELECT r.id,r.preview,r.burst,p.evidence,p.confidence,r.favorite,r.moment,CASE WHEN r.capture<=\(now.timeIntervalSince1970) THEN r.capture END capture,\(useSQL) uses FROM searchPostings p JOIN searchRecords r ON r.id=p.photo WHERE p.meaning=? AND \(condition)"
-      let args = StatementArguments([scope.key, meaning.id]) + scopeArgs
-      let finalOrder =
-        "evidence ASC,uses DESC,moment DESC,favorite DESC,capture DESC,confidence DESC,id ASC"
-      // Four ordered heads, at most 200 rows in memory; the evidence lane uses the final ordering.
-      var candidates: [String: Row] = [:]
-      for (order, limit) in [
-        (finalOrder, 148), ("uses DESC," + finalOrder, 20), ("moment DESC," + finalOrder, 15),
-        ("favorite DESC,capture DESC," + finalOrder, 15),
-      ] {
-        for row in try Row.fetchAll(
-          db, sql: base + " ORDER BY " + order + " LIMIT \(limit)", arguments: args)
-        { candidates[row["id"] as String] = row }
-      }
-      let pin = try String.fetchOne(
-        db, sql: "SELECT photo FROM searchPins WHERE meaning=? AND scope=?",
-        arguments: [meaning.id, scope.key])
-      if let pin, let row = try Row.fetchOne(db, sql: base + " AND r.id=?", arguments: args + [pin])
-      {
-        candidates[pin] = row
-      }
-      let previousID = previous?.leading?.id
-      if let previousID, previous?.meaning?.id == meaning.id,
-        previous?.scope == scope, q.hasPrefix(previousQuery),
-        let row = try Row.fetchOne(db, sql: base + " AND r.id=?", arguments: args + [previousID]),
-        (row["evidence"] as Int) == meaning.evidenceClass
-      {
-        candidates[previousID] = row
-      }
-      let sorted = candidates.values.sorted { a, b in
-        let aid: String = a["id"]
-        let bid: String = b["id"]
-        if (aid == pin) != (bid == pin) { return aid == pin }
-        let ae: Int = a["evidence"]
-        let be: Int = b["evidence"]
-        if ae != be { return ae < be }
-        for name in ["uses", "moment", "favorite", "capture", "confidence"] {
-          let av: Double = a[name] ?? -Double.greatestFiniteMagnitude
-          let bv: Double = b[name] ?? -Double.greatestFiniteMagnitude
-          if av != bv { return av > bv }
-        }
-        return aid < bid
-      }
-      var stableSorted = sorted
-      if pin == nil, let previousID, previous?.meaning?.id == meaning.id,
-        previous?.scope == scope, q.count >= previousQuery.count, q.hasPrefix(previousQuery),
-        let at = stableSorted.firstIndex(where: {
-          ($0["id"] as String) == previousID && ($0["evidence"] as Int) == meaning.evidenceClass
-        })
-      {
-        stableSorted.insert(stableSorted.remove(at: at), at: 0)
-      }
-      let hits = Array(stableSorted.prefix(200)).map { row -> SearchHit in
-        let evidence: Int = row["evidence"]
-        let id: String = row["id"]
-        let reason = Self.reason(evidence: evidence)
-        return SearchHit(
-          id: id, evidenceClass: evidence,
-          reason: id == pin ? "Your representative · " + reason : reason, pinned: id == pin,
-          previewAvailable: row["preview"])
-      }
-      // Native bursts are known duplicate groups; mere time proximity is never used.
-      var burstPositions: [String: Int] = [:]
-      var grouped: [SearchHit] = []
-      for hit in hits {
-        let burst: String? = candidates[hit.id]?["burst"]
-        if let burst, let pos = burstPositions[burst] {
-          grouped[pos].children.append(hit.id)
-        } else {
-          if let burst { burstPositions[burst] = grouped.count }
-          grouped.append(hit)
-        }
-      }
-      response.results = grouped
-      return response
+    var response = SearchResponse(query: query, generation: generation)
+    response.scope = scope
+    response.datePhrase = parsed.datePhrase
+    let (condition, scopeArgs) = filter(scope)
+    let coverage = try Row.fetchOne(
+      db,
+      sql:
+        "SELECT count(*) total,sum(ocrState='complete') ocrComplete,sum(preview) previews FROM searchRecords r WHERE \(condition)",
+      arguments: scopeArgs)!
+    response.total = coverage["total"]
+    response.indexed = coverage["ocrComplete"] ?? 0
+    response.availablePreviews = coverage["previews"] ?? 0
+    let q = parsed.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !q.isEmpty else {
+      return parsed.datePhrase == nil && scope.people.isEmpty ? response : try dateOnly(response, scope: scope, now: now, db: db)
     }
+    // Keep the indexed prefix range outermost. A source-first plan multiplies
+    // the full library by every matching term during short-prefix typing.
+    // Scope and eligibility still apply before the result limit.
+    var meaningArgs: StatementArguments = [
+      q, now.timeIntervalSince1970, scope.key, q, q + "\u{10ffff}", Self.permitsTermPrefix(q), q,
+    ]
+    meaningArgs += scopeArgs
+    meaningArgs += [acceptedMeaningID ?? ""]
+    let rows = try Row.fetchAll(
+      db,
+      sql: """
+        SELECT t.meaning,min(t.term) term,min(p.display) display,t.relation,min(p.evidence) evidence,count(DISTINCT p.photo) eligible,
+          max(t.term=?) exact,max(r.moment) moment,
+          coalesce((SELECT sum(searchDecay(e.at,?)) FROM searchEvents e WHERE e.kind='accept' AND e.meaning=t.meaning AND e.scope=?),0) accepted
+        FROM searchTerms t INDEXED BY searchTermPrefix
+        CROSS JOIN searchPostings p ON p.meaning=t.meaning
+        CROSS JOIN searchRecords r ON r.id=p.photo
+        WHERE t.term>=? AND t.term<? AND (? OR t.term=?) AND \(condition)
+        GROUP BY t.meaning
+        ORDER BY (t.meaning=?) DESC,exact DESC,accepted DESC,moment DESC,evidence ASC,term ASC,t.meaning ASC LIMIT 6
+        """, arguments: meaningArgs)
+    response.meanings = rows.map { row in
+      SearchMeaning(
+        id: row["meaning"], term: row["term"], display: row["display"],
+        relation: SearchRelation(rawValue: row["relation"])!, evidenceClass: row["evidence"],
+        eligibleCount: row["eligible"])
+    }
+    guard let meaning = response.meanings.first else {
+      return try fullText(q, response: response, scope: scope, now: now, db: db)
+    }
+    response.meaning = meaning
+    let useSQL =
+      "coalesce((SELECT sum(searchDecay(e.at,\(now.timeIntervalSince1970))) FROM searchEvents e WHERE e.kind='use' AND e.meaning=p.meaning AND e.photo=r.id AND e.scope=?),0)"
+    let base =
+      "SELECT r.id,r.preview,r.burst,p.evidence,p.confidence,r.favorite,r.moment,CASE WHEN r.capture<=\(now.timeIntervalSince1970) THEN r.capture END capture,\(useSQL) uses FROM searchPostings p JOIN searchRecords r ON r.id=p.photo WHERE p.meaning=? AND \(condition)"
+    let args = StatementArguments([scope.key, meaning.id]) + scopeArgs
+    let finalOrder =
+      "evidence ASC,uses DESC,moment DESC,favorite DESC,capture DESC,confidence DESC,id ASC"
+    // Four ordered heads, at most 200 rows in memory; the evidence lane uses the final ordering.
+    var candidates: [String: Row] = [:]
+    for (order, limit) in [
+      (finalOrder, 148), ("uses DESC," + finalOrder, 20), ("moment DESC," + finalOrder, 15),
+      ("favorite DESC,capture DESC," + finalOrder, 15),
+    ] {
+      for row in try Row.fetchAll(
+        db, sql: base + " ORDER BY " + order + " LIMIT \(limit)", arguments: args)
+      { candidates[row["id"] as String] = row }
+    }
+    let pin = try String.fetchOne(
+      db, sql: "SELECT photo FROM searchPins WHERE meaning=? AND scope=?",
+      arguments: [meaning.id, scope.key])
+    if let pin, let row = try Row.fetchOne(db, sql: base + " AND r.id=?", arguments: args + [pin])
+    {
+      candidates[pin] = row
+    }
+    let previousID = previous?.leading?.id
+    if let previousID, previous?.meaning?.id == meaning.id,
+      previous?.scope == scope, q.hasPrefix(previousQuery),
+      let row = try Row.fetchOne(db, sql: base + " AND r.id=?", arguments: args + [previousID]),
+      (row["evidence"] as Int) == meaning.evidenceClass
+    {
+      candidates[previousID] = row
+    }
+    let sorted = candidates.values.sorted { a, b in
+      let aid: String = a["id"]
+      let bid: String = b["id"]
+      if (aid == pin) != (bid == pin) { return aid == pin }
+      let ae: Int = a["evidence"]
+      let be: Int = b["evidence"]
+      if ae != be { return ae < be }
+      for name in ["uses", "moment", "favorite", "capture", "confidence"] {
+        let av: Double = a[name] ?? -Double.greatestFiniteMagnitude
+        let bv: Double = b[name] ?? -Double.greatestFiniteMagnitude
+        if av != bv { return av > bv }
+      }
+      return aid < bid
+    }
+    var stableSorted = sorted
+    if pin == nil, let previousID, previous?.meaning?.id == meaning.id,
+      previous?.scope == scope, q.count >= previousQuery.count, q.hasPrefix(previousQuery),
+      let at = stableSorted.firstIndex(where: {
+        ($0["id"] as String) == previousID && ($0["evidence"] as Int) == meaning.evidenceClass
+      })
+    {
+      stableSorted.insert(stableSorted.remove(at: at), at: 0)
+    }
+    let hits = Array(stableSorted.prefix(200)).map { row -> SearchHit in
+      let evidence: Int = row["evidence"]
+      let id: String = row["id"]
+      let reason = Self.reason(evidence: evidence)
+      return SearchHit(
+        id: id, evidenceClass: evidence,
+        reason: id == pin ? "Your representative · " + reason : reason, pinned: id == pin,
+        previewAvailable: row["preview"])
+    }
+    // Native bursts are known duplicate groups; mere time proximity is never used.
+    var burstPositions: [String: Int] = [:]
+    var grouped: [SearchHit] = []
+    for hit in hits {
+      let burst: String? = candidates[hit.id]?["burst"]
+      if let burst, let pos = burstPositions[burst] {
+        grouped[pos].children.append(hit.id)
+      } else {
+        if let burst { burstPositions[burst] = grouped.count }
+        grouped.append(hit)
+      }
+    }
+    response.results = grouped
+    return response
   }
   private static func reason(evidence: Int) -> String {
     switch evidence {

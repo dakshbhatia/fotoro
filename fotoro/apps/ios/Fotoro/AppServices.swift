@@ -217,7 +217,7 @@ enum ReviewedPhotosBackupPolicy {
   private var consumerChecking = false
   private var consumerOffline = false
   private var consumerFailure: String?
-  func consumerSearch(_ query: String, local: LocalSearchStore) async throws -> [ConsumerSearchHit] {
+  func consumerSearch(_ query: String, local: LocalSearchStore, includeVisual: Bool = true) async throws -> [ConsumerSearchHit] {
     let people = local.peopleSelection
     guard !SearchNormalization.text(query).isEmpty || !people.isEmpty else { return [] }
     let account = vault.isUnlocked ? session.accountId : nil
@@ -225,7 +225,7 @@ enum ReviewedPhotosBackupPolicy {
     let catalog = store
     let origin = BackgroundUploadPolicy.origin(api.baseURL)
     let libraryGeneration = local.libraryGeneration
-    let deviceHits = try await local.consumerResults(query)
+    let deviceHits = try await local.consumerResults(query, includeVisual: includeVisual)
     try Task.checkCancellation()
     let saved: [LocalPhoto]
     var visualSavedIDs = Set<String>()
@@ -233,7 +233,7 @@ enum ReviewedPhotosBackupPolicy {
       guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account,
         BackgroundUploadPolicy.origin(api.baseURL) == origin else { throw CancellationError() }
       let lexical = try await searchCatalog(query, people: people).filter { ["committed", "saved"].contains($0.transferState) }
-      let visual = local.acceptedMeaningID == nil ? try await consumerSavedVisualSearch(query, people: people) : []
+      let visual = includeVisual && local.acceptedMeaningID == nil ? try await consumerSavedVisualSearch(query, people: people) : []
       let matched = Set(lexical.map(\.id))
       saved = lexical + visual.filter { !matched.contains($0.id) }
       visualSavedIDs = Set(visual.map(\.id)).subtracting(matched)
@@ -243,13 +243,19 @@ enum ReviewedPhotosBackupPolicy {
     try Task.checkCancellation()
     guard local.peopleSelection == people else { throw CancellationError() }
     // Recheck local permission/revision after the cloud lookup; a withdrawn device source cannot hide an owned saved copy.
-    var records: [String: SearchRecord] = [:]
+    let currentRecords = try await local.consumerRecords(deviceHits.flatMap { [$0.id] + $0.children })
+    let records = local.libraryGeneration == libraryGeneration ? currentRecords : [:]
+    if let account {
+      guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account,
+        BackgroundUploadPolicy.origin(api.baseURL) == origin else { throw CancellationError() }
+    }
+    guard local.peopleSelection == people else { throw CancellationError() }
+    var included = Set<String>()
     var result: [ConsumerSearchHit] = []
     for hit in deviceHits {
       for id in [hit.id] + hit.children {
-        guard records[id] == nil, local.libraryGeneration == libraryGeneration,
-          let record = try local.consumerRecord(id) else { continue }
-        records[id] = record
+        guard included.insert(id).inserted, local.libraryGeneration == libraryGeneration,
+          records[id] != nil else { continue }
         result.append(ConsumerSearchHit(photo: .device(id), evidence: hit.reason))
       }
     }

@@ -153,7 +153,7 @@ final class SearchLifecycleTests: XCTestCase {
     }
   }
   #endif
-  @MainActor func testAutomaticAnalysisResumesPartialBatchAcrossQueryChangesWithoutRetryingUnavailableSources() async throws {
+  @MainActor func testAutomaticAnalysisReachesOlderAndUndatedPhotosAcrossQueryChangesAndScrollResume() async throws {
     let fetched = PHAsset.fetchAssets(with: .image, options: nil)
     guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)), fetched.count >= 4 else {
       throw XCTSkip("Permit four existing public Simulator photos for bounded analysis continuation.")
@@ -161,10 +161,10 @@ final class SearchLifecycleTests: XCTestCase {
     let photos = (0..<4).map { RecentPhoto(asset: fetched.object(at: $0)) }
     guard photos.allSatisfy({ !$0.asset.isHidden }) else { throw XCTSkip("Use permitted visible public photos.") }
     let index = try SearchIndex()
-    let records = photos.map { photo -> SearchRecord in
+    let records = photos.enumerated().map { offset, photo -> SearchRecord in
       var record = SearchRecord(id: photo.id)
       record.revision = photo.sourceRevision
-      record.capturedAt = Date()
+      record.capturedAt = offset == 0 ? Date().addingTimeInterval(-90 * 86400) : offset == 1 ? nil : Date()
       record.visualStatus = .complete
       return record
     }

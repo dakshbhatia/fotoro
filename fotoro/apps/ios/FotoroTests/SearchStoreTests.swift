@@ -4,6 +4,40 @@ import XCTest
 @testable import Fotoro
 
 final class SearchStoreTests: XCTestCase {
+  func testCancellingRunningSQLiteSearchUnblocksSuccessorAndPreservesAnalysisWrites() async throws {
+    let index = try SearchIndex()
+    var record = SearchRecord(id: "source"); record.labels = ["alpha"]
+    try index.replacePermitted([record])
+    let began = expectation(description: "Search is executing inside SQLite")
+    let gate = DispatchSemaphore(value: 0)
+    try await index.database.write { db in
+      try db.execute(sql: "INSERT INTO searchEvents(kind,meaning,photo,scope,session,at) VALUES('accept','label:alpha','',?,'test',0)",
+        arguments: [SearchScope().key])
+      db.add(function: DatabaseFunction("searchDecay", argumentCount: 2) { _ in
+        began.fulfill()
+        _ = gate.wait(timeout: .now() + 5)
+        return 1.0
+      })
+    }
+    let query = Task { try await index.searchAsync("alpha") }
+    await fulfillment(of: [began], timeout: 3)
+    query.cancel(); gate.signal()
+    do { _ = try await query.value; XCTFail("Running SQLite work must respect cancellation") }
+    catch { XCTAssertTrue(query.isCancelled) }
+    record.labels = ["successor"]
+    try index.put(record)
+    let next = try await index.searchAsync("successor")
+    XCTAssertEqual(next.results.map(\.id), [record.id], "Cancellation cannot poison the shared connection or later analysis")
+  }
+  func testBulkSearchRecordValidationHandlesMoreThanOneBindBatchAndWithdrawal() throws {
+    let index = try SearchIndex()
+    let records = (0..<850).map { SearchRecord(id: "photo-\($0)") }
+    try index.replacePermitted(records)
+    let ids = records.map(\.id)
+    XCTAssertEqual(try index.records(ids + ids + ["missing"]).count, 850)
+    try index.replacePermitted(Array(records.prefix(1)))
+    XCTAssertEqual(Set(try index.records(ids).keys), [records[0].id], "Withdrawn sources cannot survive bulk retrieval")
+  }
   func testAnalysisRetriesReopenByStageWithoutLosingCompletedWork() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -382,6 +416,25 @@ final class SearchStoreTests: XCTestCase {
     XCTAssertTrue(store.response.results.isEmpty)
     XCTAssertFalse(store.searching)
     XCTAssertNil(store.error)
+  }
+  @MainActor func testConsumerTextReusesCompletedResponseWhileBackgroundRefreshIsHeld() async throws {
+    let index = try SearchIndex()
+    var record = SearchRecord(id: "screenshot")
+    record.ocrText = "Alfred project notes"; record.ocrStatus = .complete; record.ocrConfidence = 0.95
+    try index.replacePermitted([record])
+    let gate = SearchQueryGate(), store = gatedStore(index: index, gate: gate)
+    store.updateQuery("alfred")
+    try await waitForGate(gate, query: "alfred")
+    await gate.resume("alfred")
+    try await waitFor(store, query: "alfred")
+    store.updateQuery("alfred")
+    try await waitForGate(gate, query: "alfred", count: 2)
+    let hits = try await store.consumerResults("alfred", includeVisual: false)
+    XCTAssertEqual(hits.map(\.id), [record.id], "Existing OCR must not wait for the held refresh or visual model")
+    let calls = await gate.count("alfred", returned: false)
+    XCTAssertEqual(calls, 2, "Consumer presentation must not enqueue duplicate lexical retrieval")
+    await gate.resume("alfred")
+    try await waitFor(store, query: "alfred")
   }
   @MainActor func testSameQueryEnrichmentKeepsCompletedMatchesWhileSearching() async throws {
     let index = try SearchIndex()

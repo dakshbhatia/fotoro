@@ -342,6 +342,7 @@ struct RecentPhotosView: View {
   @State private var pendingPhotoSync: Bool?
   @State private var searchHits: [ConsumerSearchHit] = []
   @State private var searchCompletion = ConsumerSearchCompletion()
+  @State private var visualSearch: (id: UUID, presentation: ConsumerSearchPresentationID)?
   @State private var searchAttempt: UInt64 = 0
   @State private var savedResults: [String: LocalPhoto] = [:]
   @State private var savedViewer: SavedPhotoViewerPresentation?
@@ -1034,6 +1035,7 @@ struct RecentPhotosView: View {
 #else
           ConsumerSearchResultsView(hits: currentSearchHits, saved: savedResults, search: search, photos: store,
             searchPending: searchCompletion.isPending(searchTaskID),
+            visualPending: visualSearch?.presentation.permitsResults(for: searchTaskID) == true,
             searchFailure: searchCompletion.failure(for: searchTaskID),
             searchFinished: searchCompletion.hasCompleted(searchTaskID),
             retrySearch: { search.error = nil; search.updateQuery(query); searchAttempt &+= 1 }, review: bestShots.snapshot,
@@ -1977,14 +1979,21 @@ struct RecentPhotosView: View {
     } catch { store.error = error.localizedDescription }
   }
   private func updateSearch() async {
-    guard search.hasSearch else { searchHits = []; savedResults = [:]; searchCompletion = ConsumerSearchCompletion(); return }
+    guard search.hasSearch else { searchHits = []; savedResults = [:]; visualSearch = nil; searchCompletion = ConsumerSearchCompletion(); return }
     let token = searchTaskID
+    let attempt = UUID()
+    visualSearch = nil
+    defer { if visualSearch?.id == attempt { visualSearch = nil } }
     searchCompletion.begin(token)
     do {
       if !search.indexing { try await Task.sleep(for: .milliseconds(100)) }
       try Task.checkCancellation()
       guard let services else { searchHits = []; savedResults = [:]; searchCompletion.succeed(token); return }
-      let hits = try await services.withDiagnosticAction(.search) { try await services.consumerSearch(query, local: search) }
+      // Publish filename, tags and recognized text before entering Core ML.
+      // Background OCR may restart enrichment; it must never hide these matches.
+      let hits = try await services.withDiagnosticAction(.search) {
+        try await services.consumerSearch(query, local: search, includeVisual: false)
+      }
       try Task.checkCancellation()
       guard token == searchTaskID else { return }
       var saved: [String: LocalPhoto] = [:]
@@ -1994,8 +2003,19 @@ struct RecentPhotosView: View {
       searchHits = hits
       savedResults = saved
       searchCompletion.succeed(token)
+      visualSearch = (attempt, token)
+      let enriched = try await services.consumerSearch(query, local: search)
+      try Task.checkCancellation()
+      guard token == searchTaskID else { return }
+      for hit in enriched {
+        if case .saved(let id) = hit.photo { saved[id] = try services.consumerSavedPhoto(id) }
+      }
+      searchHits = enriched
+      savedResults = saved
     } catch is CancellationError {} catch {
       guard !Task.isCancelled, token == searchTaskID else { return }
+      // Optional visual retrieval cannot turn a completed text search into an error.
+      if searchCompletion.hasCompleted(token) { return }
       searchHits = []
       savedResults = [:]
       searchCompletion.fail(token, message: error.localizedDescription)
