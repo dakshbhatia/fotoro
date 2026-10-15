@@ -253,7 +253,11 @@ enum ReviewedPhotosBackupPolicy {
         result.append(ConsumerSearchHit(photo: .device(id), evidence: hit.reason))
       }
     }
-    let sources = account == nil ? [] : try catalog.backupSources()
+    // Only permitted device hits can hide a Saved copy. Read their current
+    // checkpoints by primary key instead of decoding the whole sync inventory.
+    let sources = account == nil ? [] : try records.keys.sorted().compactMap {
+      try catalog.backupSourceIfPresent(id: $0)
+    }
     let copies = ConsumerSearchBinding.verifiedCopies(sources: sources, records: records)
     for photo in saved {
       if !ConsumerSearchBinding.duplicate(saved: photo, copies: copies) {
