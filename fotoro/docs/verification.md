@@ -1403,3 +1403,22 @@ Final organization pass: the final web build and all 789 web tests pass. The 65 
 The disposable browser flow also verified explicit Restore, encrypted Save changes, a separate Screenshots view showing the BTS-named photo, and exclusion from Places. Cleanup/Trash/Restore screenshots are stored in the local core-simplification artifact directory. Final web suite: 789 passed, zero failed or skipped.
 
 The complete native suite subsequently passed 725 tests with zero failures and the two existing PhotoKit/Vision skips. The lightweight Photos build passed 176 tests with the same two gates. Its shared location test now uses Foundation to parse the public fixture date, since the lightweight target omits the account wire layer; all seven full-app location tests passed again after that test-only correction. No production native inputs changed after build 77’s archive and distribution IPA audit.
+
+## Browser visual-search latency repair (October 15, 2026)
+
+Cached visual ranking previously yielded every 32 photos and copied the growing
+score map every eight photos. A 4,096-vector isolated fake-worker run on this Mac
+took 255.5 ms and 127 scheduled timer turns. The repaired engine uses 4 ms CPU
+slices, publishes the first available score before later images finish, and limits
+intermediate progress snapshots to one per 100 ms. The same isolated check took
+21.3 ms with four timer turns and two publications. These are engine measurements,
+not browser frame times, model inference latency or physical-iPhone evidence.
+
+Up to 16 text embeddings are reused within the existing inference session; they
+are never persisted and are zeroed with the image vectors on session clearing.
+The search UI distinguishes preparation from checking more photos while keeping
+lexical matches usable. Regression coverage holds a later image pending to verify
+early publication, checks bounded text-cache eviction and session clearing, and
+retains cancellation, lock, source-withdrawal, exact-identifier and failure tests.
+The actual pinned-model public Singapore smoke case also passes. This change
+does not alter native app inputs, account upload consent or sync Pause.

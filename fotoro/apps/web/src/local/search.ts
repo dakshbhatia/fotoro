@@ -61,6 +61,7 @@ export interface SearchResult {
   current?: () => boolean;
   metadataIncomplete?: boolean;
   visualStatus?: "unavailable" | "incomplete" | "missing-preview";
+  visualPending?: "preparing" | "checking";
   textStatus?: "indexing" | "incomplete";
 }
 interface IndexedMeaning {

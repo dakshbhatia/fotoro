@@ -16,6 +16,10 @@ export function textSearchFeedback(result: SearchResult) {
   return result.textStatus === "indexing" ? "Text is still being read. More matches may appear."
     : result.textStatus === "incomplete" ? "Text couldn’t be read from some photos." : undefined;
 }
+export function visualSearchProgress(result: SearchResult) {
+  return result.visualPending === "preparing" ? "Preparing visual search…"
+    : result.visualPending === "checking" ? "Checking more photos…" : undefined;
+}
 function evidence(photo: LocalOcrPhoto, meaning: SearchMeaning) {
   const source = meaning.evidence[photo.id] ?? meaning.kind;
   if (source === "visual") return "Visual similarity";
@@ -102,8 +106,9 @@ export function LocalSearch({photos, result, resources, committed, pinned, canCo
       {reasons?.get(photo.id)?.length ? <p className="find-shot-reason">{reasons.get(photo.id)!.join(" · ")}</p> : null}
       {result.meanings.some(value => value.id !== meaning.id && value.photoIds.some(id => !meaning.photoIds.includes(id))) && <div className="local-alternatives" aria-label="Other matches"><span>Also try</span>{result.meanings.filter(value => value.id !== meaning.id && value.photoIds.some(id => !meaning.photoIds.includes(id))).slice(0, 3).map(value => <button key={value.id} onClick={() => onAccept(value)}>{value.term}</button>)}</div>}
       {details && <SearchMatchDetails photo={photo} meaning={meaning} coverage={coverage} committed={committed} pinned={pinned} canCorrect={canCorrect} onAccept={onAccept} onConfirm={onConfirm} onPin={onPin} />}
+      {visualSearchProgress(result) && <p className="hint" role="status">{visualSearchProgress(result)}</p>}
       {visualSearchFeedback(result) && <p className="hint" role="status">{visualSearchFeedback(result)}</p>}
       {textSearchFeedback(result) && <p className="hint" role="status">{textSearchFeedback(result)}</p>}
-    </> : <div className="empty"><p role={result.searching || result.visualStatus || result.textStatus ? "status" : undefined}>{result.searching ? "Searching photos…" : visualSearchFeedback(result) ?? textSearchFeedback(result) ?? emptyMessage ?? "No matching photos"}</p>{!result.searching && result.visualStatus && textSearchFeedback(result) && <p role="status">{textSearchFeedback(result)}</p>}{!result.searching && !result.textStatus && <p className="hint">{emptyHint ?? "Try a tag, a place, a date or words in the photo."}</p>}{details && <p className="hint">{coverage}. Text is searchable after it has been read on this device.</p>}</div>}
+    </> : <div className="empty"><p role={result.searching || result.visualStatus || result.textStatus ? "status" : undefined}>{result.searching ? visualSearchProgress(result) ?? "Searching photos…" : visualSearchFeedback(result) ?? textSearchFeedback(result) ?? emptyMessage ?? "No matching photos"}</p>{!result.searching && result.visualStatus && textSearchFeedback(result) && <p role="status">{textSearchFeedback(result)}</p>}{!result.searching && !result.textStatus && <p className="hint">{emptyHint ?? "Try a tag, a place, a date or words in the photo."}</p>}{details && <p className="hint">{coverage}. Text is searchable after it has been read on this device.</p>}</div>}
   </section>;
 }
