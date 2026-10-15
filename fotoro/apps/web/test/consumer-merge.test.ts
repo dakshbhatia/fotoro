@@ -70,6 +70,22 @@ test("reopening an unchanged original inherits its verified Saved favorite until
   assert.equal(merge([local], saved)[0].favorite, undefined, "Withdrawn Saved state cannot promote an imported original");
 });
 
+test("reselected originals show Saved labels before adding or removing labels, without changing local edit intent", () => {
+  const {local: reviewed, snapshot, invalidate} = matchingCapture();
+  const {labels: _labels, ...local} = reviewed;
+  const displayed = merge([local], savedSearchPhotos(snapshot, [local]))[0];
+  assert.deepEqual(displayed.labels, ["Different saved label"]);
+  assert.deepEqual([...(displayed.labels ?? []), "New label"], ["Different saved label", "New label"], "The viewer's append preserves existing Saved labels");
+  assert.equal(local.labels, undefined, "Account labels must stay outside local retention until an explicit edit");
+  for (const labels of [[], ["Explicit local label"]]) {
+    const edited = {...local, labels};
+    assert.equal(merge([edited], savedSearchPhotos(snapshot, [edited]))[0].labels, labels);
+  }
+  invalidate();
+  assert.equal(displayed.current?.(), false);
+  assert.equal(merge([local], savedSearchPhotos(snapshot, [local]))[0].labels, undefined);
+});
+
 test("unloaded Saved favorite metadata admits a reselected original without overriding an explicit Unfavorite", () => {
   const records = [{id: "local-original", favorite: true}];
   assert.deepEqual([...browseFavoritePhotoIDs(records, [{id: "local-original"}])], ["local-original"]);

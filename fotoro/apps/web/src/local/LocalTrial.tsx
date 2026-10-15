@@ -66,7 +66,7 @@ export function mergeSelectedPhotos(existing: LocalPhoto[], selected: LocalPhoto
   const result = new Map(existing.map(photo => [photo.id, photo]));
   for (const photo of selected) {
     const previous = result.get(photo.id) as LocalOcrPhoto | undefined;
-    const merged = {...previous, ...photo, labels: previous?.labels ?? photo.labels ?? []} as LocalOcrPhoto;
+    const merged = {...previous, ...photo, labels: previous?.labels ?? photo.labels} as LocalOcrPhoto;
     if (photo.file) {merged.preview = undefined; merged.previewLoader = undefined; merged.previewAvailable = undefined; merged.previewSize = undefined;}
     if (previous?.ocr?.status === "failed" && !previous.file && photo.file) merged.ocr = undefined;
     result.set(photo.id, merged);

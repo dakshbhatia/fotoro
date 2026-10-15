@@ -1,4 +1,4 @@
-# Verification — October 14, 2026
+# Verification — October 15, 2026
 
 This is the current evidence record. [The backlog](product-backlog.md) owns next
 work; [product](product.md) owns the intended experience. Earlier measurements and
@@ -7,7 +7,7 @@ No speed, accuracy, cost or adoption claim is inferred from a passing smoke test
 
 ## October 14 released search, sync and Favorites; Saved search follow-up
 
-PR 100 merge `155b54aa5b52deb8583c1767eea04d2cffceacac` is live at
+PR 100 merge `155b54aa5b52deb8583c1767eea04d2cffceacac` was released at
 fotoro.cloud on Worker `ec22e7f4-ceda-4291-a810-d3aa885c8495` at 100%.
 All 49 non-HTML emitted assets match the merged build. Live public-fixture
 receipt, missing-number, Favorites and scene searches pass without console errors.
@@ -33,12 +33,13 @@ lexical and semantic workers. The three initial regressions failed before the fi
 web/API, full native and isolated Photos preview qualification passed at
 `0408fba9f32303ec8f19d186c859b983562afe84`; PR 101 merged as
 `201551bb7a7c462662659b57142526f6d3a9af3a` with the same source tree. Build 76
-passed archive and distribution IPA audits and uploaded successfully; Apple
-processing/internal availability remain to be confirmed.
+passed archive and distribution IPA audits and uploaded successfully. Apple
+processing and availability in Fotoro Internal with one tester are confirmed.
+Physical installation remains unverified.
 This source evidence does not establish physical frame pacing or broad retrieval
 quality.
 
-## October 14 reselected originals retain Saved Favorites — source qualified
+## October 14 reselected originals retain Saved Favorites — released
 
 Reopening an original on the web could hide its Saved favorite because an absent
 local choice replaced verified Saved metadata. Only explicit local true/false
@@ -49,8 +50,32 @@ Unloaded favorite metadata can admit a reselected original for bounded hydration
 Both new regressions failed before repair. All 773 web tests and the full local
 check pass. An isolated real-browser account journey verified Saved Favorite →
 reopen original → Favorites returns one copy → Unfavorite removes it → Favorite
-restores it, with no console errors. Hosted checks and production deployment remain
-pending for this web-only follow-up; native runtime source is unchanged from build 76.
+restores it, with no console errors. PR 102 merged as
+`8db2b152c86011ff26d1ad29320683578b7b9324`; all 23 hosted contexts completed
+with seven successes and 16 intentional skips. Worker
+`38d20b59-92f2-4f2a-a3a2-702d334aad62` serves 100% of production traffic,
+and all 49 non-HTML emitted assets match the merged build. Live receipt,
+identifier and Favorites browser checks pass without console errors. Native
+runtime source is unchanged from build 76.
+
+## October 15 reselected Saved labels — local qualification
+
+The browser's local original could hide the Saved copy's labels. Adding a label
+from that view could consequently replace existing labels. The exact current
+file/digest/account overlay now shows Saved labels only when no explicit local
+label edit exists. An explicit empty list still means the user removed labels.
+Import and encrypted local retention preserve that distinction; the retained
+array stays readable by older browser builds and legacy empty lists remain explicit.
+Account-derived overlays do not enter local retention merely by being displayed.
+
+Three regressions reproduced missing label inheritance and the import/retention
+conversion of an absent choice into an empty list. The 42 affected tests pass;
+the full check passes, including 776 browser tests and 129 API tests. Hosted and
+release qualification remain pending. A disposable local account browser journey
+verified labeled original → encrypted Save → open original before recovery on
+another origin → existing label visible → append a label → Save changes → refresh
+the first browser → both Saved labels recovered, with no console errors. Native
+runtime source is unchanged.
 
 ## October 11 durable native retries — awaiting hosted qualification
 

@@ -34,6 +34,7 @@ function validPhoto(value: any): value is LocalPhoto {
     (value.captureTimezoneVerified === undefined || (value.captureTimezoneVerified === true && value.captureVerified === true && value.dateSource === "exif")) &&
     (value.location === undefined || !!validatedPhotoLocation(value.location)) &&
     Array.isArray(value.labels) && value.labels.length <= 64 && value.labels.every((label: unknown) => typeof label === "string" && label.length <= 120) &&
+    (value.labelsUnspecified === undefined || (value.labelsUnspecified === true && value.labels.length === 0)) &&
     Number.isFinite(value.width) && value.width > 0 && Number.isFinite(value.height) && value.height > 0 &&
     (value.previewSize === undefined || (Number.isFinite(value.previewSize) && value.previewSize >= 0 && value.previewSize <= RETAINED_PREVIEW_BUDGET)) &&
     texts(value.keywords) && texts(value.facts) && (value.caption === undefined || (typeof value.caption === "string" && value.caption.length <= 4096)) &&
@@ -102,7 +103,10 @@ export class LocalRetention {
         if (!name.startsWith("photo:")) continue;
         try {
           const photo = JSON.parse(decoder.decode(await open(key, (raw as SavedPhoto).meta, name)));
+          const labelsUnspecified = photo.labelsUnspecified === true;
           if (!validPhoto(photo) || name !== "photo:" + photo.id) throw new Error("Invalid photo");
+          if (labelsUnspecified) delete photo.labels;
+          delete (photo as LocalPhoto & {labelsUnspecified?: boolean}).labelsUnspecified;
           delete photo.file; delete photo.preview;
           delete photo.visual; delete photo.current;
           if (!validOcr(photo.ocr, photo)) delete photo.ocr;
@@ -202,7 +206,8 @@ export class LocalRetention {
             retained += size; keep.add(photo.id); sizes.set(photo.id, size);
             if (preview) previews.set(photo.id, await seal(key, await preview.arrayBuffer(), "preview:" + photo.id));
           }
-          const meta = { id: photo.id, digest: photo.digest, filename: photo.filename, labels: photo.labels ?? [], date: photo.date, dateSource: photo.dateSource, captureVerified: photo.captureVerified, captureTimezoneVerified: photo.captureTimezoneVerified, location: photo.location, width: photo.width, height: photo.height, originalSize: photo.originalSize ?? photo.file?.size, previewAvailable: hasPreview, previewSize: hasPreview ? size : 0, caption: photo.caption, keywords: photo.keywords, facts: photo.facts, favorite: photo.favorite, ocr: validOcr(photo.ocr, photo) ? photo.ocr : undefined };
+          // Keep the legacy array readable while retaining whether the user ever edited it.
+          const meta = { id: photo.id, digest: photo.digest, filename: photo.filename, labels: photo.labels ?? [], labelsUnspecified: photo.labels === undefined ? true : undefined, date: photo.date, dateSource: photo.dateSource, captureVerified: photo.captureVerified, captureTimezoneVerified: photo.captureTimezoneVerified, location: photo.location, width: photo.width, height: photo.height, originalSize: photo.originalSize ?? photo.file?.size, previewAvailable: hasPreview, previewSize: hasPreview ? size : 0, caption: photo.caption, keywords: photo.keywords, facts: photo.facts, favorite: photo.favorite, ocr: validOcr(photo.ocr, photo) ? photo.ocr : undefined };
           if (!validPhoto(meta)) throw new Error("Search metadata could not be retained.");
           records.push(["photo:" + photo.id, { meta: await seal(key, jsonBytes(meta), "photo:" + photo.id) }]);
         }
