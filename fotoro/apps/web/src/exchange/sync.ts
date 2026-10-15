@@ -63,7 +63,6 @@ export async function lastSync(session = requireVault()) {
   assertVault(session);
   return value ? decryptPrivate<string>(value) : null;
 }
-const readFlight = new ScopedFlight<Awaited<ReturnType<typeof performRefresh>>>();
 const saveFlight = new ScopedFlight<Awaited<ReturnType<typeof performSave>>>();
 const operations = new WeakMap<UnlockedVault, Promise<unknown>>();
 const controllers = new WeakMap<UnlockedVault, AbortController>();
@@ -172,41 +171,40 @@ async function performSave(session: UnlockedVault, signal: AbortSignal, diagnost
   return result;
 }
 // Viewing the account can read saved photos, but never drains locally queued uploads or edits.
-export function refreshSync(session = requireVault(), browse?: CatalogBrowse) {
+export async function refreshSync(session = requireVault(), browse?: CatalogBrowse) {
   const window = browse ? {...browse, retainPhotoIds: [...(browse.retainPhotoIds ?? [])]} : undefined;
-  const key = window && JSON.stringify([window.limit, window.retainPhotoIds]);
   const origin = typeof location === "undefined" ? undefined : location.origin;
-  return readFlight.run(session, async () => {
-    const controller = new AbortController();
-    const abort = () => controller.abort();
-    const visibility = () => {if (document.visibilityState !== "visible") abort();};
-    const current = () => !controller.signal.aborted && (window?.current?.() ?? true)
-      && (typeof document === "undefined" || document.visibilityState === "visible")
-      && (origin === undefined || location.origin === origin);
-    const check = () => {assertVault(session); controller.signal.throwIfAborted(); if (!current()) throw new DOMException("Catalog read withdrawn", "AbortError");};
-    window?.signal?.addEventListener("abort", abort, {once: true});
-    if (window?.signal?.aborted) abort();
-    if (typeof globalThis.window !== "undefined") {globalThis.window.addEventListener?.("fotoro-lock", abort); globalThis.window.addEventListener?.("pagehide", abort);}
-    if (typeof document !== "undefined") document.addEventListener?.("visibilitychange", visibility);
-    let result: Awaited<ReturnType<typeof performRefresh>> | undefined;
-    try {
-      do {
-        check();
-        if (result) {for (const photo of result.photos) photo.metadataKey.fill(0); result = undefined;}
-        // Each bounded slice uses the same owner; queued saves can run between continuations.
-        result = await serializeSync(session, () => {check(); return diagnose("catalog", context => performRefresh(session, controller.signal, context, {...window, limit: window?.limit ?? Number.MAX_SAFE_INTEGER, signal: controller.signal, current}), "refresh");});
-        check();
-        if (result.coverage.hasMoreChanges !== true) return result;
-        await new Promise(resolve => setTimeout(resolve, 0));
-      } while (current());
-      check(); throw new DOMException("Catalog read withdrawn", "AbortError");
-    } catch (error) {for (const photo of result?.photos ?? []) photo.metadataKey.fill(0); throw error;}
-    finally {
-      window?.signal?.removeEventListener("abort", abort);
-      if (typeof globalThis.window !== "undefined") {globalThis.window.removeEventListener?.("fotoro-lock", abort); globalThis.window.removeEventListener?.("pagehide", abort);}
-      if (typeof document !== "undefined") document.removeEventListener?.("visibilitychange", visibility);
-    }
-  }, key);
+  // Foreground events are coalesced by their UI owner. Reads share the serialized
+  // catalog cursor, not cancellation scopes or mutable hydrated metadata keys.
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  const visibility = () => {if (document.visibilityState !== "visible") abort();};
+  const current = () => !controller.signal.aborted && (window?.current?.() ?? true)
+    && (typeof document === "undefined" || document.visibilityState === "visible")
+    && (origin === undefined || location.origin === origin);
+  const check = () => {assertVault(session); controller.signal.throwIfAborted(); if (!current()) throw new DOMException("Catalog read withdrawn", "AbortError");};
+  window?.signal?.addEventListener("abort", abort, {once: true});
+  if (window?.signal?.aborted) abort();
+  if (typeof globalThis.window !== "undefined") {globalThis.window.addEventListener?.("fotoro-lock", abort); globalThis.window.addEventListener?.("pagehide", abort);}
+  if (typeof document !== "undefined") document.addEventListener?.("visibilitychange", visibility);
+  let result: Awaited<ReturnType<typeof performRefresh>> | undefined;
+  try {
+    do {
+      check();
+      if (result) {for (const photo of result.photos) photo.metadataKey.fill(0); result = undefined;}
+      // Each bounded slice uses the same owner; queued saves can run between continuations.
+      result = await serializeSync(session, () => {check(); return diagnose("catalog", context => performRefresh(session, controller.signal, context, {...window, limit: window?.limit ?? Number.MAX_SAFE_INTEGER, signal: controller.signal, current}), "refresh");});
+      check();
+      if (result.coverage.hasMoreChanges !== true) return result;
+      await new Promise(resolve => setTimeout(resolve, 0));
+    } while (current());
+    check(); throw new DOMException("Catalog read withdrawn", "AbortError");
+  } catch (error) {for (const photo of result?.photos ?? []) photo.metadataKey.fill(0); throw error;}
+  finally {
+    window?.signal?.removeEventListener("abort", abort);
+    if (typeof globalThis.window !== "undefined") {globalThis.window.removeEventListener?.("fotoro-lock", abort); globalThis.window.removeEventListener?.("pagehide", abort);}
+    if (typeof document !== "undefined") document.removeEventListener?.("visibilitychange", visibility);
+  }
 }
 export function saveChosenImports(session: UnlockedVault, photoIds: readonly string[], signal?: AbortSignal, current?: () => boolean) {
   const chosen = [...photoIds];

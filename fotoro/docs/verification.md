@@ -5,6 +5,46 @@ work; [product](product.md) owns the intended experience. Earlier measurements a
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
 
+## October 15 core follow-through
+
+PR 109 merged as `2d83b292e03da46cada3011673139962fde95757`, with the same
+tree as qualified head `00e5b6c2dfeb940fd5793cf5392b15570208201a`.
+All 23 hosted contexts completed (seven successes, 16 intentional skips).
+Worker `040fcd9e-b309-4a99-b797-0c725d9aa705` serves production at 100%;
+all 43 non-HTML assets match the merged build. Build 81 passed archive and IPA
+audits, Apple processing and assignment to the existing internal group with one
+tester. Physical installation remains unverified; phone usage remains paused.
+
+The next source patch fixes four reproduced gaps:
+
+- Native OCR commits, publishes Find coverage and queues its derived annotation
+  before optional scene classification. A held-classifier regression verifies
+  that completed OCR remains searchable and syncable; cancellation resumes only
+  the unfinished visual stage. This does not establish device inference speed.
+- Both clients retain the immutable original filename as search evidence after
+  renaming, while removing superseded custom names. Current filenames rank before
+  original aliases; explicit pins and source/date/People/Trash fences still apply.
+  Native Saved search and the local index both cover this path. Existing renamed
+  index rows backfill once in 200-record read pages with transactional rollback.
+- Browser refresh owners share the serialized catalog cursor and verified cache,
+  while retaining independent cancellation and decrypted result keys. A cancelled
+  or withdrawn owner cannot capture a fresh refresh or wipe another owner's result.
+- An incoming name preserves an edited filename draft and offers Use saved name.
+  Successful explicit Apply/Use original name resolves the draft; failed or
+  withdrawn operations preserve it.
+
+Controlled regressions failed before repair. Final workspace checks pass,
+including 820 browser and 129 API tests. The full native run passed 765 with
+three existing skips; three fixture-service connection failures were resolved
+by starting the missing local fixture service. The final ConsumerCore, Exchange
+and Transfer run passes all 98 tests, including those three cases and the final
+Saved-alias fix. The complete isolated-preview suite passes 203 with three
+existing platform/opt-in skips. Independent local browser origins backed by the
+actual Worker/D1/R2 verify concurrent rename/draft retention, original-filename
+lookup after rename and explicit name reset using a public fixture. Hosted
+qualification and release of this next patch remain separate gates. Broader
+personal retrieval quality, physical latency and background behavior remain open.
+
 ## October 14 released search, sync and Favorites; Saved search follow-up
 
 PR 100 merge `155b54aa5b52deb8583c1767eea04d2cffceacac` was released at

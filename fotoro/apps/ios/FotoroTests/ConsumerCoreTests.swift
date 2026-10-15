@@ -1270,6 +1270,51 @@ final class ConsumerCoreTests: XCTestCase {
     XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(written).deletingLastPathComponent().path))
     services.consumerShareDidWrite = nil
   }
+  @MainActor func testSavedOriginalFilenameSurvivesRenameResetAndTrashInBothSearchPaths() async throws {
+    try await withSavedLibrary { services, _ in
+      let account = try XCTUnwrap(services.session.accountId), person = Wire.id()
+      let bundle = try services.vault.requireBundle(), card = try services.session.requireCard(account)
+      var photo = try self.samplePhoto(); photo.manifest.ownerAccountId = account
+      photo.metadata.filename = "IMG_4826.jpg"; photo.metadata.sourceDate = "2026-10-05T12:00:00.000Z"
+      var otherOwner = try self.samplePhoto(); otherOwner.manifest.ownerAccountId = Wire.id()
+      otherOwner.metadata.filename = photo.metadata.filename
+      try services.store.put(photo); try services.store.put(otherOwner)
+      var value = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+      value.facts = try PhotoPeopleFacts.replacing([], with: [PhotoPersonAssignment(p: person, n: "Mom", b: [0,0,100,100])],
+        originalSha256: photo.metadata.originalSha256)
+      try services.annotations.ledger.edit(value, photo: photo, bundle: bundle, card: card)
+      try services.reload()
+      var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+      let now = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 10, day: 15)))
+      @MainActor func expect(_ query: String, found: Bool = true) async throws {
+        let matches = try await services.searchCatalog(query, now: now, calendar: calendar)
+        XCTAssertEqual(matches.map(\.id), found ? [photo.id] : [], query)
+        XCTAssertEqual(services.matches(photo, query: query), found, query)
+      }
+      try services.setOrganization(.name("Boston boarding pass.jpg"), photo: photo)
+      for query in ["IMG_4826.jpg", "4826", "Boston boarding pass"] { try await expect(query) }
+      let dated = try await services.searchCatalog("IMG_4826.jpg 2026-10", now: now, calendar: calendar,
+        people: PeopleSearchSelection(personIDs: [person]))
+      XCTAssertEqual(dated.map(\.id), [photo.id])
+      let wrongDate = try await services.searchCatalog("IMG_4826.jpg 2026-11", now: now, calendar: calendar)
+      XCTAssertTrue(wrongDate.isEmpty)
+      let wrongPerson = try await services.searchCatalog("IMG_4826.jpg", now: now, calendar: calendar,
+        people: PeopleSearchSelection(personIDs: [Wire.id()]))
+      XCTAssertTrue(wrongPerson.isEmpty)
+      try services.setOrganization(.name("Family dinner.jpg"), photo: photo)
+      try await expect("Boston boarding pass", found: false)
+      try await expect("IMG_4826.jpg"); try await expect("Family dinner")
+      try services.setOrganization(.name(nil), photo: photo)
+      try await expect("Family dinner", found: false); try await expect("IMG_4826.jpg")
+      try services.setOrganization(.trash(true), photo: photo)
+      try await expect("IMG_4826.jpg", found: false)
+      XCTAssertFalse(services.matches(photo, query: ""), "Trash stays excluded before text matching")
+      try services.setOrganization(.trash(false), photo: photo)
+      try await expect("IMG_4826.jpg")
+      XCTAssertEqual(try services.consumerSavedPhoto(photo.id)?.metadata.filename, "IMG_4826.jpg",
+        "Organization never changes the immutable original metadata filename")
+    }
+  }
   @MainActor func testSavedNaturalDatesComposeTextAndOnlyTrustCaptureProvenance() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
     let previousCards = UserDefaults.standard.data(forKey: "fotoro.pinnedCards")

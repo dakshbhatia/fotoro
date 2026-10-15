@@ -90,6 +90,11 @@ const count = (events: Event[] | undefined, now: number) => (events ?? []).reduc
 const photoKey = (meaning: string, id: string) => JSON.stringify([meaning, id]);
 const meaningKey = (scope: string, meaning: string) => JSON.stringify([scope, meaning]);
 const words = (text: string): string[] => text.match(/[\p{L}\p{N}]+/gu) ?? [];
+const searchableFilenames = (photo: SearchPhoto): string[] => {
+  const name = photoName(photo, photo.filename);
+  if (name === photo.filename) return [name];
+  return normalizeSearch(name) === normalizeSearch(photo.filename) ? [name] : [name, photo.filename];
+};
 const hasCaptureDate = (photo: SearchPhoto) => photo.dateSource === "exif" || photo.dateSource === "photos";
 type DatedMeaning = [number | null, number | null, string];
 function datedMeaning(id: string): DatedMeaning | undefined {
@@ -169,10 +174,13 @@ export class PhotoSearchIndex {
         if (location.name) {add(location.name, "fact", photo.id); phraseSource(location.name, "fact", photo.id); for (const word of words(location.name)) add(word, "fact", photo.id);}
       }
       phraseSource(photo.caption ?? "", "caption", photo.id);
-      phraseSource(photoName(photo, photo.filename).replace(/\.[^.]+$/, ""), "filename", photo.id);
       for (const word of words(photo.caption ?? "")) if (!noise.test(word)) add(word, "caption", photo.id);
-      for (const word of words(photoName(photo, photo.filename).replace(/\.[^.]+$/, ""))) {
-        if (word.length >= 2 && /\p{L}/u.test(word) && !noise.test(word)) add(word, "filename", photo.id);
+      for (const name of searchableFilenames(photo)) {
+        const stem = name.replace(/\.[^.]+$/, "");
+        phraseSource(stem, "filename", photo.id);
+        for (const word of words(stem)) {
+          if (word.length >= 2 && /\p{L}/u.test(word) && !noise.test(word)) add(word, "filename", photo.id);
+        }
       }
       const ocr = photo.ocr;
       if (ocr?.status === "complete" && ocr.photoID === photo.id && ocr.revision === (photo.digest ?? photo.id) && Number.isFinite(ocr.confidence) && ocr.confidence >= 0 && ocr.confidence <= 1) {
@@ -255,7 +263,7 @@ export class PhotoSearchIndex {
     const derived = /^(?:date|text|label):/.test(baseMeaning) ? this.search(baseMeaning.slice(baseMeaning.indexOf(":") + 1), { now, scope, committedMeaning: baseMeaning }).meaning : undefined;
     const supported = (dated && baseMeaning === "date") || this.dictionary.some(term => term.id === baseMeaning && term.sources.has(id)) ||
       (derived?.id === baseMeaning && derived.photoIds.includes(id)) ||
-      (baseMeaning.startsWith("file:") && normalizeSearch(photo ? photoName(photo, photo.filename) : "") === baseMeaning.slice(5));
+      (baseMeaning.startsWith("file:") && photo && searchableFilenames(photo).some(name => normalizeSearch(name) === baseMeaning.slice(5)));
     if (!supported) return;
     const key = meaningKey(scope, meaning);
     this.record(this.history.photos, photoKey(key, id), session, now);
@@ -362,9 +370,11 @@ export class PhotoSearchIndex {
     if (/[._-]|\d/.test(prefix)) {
       for (const photo of this.records.values()) {
         yield; if (!eligible(photo.id)) continue;
-        const filename = normalizeSearch(photoName(photo, photo.filename)), stem = filename.replace(/\.[^.]+$/, "");
-        if (filename.startsWith(prefix) || stem === prefix || (/^\d+$/.test(prefix) && words(stem).includes(prefix))) {
-          include("file:" + filename, photoName(photo, photo.filename), photo.id, "filename");
+        for (const name of searchableFilenames(photo)) {
+          const filename = normalizeSearch(name), stem = filename.replace(/\.[^.]+$/, "");
+          if (filename.startsWith(prefix) || stem === prefix || (/^\d+$/.test(prefix) && words(stem).includes(prefix))) {
+            include("file:" + filename, name, photo.id, "filename");
+          }
         }
       }
     }
@@ -380,8 +390,20 @@ export class PhotoSearchIndex {
     for (const id of meaning.photoIds) {
       yield;
       const photo = this.records.get(id)!, parsed = captured(id);
+      // Keep the immutable camera name as an alias; an equally supported current
+      // display name takes precedence over that alias, before recency/feedback.
+      let currentFilename = false;
+      if (meaning.evidence[id] === "filename") {
+        const currentName = normalizeSearch(photoName(photo, photo.filename));
+        if (currentName === normalizeSearch(photo.filename)) currentFilename = true;
+        else {
+          const currentWords = " " + words(currentName.replace(/\.[^.]+$/, "")).join(" ") + " ";
+          currentFilename = normalizeSearch(meaning.term) === currentName ||
+            currentWords.includes(" " + words(normalizeSearch(meaning.term)).join(" ") + " ");
+        }
+      }
       ranks.set(id, [
-        Number(id === pin), tier(meaning.evidence[id]), count(this.history.photos[photoKey(key, id)], now),
+        Number(id === pin), tier(meaning.evidence[id]), Number(currentFilename), count(this.history.photos[photoKey(key, id)], now),
         meaning.evidence[id] === "ocr" ? photo.ocr?.confidence ?? 0 : 0,
         Number(photo.favorite === true), hasCaptureDate(photo) && parsed <= now && Number.isFinite(parsed) ? parsed : 0,
       ]);
@@ -398,7 +420,7 @@ export class PhotoSearchIndex {
     const previousId = previous?.photoId;
     const bestTier = tier(meaning.evidence[sorted[0]]);
     const stable = extending && previous.scope === scope && previous.meaning?.id === meaning.id && previousId && sorted.includes(previousId) &&
-      (pin ? pin === previousId : tier(meaning.evidence[previousId]) === bestTier);
+      (pin ? pin === previousId : tier(meaning.evidence[previousId]) === bestTier && ranks.get(previousId)![2] === ranks.get(sorted[0])![2]);
     const photoIds = sorted.slice(0, 200);
     if (stable && !photoIds.includes(previousId!)) photoIds.splice(199, 1, previousId!);
     // No await/yield may separate this evidence fence from returning the result.

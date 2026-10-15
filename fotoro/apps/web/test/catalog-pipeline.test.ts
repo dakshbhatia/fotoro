@@ -80,6 +80,41 @@ test("unchanged recent-window refresh reuses verified catalog and metadata crypt
   } finally {instrumentation.restore(); globalThis.fetch = oldFetch; lockVault(); await clearAccount(session.accountId);}
 });
 
+test("concurrent Saved refresh owners receive independent photo keys while reusing verified metadata", async () => {
+  await ready; const session = await open(0), oldFetch = globalThis.fetch, objects = new Map<string, Uint8Array>();
+  await clearAccount(session.accountId);
+  const item = await fixture(session, objects);
+  let release!: () => void, changes = 0, metadataReads = 0;
+  const held = new Promise<void>(resolve => {release = resolve;});
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = new URL(String(input), "https://public.test");
+    if (url.pathname === "/v1/changes") {
+      changes++;
+      if (changes === 1) await held;
+      return new Response(JSON.stringify({version: 1, mediaVersion: 1, changes: [], nextCursor: String(changes), hasMore: false}));
+    }
+    metadataReads++;
+    const bytes = objects.get(url.pathname.split("/").at(-1)!); assert.ok(bytes);
+    return new Response(new Uint8Array(bytes));
+  }) as typeof fetch;
+  let snapshots: Awaited<ReturnType<typeof refreshSync>>[] = [];
+  try {
+    const first = refreshSync(session, {limit: 100, signal: new AbortController().signal});
+    while (!changes) await new Promise(resolve => setTimeout(resolve, 0));
+    const second = refreshSync(session, {limit: 100, signal: new AbortController().signal});
+    release(); snapshots = await Promise.all([first, second]);
+    assert.equal(snapshots[0].photos[0].manifest.photoId, item.manifest.photoId);
+    assert.equal(snapshots[1].photos[0].manifest.photoId, item.manifest.photoId);
+    assert.deepEqual(snapshots[0].photos[0].metadataKey, snapshots[1].photos[0].metadataKey);
+    snapshots[0].photos[0].metadataKey.fill(0);
+    assert.ok(snapshots[1].photos[0].metadataKey.some(byte => byte !== 0), "Discarding one owner cannot wipe another owner's live photo key");
+    assert.equal(changes, 2); assert.equal(metadataReads, 1, "Read ownership does not discard verified unchanged metadata reuse");
+  } finally {
+    release(); for (const snapshot of snapshots) for (const photo of snapshot.photos) photo.metadataKey.fill(0);
+    globalThis.fetch = oldFetch; lockVault(); await clearAccount(session.accountId);
+  }
+});
+
 test("changed wrapped manifests reverify and revisit metadata; a fresh same-account vault and account switch invalidate reuse", async () => {
   await ready; const oldFetch = globalThis.fetch, objects = new Map<string, Uint8Array>();
   const session = await open(0); await clearAccount(session.accountId);
