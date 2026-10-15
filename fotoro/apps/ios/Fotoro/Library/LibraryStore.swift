@@ -161,6 +161,28 @@ final class LibraryStore: @unchecked Sendable {
         .map { try Wire.decode(BackupSource.self, $0) }
     }
   }
+  // Search needs only checkpoints for its current device hits. Read in bounded
+  // primary-key batches off the caller's actor; unrelated inventory is not decoded.
+  func backupSources(ids: Set<String>) async throws -> [BackupSource] {
+    guard !ids.isEmpty else { return [] }
+    let ordered = ids.sorted()
+    return try await database.read { db in
+      var sources: [BackupSource] = []
+      for start in stride(from: 0, to: ordered.count, by: 400) {
+        try Task.checkCancellation()
+        let batch = Array(ordered[start..<min(start + 400, ordered.count)])
+        let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
+        let values = try Data.fetchAll(db,
+          sql: "SELECT value FROM backupSources WHERE id IN (\(placeholders)) ORDER BY id",
+          arguments: StatementArguments(batch))
+        for value in values {
+          try Task.checkCancellation()
+          sources.append(try Wire.decode(BackupSource.self, value))
+        }
+      }
+      return sources
+    }
+  }
   func ordinaryBackupSourceIDs() throws -> Set<String> {
     try database.read { db in
       Set(try String.fetchAll(db, sql: """

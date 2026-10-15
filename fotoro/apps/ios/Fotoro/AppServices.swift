@@ -259,7 +259,13 @@ enum ReviewedPhotosBackupPolicy {
         result.append(ConsumerSearchHit(photo: .device(id), evidence: hit.reason))
       }
     }
-    let sources = account == nil ? [] : try catalog.backupSources()
+    let sources = account == nil ? [] : try await catalog.backupSources(ids: Set(records.keys))
+    try Task.checkCancellation()
+    guard local.libraryGeneration == libraryGeneration, local.peopleSelection == people else { throw CancellationError() }
+    if let account {
+      guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account,
+        BackgroundUploadPolicy.origin(api.baseURL) == origin else { throw CancellationError() }
+    }
     let copies = ConsumerSearchBinding.verifiedCopies(sources: sources, records: records)
     for photo in saved {
       if !ConsumerSearchBinding.duplicate(saved: photo, copies: copies) {
