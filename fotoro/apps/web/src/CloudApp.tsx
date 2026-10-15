@@ -434,20 +434,24 @@ export default function CloudApp({
     const session = requireVault();
     const browse = browseFor(session);
     const snapshotCurrent = () => sameVault(session) && current();
-    const cached = await readSavedSnapshot({signal, current: snapshotCurrent, read: () => cachedSync(session, diagnostic, browse)});
-    setPhotos(cached.photos);
-    setCatalogCoverage(cached.coverage);
-    const recoveredSelection = expiredSelection.current;
-    expiredSelection.current = null;
-    if (recoveredSelection) {
-      setSelected(recoveredSelection.restore(cached.photos, session.accountId));
-      setPickedFiles(recoveredSelection.filesFor(session.accountId));
-    }
-    setPending(cached.pending);
-    setAnnotationPending(cached.annotations);
-    setLastSuccessfulSync(cached.lastSuccessfulSync);
-    setSkipped(cached.skipped);
-    setSaveReady(session);
+    let recoveredSelection: ExpiredSavedSelection | null = null;
+    await readSavedSnapshot({signal, current: snapshotCurrent, read: () => cachedSync(session, diagnostic, browse), publish: cached => {
+      setPhotos(cached.photos);
+      setCatalogCoverage(cached.coverage);
+      recoveredSelection = expiredSelection.current;
+      expiredSelection.current = null;
+      if (recoveredSelection) {
+        setSelected(recoveredSelection.restore(cached.photos, session.accountId));
+        setPickedFiles(recoveredSelection.filesFor(session.accountId));
+      }
+      setPending(cached.pending);
+      setAnnotationPending(cached.annotations);
+      setLastSuccessfulSync(cached.lastSuccessfulSync);
+      setSkipped(cached.skipped);
+      setSaveReady(session);
+    }});
+    check();
+    if (!sameVault(session)) return;
     if (send && pausedRef.current) {
       diagnostic?.incomplete("cancelled");
       setStatus("Saving is paused. Continue when you’re ready.");
@@ -461,7 +465,7 @@ export default function CloudApp({
       return;
     }
     check();
-    const result = await readSavedSnapshot({signal, current: snapshotCurrent, read: async () => {
+    await readSavedSnapshot({signal, current: snapshotCurrent, read: async () => {
       let result = await (send ? saveSync(session, signal, diagnostic) : refreshSync(session, {...browse, signal, current}));
       // Cached paging can expand while this network read waits. Its larger window
       // must not collapse when the earlier, smaller refresh finishes.
@@ -471,19 +475,20 @@ export default function CloudApp({
         finally {for (const photo of previous.photos) photo.metadataKey.fill(0);}
       }
       return result;
+    }, publish: result => {
+      if (send && catalogBrowse.current?.session === session) catalogBrowse.current.limit = Math.max(catalogBrowse.current.limit, result.photos.length);
+      setPhotos((previous) => (sameVault(session) ? result.photos : previous));
+      setCatalogCoverage(result.coverage);
+      if (recoveredSelection) {const recovery = recoveredSelection; setSelected(previous => recovery.restore(result.photos, session.accountId, previous));}
+      setPending((previous) => (sameVault(session) ? result.pending : previous));
+      setSkipped((previous) => (sameVault(session) ? result.skipped : previous));
+      setAnnotationPending(result.annotations);
+      setLastSuccessfulSync((previous) =>
+        sameVault(session) ? result.lastSuccessfulSync : previous,
+      );
+      setStatus((previous) => (sameVault(session) ? "" : previous));
+      setNeedsAttention((previous) => (sameVault(session) ? false : previous));
     }});
-    if (send && catalogBrowse.current?.session === session) catalogBrowse.current.limit = Math.max(catalogBrowse.current.limit, result.photos.length);
-    setPhotos((previous) => (sameVault(session) ? result.photos : previous));
-    setCatalogCoverage(result.coverage);
-    if (recoveredSelection) setSelected(previous => recoveredSelection.restore(result.photos, session.accountId, previous));
-    setPending((previous) => (sameVault(session) ? result.pending : previous));
-    setSkipped((previous) => (sameVault(session) ? result.skipped : previous));
-    setAnnotationPending(result.annotations);
-    setLastSuccessfulSync((previous) =>
-      sameVault(session) ? result.lastSuccessfulSync : previous,
-    );
-    setStatus((previous) => (sameVault(session) ? "" : previous));
-    setNeedsAttention((previous) => (sameVault(session) ? false : previous));
   };
   const run = async (fn: () => Promise<void | boolean>, accountAction = false) => {
     if (running.current) return false;

@@ -37,19 +37,21 @@ export class DeferredSavedRefresh {
   dispose() {this.disposed = true; this.pending = false;}
 }
 
-// The caller takes ownership only after the final asynchronous read passes its
-// scope fence. Cancelled/unpublished snapshots own copied metadata keys.
+// Check and publish in the same continuation. Returning an admitted snapshot
+// across another await would let withdrawal run before the caller publishes it.
+// The synchronous publisher takes ownership; discarded snapshots wipe their keys.
 export async function readSavedSnapshot<T extends {photos: {metadataKey: Uint8Array}[]}>(options: {
-  signal?: AbortSignal; current: () => boolean; read: () => Promise<T>;
-}): Promise<T> {
+  signal?: AbortSignal; current: () => boolean; read: () => Promise<T>; publish: (result: T) => void;
+}): Promise<void> {
   const check = () => {
     options.signal?.throwIfAborted();
     if (!options.current()) throw new DOMException("Saved browse changed", "AbortError");
   };
   check();
   const result = await options.read();
-  try {check(); return result;}
-  catch (error) {for (const photo of result.photos) photo.metadataKey.fill(0); throw error;}
+  let published = false;
+  try {check(); options.publish(result); published = true;}
+  finally {if (!published) for (const photo of result.photos) photo.metadataKey.fill(0);}
 }
 
 // Cached paging does not own Save status or drain uploads.
@@ -58,12 +60,5 @@ export async function readSavedBrowsePage(options: {
   read: () => Promise<{photos: import("./catalog").Photo[]; coverage: import("./catalog").CatalogCoverage}>;
   publish: (result: {photos: import("./catalog").Photo[]; coverage: import("./catalog").CatalogCoverage}) => void;
 }) {
-  const check = () => {
-    options.signal.throwIfAborted();
-    if (!options.current()) throw new DOMException("Saved browse changed", "AbortError");
-  };
-  const result = await readSavedSnapshot(options);
-  let published = false;
-  try {check(); options.publish(result); published = true;}
-  finally {if (!published) for (const photo of result.photos) photo.metadataKey.fill(0);}
+  return readSavedSnapshot(options);
 }
