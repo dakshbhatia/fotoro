@@ -17,6 +17,33 @@ private actor AdmissionQueryProbe {
 
 final class SearchLifecycleTests: XCTestCase {
   #if !FOTORO_LOCAL_PREVIEW
+  @MainActor func testDiagnosticSnapshotDoesNotPublishCoverageAcrossSourceWithdrawal() async throws {
+    guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)) else {
+      throw XCTSkip("Permit public Simulator Photos for the current-index status export.")
+    }
+    let index = try SearchIndex()
+    try index.replacePermitted([SearchRecord(id: "public-source")])
+    let store = LocalSearchStore(index: index)
+    store.setAutomaticAnalysisActive(false)
+    store.completePermittedSnapshotRefresh(photos: [])
+    defer { store.pause() }
+    let current = await store.diagnosticIndexSnapshot()
+    XCTAssertEqual(current.first?.analysisActivity, .inactive)
+    XCTAssertEqual(current.first?.total, 1)
+    let gate = AdmissionPreviewGate(), started = expectation(description: "Snapshot read held")
+    store.diagnosticCoverageRead = { index, now in
+      let coverage = try index.analysisCoverage(now: now)
+      started.fulfill(); await gate.wait(); return coverage
+    }
+    let export = Task { await store.diagnosticIndexSnapshot() }
+    await fulfillment(of: [started], timeout: 3)
+    store.pause()
+    gate.open()
+    let withdrawn = await export.value
+    XCTAssertEqual(withdrawn.count, 1)
+    XCTAssertEqual(withdrawn.first?.reason, .contextChanged)
+    XCTAssertNil(withdrawn.first?.total); XCTAssertNil(withdrawn.first?.analysisStage)
+  }
   @MainActor func testOrganizationPublicationIgnoresOCRProgressAndPublishesScreenshotCorrections() throws {
     guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
       let asset = PHAsset.fetchAssets(with: .image, options: nil).firstObject, !asset.isHidden else {

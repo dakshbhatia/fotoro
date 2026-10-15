@@ -5,7 +5,9 @@ import {pathToFileURL} from "node:url";
 // closed fields reaches the report, including parser errors and input paths.
 const values = {
   operation: "app api auth sync share albums album search metadata people consent picks catalog media request".split(" "),
-  step: "action request response decode credential unlock catalog verify persist transfer annotation scan prepare analysis export settlePrevious settleBackup settleJournal".split(" "),
+  step: "action request response decode credential unlock catalog verify persist transfer annotation scan prepare analysis export settlePrevious settleBackup settleJournal snapshot".split(" "),
+  analysisStage: ["ocr", "visual", "semantic"],
+  analysisActivity: "notReady inactive interacting waitingForIdle running retryScheduled idle".split(" "),
   action: "passkey password enrollment refresh save create accept end add receive contribute prepare".split(" "),
   outcome: "started completed succeeded failed cancelled changed".split(" "),
   reason: "none cancelled contextChanged inactive background recoveryProbe network http decode validation unknown signedOut locked permissionRequired paused offline retryRequired waiting pendingTransfers unpreparedSources skippedSources pendingAnnotations sourceUnavailable current invalid_wire account_changed source_changed quota unavailable verification".split(" "),
@@ -21,7 +23,7 @@ const values = {
 const uuid = value => typeof value === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value) ? value.toLowerCase() : undefined;
 const integer = (value, max, min = 0) => Number.isSafeInteger(value) && value >= min && value <= max ? value : undefined;
 const pick = (key, value) => values[key].includes(value) ? value : undefined;
-const scalarCounts = ["attempted", "completed", "pending", "count", "cacheHits", "unavailable", "skipped"];
+const scalarCounts = ["attempted", "completed", "pending", "count", "cacheHits", "unavailable", "skipped", "total", "failedCount", "deferred", "modelDeferred"];
 const timestamp = value => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 4_102_444_800 ? value : undefined;
 const maximumBytes = 8 * 1024 * 1024;
 const maximumEvents = 4096;
@@ -35,7 +37,7 @@ export function sanitizeEvent(value) {
   const outcome = server ? value.event === "api.error" || value.status >= 400 ? "failed" : "completed" : pick("outcome", value.outcome);
   if (!operation || !outcome) return;
   const event = {source: server ? "server" : "client", operation, outcome};
-  for (const key of ["step", "action", "reason", "state", "area", "errorClass", "endpoint", "method", "accountState"]) {
+  for (const key of ["step", "action", "reason", "state", "area", "errorClass", "endpoint", "method", "accountState", "analysisStage", "analysisActivity"]) {
     const v = pick(key, value[key]); if (v !== undefined) event[key] = v;
   }
   const current = pick("step", value.currentStep); if (current) event.currentStep = current;
@@ -51,6 +53,10 @@ export function sanitizeEvent(value) {
   }
   const elapsed = integer(value.elapsedMS ?? value.elapsedMs, 86_400_000);
   if (elapsed !== undefined) event.elapsedMS = elapsed;
+  const retry = integer(value.nextRetryMS, 86_400_000);
+  if (retry !== undefined) event.nextRetryMS = retry;
+  const checkedAge = integer(value.lastCheckedAgeMS, 31_536_000_000);
+  if (checkedAge !== undefined) event.lastCheckedAgeMS = checkedAge;
   if (status !== undefined) event.status = status;
   return event;
 }
@@ -89,7 +95,7 @@ export function parseDiagnostics(text) {
   return events;
 }
 
-export function summarizeDiagnostics(events) {
+export function summarizeDiagnostics(events, {now = Date.now() / 1000} = {}) {
   // Revalidate callers too; no raw input object can enter the final report.
   const safe = events.slice(0, maximumEvents).map(e => sanitizeEvent(e.source === "server" ? {...e, event: e.outcome === "failed" ? "api.error" : "api.request"} : e)).filter(Boolean);
   const groups = new Map(), counts = new Map();
@@ -109,7 +115,7 @@ export function summarizeDiagnostics(events) {
     const key = `${event.source}/${event.operation}/${event.outcome}`;
     counts.set(key, (counts.get(key) ?? 0) + 1);
     if (event.requestId) (event.source === "server" ? serverRequests : clientRequests).add(event.requestId);
-    if (!event.traceId) continue;
+    if (!event.traceId || event.step === "snapshot") continue;
     const trace = groups.get(event.traceId) ?? [];
     trace.push(event); groups.set(event.traceId, trace);
   }
@@ -185,12 +191,35 @@ export function summarizeDiagnostics(events) {
     }
     return window;
   });
+  // Never mix coverage from a prior export with a newer unavailable snapshot.
+  const snapshot = safe.findLast(e => e.source === "client" && e.operation === "search" && e.step === "snapshot");
+  let indexSnapshot;
+  if (snapshot) {
+    const rows = snapshot.traceId ? safe.filter(e => e.source === "client" && e.operation === "search" && e.step === "snapshot" && e.traceId === snapshot.traceId) : [snapshot];
+    indexSnapshot = {scope: "permitted_local_photos", activity: snapshot.analysisActivity ?? "unknown", coverage: rows.filter(e => e.analysisStage).map(e => ({stage: e.analysisStage, ...counters(e), ...(e.nextRetryMS === undefined ? {} : {nextRetryMS: e.nextRetryMS})}))};
+    if (snapshot.build) indexSnapshot.build = snapshot.build;
+    if (snapshot.reason) indexSnapshot.reason = snapshot.reason;
+    const age = snapshot.timestamp === undefined ? undefined : integer(Math.round((now - snapshot.timestamp) * 1000), Number.MAX_SAFE_INTEGER);
+    if (age !== undefined) indexSnapshot.ageMS = age;
+    indexSnapshot.limitation = "Coverage was captured for this export, not live monitoring. Pending excludes failed/unavailable; deferred overlaps unfinished states. OCR complete includes photos with no recognized text. Saved/web coverage is separate. Idle does not mean complete.";
+  }
+  const sync = safe.findLast(e => e.source === "client" && e.operation === "sync" && e.step === "snapshot");
+  let syncSnapshot;
+  if (sync) {
+    syncSnapshot = {basis: "cached_ui_projection", state: sync.state ?? "unknown", ...counters(sync),
+      limitation: "This is the UI's last derived sync summary. Exporting does not refresh the server, verify originals or establish second-device visibility. Missing lastCheckedAgeMS means freshness is unknown."};
+    for (const key of ["accountState", "reason", "build", "lastCheckedAgeMS"]) if (sync[key] !== undefined) syncSnapshot[key] = sync[key];
+    const age = sync.timestamp === undefined ? undefined : integer(Math.round((now - sync.timestamp) * 1000), Number.MAX_SAFE_INTEGER);
+    if (age !== undefined) syncSnapshot.ageMS = age;
+  }
   return {
     version: 2, events: safe.length,
     counts: [...counts].map(([kind, count]) => ({kind, count})),
     requestLinks: {client: clientRequests.size, server: serverRequests.size,
       matched: [...clientRequests].filter(id => serverRequests.has(id)).length},
     flows, buildWindows,
+    ...(indexSnapshot ? {indexSnapshot} : {}),
+    ...(syncSnapshot ? {syncSnapshot} : {}),
     ...(safe.some(e => e.accountState) ? {latestAccountState: [...safe].reverse().find(e => e.accountState).accountState} : {}),
     untracedPicks: {events: untracedPicks.length, latest: untracedPicks.slice(-5).map(e => ({outcome: e.outcome, ...counters(e), ...(e.elapsedMS === undefined ? {} : {elapsedMS: e.elapsedMS})})),
       limitation: "Older untraced Picks counts describe processed preview candidates; they cannot be assigned to a sync or upload backlog."},
@@ -212,6 +241,12 @@ async function main(args) {
   console.log(`${summary.events} safe events; ${summary.requestLinks.matched} client/server request links.`);
   for (const count of summary.counts) console.log(`${count.kind}: ${count.count}`);
   for (const flow of summary.flows) console.log(`${flow.operation}${flow.action ? "/" + flow.action : ""}: ${flow.result}${flow.activeStep ? "; active " + flow.activeStep : ""}${flow.lastCompletedStep ? "; last completed " + flow.lastCompletedStep : ""}${flow.reason ? "; " + flow.reason : ""}${flow.elapsedMS !== undefined ? "; " + flow.elapsedMS + "ms" : ""} [${flow.traceId}]`);
+  if (summary.indexSnapshot) {
+    console.log(`Local index snapshot: ${summary.indexSnapshot.activity}; build ${summary.indexSnapshot.build ?? "unknown"}; age ${summary.indexSnapshot.ageMS === undefined ? "unknown" : summary.indexSnapshot.ageMS + "ms"}${summary.indexSnapshot.reason ? "; " + summary.indexSnapshot.reason : ""}.`);
+    for (const stage of summary.indexSnapshot.coverage) console.log(`${stage.stage}: ${JSON.stringify(stage)}`);
+    console.log(summary.indexSnapshot.limitation);
+  }
+  if (summary.syncSnapshot) console.log(`Cached sync snapshot: ${JSON.stringify(summary.syncSnapshot)}`);
   if (summary.untracedPicks.events) console.log(`Older untraced Picks: ${summary.untracedPicks.events} events; ${JSON.stringify(summary.untracedPicks.latest)}. ${summary.untracedPicks.limitation}`);
   console.log(summary.limitation);
 }

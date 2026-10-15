@@ -17,7 +17,23 @@ Hono Worker with D1 and private R2. The upstream Ente application is a reference
   require separate preview consent and explicitly configured provider/work limits;
   that route remains disabled by default.
 
-### October 11 current browser checkpoint
+### October 15 current released checkpoint
+
+PR 107 merged as `b6120ff082785e80f147b927304b1a4094ed42f5`; its tree matches
+qualified head `ff68950dff452edbb1809c00a2e9380c4bba3442`. Worker
+`25316edb-d869-4248-8c17-a6751e850242` serves 100%, deployment
+`6339a725-92b1-4254-8571-8ab7ca14667e`. All 43 non-HTML assets and root/Photos/
+Saved HTML entry references match. API script/runtime, eight bindings and schema
+are unchanged. Rollback is `7b458898-5896-494f-9f79-6fd5ba10011a`.
+
+Apple processed 0.1.0 (80), build `74a3705d-1702-458a-b372-99d06c986564`, with
+the existing internal group and unchanged one tester. The archive/distribution
+audit passed. Physical installation and acceptance remain unqualified because
+phone testing is paused. The new export-time coverage diagnostics described in
+[diagnostics](diagnostics.md) are a source change after build 80, not part of that
+release. Build 78 is the last observed physical installation.
+
+### October 11 previous browser checkpoint
 
 PR 85 Worker `cf144db8-c338-4661-a5aa-5ab9566726a3` serves 100%,
 deployment `cd4549db-985b-4a58-b3e2-113066e34fd9`. All 47 non-HTML assets

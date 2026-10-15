@@ -10,7 +10,7 @@ Neither ID grants access to anything.
 
 - iPhone: open **Sync → Diagnostics → Copy diagnostics** or **Share diagnostics**.
   The local history persists across app launches, capped at 160 events and 64 KiB.
-  This control is available in TestFlight 0.1.0 (45); build 44 predates it.
+  This control is available from TestFlight 0.1.0 (45).
 - Browser: open Settings in Photos or Saved, then **Copy diagnostics**. If clipboard
   access fails, select the displayed report. History is in memory, capped at 128
   events; copy it before reloading or closing the tab.
@@ -34,6 +34,59 @@ reports from fixed fields, ignores raw envelopes and unknown values, and limits
 input size and event counts. Output shows action outcomes, timings, failures,
 available last-completed steps, and matched client/server request references.
 It never prints input filenames or parser error text.
+
+## Current understanding and gaps (October 15)
+
+Production and TestFlight build 80 contain bounded action/request diagnostics.
+These explain observed requests and interrupted stages; they do not establish
+complete indexing or a healthy personal library. Browser history disappears on
+reload. Native history is a short ring, not a full session archive. Historical
+production log access has not been established with the current credentials.
+
+The last retained physical build-78 audit counted 21,481 local catalog records,
+2,466 with completed OCR and 19,015 unchecked. That is about 11.5% OCR coverage,
+not text-recognition accuracy. Its catalog query samples had a 46 ms median and
+59 ms maximum; action samples had a 100.5 ms median and 111 ms maximum. These
+measure different boundaries and are not full UI-to-result latency percentiles.
+The user reported fast results but weak relevance. Builds 79/80 and the library's
+current coverage have not been qualified on physical hardware; phone use is paused.
+
+This source change adds an **export-time local index snapshot** to native Copy/
+Share diagnostics. It is not present in build 80. Each stage (OCR, visual,
+semantic) reports whole permitted local Photos catalog counts: total, complete,
+pending, failed, unavailable, deferred, model-deferred and the next future retry
+delay. Failed/unavailable are separate from pending; deferred overlaps unfinished
+states. Completed OCR includes photos with no recognized text. Saved/web indexing
+is a separate catalog and is not included. The count follows the local scheduler's
+catalog, including Fotoro Trash entries still present in that catalog.
+
+The snapshot reports scheduler activity (not ready, inactive, interacting, waiting
+for idle, running, retry scheduled or idle). These are observed states, not a
+diagnosis: idle does not mean complete and a retry timer does not prove a source
+will become available. The reader shows build and snapshot age without printing
+absolute timestamps. A changed/withdrawn source generation discards all coverage
+from the unfinished read. Counts run off the UI actor in one database read and
+only when explicitly exporting; they are not queried per keystroke or polled.
+Export snapshots do not replace the persisted action history.
+
+The same export includes the cached Sync UI projection (state, reason, account
+state, completed/total/skipped counts and last server-check age when known).
+Exporting does not start Sync, read originals or make network requests. Unknown
+last-check age stays unknown; a freshly exported cached state is not a fresh
+server verification or proof that another device can see a change. Last-check
+age is measured at capture; the reader separately reports the export's age.
+
+Still missing: durable browser session history, a verified historical server
+query path, per-stage last-progress history and stall detection, an end-to-end
+latency distribution, and repeated personal-library retrieval/second-device
+acceptance. No automatic diagnostic upload or alerting is implied by this report.
+
+The remaining acceptance order is: measure current coverage and its waiting
+reasons; verify OCR continues through idle/resume and finishes without starving
+search; score expected results on representative personal searches; verify an
+edit/name/screenshot correction and Trash/Restore on a second device; then measure
+physical launch, scrolling, memory and battery cost. Until those pass, describe
+the product as partially qualified, rather than fully working end to end.
 
 ## What the events establish
 
@@ -77,7 +130,7 @@ actions and requests only. Client reports stay local until the user copies/share
 them; there is no automatic diagnostic upload. Counts and timings are bounded.
 New labels must be closed enums and new fields must pass the privacy tests.
 
-## October 8 released diagnostics
+## Historical evidence: October 8 released diagnostics
 
 PR 49 qualified head `072cfa99d0f864c87cb8ed4132623efcd4274398` completed all
 23 checks (eight success, 15 intentional skips). Guarded merge

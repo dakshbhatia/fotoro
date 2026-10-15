@@ -27,7 +27,9 @@ Cloudflare proposals become tasks here only when a consumer need admits them.
    source/revision/processor-bound stage retry deadlines. Reopening preserves
    completed OCR/classification/vectors; due work resumes through one admitted
    wakeup and model readiness releases only model-deferred vectors. Metadata
-   comes first; heavier preparation starts with 30 days and expands deliberately.
+   comes first; native analysis visits every permitted local photo newest first
+   while the app is active and browsing is idle. Original backup has a separate
+   opt-in date horizon; do not mistake that horizon for local search coverage.
    Opt-in browser vectors and per-photo retry deadlines now reopen from existing
    encrypted storage, bound to current source/digest/processor and account.
    Clear/opt-out removes that evidence. Broader physical acceptance remains open.
@@ -112,9 +114,12 @@ Automatic Picks waits through sync preflight and backup; an explicit Picks reque
 remains available. Already scheduled ciphertext uploads may finish in the background.
 Existing 10-day Sync anchors preserve their journal and exclusions until explicit
 expansion to 30 days. Date and reviewed-People metadata scope heavy processing;
-automatic recent preparation continues when browsing is idle, including due
-source retries. Older query-scoped batches and immediate retry remain explicit
-choices; model readiness cannot bypass unavailable-source deadlines.
+automatic local analysis continues through older and undated permitted photos
+when browsing is idle, including due source retries. This does not expand the
+original-backup horizon. Query-scoped checks and immediate retry remain explicit
+choices; model readiness cannot bypass unavailable-source deadlines. Current
+coverage, retry waits and operational gaps are documented in
+[diagnostics](diagnostics.md); incomplete evidence must remain visible.
 Native API requests normalize URLSession cancellation to cancellation outcomes.
 Pause cancels active foreground transfer work while retaining its durable retry;
 interrupted work does not become a transfer failure solely because it was paused.

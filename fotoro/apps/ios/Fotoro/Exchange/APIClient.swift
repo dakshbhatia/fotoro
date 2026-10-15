@@ -5,7 +5,10 @@ import AuthenticationServices
 enum NativeDiagnosticPhase: String, Codable, Sendable { case app, api, auth, sync, share, consent, picks, albums, search, metadata, people }
 enum NativeDiagnosticOutcome: String, Codable, Sendable { case started, completed, failed, cancelled, changed }
 enum NativeDiagnosticOperation: String, Codable, Sendable { case app, api, auth, sync, share, albums, search, metadata, people, consent, picks }
-enum NativeDiagnosticStep: String, Codable, Sendable { case action, request, response, decode, credential, unlock, catalog, verify, persist, transfer, annotation, scan, prepare, analysis, export, settlePrevious, settleBackup, settleJournal }
+enum NativeDiagnosticStep: String, Codable, Sendable { case action, request, response, decode, credential, unlock, catalog, verify, persist, transfer, annotation, scan, prepare, analysis, export, settlePrevious, settleBackup, settleJournal, snapshot }
+enum NativeAnalysisActivity: String, Codable, Sendable {
+  case notReady, inactive, interacting, waitingForIdle, running, retryScheduled, idle
+}
 enum NativeDiagnosticReason: String, Codable, Sendable {
   case cancelled, contextChanged, inactive, background, recoveryProbe, network, http, decode, validation, unknown
   case signedOut, locked, permissionRequired, paused, offline, retryRequired, waiting, pendingTransfers, unpreparedSources, skippedSources, pendingAnnotations, sourceUnavailable, current
@@ -107,6 +110,14 @@ struct NativeDiagnosticEvent: Codable, Sendable {
   let cacheHits: Int?
   let unavailable: Int?
   let skipped: Int?
+  let total: Int?
+  let failedCount: Int?
+  let deferred: Int?
+  let modelDeferred: Int?
+  let nextRetryMS: Int?
+  let lastCheckedAgeMS: Int?
+  let analysisStage: SearchAnalysisStage?
+  let analysisActivity: NativeAnalysisActivity?
   let currentStep: NativeDiagnosticStep?
   let parentTraceId: UUID?
   let traceId: UUID?
@@ -122,6 +133,9 @@ struct NativeDiagnosticEvent: Codable, Sendable {
     state: ConsumerSyncState? = nil, accountState: NativeDiagnosticAccountState? = nil,
     completed: Int? = nil, pending: Int? = nil, attempted: Int? = nil,
     cacheHits: Int? = nil, unavailable: Int? = nil, skipped: Int? = nil,
+    total: Int? = nil, lastCheckedAt: Date? = nil,
+    coverage: SearchStageCoverage? = nil, analysisActivity: NativeAnalysisActivity? = nil,
+    coverageTime: Date = Date(),
     trace: NativeDiagnosticTrace? = NativeDiagnosticTrace.current,
     step: NativeDiagnosticStep? = nil, reason: NativeDiagnosticReason? = nil) {
     timestamp = Date().timeIntervalSince1970
@@ -134,12 +148,25 @@ struct NativeDiagnosticEvent: Codable, Sendable {
     self.requestId = requestId.flatMap(UUID.init(uuidString:))
     self.state = state
     self.accountState = accountState
-    self.completed = completed.map { max(0, min($0, 1_000_000)) }
-    self.pending = pending.map { max(0, min($0, 1_000_000)) }
+    self.completed = (coverage?.complete ?? completed).map { max(0, min($0, 1_000_000)) }
+    self.pending = (coverage?.pending ?? pending).map { max(0, min($0, 1_000_000)) }
     self.attempted = attempted.map { max(0, min($0, 1_000_000)) }
     self.cacheHits = cacheHits.map { max(0, min($0, 1_000_000)) }
-    self.unavailable = unavailable.map { max(0, min($0, 1_000_000)) }
+    self.unavailable = (coverage?.unavailable ?? unavailable).map { max(0, min($0, 1_000_000)) }
     self.skipped = skipped.map { max(0, min($0, 1_000_000)) }
+    self.total = (coverage?.total ?? total).map { max(0, min($0, 1_000_000)) }
+    failedCount = coverage.map { max(0, min($0.failed, 1_000_000)) }
+    deferred = coverage.map { max(0, min($0.deferred, 1_000_000)) }
+    modelDeferred = coverage.map { max(0, min($0.modelDeferred, 1_000_000)) }
+    nextRetryMS = coverage?.nextRetry.map {
+      let milliseconds = $0.timeIntervalSince(coverageTime) * 1000
+      return Int(max(0, min(milliseconds.isFinite ? milliseconds : 0, 86_400_000)))
+    }
+    lastCheckedAgeMS = lastCheckedAt.map {
+      let milliseconds = coverageTime.timeIntervalSince($0) * 1000
+      return Int(max(0, min(milliseconds.isFinite ? milliseconds : 0, 31_536_000_000)))
+    }
+    analysisStage = coverage?.stage; self.analysisActivity = analysisActivity
     currentStep = trace?.currentStep; parentTraceId = trace?.parentTraceId
     traceId = trace?.id; operation = trace?.operation; self.step = step
     lastCompletedStep = trace?.lastCompletedStep; self.reason = reason
@@ -193,9 +220,9 @@ final class NativeDiagnostics: @unchecked Sendable {
     }
   }
   func flush() { queue.sync { persist() } }
-  func exportJSON() -> Data {
+  func exportJSON(additionalEvents: [NativeDiagnosticEvent] = []) -> Data {
     queue.sync {
-      var safe = events.suffix(160).map { $0.exportSafe() }
+      var safe = (events + additionalEvents).suffix(160).map { $0.exportSafe() }
       let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
       while let data = try? encoder.encode(safe) {
         if data.count <= Self.maximumBytes { return data }
