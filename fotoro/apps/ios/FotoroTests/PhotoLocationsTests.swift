@@ -7,7 +7,7 @@ import XCTest
 final class PhotoLocationsTests: XCTestCase {
   func testOrganizationNamesMatchWebAndTrashRestoresWithoutDestroyingWords() throws {
     let digest = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-    let date = try XCTUnwrap(Wire.parseDate("2018-02-03T23:50:00Z"))
+    let date = try XCTUnwrap(ISO8601DateFormatter().date(from: "2018-02-03T23:50:00Z"))
     XCTAssertEqual(PhotoOrganizationFacts.suggestedName(original: "IMG_0001.JPG", digest: digest,
       capturedAt: date, labels: ["BTS", "Family  trip"], place: "Seoul", screenshot: false), "2018-02-03_Seoul_BTS_Family-trip_0000000000.jpg")
     var facts = try PhotoOrganizationFacts.replacing(["My EXACT words", "fotoro.future.v2:keep"], change: .name("BTS at Grandma’s.jpg"))
