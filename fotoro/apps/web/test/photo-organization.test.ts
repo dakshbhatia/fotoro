@@ -1,3 +1,4 @@
+import {groupPhotoPlaces} from "../src/local/places";
 import {currentSearchRecords} from "../src/library/search";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -95,4 +96,11 @@ test("long Unicode evidence preserves a stable filename identity suffix within f
   assert.equal(validPhotoName(name), true);
   assert.match(name, /_0000000000\.jpg$/);
   assert.ok(new TextEncoder().encode(name).length <= 240);
+});
+
+test("Places excludes Fotoro Trash and restores the same recorded location", () => {
+  const photo = {id: "located", ...original, location: {latitude: 37.5, longitude: 127, source: "photos" as const, name: "Seoul"}};
+  const trashed = withPhotoOrganization(photo, {trash: true});
+  assert.deepEqual(groupPhotoPlaces([trashed]), []);
+  assert.equal(groupPhotoPlaces([withPhotoOrganization(trashed, {trash: false})])[0].visits[0].photos[0].id, photo.id);
 });

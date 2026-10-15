@@ -1383,7 +1383,7 @@ with Restore. Original bytes and user captions remain unchanged. Date/place/tags
 are visible; camera dimensions and provenance sit in Technical details.
 
 Local verification: the full workspace check passed, including 129 API tests and
-788 browser tests with the emitted build/startup budget present. A subsequent
+789 browser tests with the emitted build/startup budget present. A subsequent
 65-test native run passed annotation, search, Info, place and 10,000-record search
 performance coverage. The authenticated native test saves a name, screenshot
 flag and Trash on one client, refreshes another client, restores there, and
@@ -1398,4 +1398,6 @@ release artifact. Physical phone installation, measured battery/frame pacing,
 full-library cleanup quality and accessibility acceptance remain open. This
 cleanup release retains storage and never deletes the device Photos library.
 
-Final organization pass: the final web build and all 788 web tests pass. The 65 affected native tests were rerun after the final filename/export changes and pass with no skips (Xcode result `test_sim_2026-10-15T16-57-11-702Z_pid34826_535a8b74.xcresult`). Browser verification used a disposable account against local D1/R2: upload, explicit BTS tag/name, screenshot classification, cleanup preview, encrypted Save changes, lock/recovery and Fotoro Trash. A delayed main-grid update found during that flow was fixed by overlaying current loaded owner records over the cached metadata projection, with a regression test for immediate Trash and Restore.
+Final organization pass: the final web build and all 789 web tests pass. The 65 affected native tests were rerun after the final filename/export changes and pass with no skips (Xcode result `test_sim_2026-10-15T16-57-11-702Z_pid34826_535a8b74.xcresult`). Browser verification used a disposable account against local D1/R2: upload, explicit BTS tag/name, screenshot classification, cleanup preview, encrypted Save changes, lock/recovery and Fotoro Trash. A delayed main-grid update found during that flow was fixed by overlaying current loaded owner records over the cached metadata projection, with a regression test for immediate Trash and Restore.
+
+The disposable browser flow also verified explicit Restore, encrypted Save changes, a separate Screenshots view showing the BTS-named photo, and exclusion from Places. Cleanup/Trash/Restore screenshots are stored in the local core-simplification artifact directory. Final web suite: 789 passed, zero failed or skipped.
