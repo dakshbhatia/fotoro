@@ -1416,6 +1416,8 @@ not browser frame times, model inference latency or physical-iPhone evidence.
 
 Up to 16 text embeddings are reused within the existing inference session; they
 are never persisted and are zeroed with the image vectors on session clearing.
+Only fully cached, source-current queries bypass the 250 ms inference debounce;
+new phrases or missing/changed vectors retain the delay to avoid inference churn.
 The search UI distinguishes preparation from checking more photos while keeping
 lexical matches usable. Regression coverage holds a later image pending to verify
 early publication, checks bounded text-cache eviction and session clearing, and

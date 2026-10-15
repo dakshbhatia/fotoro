@@ -32,7 +32,7 @@ export function useSemanticFind(photos: LocalPhoto[], base: SearchResult, active
       void engine.search(photos, base.query, valid, scores => {if (valid()) setResult({input, scores, pending: true});})
         .then(visualStatus => {if (valid()) setResult(previous => ({...previous, input, pending: false, visualStatus}));})
         .catch(() => {if (valid()) setResult(previous => ({...previous, input, pending: false, visualStatus: "unavailable"}));});
-    }, 250);
+    }, engine.canSearchCached(photos, base.query) ? 0 : 250);
     return () => {current = false; clearTimeout(timer); engine.cancel();};
   }, [input]);
   return useMemo<SearchResult>(() => {

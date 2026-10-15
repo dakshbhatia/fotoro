@@ -328,13 +328,20 @@ test("repeated phrases reuse bounded session-only text vectors and clearing requ
   const photos = [photo("one")];
   const texts = () => workers.reduce((sum, worker) => sum + worker.messages.filter(message => message.kind === "text").length, 0);
   try {
+    assert.equal(engine.canSearchCached(photos, "city"), false);
     await engine.search(photos, "city", () => true, () => {});
+    assert.equal(engine.canSearchCached(photos, "city"), true, "A fully cached query can skip the cold-inference debounce");
+    assert.equal(engine.canSearchCached(photos, "beach"), false);
+    assert.equal(engine.canSearchCached([{...photos[0], digest: "changed"}], "city"), false);
+    assert.equal(engine.canSearchCached([photo("uncached")], "city"), false);
+    assert.equal(engine.canSearchCached([{...photos[0], current: () => false}], "city"), false);
     await engine.search([{...photos[0], labels: ["new label"]}], "city", () => true, () => {});
     assert.equal(texts(), 1, "A metadata refresh should not re-encode the same phrase");
     for (let index = 0; index < 16; index++) await engine.search(photos, "other scene " + index, () => true, () => {});
     await engine.search(photos, "city", () => true, () => {});
     assert.equal(texts(), 18, "Older phrases must leave the bounded cache");
     engine.clear();
+    assert.equal(engine.canSearchCached(photos, "city"), false);
     await engine.search(photos, "city", () => true, () => {});
     assert.equal(texts(), 19); assert.equal(workers.length, 2);
     assert.equal(workers[0].terminated, true);

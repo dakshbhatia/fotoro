@@ -93,6 +93,14 @@ export class SemanticFindSession {
       }
     }
   }
+  canSearchCached(photos: LocalPhoto[], query: string) {
+    if (!this.textVectors.has(parseNaturalDateQuery(query).text.slice(0, 2048))) return false;
+    const selected = eligibleSemanticPhotos(photos, query);
+    return selected.length > 0 && selected.every(photo => {
+      const cached = this.vectors.get(photo.id), source = photo.file ?? photo.preview ?? photo.previewLoader;
+      return !!cached && (cached.digest ? cached.digest === photo.digest : cached.source.deref() === source);
+    });
+  }
   private request(payload: {kind: "text"; text: string} | {kind: "image"; blob: Blob}) {
     if (!this.worker) {
       const worker = this.createWorker(); this.worker = worker;
