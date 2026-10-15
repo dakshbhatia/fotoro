@@ -95,6 +95,15 @@ enum SearchMetadataIntake {
     #endif
   #endif
   @ObservationIgnored private var queryTask: Task<Void, Never>?
+  @ObservationIgnored private var analysisQueryRefreshTask: Task<Void, Never>?
+  @ObservationIgnored private var analysisQueryRefreshID = UUID()
+  @ObservationIgnored private var analysisRevision: UInt64 = 0
+  @ObservationIgnored private var responseAnalysisRevision: UInt64 = 0
+  #if DEBUG
+    @ObservationIgnored var analysisQueryRefreshDelay: @MainActor () async throws -> Void = {
+      try await Task.sleep(for: .milliseconds(750))
+    }
+  #endif
   @ObservationIgnored private var work = SearchWorkFence()
   @ObservationIgnored private var queryGeneration: UInt64 = 0
   @ObservationIgnored private var priorPermittedResponse: SearchResponse?
@@ -161,6 +170,7 @@ enum SearchMetadataIntake {
     }
     refreshTask?.cancel()
     queryTask?.cancel()
+    cancelAnalysisQueryRefresh()
     imageRequest?.cancel()
     imageRequest = nil
     indexing = false
@@ -562,7 +572,7 @@ enum SearchMetadataIntake {
         try onRecordChanged?(observed, false)
         guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled else { break }
         // Publish OCR/classification without waiting for a cold model download.
-        updateQuery(query)
+        metadataAnalysisDidChange()
         #if !FOTORO_LOCAL_PREVIEW
         // Warm inference uses this derivative. Cold installation cannot hold
         // later photos' OCR/classification or retain a cancelled browse worker.
@@ -605,7 +615,7 @@ enum SearchMetadataIntake {
               }.value
             }
             guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled else { break }
-            updateQuery(query)
+            metadataAnalysisDidChange()
           } else {
             try Task.checkCancellation()
             guard analysisIsCurrent(scope, token: token, explicit: explicit), analysisSourceCurrent(record) else { break }
@@ -763,6 +773,7 @@ enum SearchMetadataIntake {
       priorPermittedResponse = prior
     }
     ready = false
+    cancelAnalysisQueryRefresh()
     queryGeneration &+= 1
     queryTask?.cancel()
     searching = false
@@ -789,7 +800,8 @@ enum SearchMetadataIntake {
     let scope = SearchScope(people: peopleSelection)
     // An older answer may remain visible during enrichment, but only this
     // completed generation can be reused after edits or annotation changes.
-    var next = hasCurrentResponse && response.generation == queryToken && SearchNormalization.text(value) == currentQuery
+    var next = hasCurrentResponse && response.generation == queryToken && responseAnalysisRevision == analysisRevision
+      && SearchNormalization.text(value) == currentQuery
       ? response : try await queryExecutor(index, value, scope, accepted, previous, queryToken)
     #if !FOTORO_LOCAL_PREVIEW
     let phrase = NaturalDateQuery.parse(value).text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -852,7 +864,43 @@ enum SearchMetadataIntake {
     #endif
     return record
   }
+  private func cancelAnalysisQueryRefresh() {
+    analysisQueryRefreshTask?.cancel()
+    analysisQueryRefreshTask = nil
+    analysisQueryRefreshID = UUID()
+  }
+  // Analysis only adds derived evidence. Keep a completed answer visible and
+  // publish bursts together, without starving refreshes during continuous OCR.
+  // Owner edits and permission changes still use the immediate query path.
+  func metadataAnalysisDidChange() {
+    analysisRevision &+= 1
+    guard ready, hasSearch, analysisQueryRefreshTask == nil else { return }
+    let id = UUID(), token = work.generation
+    analysisQueryRefreshID = id
+    analysisQueryRefreshTask = Task { [weak self] in
+      #if DEBUG
+        guard let delay = self?.analysisQueryRefreshDelay else { return }
+      #endif
+      do {
+        #if DEBUG
+          try await delay()
+        #else
+          try await Task.sleep(for: .milliseconds(750))
+        #endif
+        try Task.checkCancellation()
+        // A slow text query is allowed to finish. Repeated OCR checkpoints
+        // cannot cancel it before the first useful response is displayed.
+        await self?.queryTask?.value
+        try Task.checkCancellation()
+        guard let self, ready, token == work.generation,
+          analysisQueryRefreshID == id else { return }
+        analysisQueryRefreshTask = nil
+        if responseAnalysisRevision != analysisRevision { updateQuery(query) }
+      } catch {}
+    }
+  }
   func updateQuery(_ value: String) {
+    cancelAnalysisQueryRefresh()
     let normalized = SearchNormalization.text(value)
     let changed = normalized != SearchNormalization.text(query)
     if changed, ready, indexing, !automaticAnalysisRunning { pause() }
@@ -884,6 +932,7 @@ enum SearchMetadataIntake {
     guard ready, let index else { searching = false; return }
     searching = true
     let accepted = acceptedMeaningID
+    let analysisAtStart = analysisRevision
     let execute = queryExecutor
     let scope = SearchScope(people: peopleSelection)
     queryTask = Task {
@@ -895,6 +944,7 @@ enum SearchMetadataIntake {
         guard generation == queryGeneration, !Task.isCancelled else { return }
         if accepted != nil, next.meaning?.id != accepted { acceptedMeaningID = nil }
         response = next
+        responseAnalysisRevision = analysisAtStart
         displayedID = next.leading?.id
         priorPermittedResponse = nil
         searching = false
