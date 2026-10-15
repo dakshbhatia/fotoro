@@ -42,8 +42,8 @@ export function PhotoCleanup({photos, resources, onTrash, canTrash, onOpen, chan
     return () => {alive = false; analyzer.clear();};
   }, [analyzer, scan]);
   const rows = photos.filter(photo => photo.current?.() !== false && !isPhotoTrashed(photo) && result?.reasons.has(photo.id));
-  return <aside className="settings-panel photo-cleanup" ref={panel} role="dialog" aria-modal="true" aria-label="Review cleanup" tabIndex={-1}>
-    <header><h2>Review cleanup</h2><button onClick={onClose}>Done</button></header>
+  return <aside className="sheet places-sheet photo-cleanup" ref={panel} role="dialog" aria-modal="true" aria-label="Review cleanup" tabIndex={-1}>
+    <header className="places-header"><h2>Review cleanup</h2><button onClick={onClose}>Done</button></header>
     <p>Review possible duplicates, blurry shots, and photos with little detail. Nothing is selected or removed automatically.</p>
     <p className="hint">This review covers up to 200 currently loaded photos. Trash is recoverable and only affects Fotoro; it does not free storage.</p>
     {busy ? <p role="status">Checking previews… {done} / {scan.length}</p> : <p role="status">{rows.length} to review · {result?.unassessed ?? scan.length} previews unassessed.</p>}
