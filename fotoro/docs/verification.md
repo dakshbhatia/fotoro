@@ -1521,3 +1521,21 @@ for loaded and recent photos; a separate correction signal invalidates them and
 coalesces a hydration batch into one deferred Picks restart. OCR/query publication
 does not trigger that restart. Pending Picks also respects screenshot eligibility.
 No original or Photos-library metadata is changed.
+
+Final local verification: workspace `pnpm check` passes core/crypto/contracts,
+release/preview audits and 129 API tests. The subsequent final web build and all
+801 browser tests pass with no skips; static startup JavaScript is 481,720 bytes
+across two chunks, below the existing 500 KiB ceiling. The actual pinned TinyCLIP
+public-image inference smoke passes. Full-app Simulator verification passes
+744 tests with zero failures and three existing/opt-in skips
+(`test_sim_2026-10-15T20-25-34-616Z_pid34826_005fe0b3.xcresult`); the isolated
+local-preview scheme passes 191 with zero failures and three skips
+(`test_sim_2026-10-15T20-27-55-272Z_pid34826_fd75b0f0.xcresult`).
+Controlled regressions cover continuous analysis bursts, slow first queries,
+owner edits during local validation and Saved reads, and correction changes while
+Picks is pending. A real browser using a fresh public encrypted fixture verifies
+filename search, a decrypted preview, stale-result clearing and usable Back return
+without console warnings/errors. Runtime fixture files and screenshots stay outside
+the repository. This does not qualify a new phone build, complete the private OCR
+backlog, or measure physical frame pacing, battery, large-library ranking accuracy
+or background iCloud behavior. Distribution is a separate gate.
