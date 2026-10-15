@@ -103,19 +103,7 @@ enum SearchMetadataIntake {
   @ObservationIgnored private let processor = VisionTextProcessor()
   @ObservationIgnored private var imageRequest: SearchImageRequest?
   @ObservationIgnored private var queryExecutor: QueryExecutor = { index, value, scope, accepted, previous, generation in
-    try Task.checkCancellation()
-    let lexical = try await Task.detached(priority: .userInitiated) {
-      try index.search(value, scope: scope, acceptedMeaningID: accepted, previous: previous, generation: generation)
-    }.value
-    #if FOTORO_LOCAL_PREVIEW
-      return lexical
-    #else
-    let phrase = NaturalDateQuery.parse(value).text.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard accepted == nil, lexical.permitsSemanticMatches, phrase.count >= 3,
-      let vector = try? await PhotoSemanticProcessor.shared.textIfReady(phrase) else { return lexical }
-    try Task.checkCancellation()
-    return try await Task.detached(priority: .userInitiated) { try index.addingSemantic(vector, to: lexical) }.value
-    #endif
+    try await index.searchAsync(value, scope: scope, acceptedMeaningID: accepted, previous: previous, generation: generation)
   }
 
   static func defaultIndexRoot(in directory: URL) -> URL {
@@ -262,17 +250,17 @@ enum SearchMetadataIntake {
             if semanticRetryRequested { scheduleAutomaticAnalysis() }
           #endif
           if !Task.isCancelled, !automaticAnalysisRestartRequested {
-            scheduleAutomaticRetry(scope: automaticAnalysisScope ?? PhotoAnalysisScope(), token: token)
+            scheduleAutomaticRetry(scope: automaticAnalysisScope ?? PhotoAnalysisScope(includesOlder: true), token: token)
           }
         }
       }
       guard !Task.isCancelled, automaticAnalysisID == id, automaticAnalysisAdmitted,
         ready, token == work.generation else { return }
       indexing = true
-      // Background preparation owns a recent-photo scope, independent of the
-      // current query. Continue after attempted sources so unavailable previews
-      // cannot spin or starve the next bounded batch.
-      let scope = automaticAnalysisScope ?? PhotoAnalysisScope()
+      // Search covers every permitted photo. Prepare newest first, then continue
+      // into older and undated sources in bounded batches while the home is idle.
+      // A query cannot filter out photos whose text has not yet been read.
+      let scope = automaticAnalysisScope ?? PhotoAnalysisScope(includesOlder: true)
       automaticAnalysisScope = scope
       var after = automaticAnalysisCursor
       #if !FOTORO_LOCAL_PREVIEW
@@ -789,27 +777,70 @@ enum SearchMetadataIntake {
     updateQuery(query)
   }
   // Uses the same ranking and accepted meaning without recording a new choice or query history.
-  func consumerResults(_ value: String) async throws -> [SearchHit] {
+  func consumerResults(_ value: String, includeVisual: Bool = true) async throws -> [SearchHit] {
     try Task.checkCancellation()
     guard ready, let index else { return [] }
     let token = work.generation
     let library = libraryGeneration
     let queryToken = queryGeneration
+    let currentQuery = SearchNormalization.text(query)
     let previous = response
     let accepted = acceptedMeaningID
     let scope = SearchScope(people: peopleSelection)
-    let next = try await queryExecutor(index, value, scope, accepted, previous, queryToken)
+    // An older answer may remain visible during enrichment, but only this
+    // completed generation can be reused after edits or annotation changes.
+    var next = hasCurrentResponse && response.generation == queryToken && SearchNormalization.text(value) == currentQuery
+      ? response : try await queryExecutor(index, value, scope, accepted, previous, queryToken)
+    #if !FOTORO_LOCAL_PREVIEW
+    let phrase = NaturalDateQuery.parse(value).text.trimmingCharacters(in: .whitespacesAndNewlines)
+    if includeVisual, accepted == nil, next.permitsSemanticMatches, phrase.count >= 3,
+      let vector = try? await PhotoSemanticProcessor.shared.textIfReady(phrase) {
+      try Task.checkCancellation()
+      let base = next
+      let worker = Task.detached(priority: .userInitiated) {
+        try Task.checkCancellation()
+        return try index.addingSemantic(vector, to: base)
+      }
+      next = try await withTaskCancellationHandler { try await worker.value }
+        onCancel: { worker.cancel() }
+    }
+    #endif
     try Task.checkCancellation()
     guard ready, token == work.generation, library == libraryGeneration else { return [] }
-    guard queryToken == queryGeneration else { throw CancellationError() }
+    guard currentQuery == SearchNormalization.text(query), accepted == acceptedMeaningID,
+      scope.people == peopleSelection else { throw CancellationError() }
+    let permitted = try await consumerRecords(next.results.flatMap { [$0.id] + $0.children })
+    try Task.checkCancellation()
+    guard currentQuery == SearchNormalization.text(query), accepted == acceptedMeaningID,
+      scope.people == peopleSelection else { throw CancellationError() }
     return next.results.compactMap { hit in
-      let current = ([hit.id] + hit.children).filter { (try? consumerRecord($0)) != nil }
+      let current = ([hit.id] + hit.children).filter { permitted[$0] != nil }
       guard let first = current.first else { return nil }
       var permitted = hit
       permitted.id = first
       permitted.children = Array(current.dropFirst())
       return permitted
     }
+  }
+  func consumerRecords(_ ids: [String]) async throws -> [String: SearchRecord] {
+    guard ready, let index else { return [:] }
+    let token = work.generation, library = libraryGeneration, people = peopleSelection
+    let worker = Task.detached(priority: .userInitiated) { try index.records(ids) }
+    let records = try await withTaskCancellationHandler { try await worker.value }
+      onCancel: { worker.cancel() }
+    try Task.checkCancellation()
+    guard ready, token == work.generation, library == libraryGeneration, people == peopleSelection else {
+      throw CancellationError()
+    }
+    #if !FOTORO_LOCAL_PREVIEW
+    if !people.isEmpty {
+      return records.filter { _, record in
+        !PhotoOrganizationFacts.trashed(record.facts) && canEditPeoplePhoto(record.id, revision: record.revision)
+          && people.matches(Set(PhotoPeopleFacts.read(record.facts, enforceWireLimits: false).map(\.p)))
+      }
+    }
+    #endif
+    return records.filter { !PhotoOrganizationFacts.trashed($0.value.facts) }
   }
   func consumerRecord(_ id: String) throws -> SearchRecord? {
     guard ready, let record = try index?.record(id) else { return nil }
@@ -856,6 +887,7 @@ enum SearchMetadataIntake {
     let execute = queryExecutor
     let scope = SearchScope(people: peopleSelection)
     queryTask = Task {
+      let started = ProcessInfo.processInfo.systemUptime
       do {
         try Task.checkCancellation()
         guard generation == queryGeneration else { return }
@@ -868,7 +900,9 @@ enum SearchMetadataIntake {
         searching = false
         #if !FOTORO_LOCAL_PREVIEW
         NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .search, outcome: .completed,
-          completed: next.results.count, trace: NativeDiagnosticTrace(.search), step: .catalog))
+          elapsed: ProcessInfo.processInfo.systemUptime - started,
+          completed: next.results.count, pending: max(0, next.total - next.indexed),
+          trace: NativeDiagnosticTrace(.search), step: .catalog))
         #endif
       } catch {
         guard generation == queryGeneration, !Task.isCancelled else { return }

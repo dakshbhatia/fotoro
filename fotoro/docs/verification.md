@@ -1424,3 +1424,54 @@ early publication, checks bounded text-cache eviction and session clearing, and
 retains cancellation, lock, source-withdrawal, exact-identifier and failure tests.
 The actual pinned-model public Singapore smoke case also passes. This change
 does not alter native app inputs, account upload consent or sync Pause.
+
+## Native search against the connected phone (October 15, 2026)
+
+A reported text search failed on the installed build 77 despite existing OCR
+matches. Authorized diagnostics recorded cancelled searches around 30 seconds.
+An all-processes physical-phone capture was symbolicated with build 77's dSYM;
+search SQL accounted for most sampled Fotoro CPU. The trace also has device
+symbol-overlap warnings, so it does not establish first-paint or launch latency.
+Private index copies and recordings remain outside the repository.
+
+The copied library exposed a source-first SQLite plan: every permitted record
+was joined against the typed prefix range before evidence grouping. Prefix-first
+indexed joins avoid that multiplication without changing eligibility, ranking or
+the six-meaning/200-candidate bounds. The live query uses GRDB's cancellable async
+read, which interrupts obsolete SQL and resets the connection before subsequent
+queries or analysis writes. A controlled running-query cancellation test verifies
+that both a successor search and later writes remain usable.
+
+Native presentation publishes existing filename, tag, metadata and OCR matches
+before optional visual inference, reuses the completed local response and validates
+records in bounded background batches. Visual failure cannot erase a completed
+text response. Search shows OCR coverage and distinguishes visual checking.
+Automatic local analysis now traverses newest, older and undated permitted photos
+in batches of at most 500, retaining idle/foreground/scroll cancellation and durable
+retry behavior. Saved automatic visual analysis retains its existing recent scope.
+
+On the authorized 21k-record index copy, final simulator retrieval measured about
+41 ms median and 42 ms p90 over ten full-word text queries. Prefix retrieval took
+124 ms for one character, 38 ms for two, 27 ms for three and 37 ms for the complete
+word. This excludes PhotoKit image loading, UI rendering, first-time inference and
+physical-phone performance after the repair. The original join exceeded a 3-second
+local SQL timeout for the first character; its replacement completed that isolated
+SQL step in about 166 ms. These different checks are not a paired app speedup claim.
+
+Final full-app verification passed 731 tests with zero failures and the two existing
+PhotoKit/Vision simulator skips (`test_sim_2026-10-15T19-36-32-365Z_pid34826_b74f2c0a.xcresult`).
+The cancelled-query test also verifies later analysis writes. Broad-prefix stress
+uses 10,000 synthetic photos across 1,500 meanings without SQLite statistics.
+An earlier run exposed an extra cancellation check in the synchronous test path;
+it was removed while retaining GRDB cancellation on the live async path, and the
+complete suite passed again. Build 78's archive and distribution-signed IPA passed
+the production identity, dSYM, static crypto and encryption audits. Upload,
+processing, internal availability and a physical-phone rerun are separate gates.
+
+The subsequent cache review reproduced a removed tag reappearing from a completed
+response while its replacement query was pending. Reuse now requires the exact
+completed query generation; bulk result validation also excludes current Trash
+facts. The new failing regression passed after the guard, together with all 168
+affected search, date, semantic and consumer tests. Build 78 contains the primary
+latency repair; build 79 additionally carries this cache freshness correction.
+The original installed phone remained on build 77 at the last device readback.

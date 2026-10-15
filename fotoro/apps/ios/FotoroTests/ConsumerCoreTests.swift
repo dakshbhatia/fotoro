@@ -381,6 +381,27 @@ final class ConsumerCoreTests: XCTestCase {
     }
   }
 
+  @MainActor func testTextSearchCompletesWithoutEnteringSavedVisualEncoder() async throws {
+    try await withSavedLibrary { services, _ in
+      var photo = try self.samplePhoto()
+      photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+      try services.store.put(photo); try services.reload()
+      var encodingCalls = 0
+      services.savedVisualQueryEmbedding = { _ in
+        encodingCalls += 1
+        XCTFail("Text retrieval must not enter optional visual inference")
+        return nil
+      }
+      defer { services.savedVisualQueryEmbedding = nil }
+      let index = try SearchIndex()
+      var record = SearchRecord(id: "screenshot")
+      record.ocrText = "Alfred project notes"; record.ocrStatus = .complete; record.ocrConfidence = 0.95
+      try index.replacePermitted([record])
+      let hits = try await services.consumerSearch("alfred", local: LocalSearchStore(index: index), includeVisual: false)
+      XCTAssertEqual(hits.map(\.photo), [.device(record.id)])
+      XCTAssertEqual(encodingCalls, 0)
+    }
+  }
   @MainActor func testSavedVisualQueryRejectsWithdrawalWhileEncodingIncludingUnavailableModel() async throws {
     for change in ["origin", "metadata", "lock", "cancel", "metadata-without-vector"] {
       try await withSavedLibrary { services, _ in

@@ -66,6 +66,11 @@ private struct SearchAnalysisActions: View {
   let search: LocalSearchStore
   var body: some View {
     if search.hasSearch || search.analysisRemaining > 0 || search.analysisUnavailable > 0 {
+      if search.hasCurrentResponse, search.response.total > 0 {
+        Text("Text checked in \(search.response.indexed) of \(search.response.total) photos on this device")
+          .font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+          .accessibilityIdentifier("search.coverage")
+      }
       DisclosureGroup("Photo analysis") {
         VStack(alignment: .leading, spacing: 6) {
           if search.analysisRemaining > 0 {
@@ -91,13 +96,14 @@ private struct SearchAnalysisActions: View {
 private struct SearchEmptyResults: View {
   let search: LocalSearchStore
   var searchPending = false
+  var visualPending = false
   var finished = true
   var reviewing = false
   var failure: String?
   var retry: (() -> Void)?
   var body: some View {
-    if searchPending || search.searching || search.indexing {
-      SearchProgressFeedback(search: search, searchPending: searchPending)
+    if searchPending || search.searching || visualPending || (search.indexing && !search.hasCurrentResponse) {
+      SearchProgressFeedback(search: search, searchPending: searchPending, visualPending: visualPending)
         .frame(maxWidth: .infinity).padding(.vertical, 40)
     } else if let failure = failure ?? search.error {
       ContentUnavailableView {
@@ -121,9 +127,10 @@ private struct SearchEmptyResults: View {
 private struct SearchProgressFeedback: View {
   let search: LocalSearchStore
   var searchPending = false
+  var visualPending = false
   var body: some View {
     VStack(alignment: .leading, spacing: 6) {
-      ProgressView(searchPending || search.searching ? "Searching photos…" : "Preparing photo search…")
+      ProgressView(searchPending || search.searching ? "Searching photos…" : visualPending ? "Checking visual matches…" : "Preparing photo search…")
       if search.indexing, let progress = search.analysisProgress {
         Text("\(progress.processed) of \(progress.total) photos attempted")
       }
@@ -165,6 +172,7 @@ struct ConsumerSearchResultsView: View {
   let search: LocalSearchStore
   let photos: RecentPhotosStore
   var searchPending: Bool = false
+  var visualPending: Bool = false
   var searchFailure: String?
   var searchFinished = true
   var retrySearch: (() -> Void)?
@@ -190,7 +198,7 @@ struct ConsumerSearchResultsView: View {
       }
       SearchAlternatives(search: search, selected: choseAlternative)
       if matches.isEmpty {
-        SearchEmptyResults(search: search, searchPending: searchPending, finished: searchFinished, reviewing: review != nil, failure: searchFailure, retry: retrySearch)
+        SearchEmptyResults(search: search, searchPending: searchPending, visualPending: visualPending, finished: searchFinished, reviewing: review != nil, failure: searchFailure, retry: retrySearch)
       } else {
         if let selectResults {
           Button("Select results", systemImage: "checkmark.circle", action: selectResults)
@@ -207,8 +215,8 @@ struct ConsumerSearchResultsView: View {
         }
       }
       SearchAnalysisActions(search: search)
-      if !matches.isEmpty, searchPending || search.searching || search.indexing {
-        SearchProgressFeedback(search: search, searchPending: searchPending).padding(.horizontal)
+      if !matches.isEmpty, searchPending || search.searching || search.indexing || visualPending {
+        SearchProgressFeedback(search: search, searchPending: searchPending, visualPending: visualPending).padding(.horizontal)
       }
       if !matches.isEmpty, let error = search.error {
         DisclosureGroup("Details") { Text(error).textSelection(.enabled) }.font(.caption).padding(.horizontal)
