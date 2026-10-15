@@ -563,6 +563,8 @@ summary {
 .local-details { max-height: calc(100dvh - 220px); overflow: auto; min-width: min(320px,calc(100vw - 48px)); }
 .local-details input { width: 100%; color: #111; }
 .local-labels { display: flex; flex-wrap: wrap; gap: 4px; }
+.local-labels > span { display: inline-flex; align-items: center; gap: 4px; padding-left: 12px; border: 1px solid var(--photo-border, #666); border-radius: 22px; overflow-wrap: anywhere; }
+.local-labels > span > button { min-width: 44px; min-height: 44px; margin: 0; padding: 8px; }
 .local-details .local-labels button { border: 1px solid #666; border-radius: 18px; overflow-wrap: anywhere; }
 .local-label-form label { margin: 12px 0 8px; }
 .local-label-form > button { border: 1px solid #666; }
@@ -609,7 +611,8 @@ h1 { font-size: 32px; letter-spacing: -1.3px; font-weight: 650; }
 .local-search { flex: 1; min-height: 0; height: auto; width: 100%; max-width: 1100px; padding: 0 32px calc(154px + env(safe-area-inset-bottom)); --local-preview-height: clamp(96px,calc(100dvh - 335px - env(safe-area-inset-top) - env(safe-area-inset-bottom)),800px); }
 .search-caption { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 8px; }
 .search-caption .local-coverage { margin: 0; font-size: 13px; color: #686f62; }
-.search-caption button { width: 44px; padding: 11px; margin-left: auto; }
+.search-caption button { min-width: 44px; padding: 11px; }
+.search-caption .text-button { width: 44px; margin-left: auto; }
 .local-leading { height: auto; min-height: 96px; border-radius: 18px; background: #eeefe9; }
 .local-leading:hover:not(:disabled) { background: #eeefe9; }
 .local-leading img { height: auto; max-height: var(--local-preview-height); width: 100%; object-fit: contain; }
@@ -1076,3 +1079,10 @@ main:has(.consumer-selection) .local-search { padding-bottom: calc(max(140px, va
 @media (prefers-reduced-motion: reduce) {
   button, .viewer img { transition: none; }
 }
+
+.photo-organization form { display: grid; gap: .65rem; }
+.photo-organization input { max-width: 100%; }
+.photo-cleanup ul { list-style: none; padding: 0; }
+.photo-cleanup li { padding: 1rem 0; border-bottom: 1px solid var(--line, #8884); }
+.photo-cleanup li > button:first-child { display: flex; align-items: center; gap: .75rem; text-align: left; max-width: 100%; overflow-wrap: anywhere; }
+.photo-cleanup li img { width: 5rem; height: 5rem; object-fit: contain; }

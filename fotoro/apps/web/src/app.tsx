@@ -120,6 +120,7 @@ export default function App() {
           active={!cloud}
           onPhotosChange={setLocalPhotos}
           ownedPhotos={ownedPhotos}
+          photoChanges={photoChanges?.current() ? photoChanges : undefined}
           onOpenSaved={photoId => {
             photoOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
             setSavedViewer(photoId);
@@ -188,7 +189,7 @@ export default function App() {
           </Suspense>
         </div>
       )}
-      {viewingSaved && ownedPhotos && savedViewer && <Suspense fallback={<div className="viewer" role="dialog" aria-modal="true" aria-label="Opening photo"><header className="viewer-top glass"><p className="hint" role="status">Opening photo…</p><button autoFocus onClick={closeSavedPhoto}>Close</button></header></div>}><SavedViewer key={savedViewer} photos={ownedPhotos.photos} initial={savedViewer} onSaved={() => {}} changes={photoChanges?.token === ownedPhotos.token && photoChanges.current() ? {...photoChanges, review: () => {setSavedViewer(null); setOpened(true); setCloud(true); photoChanges.review();}} : undefined} onLabels={ownedPhotos.edit ? (photo, labels) => {
+      {viewingSaved && ownedPhotos && savedViewer && <Suspense fallback={<div className="viewer" role="dialog" aria-modal="true" aria-label="Opening photo"><header className="viewer-top glass"><p className="hint" role="status">Opening photo…</p><button autoFocus onClick={closeSavedPhoto}>Close</button></header></div>}><SavedViewer key={savedViewer} photos={ownedPhotos.photos} initial={savedViewer} onSaved={() => {}} changes={photoChanges?.token === ownedPhotos.token && photoChanges.current() ? {...photoChanges, review: () => {setSavedViewer(null); setOpened(true); setCloud(true); photoChanges.review();}} : undefined} onOrganization={ownedPhotos.edit ? (photo, organization) => ownedPhotos.edit!(photo, {organization}) : undefined} onLabels={ownedPhotos.edit ? (photo, labels) => {
         if (!ownedPhotos.current() || !ownedPhotos.photos.includes(photo) || photo.grantId || photo.manifest.ownerAccountId !== ownedPhotos.accountId) return;
         return ownedPhotos.edit?.(photo, {labels});
       } : undefined} onFavorite={ownedPhotos.edit ? (photo, favorite) => {

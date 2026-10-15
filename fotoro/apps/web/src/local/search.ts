@@ -1,3 +1,4 @@
+import {photoName, isPhotoScreenshot, organizationFactCategory} from "@fotoro/contracts/organization";
 import {parseNaturalDateQuery} from "./natural-date";
 import type {PhotoVisualV1, PhotoLocationV1} from "@fotoro/contracts";
 import {validatedVisualLabels} from "@fotoro/contracts/visual";
@@ -144,7 +145,8 @@ export class PhotoSearchIndex {
         add(keyword, "keyword", photo.id);
         for (const word of words(keyword)) add(word, "keyword", photo.id);
       }
-      for (const fact of photo.facts ?? []) if (!isLocationFact(fact) && !isCloudObservationFact(fact) && !isPeopleFact(fact) && !isCaptureMetadataFact(fact)) { add(fact, "fact", photo.id); phraseSource(fact, "fact", photo.id); }
+      if (isPhotoScreenshot(photo)) add("Screenshot", "fact", photo.id);
+      for (const fact of photo.facts ?? []) if (!(fact === "screenshot" && !isPhotoScreenshot(photo)) && !organizationFactCategory(fact) && !isLocationFact(fact) && !isCloudObservationFact(fact) && !isPeopleFact(fact) && !isCaptureMetadataFact(fact)) { add(fact, "fact", photo.id); phraseSource(fact, "fact", photo.id); }
       for (const term of captureMetadataSearchText(photo, photo.digest ?? "")) {
         add(term, "fact", photo.id); phraseSource(term, "fact", photo.id);
         for (const word of words(term)) add(word, "fact", photo.id);
@@ -163,9 +165,9 @@ export class PhotoSearchIndex {
         if (location.name) {add(location.name, "fact", photo.id); phraseSource(location.name, "fact", photo.id); for (const word of words(location.name)) add(word, "fact", photo.id);}
       }
       phraseSource(photo.caption ?? "", "caption", photo.id);
-      phraseSource(photo.filename.replace(/\.[^.]+$/, ""), "filename", photo.id);
+      phraseSource(photoName(photo, photo.filename).replace(/\.[^.]+$/, ""), "filename", photo.id);
       for (const word of words(photo.caption ?? "")) if (!noise.test(word)) add(word, "caption", photo.id);
-      for (const word of words(photo.filename.replace(/\.[^.]+$/, ""))) {
+      for (const word of words(photoName(photo, photo.filename).replace(/\.[^.]+$/, ""))) {
         if (word.length >= 2 && /\p{L}/u.test(word) && !noise.test(word)) add(word, "filename", photo.id);
       }
       const ocr = photo.ocr;
@@ -249,7 +251,7 @@ export class PhotoSearchIndex {
     const derived = /^(?:date|text|label):/.test(baseMeaning) ? this.search(baseMeaning.slice(baseMeaning.indexOf(":") + 1), { now, scope, committedMeaning: baseMeaning }).meaning : undefined;
     const supported = (dated && baseMeaning === "date") || this.dictionary.some(term => term.id === baseMeaning && term.sources.has(id)) ||
       (derived?.id === baseMeaning && derived.photoIds.includes(id)) ||
-      (baseMeaning.startsWith("file:") && normalizeSearch(photo?.filename ?? "") === baseMeaning.slice(5));
+      (baseMeaning.startsWith("file:") && normalizeSearch(photo ? photoName(photo, photo.filename) : "") === baseMeaning.slice(5));
     if (!supported) return;
     const key = meaningKey(scope, meaning);
     this.record(this.history.photos, photoKey(key, id), session, now);
@@ -356,9 +358,9 @@ export class PhotoSearchIndex {
     if (/[._-]|\d/.test(prefix)) {
       for (const photo of this.records.values()) {
         yield; if (!eligible(photo.id)) continue;
-        const filename = normalizeSearch(photo.filename), stem = filename.replace(/\.[^.]+$/, "");
+        const filename = normalizeSearch(photoName(photo, photo.filename)), stem = filename.replace(/\.[^.]+$/, "");
         if (filename.startsWith(prefix) || stem === prefix || (/^\d+$/.test(prefix) && words(stem).includes(prefix))) {
-          include("file:" + filename, photo.filename, photo.id, "filename");
+          include("file:" + filename, photoName(photo, photo.filename), photo.id, "filename");
         }
       }
     }

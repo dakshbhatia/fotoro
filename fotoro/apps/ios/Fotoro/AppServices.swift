@@ -516,7 +516,7 @@ enum ReviewedPhotosBackupPolicy {
       let directory = FileManager.default.temporaryDirectory.appendingPathComponent("fotoro-share-" + Wire.id())
       do {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.protectionKey: FileProtectionType.complete])
-        let component = URL(fileURLWithPath: current.metadata.filename).lastPathComponent
+        let component = URL(fileURLWithPath: PhotoOrganizationFacts.name(annotation(current).facts, original: current.metadata.filename)).lastPathComponent
         let filename = ["", ".", "..", "/"].contains(component) ? "photo." + PhotoImport.originalExtension(for: current.metadata.mediaType) : component
         let output = directory.appendingPathComponent(filename)
         try bytes.write(to: output, options: [.atomic, .completeFileProtection])
@@ -1957,6 +1957,16 @@ enum ReviewedPhotosBackupPolicy {
   }
   func bindLocalSearch(_ search: LocalSearchStore) {
     localSearch = search
+    search.onOrganizationChanged = { [weak self] record, change in
+      guard let self, self.vault.isUnlocked,
+        let source = try self.store.backupSourceIfPresent(id: record.id),
+        AnnotationSourceBinding.accepts(sourceRevision: source.sourceRevision, recordRevision: record.revision),
+        let photo = try self.store.backupPhoto(source.photoId), source.originalSha256 == photo.metadata.originalSha256 else {
+        if case .trash = change { throw FotoroError("Save this photo to Fotoro first") }
+        return
+      }
+      try self.setOrganization(change, photo: photo)
+    }
     search.onRecordChanged = { [weak self] record, labelsChanged in
       guard let self else { return }
       let derivedOnly = self.automaticSyncPreference.enabled && !labelsChanged
@@ -1991,6 +2001,19 @@ enum ReviewedPhotosBackupPolicy {
       let bundle = try? vault.requireBundle(),
       let current = try? annotations.ledger.current(photo: photo, bundle: bundle, card: card) { return current }
     return PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+  }
+  func setOrganization(_ change: PhotoOrganizationChange, photo: LocalPhoto) throws {
+    guard let account = session.accountId, photo.manifest.ownerAccountId == account,
+      let current = try consumerSavedPhoto(photo.id), current.metadata == photo.metadata,
+      current.manifest == photo.manifest else { throw FotoroError("Photo source changed") }
+    let bundle = try vault.requireBundle(), card = try session.requireCard(account)
+    var value = try annotations.ledger.current(photo: photo, bundle: bundle, card: card) ?? PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+    if case .name(let name) = change, let name,
+      (name as NSString).pathExtension.lowercased() != (photo.metadata.filename as NSString).pathExtension.lowercased() { throw PhotoOrganizationError.invalid }
+    value.facts = try PhotoOrganizationFacts.replacing(value.facts, change: change)
+    try annotations.ledger.edit(value, photo: photo, bundle: bundle, card: card)
+    try reloadAnnotations()
+    try hydrateLocalAnnotations()
   }
   func setLabels(_ labels: [String], photo: LocalPhoto) throws {
     guard let account = session.accountId else { throw FotoroError("Sign in first") }
@@ -2035,11 +2058,12 @@ enum ReviewedPhotosBackupPolicy {
               parsed.scope.until.map({ date < $0 }) ?? true else { continue }
           }
           let value = try ledger.current(photo: photo, bundle: bundle, card: card)
+          guard !PhotoOrganizationFacts.trashed(value?.facts) else { continue }
           let confirmed = PhotoPeopleFacts.read(value?.facts ?? [], originalSha256: photo.metadata.originalSha256)
           guard people.matches(Set(confirmed.map(\.p))) else { continue }
           let scenes = SearchVisualPolicy.validated(value?.visual).map(\.label)
           let captureTerms = PhotoCaptureFacts.read(value?.facts, originalSha256: photo.metadata.originalSha256)?.searchText ?? ""
-          let terms = [captureTerms, photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + PhotoLocationFacts.userFacts(value?.facts).filter { !PhotoPeopleFacts.isReserved($0) && !$0.hasPrefix("fotoro.ai.v1:") && !PhotoCaptureFacts.isReserved($0) } + confirmed.map(\.n) + (value?.location?.searchTerms ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""]
+          let terms = [captureTerms, PhotoOrganizationFacts.name(value?.facts, original: photo.metadata.filename)] + (value?.labels ?? []) + (value?.keywords ?? []) + PhotoLocationFacts.userFacts(value?.facts).filter { !PhotoPeopleFacts.isReserved($0) && !$0.hasPrefix("fotoro.ai.v1:") && !PhotoCaptureFacts.isReserved($0) && PhotoOrganizationFacts.category($0) == nil } + confirmed.map(\.n) + (value?.location?.searchTerms ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""]
           if evidenceQuery.matches(terms: terms, scenes: scenes) { matches.append(photo) }
         }
         guard page.count == 1000, let last = page.last else { break }
@@ -2059,10 +2083,11 @@ enum ReviewedPhotosBackupPolicy {
     return result
   }
   func matches(_ photo: LocalPhoto, query: String) -> Bool {
-    guard !query.isEmpty else { return true }
     let value = photoAnnotations[photo.id]
+    guard !PhotoOrganizationFacts.trashed(value?.facts) else { return false }
+    guard !query.isEmpty else { return true }
     return PhotoEvidenceQuery(query).matches(
-      terms: [PhotoCaptureFacts.read(value?.facts, originalSha256: photo.metadata.originalSha256)?.searchText ?? "", photo.metadata.filename] + (value?.labels ?? []) + (value?.keywords ?? []) + PhotoLocationFacts.userFacts(value?.facts).filter { !PhotoPeopleFacts.isReserved($0) && !$0.hasPrefix("fotoro.ai.v1:") && !PhotoCaptureFacts.isReserved($0) } + PhotoPeopleFacts.read(value?.facts ?? [], originalSha256: photo.metadata.originalSha256).map(\.n) + (value?.location?.searchTerms ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""],
+      terms: [PhotoCaptureFacts.read(value?.facts, originalSha256: photo.metadata.originalSha256)?.searchText ?? "", PhotoOrganizationFacts.name(value?.facts, original: photo.metadata.filename)] + (value?.labels ?? []) + (value?.keywords ?? []) + PhotoLocationFacts.userFacts(value?.facts).filter { !PhotoPeopleFacts.isReserved($0) && !$0.hasPrefix("fotoro.ai.v1:") && !PhotoCaptureFacts.isReserved($0) && PhotoOrganizationFacts.category($0) == nil } + PhotoPeopleFacts.read(value?.facts ?? [], originalSha256: photo.metadata.originalSha256).map(\.n) + (value?.location?.searchTerms ?? []) + [value?.caption ?? "", value?.ocr?.text ?? ""],
       scenes: SearchVisualPolicy.validated(value?.visual).map(\.label))
   }
   private func automaticDerivedSourceCurrent(_ source: BackupSource) -> Bool {

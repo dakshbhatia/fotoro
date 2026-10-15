@@ -185,7 +185,7 @@ struct PhotoViewer: View {
           services.session.accountId == account, services.store === catalog,
           let current = try services.consumerSavedPhoto(photo.id),
           current.metadata == photo.metadata, current.manifest == photo.manifest else { throw CancellationError() }
-        let urls = try await CameraMedia.exportOriginalFile(url, metadata: photo.metadata)
+        let urls = try await CameraMedia.exportOriginalFile(url, metadata: photo.metadata, name: PhotoOrganizationFacts.name(services.annotation(photo).facts, original: photo.metadata.filename))
         try Task.checkCancellation()
         guard services.vault.isUnlocked, services.vault.generation == generation,
           services.session.accountId == account, services.store === catalog,
@@ -450,22 +450,20 @@ struct SavedPhotoDetails: View {
       originalSha256: photo.metadata.originalSha256).map(\.n))).sorted()
   }
   private var canAddLabel: Bool {
-    !SearchNormalization.text(label).isEmpty && label.unicodeScalars.count <= 120 && labels.count < 64
+    SearchNormalization.newPhotoTag(label, existing: labels) != nil
   }
   var body: some View {
     NavigationStack {
       List {
         Section {
-          Text(photo.metadata.filename)
-          if let date = Wire.parseDate(photo.metadata.sourceDate) {
-            Text(date.formatted(date: .complete, time: .shortened)).foregroundStyle(.secondary)
-            Text(photo.metadata.dateSource == "photos" ? "Date from Photos" :
-              photo.metadata.dateSource == "exif" ? "Date from the original" : "Date imported · capture date unavailable")
-              .font(.caption).foregroundStyle(.secondary)
+          if photo.metadata.dateSource == "import" {
+            Text("Capture date unavailable").foregroundStyle(.secondary)
+          } else if let date = Wire.parseDate(photo.metadata.sourceDate) {
+            Text(date.formatted(date: .complete, time: .shortened))
           }
           if services.annotation(photo).favorite == true { Label("Favorite", systemImage: "heart.fill") }
         }
-        if let capture { PhotoMetadataSections(metadata: capture) }
+        if let location = services.annotation(photo).location { PhotoLocationSection(location: location) }
         if !namedPeople.isEmpty {
           Section("People you’ve named") {
             ForEach(namedPeople, id: \.self) { Text($0) }
@@ -473,7 +471,8 @@ struct SavedPhotoDetails: View {
               .font(.caption).foregroundStyle(.secondary)
           }
         }
-        Section("Labels") {
+        SavedPhotoOrganizationSection(services: services, photo: photo)
+        Section("Tags") {
           ForEach(Array(labels.enumerated()), id: \.offset) { index, value in
             HStack {
               Text(value)
@@ -482,11 +481,11 @@ struct SavedPhotoDetails: View {
                 var next = labels
                 next.remove(at: index)
                 do { try services.setLabels(next, photo: photo) } catch { services.error = error.localizedDescription }
-              }.labelStyle(.iconOnly).accessibilityLabel("Remove label \(value)")
+              }.labelStyle(.iconOnly).accessibilityLabel("Remove tag \(value)")
             }
           }
           HStack {
-            TextField("Add label", text: $label).autocorrectionDisabled()
+            TextField("Add a tag or place name", text: $label).autocorrectionDisabled()
               .focused($labelFocused).submitLabel(.done).onSubmit(addLabel)
             Button("Add", action: addLabel).disabled(!canAddLabel)
           }
@@ -504,16 +503,10 @@ struct SavedPhotoDetails: View {
           }
         }
         if let caption = services.annotation(photo).caption { Section("Caption") { Text(caption) } }
-        if let location = services.annotation(photo).location {
-          Section("Location") {
-            Text(location.displayName).textSelection(.enabled)
-            if location.name != nil { Text(location.coordinates).foregroundStyle(.secondary) }
-            Text(location.provenance).font(.caption).foregroundStyle(.secondary)
-          }
-        }
         if let ocr = services.annotation(photo).ocr, !ocr.text.isEmpty {
-          Section("Text in this photo") { Text(ocr.text).textSelection(.enabled) }
+          Section { DisclosureGroup("Text in this photo") { Text(ocr.text).textSelection(.enabled) } }
         }
+        PhotoMetadataSections(metadata: capture, filename: photo.metadata.filename)
         if let message = services.annotations.errors[photo.id] { Text(message).font(.caption).foregroundStyle(.secondary) }
         if let error = services.error { Text(error).font(.caption).foregroundStyle(.secondary) }
       }.scrollDismissesKeyboard(.interactively)
@@ -522,9 +515,9 @@ struct SavedPhotoDetails: View {
     }.presentationDetents([.medium, .large])
   }
   private func addLabel() {
-    guard canAddLabel else { return }
+    guard let tag = SearchNormalization.newPhotoTag(label, existing: labels) else { return }
     do {
-      try services.setLabels(labels + [label], photo: photo)
+      try services.setLabels(labels + [tag], photo: photo)
       label = ""
       labelFocused = false
     } catch { services.error = error.localizedDescription }

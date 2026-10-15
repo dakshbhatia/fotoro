@@ -5,6 +5,40 @@ import XCTest
 @testable import Fotoro
 
 final class PhotoLocationsTests: XCTestCase {
+  func testOrganizationNamesMatchWebAndTrashRestoresWithoutDestroyingWords() throws {
+    let digest = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    let date = try XCTUnwrap(ISO8601DateFormatter().date(from: "2018-02-03T23:50:00Z"))
+    XCTAssertEqual(PhotoOrganizationFacts.suggestedName(original: "IMG_0001.JPG", digest: digest,
+      capturedAt: date, labels: ["BTS", "Family  trip"], place: "Seoul", screenshot: false), "2018-02-03_Seoul_BTS_Family-trip_0000000000.jpg")
+    var facts = try PhotoOrganizationFacts.replacing(["My EXACT words", "fotoro.future.v2:keep"], change: .name("BTS at Grandma’s.jpg"))
+    facts = try PhotoOrganizationFacts.replacing(facts, change: .trash(true))
+    facts = try PhotoOrganizationFacts.replacing(facts, change: .screenshot(true))
+    XCTAssertTrue(PhotoOrganizationFacts.trashed(facts))
+    XCTAssertEqual(try PhotoOrganizationFacts.replacing(facts, change: .trash(true)), facts)
+    facts = try PhotoOrganizationFacts.replacing(facts, change: .trash(false))
+    XCTAssertFalse(PhotoOrganizationFacts.trashed(facts))
+    XCTAssertEqual(PhotoOrganizationFacts.name(facts, original: "IMG.JPG"), "BTS at Grandma’s.jpg")
+    XCTAssertTrue(PhotoOrganizationFacts.screenshot(facts))
+    XCTAssertEqual(Array(facts.prefix(2)), ["My EXACT words", "fotoro.future.v2:keep"])
+    for name in ["../a.jpg", "a/b.jpg", "a\\b.jpg", "CON.jpg", "a?.jpg", " a.jpg", "a.jpg."] {
+      XCTAssertFalse(PhotoOrganizationFacts.validName(name), name)
+      XCTAssertThrowsError(try PhotoOrganizationFacts.replacing(nil, change: .name(name)))
+    }
+    XCTAssertThrowsError(try PhotoOrganizationFacts.replacing((0..<64).map { "fact \($0)" }, change: .trash(true)))
+  }
+
+  func testPlacePresentationKeepsCoordinatesForAnExplicitMapAction() throws {
+    let location = PhotoLocationV1(latitude: 37.5665, longitude: 126.978, source: "photos")
+    XCTAssertEqual(location.displayName, "Location on map")
+    let url = try XCTUnwrap(location.mapURL)
+    let parts = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+    XCTAssertEqual(parts.host, "maps.apple.com")
+    XCTAssertEqual(parts.queryItems?.map(\.name), ["ll", "q"])
+    XCTAssertEqual(parts.queryItems?.first?.value, "37.5665,126.978")
+    XCTAssertNil(PhotoLocationV1(latitude: 91, longitude: 0, source: "photos").mapURL)
+    XCTAssertEqual(PhotoLocationV1(latitude: 37, longitude: 126, source: "photos", name: "Grandma’s house").displayName, "Grandma’s house")
+  }
+
   private let location = PhotoLocationV1(latitude: 40.7128, longitude: -74.006,
     source: "photos", name: "  My place  ", accuracyMeters: 12)
 

@@ -1,3 +1,4 @@
+import {isPhotoTrashed} from "@fotoro/contracts/organization";
 import type {PhotoLocationV1} from "@fotoro/contracts";
 import {validatedPhotoLocation} from "@fotoro/contracts/location";
 import type {SearchPhoto} from "./search";
@@ -17,7 +18,7 @@ export function validPlace(location: PhotoLocationV1 | undefined): location is P
   return validatedPhotoLocation(location) !== undefined;
 }
 export function placeTitle(location: PhotoLocationV1): string {
-  return location.name || `${location.latitude.toFixed(4)}, ${location.longitude.toFixed(4)}`;
+  return location.name?.trim() ? location.name : "Location on map";
 }
 export function placeSource(location: PhotoLocationV1): string {
   return location.source === "google-timeline" ? "Estimated from Google Timeline" : "Location from the photo";
@@ -30,7 +31,7 @@ export function placeMapURL(location: PhotoLocationV1): string | undefined {
   return url.href;
 }
 export function currentTimelineCandidates(candidates: readonly TimelineCandidate[], photos: readonly SearchPhoto[]): TimelineCandidate[] {
-  const current = new Map(photos.filter(photo => photo.current?.() !== false).map(photo => [photo.id, photo]));
+  const current = new Map(photos.filter(photo => photo.current?.() !== false && !isPhotoTrashed(photo)).map(photo => [photo.id, photo]));
   const seen = new Set<string>();
   return candidates.filter(candidate => {
     const photo = current.get(candidate.photoID);
@@ -58,7 +59,7 @@ function dayKey(time: number) {
 export function groupPhotoPlaces<T extends SearchPhoto>(photos: readonly T[]): PlaceDay<T>[] {
   const seen = new Set<string>(), days = new Map<string, PlaceDay<T>>();
   const located = photos.filter(photo => {
-    if (photo.current?.() === false || !validPlace(photo.location) || seen.has(photo.id)) return false;
+    if (photo.current?.() === false || isPhotoTrashed(photo) || !validPlace(photo.location) || seen.has(photo.id)) return false;
     seen.add(photo.id); return true;
   }).sort((a, b) => (captureTime(a) ?? Infinity) - (captureTime(b) ?? Infinity) || a.id.localeCompare(b.id));
   for (const photo of located) {

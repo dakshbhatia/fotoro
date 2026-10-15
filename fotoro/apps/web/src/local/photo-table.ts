@@ -1,6 +1,10 @@
+import {photoName} from "@fotoro/contracts/organization";
 import {photoFormat} from "../media/photo-source";
 import type {LocalPhoto} from "./resources";
 import {peopleNames} from "@fotoro/contracts/people";
+import {placeTitle} from "./places";
+
+export const defaultPhotoColumns = ["name", "date", "location", "tags"] as const;
 
 export const photoColumns = [
   {id: "name", label: "Name"}, {id: "date", label: "Capture date"},
@@ -14,12 +18,12 @@ export interface PhotoSort {column: PhotoColumn; descending: boolean}
 const capturedDate = (photo: LocalPhoto) => (photo.dateSource === "exif" || photo.dateSource === "photos") && Number.isFinite(Date.parse(photo.date));
 export function photoCell(photo: LocalPhoto, column: PhotoColumn): string {
   switch (column) {
-    case "name": return photo.filename;
+    case "name": return photoName(photo, photo.filename);
     case "date": return capturedDate(photo)
       ? new Date(photo.date).toLocaleDateString(undefined, {year: "numeric", month: "short", day: "numeric"}) : "Unavailable";
     case "type": return photoFormat({name: photo.filename, type: photo.file?.type ?? ""})?.toUpperCase() ?? "Unknown";
     case "dimensions": return photo.width && photo.height ? `${photo.width} × ${photo.height}` : "Unavailable";
-    case "location": return photo.location ? photo.location.name || `${photo.location.latitude.toFixed(4)}, ${photo.location.longitude.toFixed(4)}` : "Unavailable";
+    case "location": return photo.location ? placeTitle(photo.location) : "—";
     case "tags": return photo.labels?.join(", ") || "—";
     case "people": return peopleNames(photo.facts,photo.digest??"").join(", ") || "—";
     case "text": return photo.ocr?.status === "complete" ? photo.ocr.text.trim() ? "Read" : "No text found" : photo.ocr?.status === "failed" ? "Could not read" : "Not read";

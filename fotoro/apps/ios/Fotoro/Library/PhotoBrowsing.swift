@@ -147,6 +147,7 @@ struct SavedPhotoBrowseProjectionID: Equatable {
   var permitted: Bool
   var catalog: UInt64
   var favoritesOnly: Bool
+  var organization: String = "photos"
   var calendar: Calendar
   var origin: String? = nil
 }

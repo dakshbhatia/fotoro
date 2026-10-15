@@ -113,7 +113,7 @@ private struct SearchEmptyResults: View {
       ContentUnavailableView("Search paused", systemImage: "magnifyingglass")
     } else {
       ContentUnavailableView(reviewing ? "No suggestions" : "No photos found", systemImage: "magnifyingglass",
-        description: Text(reviewing ? "Use All matches to review every photo." : "Try a label, a date or words in a photo."))
+        description: Text(reviewing ? "Use All matches to review every photo." : "Try a tag, a place, a date or words in a photo."))
     }
   }
 }
@@ -135,6 +135,14 @@ struct SearchAlternatives: View {
   let search: LocalSearchStore
   var selected: () -> Void = {}
   var body: some View {
+    if let meaning = search.response.meaning, meaning.relation == .label {
+      Button("Search only “\(meaning.display)”") {
+        search.accept(meaning)
+        selected()
+      }.buttonStyle(.bordered)
+        .accessibilityValue(search.acceptedMeaningID == meaning.id ? "Exact match" : "")
+        .padding(.horizontal)
+    }
     if !search.response.alternatives.isEmpty {
       ScrollView(.horizontal, showsIndicators: false) {
         HStack {
@@ -307,6 +315,8 @@ struct LocalPhotoDetails: View {
   let search: LocalSearchStore?
   @State private var labels: [String] = []
   @State private var label = ""
+  @State private var nameDraft = ""
+  @State private var organizationFacts: [String] = []
   @State private var capture: PhotoCaptureMetadata?
   @State private var readingCapture = false
   @State private var originalUnavailable = false
@@ -330,19 +340,7 @@ struct LocalPhotoDetails: View {
         }
         if photo.isFavorite { Label("Favorite", systemImage: "heart.fill") }
         }
-        if let location = photo.photoLocation {
-          Section("Location") {
-            Text(location.displayName).textSelection(.enabled)
-            if location.name != nil { Text(location.coordinates).foregroundStyle(.secondary) }
-            Text(location.provenance).font(.caption).foregroundStyle(.secondary)
-          }
-        }
-        if let capture { PhotoMetadataSections(metadata: capture) }
-        if readingCapture { ProgressView("Reading capture details…") }
-        if originalUnavailable {
-          Text("More camera details may be in the original. Info uses files already on this device.")
-            .font(.footnote).foregroundStyle(.secondary)
-        }
+        if let location = photo.photoLocation { PhotoLocationSection(location: location) }
         if let search {
           #if !FOTORO_LOCAL_PREVIEW
           if let record = try? search.consumerRecord(photo.id), record.revision == photo.sourceRevision {
@@ -358,16 +356,8 @@ struct LocalPhotoDetails: View {
             }
           }
           #endif
-          if let record = try? search.consumerRecord(photo.id), !record.visualLabels.isEmpty {
-            Section("Inferred scenes") {
-              ForEach(record.visualLabels, id: \.identifier) { evidence in
-                Text(evidence.label)
-              }
-              Text("Detected on this iPhone. These are separate from your labels.")
-                .font(.caption).foregroundStyle(.secondary)
-            }
-          }
-          Section("Labels") {
+          nameSection
+          Section("Tags") {
             ForEach(Array(labels.enumerated()), id: \.offset) { at, value in
               HStack {
                 Text(value)
@@ -376,28 +366,33 @@ struct LocalPhotoDetails: View {
                   var proposed = labels
                   proposed.remove(at: at)
                   if search.setLabels(proposed, photoID: photo.id) { labels = proposed }
-                }.labelStyle(.iconOnly).disabled(!search.canEditLabels(photo.id))
+                }.labelStyle(.iconOnly).accessibilityLabel("Remove tag \(value)").disabled(!search.canEditLabels(photo.id))
               }
             }
             HStack {
-              TextField("Add label", text: $label).autocorrectionDisabled().focused($labelFocused)
-              Button("Add") {
-                let proposed = labels + [label]
-                if search.setLabels(proposed, photoID: photo.id) {
-                  labels = proposed
-                  label = ""
-                  labelFocused = false
-                }
-              }
-              .disabled(SearchNormalization.text(label).isEmpty || label.unicodeScalars.count > 120 || labels.count >= 64 || !search.canEditLabels(photo.id))
+              TextField("Add a tag or place name", text: $label).autocorrectionDisabled().focused($labelFocused)
+                .submitLabel(.done).onSubmit(addTag)
+              Button("Add", action: addTag)
+              .disabled(SearchNormalization.newPhotoTag(label, existing: labels) == nil || !search.canEditLabels(photo.id))
             }
             if !search.canEditLabels(photo.id) {
               Text("The local index is preparing this photo.").font(.caption).foregroundStyle(
                 .secondary)
             }
             Text(
-              "Add words that help you find this photo."
+              "Use your own words, like BTS or Grandma’s house."
             ).font(.caption).foregroundStyle(.secondary)
+          }
+          if let record = try? search.consumerRecord(photo.id), !record.visualLabels.isEmpty {
+            Section {
+              DisclosureGroup("Detected scenes") {
+              ForEach(record.visualLabels, id: \.identifier) { evidence in
+                Text(evidence.label)
+              }
+              Text("Detected on this iPhone. These are separate from your tags.")
+                .font(.caption).foregroundStyle(.secondary)
+              }
+            }
           }
           if let error = search.error { Text(error).font(.caption).foregroundStyle(.secondary) }
           if let meaning = search.response.meaning,
@@ -415,6 +410,14 @@ struct LocalPhotoDetails: View {
             }
           }
         }
+        if let capture { PhotoMetadataSections(metadata: capture) }
+        if readingCapture { ProgressView("Reading technical details…") }
+        if originalUnavailable {
+          DisclosureGroup("More details") {
+            Text("More camera details may be in the original. Info uses files already on this device.")
+              .font(.footnote).foregroundStyle(.secondary)
+          }
+        }
         } else {
           ContentUnavailableView("Photo unavailable", systemImage: "photo",
             description: Text("This photo changed or is no longer permitted. Open it again from Photos."))
@@ -422,12 +425,44 @@ struct LocalPhotoDetails: View {
       }.navigationTitle("Photo details").navigationBarTitleDisplayMode(.inline).toolbar {
         ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
       }
-    }.onAppear { labels = search?.labels(photo.id) ?? [] }
+    }.onAppear {
+      labels = search?.labels(photo.id) ?? []
+      organizationFacts = (try? search?.record(photo.id)?.facts) ?? []
+      nameDraft = PhotoOrganizationFacts.name(organizationFacts, original: originalName)
+    }
       .onChange(of: search?.canEditLabels(photo.id) ?? false) {
         labels = search?.labels(photo.id) ?? []
       }
       .task(id: readIdentity) { await readCapture() }
       .presentationDetents([.medium, .large])
+  }
+
+  private var originalName: String { (try? search?.record(photo.id)?.filename) ?? "Photo" }
+  private var nameSection: some View {
+    Section("Photo name") {
+            TextField("Filename", text: $nameDraft).autocorrectionDisabled().textInputAutocapitalization(.never).accessibilityLabel("Photo filename")
+            Button("Suggest name") {
+              nameDraft = PhotoOrganizationFacts.suggestedName(original: originalName, digest: nil,
+                capturedAt: photo.capturedAt, labels: labels, place: photo.photoLocation?.name, screenshot: photo.isScreenshot)
+            }
+            Button("Apply name") { applyOrganization(.name(nameDraft)) }
+              .disabled(!PhotoOrganizationFacts.validName(nameDraft) || nameDraft == PhotoOrganizationFacts.name(organizationFacts, original: originalName))
+            Toggle("Screenshot", isOn: Binding(get: { PhotoOrganizationFacts.screenshot(organizationFacts, detected: photo.isScreenshot) }, set: { applyOrganization(.screenshot($0)) }))
+            Text("Names stay in Fotoro; original files in Photos stay unchanged. Save and Sync for other devices.").font(.caption).foregroundStyle(.secondary)
+          }
+  }
+  private func applyOrganization(_ change: PhotoOrganizationChange) {
+    guard sourceIsCurrent, let search, search.setOrganization(change, photoID: photo.id) else { return }
+    organizationFacts = (try? search.record(photo.id)?.facts) ?? []
+    nameDraft = PhotoOrganizationFacts.name(organizationFacts, original: originalName)
+  }
+  private func addTag() {
+    guard sourceIsCurrent, let search, search.canEditLabels(photo.id),
+      let tag = SearchNormalization.newPhotoTag(label, existing: labels) else { return }
+    let proposed = labels + [tag]
+    if search.setLabels(proposed, photoID: photo.id) {
+      labels = proposed; label = ""; labelFocused = false
+    }
   }
 
   private func readCapture() async {

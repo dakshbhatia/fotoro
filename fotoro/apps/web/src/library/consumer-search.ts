@@ -1,3 +1,5 @@
+import {overlayOrganizationFacts} from "@fotoro/contracts/organization";
+import type {PhotoOrganizationPatch} from "@fotoro/contracts/organization";
 import {useEffect, useMemo, useRef, useState} from "react";
 import type {Photo, CatalogCoverage} from "./catalog";
 import {cloudSearchRecords} from "./search";
@@ -31,10 +33,11 @@ export function mergeConsumerSearchPhotos<T extends {id: string}>(local: T[], sa
       || (savedPhoto as Partial<LocalPhoto>).current?.() === false) return photo;
     const location = original.location ?? source.location;
     const favorite = original.favorite ?? (savedPhoto as Partial<LocalPhoto>).favorite;
+    const facts = overlayOrganizationFacts(original.facts, (savedPhoto as Partial<LocalPhoto>).facts);
     const labels = original.labels ?? (savedPhoto as Partial<LocalPhoto>).labels;
     const promoteDate = original.dateSource === "selected" && ["photos", "exif"].includes(source.dateSource) && Number.isFinite(Date.parse(source.date));
-    if (!promoteDate && location === original.location && favorite === original.favorite && labels === original.labels) return photo;
-    return {...photo, ...(promoteDate ? {date: source.date, dateSource: source.dateSource, captureVerified: source.dateSource === "exif" ? true : original.captureVerified} : {}), ...(location ? {location} : {}), ...(favorite !== undefined ? {favorite} : {}), ...(labels !== undefined ? {labels} : {}),
+    if (!facts.length && !original.facts?.length && !promoteDate && location === original.location && favorite === original.favorite && labels === original.labels) return photo;
+    return {...photo, facts, ...(promoteDate ? {date: source.date, dateSource: source.dateSource, captureVerified: source.dateSource === "exif" ? true : original.captureVerified} : {}), ...(location ? {location} : {}), ...(favorite !== undefined ? {favorite} : {}), ...(labels !== undefined ? {labels} : {}),
       current: () => source.snapshot.current() && original.current?.() !== false && (savedPhoto as Partial<LocalPhoto>).current?.() !== false};
   });
   return [...displayed, ...currentSaved.filter(photo => !localIDs.has(photo.id))];
@@ -54,7 +57,7 @@ export interface OwnedPhotoSnapshot {
   current: () => boolean;
   sourceCurrent?: (photo: Photo) => boolean;
   preview: (photo: Photo) => Promise<Blob>;
-  edit?: (photo: Photo, changes: {labels?: string[]; favorite?: boolean; location?: PhotoLocationV1; observation?: PhotoObservationV1; people?: PeopleAssignment[]}) => Promise<void>;
+  edit?: (photo: Photo, changes: {labels?: string[]; favorite?: boolean; location?: PhotoLocationV1; observation?: PhotoObservationV1; people?: PeopleAssignment[]; organization?: PhotoOrganizationPatch}) => Promise<void>;
   locate?: (updates: readonly {photo: Photo; location: PhotoLocationV1}[]) => Promise<{applied: number; failed: number; updatedPhotoIDs: string[]}>;
   people?: (updates: readonly {photo: Photo; assignments: PeopleAssignment[]}[]) => Promise<void>;
 }

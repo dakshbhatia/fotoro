@@ -4,6 +4,22 @@ import XCTest
 @testable import Fotoro
 
 final class SearchTests: XCTestCase {
+  func testRenamedPhotoIsSearchableAndTrashCannotLeakThroughAnyMeaningOrPin() throws {
+    let record = photo("original", labels: ["BTS"], filename: "IMG_0001.JPG", ocr: "invoice 4826")
+    let i = try index([record])
+    XCTAssertTrue(try i.setOrganization(.name("Grandma Seoul.JPG"), photoID: record.id))
+    XCTAssertEqual(try i.search("Seoul").leading?.id, record.id)
+    XCTAssertTrue(try i.setOrganization(.trash(true), photoID: record.id))
+    for query in ["BTS", "Seoul", "invoice 4826"] { XCTAssertNil(try i.search(query).leading, query) }
+    XCTAssertTrue(try i.setOrganization(.trash(false), photoID: record.id))
+    XCTAssertEqual(try i.search("BTS").leading?.id, record.id)
+    XCTAssertEqual(try i.search("Seoul").leading?.id, record.id)
+    XCTAssertEqual(try i.record(record.id)?.filename, "IMG_0001.JPG")
+    XCTAssertEqual(try i.record(record.id)?.ocrText, "invoice 4826")
+    try i.replacePermitted([record])
+    XCTAssertEqual(PhotoOrganizationFacts.name(try i.record(record.id)?.facts, original: record.filename), "Grandma Seoul.JPG")
+  }
+
   let now = Date(timeIntervalSince1970: 1_791_288_000)
   func photo(
     _ id: String, labels: [String] = [], filename: String = "", captured: Date? = nil,

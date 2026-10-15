@@ -1,9 +1,10 @@
+import {photoName, renamedPhotoFile, withPhotoOrganization, type PhotoOrganizationPatch, type PhotoOrganizationScope} from "@fotoro/contracts/organization";
 import {SelectionTray} from "../components/SelectionTray";
 import {CopyDiagnostics} from "../components/CopyDiagnostics";
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../library/icons";
 import { LocalLibrary } from "./LocalLibrary";
-import {photoColumns, type PhotoColumn} from "./photo-table";
+import {photoColumns, defaultPhotoColumns, type PhotoColumn} from "./photo-table";
 import { LocalViewer } from "./LocalViewer";
 import { LocalSearch } from "./LocalSearch";
 import { LocalRetention } from "./retention";
@@ -21,6 +22,7 @@ import {useDialogFocus} from "../library/dialog-focus";
 import {canShareOriginals, downloadOriginal, OriginalShareAttempt, prepareSavedOriginals, savedOriginalSelectionCurrent} from "../library/system-share";
 import {ShareSelection} from "../exchange/sharing";
 import type {Photo} from "../library/catalog";
+import type {ConsumerPhotoChanges} from "../library/consumer-changes";
 import {ownedPhotoForLocal, selectedOwnedPhotos, reconcileSavedSelection} from "./selection";
 import {findMatchPhotos, shortlistSearchResult} from "./find-best-shots";
 import {useSemanticFind} from "./useSemanticFind";
@@ -59,7 +61,7 @@ export async function prepareChosenOriginals(local: readonly LocalPhoto[], saved
   } catch (error) {files.length = 0; throw error;}
 }
 export function selectedOriginals(photos: LocalPhoto[], selected?: ReadonlySet<string>): File[] {
-  return photos.flatMap(photo => photo.file instanceof File && photo.current?.() !== false && (!selected || selected.has(photo.id)) ? [photo.file] : []);
+  return photos.flatMap(photo => photo.file instanceof File && photo.current?.() !== false && (!selected || selected.has(photo.id)) ? [renamedPhotoFile(photo.file, photoName(photo, photo.filename))] : []);
 }
 /* The digest, never a filename, reconnects original operations and supplied labels. */
 export function mergeSelectedPhotos(existing: LocalPhoto[], selected: LocalPhoto[]): LocalPhoto[] {
@@ -84,7 +86,8 @@ export interface BestShotSelectionRequest {scope: string; source: unknown; selec
 export function bestShotSelectionRequestCurrent(request: BestShotSelectionRequest, scope: string, source: unknown, selectionRevision: number) {
   return request.scope === scope && request.source === source && request.selectionRevision === selectionRevision;
 }
-export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, ownedPhotos = null, onOpenSaved, onShareSaved, onAlbumSelection, active = true}: {onBackup: () => void; onSave?: (photos: LocalPhoto[]) => void; onCancelSave?: () => void; onPhotosChange?: (photos: LocalPhoto[]) => void; ownedPhotos?: OwnedPhotoSnapshot | null; onOpenSaved?: (id: string) => void; onShareSaved?: (photos: Photo[]) => void; onAlbumSelection?: (local: LocalPhoto[], saved: Photo[]) => void; active?: boolean}) {
+const PhotoCleanup = lazy(() => import("./PhotoCleanup").then(module => ({default: module.PhotoCleanup})));
+export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, ownedPhotos = null, onOpenSaved, onShareSaved, onAlbumSelection, photoChanges, active = true}: {onBackup: () => void; onSave?: (photos: LocalPhoto[]) => void; onCancelSave?: () => void; onPhotosChange?: (photos: LocalPhoto[]) => void; ownedPhotos?: OwnedPhotoSnapshot | null; photoChanges?: ConsumerPhotoChanges; onOpenSaved?: (id: string) => void; onShareSaved?: (photos: Photo[]) => void; onAlbumSelection?: (local: LocalPhoto[], saved: Photo[]) => void; active?: boolean}) {
   const [photos, setPhotos] = useState<LocalOcrPhoto[]>([]), [query, setQuery] = useState(""),
     [viewer, setViewer] = useState<string | null>(null), [settings, setSettings] = useState(false),
     [last30, setLast30] = useState(true), [status, setStatus] = useState(""), [progress, setProgress] = useState(""),
@@ -100,9 +103,10 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
   }, [query]);
   const backgroundReady = query === settledQuery;
   const [placesOpen, setPlacesOpen] = useState(false);
+  const [cleanupOpen, setCleanupOpen] = useState(false);
   const [peopleOpen, setPeopleOpen] = useState(false);
   const [photoView, setPhotoView] = useState<"grid" | "table">("grid");
-  const [columns, setColumns] = useState<ReadonlySet<PhotoColumn>>(() => new Set(["name", "date", "type", "availability"]));
+  const [columns, setColumns] = useState<ReadonlySet<PhotoColumn>>(() => new Set(defaultPhotoColumns));
   const visibleColumns = photoColumns.filter(column => columns.has(column.id)).map(column => column.id);
   const [browseScope, setBrowseScope] = useState<"photos" | "picks">("photos"), [sharing, setSharing] = useState(false);
   const [chosenSavedIDs, setChosenSavedIDs] = useState(new Set<string>());
@@ -140,17 +144,18 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
   const savedSelectionBusy = !!ownedPhotos?.current() && ownedPhotos.selectionReady === false;
   const searchPhotos = useMemo(() => mergeConsumerSearchPhotos(photos, savedPhotos), [photos, savedPhotos]);
   const currentSearchPhotos = useRef(searchPhotos); currentSearchPhotos.current = searchPhotos;
-  const peopleRecords = useMemo(() => [...photos, ...savedRecords], [photos, savedRecords]);
+  const peopleRecords = useMemo(() => {const ids = new Set(searchPhotos.map(photo => photo.id)); return [...searchPhotos, ...savedRecords.filter(record => !ids.has(record.id))];}, [searchPhotos, savedRecords]);
   const peopleScope = useMemo(() => ({sourceGeneration, token: ownedPhotos?.token}), [sourceGeneration, ownedPhotos?.token]);
   const peopleFind = usePeopleFilter(peopleRecords, peopleScope);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [organizationScope, setOrganizationScope] = useState<PhotoOrganizationScope>("photos");
   const favoriteIDs = useMemo(() => browseFavoritePhotoIDs(savedRecords, searchPhotos), [savedRecords, searchPhotos]);
-  const browseFilter = peopleFind.filter.ids.size > 0 || favoritesOnly;
-  const recentActive = recentBrowseActive(last30, query);
+  const browseFilter = peopleFind.filter.ids.size > 0 || favoritesOnly || organizationScope !== "photos";
+  const recentActive = organizationScope === "photos" && recentBrowseActive(last30, query);
   const index = useMemo(() => new PhotoSearchIndex(photos.map(photo => photo.ocr && photo.ocr.processor !== OCR_PROCESSOR ? {...photo, ocr: undefined} : photo), feedback), [photos, feedback]);
   const savedIndex = useMemo(() => metadataSearch ? undefined : new PhotoSearchIndex(savedPhotos), [!!metadataSearch, savedPhotos]);
   const metadataIDs = useMemo(() => new Map((metadataSearch?.records ?? []).map((record, index) => [record.id, savedRecords[index].id])), [metadataSearch?.records, savedRecords]);
-  const metadataAllowed = useMemo(() => metadataDatePhotoIDs(peopleRecords, query, peopleMatchingPhotoIDs(peopleRecords.filter(photo => (!favoritesOnly || favoriteIDs.has(photo.id)) && inBrowseRange(photo, recentActive, false)), peopleFind.filter)), [peopleRecords, recentActive, favoritesOnly, favoriteIDs, peopleFind.filter, query]);
+  const metadataAllowed = useMemo(() => metadataDatePhotoIDs(peopleRecords, query, peopleMatchingPhotoIDs(peopleRecords.filter(photo => (!favoritesOnly || favoriteIDs.has(photo.id)) && inBrowseRange(photo, recentActive, false, Date.now(), organizationScope)), peopleFind.filter)), [peopleRecords, recentActive, favoritesOnly, favoriteIDs, peopleFind.filter, query, organizationScope]);
   const metadataLocal = useMemo(() => index.search(query, {scope, allowedIds: metadataAllowed, committedMeaning: committed}), [index, query, metadataAllowed, committed]);
   const metadataSavedRequest = useMemo(() => metadataSearch ? (signal: AbortSignal, current: () => boolean) => accountSearchResultAsync(metadataSearch.searchAsync, metadataSearch.records, metadataIDs, query, {scope: "saved:" + (ownedPhotos?.accountId ?? ""), allowedIds: metadataAllowed, committedMeaning: committed}, signal, () => current() && metadataSearch.current()) : undefined, [metadataSearch?.token, metadataIDs, query, metadataAllowed, committed, ownedPhotos?.accountId]);
   const metadataSavedAsync = useAccountSearch(query, "saved:" + (ownedPhotos?.accountId ?? ""), metadataSavedRequest, active && ready);
@@ -163,7 +168,7 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
   const picks = usePhotoPicks(photos, resources, active && ready && !progress && backgroundReady, sourceGeneration, backgroundPhotos);
   const localSelectionRef = useRef(picks.ids);
   localSelectionRef.current = picks.ids;
-  const reviewedPhotos = useMemo(() => photos.filter(photo => picks.ids.has(photo.id)), [photos, picks.ids]);
+  const reviewedPhotos = useMemo(() => searchPhotos.filter(photo => photo.file instanceof File && picks.ids.has(photo.id)), [searchPhotos, picks.ids]);
   const openBackup = () => {onPhotosChange?.(reviewedPhotos); onBackup();};
   const reconciledSelection = useMemo(() => reconcileSavedSelection(ownedPhotos, chosenSavedToken.current, chosenSavedIDs, photos), [ownedPhotos, chosenSavedIDs, photos]);
   const chosenSaved = useMemo(() => selectedOwnedPhotos(ownedPhotos, chosenSavedToken.current, reconciledSelection.savedIDs), [ownedPhotos, reconciledSelection]);
@@ -186,13 +191,13 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
     const next = new Set(sameSelection ? chosenSavedRef.current : []); checked ? next.add(photoId) : next.delete(photoId); replaceSavedChoice(next);
   };
   const searchSelectionIDs = useMemo(() => new Set([...picks.ids, ...chosenSaved.map(photo => "saved:" + photo.manifest.photoId)]), [picks.ids, chosenSaved]);
-  const browsePhotos = useMemo(() => searchPhotos.filter(photo => photo.current?.() !== false && inBrowseRange(photo, recentActive, favoritesOnly)
+  const browsePhotos = useMemo(() => searchPhotos.filter(photo => photo.current?.() !== false && inBrowseRange(photo, recentActive, favoritesOnly, Date.now(), organizationScope)
     && (browseScope === "photos" || picks.recommendations?.ids.has(photo.id))
-    && (normalizeSearch(query) || browseFilter || !photo.id.startsWith("saved:") || !metadataSearch || metadataSearch.browseIds.has(photo.id.slice(6)))), [searchPhotos, recentActive, favoritesOnly, browseScope, picks.recommendations, query, browseFilter, metadataSearch]);
+    && (normalizeSearch(query) || browseFilter || !photo.id.startsWith("saved:") || !metadataSearch || metadataSearch.browseIds.has(photo.id.slice(6)))), [searchPhotos, recentActive, favoritesOnly, browseScope, picks.recommendations, query, browseFilter, metadataSearch, organizationScope]);
   const permitted = useMemo(() => {
     const browseIDs = new Set(browsePhotos.map(photo => photo.id));
-    return peopleMatchingPhotoIDs(peopleRecords.filter(photo => browseIDs.has(photo.id) || browseScope === "photos" && (normalizeSearch(query) || browseFilter) && (!favoritesOnly || favoriteIDs.has(photo.id)) && inBrowseRange(photo, recentActive, false)), peopleFind.filter);
-  }, [peopleRecords, browsePhotos, peopleFind.filter, browseScope, query, browseFilter, recentActive, favoritesOnly, favoriteIDs]);
+    return peopleMatchingPhotoIDs(peopleRecords.filter(photo => browseIDs.has(photo.id) || browseScope === "photos" && (normalizeSearch(query) || browseFilter) && (!favoritesOnly || favoriteIDs.has(photo.id)) && inBrowseRange(photo, recentActive, false, Date.now(), organizationScope)), peopleFind.filter);
+  }, [peopleRecords, browsePhotos, peopleFind.filter, browseScope, query, browseFilter, recentActive, favoritesOnly, favoriteIDs, organizationScope]);
   const permittedPhotos = useMemo(() => browsePhotos.filter(photo => permitted.has(photo.id)), [browsePhotos, permitted]);
   const scoped = useMemo(() => photos.filter(photo => permitted.has(photo.id)), [photos, permitted]);
   const hasPhotos = searchPhotos.length > 0;
@@ -242,7 +247,7 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
   const pin = result.meaning ? feedback.pins[JSON.stringify([scope, result.meaning.id])] : undefined;
   const available = scoped.filter(photo => photo.previewAvailable !== false && (photo.file || photo.preview || photo.previewLoader)).length,
     textComplete = scoped.filter(hasCurrentLocalOcr).length;
-  const coverage = `${scoped.length} photos${readText || textComplete ? ` · ${textComplete} with text read` : ""}${available < scoped.length ? ` · ${scoped.length - available} need to be reopened` : ""}`;
+  const coverage = `${scoped.length} ${scoped.length === 1 ? "photo" : "photos"}${readText || textComplete ? ` · ${textComplete} with text read` : ""}${available < scoped.length ? ` · ${scoped.length - available} need to be reopened` : ""}`;
   const ocrProgress = useLocalOcr(backgroundPhotos, active && readText && backgroundReady, resources, sourceGeneration, output => {
     setPhotos(current => current.map(photo => photo.id === output.photoID && (photo.digest ?? photo.id) === output.revision ? {...photo, ocr: output} : photo));
   }, backgroundScope);
@@ -396,9 +401,9 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
     if (!originalsCurrent(context)) {cancelOriginals(); return;}
     setPreparingShare(true); setStatus(""); setOriginalShareError("");
     try {
-      const [{photoBytes}, {cameraOriginalFiles}] = await Promise.all([import("../library/catalog"), import("../media/camera-original")]);
+      const [{photoBytes}, {photoOriginalFiles}] = await Promise.all([import("../library/catalog"), import("../media/camera-original")]);
       const files = await prepareChosenOriginals(context.local, context.saved.photos, context.controller.signal, () => originalsCurrent(context), photoBytes,
-        (bytes, photo) => cameraOriginalFiles(bytes, photo.metadata));
+        (bytes, photo) => photoOriginalFiles(bytes, photo));
       if (originalsCurrent(context)) {context.files = files; setPreparedShare(context);}
       else {files.length = 0; if (originalContext.current === context) cancelOriginals();}
     } catch (error) {
@@ -453,6 +458,13 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
   const shareSaved = () => {
     if (!ownedPhotos?.current() || ownedPhotos.selectionReady === false || !chosenSaved.length || chosenSaved.some(photo => !ownedPhotos.photos.includes(photo) || photo.grantId || photo.manifest.ownerAccountId !== ownedPhotos.accountId)) return;
     onShareSaved?.([...chosenSaved]);
+  };
+  const editOrganization = async (local: LocalPhoto, organization: PhotoOrganizationPatch) => {
+    if (!alive.current || !activeRef.current || local.current?.() === false) throw new Error("Photo source changed");
+    const snapshot = currentOwnedPhotos.current, saved = ownedPhotoForLocal(snapshot, local);
+    if (saved && snapshot?.edit) {await snapshot.edit(saved, {organization}); return;}
+    if (organization.trash !== undefined) throw new Error("Save this photo to Fotoro first");
+    setPhotos(current => current.map(photo => photo.id === local.id && photo.file === local.file && photo.digest === local.digest ? withPhotoOrganization(photo, organization) : photo));
   };
   const editLocalPhoto = (id: string, changes: {labels?: string[]; favorite?: boolean; location?: PhotoLocationV1}) => {
     const local = currentPhotos.current.find(photo => photo.id === id);
@@ -564,13 +576,14 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
         <details className="photo-browse-filters" onKeyDown={event => {
           if (event.key === "Escape") {event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();}
         }}><summary>Filters<span className="photo-browse-filter-state">{[
-          recentBrowseActive(true, query) ? last30 ? "Last 30 days" : "All photos" : undefined,
+          organizationScope === "photos" && recentBrowseActive(true, query) ? last30 ? "Last 30 days" : "All photos" : undefined,
           peopleFind.filter.ids.size > 0 ? `${peopleFind.filter.ids.size} ${peopleFind.filter.ids.size === 1 ? "person" : "people"}${peopleFind.filter.mode === "everyone" ? " · Everyone" : ""}` : undefined,
           favoritesOnly ? "Favorites" : undefined,
+          organizationScope === "photos" ? undefined : organizationScope === "trash" ? "Trash" : "Screenshots",
           !normalizeSearch(query) && photoView === "table" ? "Table" : undefined,
         ].filter(Boolean).join(" · ")}</span></summary>
-          <div className="photo-browse-filter-options">
-            {recentBrowseActive(true, query) && <label className="local-check"><input type="checkbox" checked={last30} disabled={shareBusy} onChange={event => setLast30(event.target.checked)} />Last 30 days</label>}
+          <div className="photo-browse-filter-options"><button disabled={shareBusy} onClick={() => setCleanupOpen(true)}>Review cleanup</button><label>Show<select aria-label="Photo type" value={organizationScope} onChange={event => setOrganizationScope(event.target.value as PhotoOrganizationScope)}><option value="photos">Photos</option><option value="screenshots">Screenshots</option><option value="trash">Fotoro Trash</option></select></label>
+            {organizationScope === "photos" && recentBrowseActive(true, query) && <label className="local-check"><input type="checkbox" checked={last30} disabled={shareBusy} onChange={event => setLast30(event.target.checked)} />Last 30 days</label>}
             <label className="local-check"><input type="checkbox" checked={favoritesOnly} disabled={shareBusy} onChange={event => setFavoritesOnly(event.target.checked)} />Favorites</label>
             <PeopleFilter people={peopleFind.people} value={peopleFind.filter} onChange={peopleFind.change} disabled={shareBusy} onReview={() => setPeopleOpen(true)} />
             {!normalizeSearch(query) && <>
@@ -657,6 +670,12 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
       if (id.startsWith("saved:")) onOpenSaved?.(id.slice(6));
       else {setBrowseScope("photos"); setLast30(false); changeQuery(""); setViewer(id);}
     }} />}
-    {viewing && viewer && <LocalViewer photos={viewerPhotos.filter(photo => !photo.id.startsWith("saved:"))} initial={viewer} resources={resources} intelligence={active && ownedPhotos?.current() && ownedPhotos.edit ? {scopeKey: intelligenceScope(ownedPhotos.token), expectedAccountId: ownedPhotos.accountId, current: () => activeRef.current && currentOwnedPhotos.current?.token === ownedPhotos.token && ownedPhotos.current(), keep: keepLocalObservation} : undefined} onSave={onSave ? photo => onSave([photo]) : undefined} isSaved={photo => !!ownedPhotos?.current() && savedPhotos.some(saved => saved.id === photo.id)} onLabels={(id, labels) => editLocalPhoto(id, {labels})} onFavorite={(id, favorite) => editLocalPhoto(id, {favorite})} onUse={normalizeSearch(query) ? id => confirm(id) : undefined} onConfirm={normalizeSearch(query) ? id => confirm(id) : undefined} onPin={normalizeSearch(query) ? id => confirm(id, true) : undefined} meaning={result.meaning?.term} onReselect={() => {input.current?.click(); setViewer(null);}} onClose={() => setViewer(null)} />}
+    {active && cleanupOpen && <Suspense fallback={<p role="status">Opening cleanup…</p>}><PhotoCleanup photos={searchPhotos} resources={photo => photo.id.startsWith("saved:") ? savedResources : resources} canTrash={photo => !!ownedPhotos?.edit && (photo.id.startsWith("saved:") || !!ownedPhotoForLocal(ownedPhotos, photo))} onTrash={async photo => {
+      const snapshot = currentOwnedPhotos.current;
+      const saved = photo.id.startsWith("saved:") ? snapshot?.photos.find(item => item.manifest.photoId === photo.id.slice(6)) : ownedPhotoForLocal(snapshot, photo);
+      if (!snapshot?.current() || !snapshot.edit || !saved || photo.current?.() === false) throw new Error("Photo source changed");
+      await snapshot.edit(saved, {organization: {trash: true}});
+    }} changes={photoChanges?.token === ownedPhotos?.token ? photoChanges : undefined} onOpen={photo => {setCleanupOpen(false); if (photo.id.startsWith("saved:")) onOpenSaved?.(photo.id.slice(6)); else setViewer(photo.id);}} onClose={() => setCleanupOpen(false)} /></Suspense>}
+    {viewing && viewer && <LocalViewer key={viewer} onOrganization={editOrganization} photos={searchPhotos.filter(photo => !photo.id.startsWith("saved:") && (viewerPhotos.some(value => value.id === photo.id) || photo.id === viewer))} initial={viewer} resources={resources} changes={photoChanges?.token === ownedPhotos?.token ? photoChanges : undefined} savedPhotoFor={photo => ownedPhotoForLocal(ownedPhotos, photo)} intelligence={active && ownedPhotos?.current() && ownedPhotos.edit ? {scopeKey: intelligenceScope(ownedPhotos.token), expectedAccountId: ownedPhotos.accountId, current: () => activeRef.current && currentOwnedPhotos.current?.token === ownedPhotos.token && ownedPhotos.current(), keep: keepLocalObservation} : undefined} onSave={onSave ? photo => onSave([photo]) : undefined} isSaved={photo => !!ownedPhotos?.current() && savedPhotos.some(saved => saved.id === photo.id)} onLabels={(id, labels) => editLocalPhoto(id, {labels})} onFavorite={(id, favorite) => editLocalPhoto(id, {favorite})} onUse={normalizeSearch(query) ? id => confirm(id) : undefined} onConfirm={normalizeSearch(query) ? id => confirm(id) : undefined} onPin={normalizeSearch(query) ? id => confirm(id, true) : undefined} meaning={result.meaning?.term} onReselect={() => {input.current?.click(); setViewer(null);}} onClose={() => setViewer(null)} />}
   </>;
 }

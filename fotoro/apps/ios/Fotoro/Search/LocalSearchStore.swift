@@ -54,6 +54,7 @@ enum SearchMetadataIntake {
   private(set) var acceptedMeaningID: String?
   private(set) var displayedID: String?
   var error: String?
+  @ObservationIgnored var onOrganizationChanged: ((SearchRecord, PhotoOrganizationChange) throws -> Void)?
   @ObservationIgnored var onRecordChanged: ((SearchRecord, Bool) throws -> Void)?
   @ObservationIgnored var onSnapshotReady: (() throws -> Void)?
   @ObservationIgnored private var index: SearchIndex?
@@ -942,10 +943,21 @@ enum SearchMetadataIntake {
     updateQuery(query)
   }
   #endif
+  @discardableResult func setOrganization(_ change: PhotoOrganizationChange, photoID: String) -> Bool {
+    guard canEditLabels(photoID), let index, let record = try? index.record(photoID),
+      assets[photoID]?.sourceRevision == record.revision else { error = "Photo source changed"; return false }
+    do {
+      // A linked account mutation reads the latest ledger instead of copying stale local facts.
+      try onOrganizationChanged?(record, change)
+      guard try index.setOrganization(change, photoID: photoID) else { return false }
+      updateQuery(query)
+      return true
+    } catch { self.error = error.localizedDescription; return false }
+  }
   func labels(_ photoID: String) -> [String] { (try? index?.record(photoID)?.labels) ?? [] }
   @discardableResult func setLabels(_ labels: [String], photoID: String) -> Bool {
     guard labels.count <= 64, labels.allSatisfy({ !$0.isEmpty && $0.unicodeScalars.count <= 120 }) else {
-      error = "Use up to 64 labels, each with up to 120 characters."
+      error = "Use up to 64 tags, each with up to 120 characters."
       return false
     }
     guard canEditLabels(photoID), let index else {

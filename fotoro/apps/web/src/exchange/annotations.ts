@@ -1,3 +1,4 @@
+import {organizationFactCategory, withPhotoOrganization, type PhotoOrganizationPatch} from "@fotoro/contracts/organization";
 import {type DiagnosticContext} from "../diagnostics";
 import type { PhotoAnnotationsV1, PhotoAnnotationsUpdateV1, PhotoAnnotationsReplyV1, PhotoLocationV1, SignedPayloadV1, WrappedKeyV1 } from "@fotoro/contracts";
 import { validateWire } from "@fotoro/contracts/validate";
@@ -32,8 +33,10 @@ const ordered = (value: unknown): unknown => Array.isArray(value) ? value.map(or
 const same = (a: unknown, b: unknown) => JSON.stringify(ordered(a)) === JSON.stringify(ordered(b));
 // Keep each encoded record family atomic, including malformed or future records.
 // Unknown reserved records remain one conservative bucket rather than being parsed.
-const factCategories = ["supplied", "people", "location", "capture", "observation", "reserved"] as const;
+const factCategories = ["supplied", "people", "location", "capture", "observation", "name", "trash", "screenshot", "reserved"] as const;
 function factCategory(fact: string): typeof factCategories[number] {
+  const organization = organizationFactCategory(fact);
+  if (organization) return organization;
   if (isPeopleFact(fact)) return "people";
   if (isLocationFact(fact)) return "location";
   if (fact.startsWith("fotoro.capture.")) return "capture";
@@ -183,6 +186,14 @@ export async function queueAnnotations(identity: AnnotationIdentity, changes: An
 }
 /* A Timeline acknowledgement means these exact coordinates are retained. Merge
    into the latest verified facts under the writer, preserving supplied text. */
+export async function queuePhotoOrganization(identity: AnnotationIdentity, patch: PhotoOrganizationPatch, session = requireVault()) {
+  return serializeAnnotationWrites(session, async () => {
+    assertAnnotationWriter(identity, session);
+    const state = await annotationWriteState(identity, session);
+    const {facts} = withPhotoOrganization({facts: state.projected?.value.facts}, patch);
+    return queueAnnotationChanges(identity, {facts}, session, state);
+  });
+}
 export async function queuePhotoLocation(identity: AnnotationIdentity, proposedLocation: PhotoLocationV1, session = requireVault()): Promise<boolean> {
   const location = {...proposedLocation};
   return serializeAnnotationWrites(session, async () => {
@@ -355,12 +366,12 @@ export async function queueLocalAnnotations(identity: AnnotationIdentity, local:
     const state = await annotationWriteState(identity, session);
     const currentLocation = state.projected && annotationLocation(state.projected.value);
     if (Object.hasOwn(patch, "facts")) {
-      const supplied = (facts: string[] | undefined) => (facts ?? []).filter(fact => !isLocationFact(fact) && !isPeopleFact(fact) && !isCloudObservationFact(fact));
+      const supplied = (facts: string[] | undefined) => (facts ?? []).filter(fact => !isLocationFact(fact) && !isPeopleFact(fact) && !isCloudObservationFact(fact) && !organizationFactCategory(fact));
       // A reserved-evidence delta is independent of supplied-fact edits. Merge
       // only categories changed in the local source into the latest account
       // value, so another device's words, names and observations survive.
       if (same(supplied(previous?.facts), supplied(next.facts))) {
-        let merged = state.projected?.value.facts ?? (next.facts ?? []).filter(fact => !isPeopleFact(fact) && !isCloudObservationFact(fact));
+        let merged = state.projected?.value.facts ?? (next.facts ?? []).filter(fact => !isPeopleFact(fact) && !isCloudObservationFact(fact) && !organizationFactCategory(fact));
         const category = (facts: string[] | undefined, matches: (fact: string) => boolean) => (facts ?? []).filter(matches);
         const nextCloud = category(next.facts, isCloudObservationFact);
         if (!same(category(previous?.facts, isCloudObservationFact), nextCloud)) {
@@ -371,6 +382,11 @@ export async function queueLocalAnnotations(identity: AnnotationIdentity, local:
         if (!same(category(previous?.facts, isPeopleFact), nextPeople)) {
           const assignments = validatedPeopleAssignments(next.facts, identity.originalSha256);
           if (assignments.length || !nextPeople.length) merged = factsWithPeople(merged, identity.originalSha256, assignments);
+        }
+        for (const key of ["name", "trash", "screenshot"] as const) {
+          const matches = (fact: string) => organizationFactCategory(fact) === key;
+          const replacement = category(next.facts, matches);
+          if (!same(category(previous?.facts, matches), replacement)) merged = [...(merged ?? []).filter(fact => !matches(fact)), ...replacement];
         }
         patch.facts = merged;
       }

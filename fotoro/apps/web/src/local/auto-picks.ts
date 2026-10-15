@@ -1,3 +1,4 @@
+import {isPhotoScreenshot, isPhotoTrashed} from "@fotoro/contracts/organization";
 import type {LocalPhoto} from "./resources";
 export const PICK_PROCESSOR = "moment-highlights-v3";
 export interface PhotoSignals {
@@ -225,4 +226,46 @@ export class PickAnalyzer {
     for (const [id, entry] of this.cache) if (!entry.signal) this.cache.delete(id);
   }
   clear() {this.cancel(); this.cache.clear();}
+}
+
+export function cleanupCandidates(photos: readonly LocalPhoto[], signals: ReadonlyMap<string, PhotoSignals>) {
+  const reasons = new Map<string, string[]>(), digests = new Map<string, LocalPhoto>();
+  let unassessed = 0;
+  const recent: LocalPhoto[] = [];
+  for (const photo of photos) {
+    if (photo.current?.() === false || isPhotoTrashed(photo)) continue;
+    const why: string[] = [];
+    if (photo.digest) {
+      const previous = digests.get(photo.digest);
+      if (previous) why.push("Identical original · keep another copy"); else digests.set(photo.digest, photo);
+    }
+    const signal = signals.get(photo.id);
+    // Screenshots and favorites are useful even when flat, dark or soft.
+    if (!signal || !valid(signal)) unassessed++;
+    else if (!photo.favorite && !isPhotoScreenshot(photo)) {
+      if (signal.luminance < .025 || signal.luminance > .985) why.push("Possibly too dark or bright");
+      else if (signal.contrast < .012) why.push("Very little visible detail");
+      else if (signal.sharpness < .008 && signal.contrast > .025) why.push("Possibly blurry");
+      const time = captured(photo);
+      if (time !== undefined) {
+        const previous = recent.find(candidate => {
+          const prior = signals.get(candidate.id), priorTime = captured(candidate);
+          return prior && priorTime !== undefined && Math.abs(time - priorTime) <= 30000 && similar(candidate, photo, prior, signal);
+        });
+        if (previous && !why.length) why.push("Similar shot within 30 seconds · compare before removing");
+      }
+      recent.push(photo); if (recent.length > 24) recent.shift();
+    }
+    if (why.length) reasons.set(photo.id, why);
+  }
+  return {reasons, unassessed};
+}
+export class CleanupAnalyzer {
+  private analyzer = new PickAnalyzer();
+  async run(photos: LocalPhoto[], load: (photo: LocalPhoto, signal?: AbortSignal) => Promise<PhotoSignals>, progress: (done: number) => void) {
+    const signals = new Map<string, PhotoSignals>();
+    const result = await this.analyzer.run(photos, async (photo, signal) => {const value = await load(photo, signal); signals.set(photo.id, value); return value;}, progress);
+    return result ? cleanupCandidates(photos, signals) : undefined;
+  }
+  clear() {this.analyzer.clear();}
 }

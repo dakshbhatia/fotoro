@@ -1,3 +1,4 @@
+import {isPhotoTrashed, photoName} from "@fotoro/contracts/organization";
 import {useEffect, useRef, useState} from "react";
 import {useDialogFocus} from "../library/dialog-focus";
 import {Icon} from "../library/icons";
@@ -16,9 +17,9 @@ function PlaceThumbnail({photo, resources, onOpen}: {photo: LocalPhoto; resource
     }).catch(() => {});
     return () => {alive = false;};
   }, [photo, resources]);
-  return <button className="place-thumbnail" aria-label={`Open ${photo.filename}`} onClick={() => {
+  return <button className="place-thumbnail" aria-label={`Open ${photoName(photo, photo.filename)}`} onClick={() => {
     if (photo.current?.() !== false) onOpen(photo.id);
-  }}>{url ? <img src={url} alt={photo.filename} /> : <span>{photo.filename}</span>}</button>;
+  }}>{url ? <img src={url} alt={photoName(photo, photo.filename)} /> : <span>{photoName(photo, photo.filename)}</span>}</button>;
 }
 export function Places({photos, resources, savedResources, onOpen, onClose, onApplyLocations}: {
   photos: LocalPhoto[];
@@ -53,7 +54,7 @@ export function Places({photos, resources, savedResources, onOpen, onClose, onAp
     try {
       const timeline = await parseGoogleTimelineFile(file);
       if (!alive.current || generation !== importGeneration.current) return;
-      setPreview(previewGoogleTimeline(currentPhotos.current.filter(photo => photo.current?.() !== false), timeline));
+      setPreview(previewGoogleTimeline(currentPhotos.current.filter(photo => photo.current?.() !== false && !isPhotoTrashed(photo)), timeline));
     } catch (error) {
       if (alive.current && generation === importGeneration.current) setMessage((error as Error).message);
     } finally {if (alive.current && generation === importGeneration.current) setBusy(false);}

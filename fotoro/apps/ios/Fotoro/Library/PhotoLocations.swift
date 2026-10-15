@@ -18,7 +18,7 @@ struct PhotoLocationV1: Codable, Equatable, Sendable {
   }
   var coordinates: String { String(format: "%.4f, %.4f", latitude, longitude) }
   var displayName: String {
-    guard let name, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return coordinates }
+    guard let name, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "Location on map" }
     return name
   }
   var provenance: String {
@@ -29,6 +29,13 @@ struct PhotoLocationV1: Codable, Equatable, Sendable {
     }
   }
   var searchTerms: [String] { isValid ? ["location gps", coordinates] + (name.map { [$0] } ?? []) : [] }
+  var mapURL: URL? {
+    guard isValid else { return nil }
+    var url = URLComponents(string: "https://maps.apple.com/")
+    url?.queryItems = [URLQueryItem(name: "ll", value: "\(latitude),\(longitude)"),
+      URLQueryItem(name: "q", value: "Photo location")]
+    return url?.url
+  }
 
   static func photos(_ value: CLLocation?) -> Self? {
     guard let value else { return nil }
@@ -124,6 +131,92 @@ enum PhotoLocationError: LocalizedError {
     switch self {
     case .invalid: return "Photo location is invalid."
     case .capacity: return "There is no room for location in this photo’s saved facts."
+    }
+  }
+}
+
+// Private organization records use the released annotation facts envelope.
+enum PhotoOrganizationChange { case name(String?), trash(Bool), screenshot(Bool?) }
+enum PhotoOrganizationFacts {
+  static let namePrefix = "fotoro.name.v1:"
+  static let trashPrefix = "fotoro.trash.v1:"
+  static let screenshotPrefix = "fotoro.screenshot.v1:"
+  static let prefixes = [namePrefix, trashPrefix, screenshotPrefix]
+  static func category(_ fact: String) -> String? {
+    if fact.hasPrefix(namePrefix) { return "name" }
+    if fact.hasPrefix(trashPrefix) { return "trash" }
+    if fact.hasPrefix(screenshotPrefix) { return "screenshot" }
+    return nil
+  }
+  static func one(_ facts: [String]?, prefix: String) -> String? {
+    let values = (facts ?? []).filter { $0.hasPrefix(prefix) }
+    return values.count == 1 ? String(values[0].dropFirst(prefix.count)) : nil
+  }
+  static func validName(_ name: String) -> Bool {
+    !name.isEmpty && name.unicodeScalars.count <= 160 && name.utf8.count <= 240 && name == name.trimmingCharacters(in: .whitespacesAndNewlines)
+      && !name.hasPrefix(".") && !name.hasSuffix(".") && !name.hasSuffix(" ")
+      && name.range(of: #"[\\/<>:"|?*\p{C}]"#, options: .regularExpression) == nil
+      && name.range(of: #"^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)"#, options: [.regularExpression, .caseInsensitive]) == nil
+  }
+  static func name(_ facts: [String]?, original: String) -> String {
+    guard let name = one(facts, prefix: namePrefix), validName(name) else { return original }
+    return name
+  }
+  static func trashed(_ facts: [String]?) -> Bool { one(facts, prefix: trashPrefix) == "true" }
+  static func screenshot(_ facts: [String]?, originalSha256: String? = nil, detected: Bool = false) -> Bool {
+    if let value = one(facts, prefix: screenshotPrefix), ["true", "false"].contains(value) { return value == "true" }
+    let capture = originalSha256.flatMap { PhotoCaptureFacts.read(facts, originalSha256: $0) }
+    return detected || facts?.contains("screenshot") == true || capture?.items.contains { $0.p == .photos && $0.k == "subtypes" && $0.v.split(separator: ",").contains("screenshot") } == true
+  }
+  static func replacing(_ facts: [String]?, change: PhotoOrganizationChange) throws -> [String] {
+    let prefix: String, value: String?
+    switch change {
+    case .name(let name):
+      guard name.map(validName) ?? true else { throw PhotoOrganizationError.invalid }
+      prefix = namePrefix; value = name
+    case .trash(let trash): prefix = trashPrefix; value = trash ? "true" : nil
+    case .screenshot(let screenshot): prefix = screenshotPrefix; value = screenshot.map { $0 ? "true" : "false" }
+    }
+    if let value, one(facts, prefix: prefix) == value { return facts ?? [] }
+    var result = (facts ?? []).filter { !$0.hasPrefix(prefix) }
+    if let value { result.append(prefix + value) }
+    guard result.count <= 64 else { throw PhotoOrganizationError.capacity }
+    return result
+  }
+  static func suggestedName(original: String, digest: String?, capturedAt: Date?, labels: [String], place: String?, screenshot: Bool) -> String {
+    func slug(_ value: String) -> String {
+      value.precomposedStringWithCanonicalMapping.replacingOccurrences(of: #"[^\p{L}\p{N}]+"#, with: "-", options: .regularExpression).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withFullDate]; formatter.timeZone = TimeZone(secondsFromGMT: 0)
+    var parts = capturedAt.map { [formatter.string(from: $0)] } ?? []
+    var seen = Set<String>()
+    for text in [screenshot ? "Screenshot" : nil, place] + labels.prefix(2).map(Optional.some) {
+      if let text { let word = slug(text); if !word.isEmpty && seen.insert(word).inserted { parts.append(word) } }
+    }
+    var identity: String?
+    if let digest {
+      var hex = digest.lowercased()
+      if digest.range(of: #"^[a-fA-F0-9]{64}$"#, options: .regularExpression) == nil {
+        let encoded = digest.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        hex = Data(base64Encoded: encoded + String(repeating: "=", count: (4 - encoded.count % 4) % 4)).flatMap { $0.count == 32 ? $0.map { String(format: "%02x", $0) }.joined() : nil } ?? ""
+      }
+      if !hex.isEmpty { identity = String(hex.prefix(10)) }
+    }
+    var evidence = String(parts.joined(separator: "_").unicodeScalars.prefix(120))
+    while evidence.utf8.count > 210 { evidence.removeLast() }
+    let named = [evidence.isEmpty ? nil : evidence, identity].compactMap { $0 }.joined(separator: "_")
+    let stem = named.isEmpty ? "Photo" : named
+    let ext = (original as NSString).pathExtension
+    return stem + (ext.range(of: #"^[a-zA-Z0-9]{1,10}$"#, options: .regularExpression) == nil ? "" : "." + ext.lowercased())
+  }
+}
+enum PhotoOrganizationError: LocalizedError {
+  case invalid, capacity
+  var errorDescription: String? {
+    switch self {
+    case .invalid: return "Use a filename without slashes or special file characters. Keep the original extension."
+    case .capacity: return "This photo’s saved facts are full. Remove an unused fact before changing it."
     }
   }
 }

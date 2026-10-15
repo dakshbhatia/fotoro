@@ -1,3 +1,4 @@
+import {photoName, renamedPhotoFile} from "@fotoro/contracts/organization";
 import type {PhotoMetadataV1} from "@fotoro/contracts";
 import {CAMERA_ORIGINAL_LIMIT, LIVE_PHOTO_TYPE, isCameraMedia} from "@fotoro/contracts/camera-media";
 import {ready, b64, sodium, decodeLivePhoto} from "@fotoro/crypto";
@@ -33,4 +34,12 @@ export async function readCameraPlayback(photo: Photo, signal: AbortSignal, curr
     }
     return new Blob([new Uint8Array(bytes)], {type: photo.metadata.mediaType});
   } finally {bytes.fill(0);}
+}
+
+export async function photoOriginalFiles(bytes: Uint8Array, photo: Photo): Promise<File[]> {
+  const files = await cameraOriginalFiles(bytes, photo.metadata);
+  if (photo.grantId) return files;
+  const name = photoName(photo.annotations ?? {}, photo.metadata.filename);
+  if (name === photo.metadata.filename) return files;
+  return files.map(file => renamedPhotoFile(file, files.length === 1 ? name : name.replace(/\.[^.]+$/, "") + (file.name.match(/\.[^.]+$/)?.[0] ?? "")));
 }

@@ -14,7 +14,7 @@ test("table never presents selection timestamps as capture dates and sorts unava
 test("table uses observed dimensions, location, labels and original availability", () => {
   const original = photo("local", {file: new File(["original"], "local.jpg", {type: "image/jpeg"}), width: 4000, height: 3000, labels: ["Family"], location: {latitude: 1.25, longitude: 2.5, source: "exif"}});
   assert.equal(photoCell(original, "dimensions"), "4000 × 3000");
-  assert.equal(photoCell(original, "location"), "1.2500, 2.5000");
+  assert.equal(photoCell(original, "location"), "Location on map");
   assert.equal(photoCell(original, "tags"), "Family");
   assert.equal(photoCell(original, "availability"), "Original on device");
   assert.equal(photoCell(photo("preview", {preview: new Blob(["preview"])}), "availability"), "Preview only");

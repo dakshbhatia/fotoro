@@ -1,3 +1,4 @@
+import {photoName} from "@fotoro/contracts/organization";
 import { useRef, useState, useEffect, useMemo } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { type Photo } from "./catalog";
@@ -56,7 +57,7 @@ export function Thumbnail({
         data-photo-navigation-id={photo.manifest.photoId}
         onClick={onOpen}
         disabled={selecting && selectionDisabled}
-        aria-label={"Open " + photo.metadata.filename}
+        aria-label={"Open " + photoName(photo.annotations ?? {}, photo.metadata.filename)}
         aria-description={reasons?.join(". ")}
       >
         {loaded.source === source && loaded.url ? (
@@ -66,7 +67,7 @@ export function Thumbnail({
         )}
         {reasons?.length ? <span className="find-photo-reason">{reasons.join(" · ")}</span> : null}
       </button>
-      {(selecting || selected) && <PhotoSelectionButton filename={photo.metadata.filename} selected={selected} disabled={selectionDisabled} onSelect={onSelect} />}
+      {(selecting || selected) && <PhotoSelectionButton filename={photoName(photo.annotations ?? {}, photo.metadata.filename)} selected={selected} disabled={selectionDisabled} onSelect={onSelect} />}
     </div>
   );
 }

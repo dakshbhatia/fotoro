@@ -48,3 +48,11 @@ export function mergeSearchPhotos(previous: Photo[], matches: Photo[], added: Se
   }
   return {photos: next, added: nextAdded};
 }
+
+// Pending owner edits take effect while the encrypted metadata index refreshes.
+export function currentSearchRecords(cached: SearchPhoto[], loaded: SearchPhoto[]): SearchPhoto[] {
+  const current = new Map(loaded.map(photo => [photo.id, photo]));
+  const records = cached.map(photo => current.get(photo.id) ?? photo);
+  const cachedIDs = new Set(cached.map(photo => photo.id));
+  return [...records, ...loaded.filter(photo => !cachedIDs.has(photo.id))];
+}
