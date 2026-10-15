@@ -1,6 +1,6 @@
 import {isPhotoScreenshot, isPhotoTrashed} from "@fotoro/contracts/organization";
 import type {LocalPhoto} from "./resources";
-export const PICK_PROCESSOR = "moment-highlights-v3";
+export const PICK_PROCESSOR = "moment-highlights-v4";
 export interface PhotoSignals {
   hash: bigint;
   luminance: number;
@@ -71,7 +71,7 @@ const PICK_WORK_BATCH = 128;
 function* recommendationSteps(photos: LocalPhoto[], signals: ReadonlyMap<string, PhotoSignals>): Generator<void, PhotoRecommendations> {
   const byID = new Map<string, LocalPhoto>();
   for (let i = 0; i < photos.length; i++) {
-    if (photos[i].current?.() !== false) byID.set(photos[i].id, photos[i]);
+    byID.set(photos[i].id, photos[i]);
     if ((i + 1) % PICK_WORK_BATCH === 0) yield;
   }
   const unique = [...byID.values()];
@@ -80,7 +80,7 @@ function* recommendationSteps(photos: LocalPhoto[], signals: ReadonlyMap<string,
   let unassessed = 0;
   for (let order = 0; order < unique.length; order++) {
     const photo = unique[order], signal = signals.get(photo.id);
-    if (photo.current?.() !== false) {
+    if (photo.current?.() !== false && !isPhotoTrashed(photo) && (!isPhotoScreenshot(photo) || photo.favorite)) {
       if (!signal || !valid(signal)) unassessed++;
       else if (signal.contrast >= .006) candidates.push({photo, signal, order, time: captured(photo), score: score(photo, signal)});
     }
@@ -144,6 +144,15 @@ function* recommendationSteps(photos: LocalPhoto[], signals: ReadonlyMap<string,
         ...(moments.length > 1 && group.best.time !== undefined ? ["Variety across moments"] : [])]);
     }
   }
+  // Burst grouping may choose one representative, but must not discard an
+  // owner's other explicit favorites from the suggested set.
+  for (let index = 0; index < candidates.length; index++) {
+    const candidate = candidates[index];
+    if (candidate.photo.favorite && !ids.has(candidate.photo.id)) {
+      ids.add(candidate.photo.id); reasons.set(candidate.photo.id, ["Favorite"]);
+    }
+    if ((index + 1) % PICK_WORK_BATCH === 0) yield;
+  }
   return {ids, reasons, groupCount: groups.length, duplicateCount: candidates.length - groups.length, unassessed};
 }
 export function recommendPhotos(photos: LocalPhoto[], signals: ReadonlyMap<string, PhotoSignals>): PhotoRecommendations {
@@ -165,7 +174,7 @@ export class PickAnalyzer {
   private controller = new AbortController();
   private cache = new Map<string, CachedSignals>();
   constructor(private readonly yieldWork: () => Promise<void> = () => new Promise(resolve => setTimeout(resolve, 0))) {}
-  async run(photos:LocalPhoto[], load:(photo:LocalPhoto, signal?: AbortSignal)=>Promise<PhotoSignals>, progress?:(done:number,total:number)=>void):Promise<PhotoRecommendations|undefined> {
+  private async measurements(photos:LocalPhoto[], load:(photo:LocalPhoto, signal?: AbortSignal)=>Promise<PhotoSignals>, progress?: (done:number,total:number)=>void, highlights = false) {
     this.cancel();
     const version = this.version, cancellationSignal = this.controller.signal, unique = [...new Map(photos.map(photo => [photo.id, photo])).values()];
     const ids = new Set(unique.map(photo => photo.id));
@@ -174,7 +183,7 @@ export class PickAnalyzer {
     for (let i = 0; i < unique.length; i++) {
       if (version !== this.version) return;
       const photo = unique[i], source = photo.file ?? photo.preview ?? photo.previewLoader;
-      if (source && photo.previewAvailable !== false && photo.current?.() !== false) {
+      if (source && photo.previewAvailable !== false && photo.current?.() !== false && !isPhotoTrashed(photo) && (!highlights || !isPhotoScreenshot(photo) || photo.favorite)) {
         let entry = this.cache.get(photo.id);
         if (!entry || entry.source.deref() !== source || entry.digest !== photo.digest || entry.width !== photo.width || entry.height !== photo.height) {
           entry = {source: new WeakRef(source), digest: photo.digest, width: photo.width, height: photo.height};
@@ -201,6 +210,12 @@ export class PickAnalyzer {
       if ((i + 1) % 8 === 0 || i + 1 === unique.length) progress?.(i + 1, unique.length);
       if ((i + 1) % PICK_WORK_BATCH === 0) await this.yieldWork();
     }
+    return version === this.version ? {version, unique, signals} : undefined;
+  }
+  async run(photos:LocalPhoto[], load:(photo:LocalPhoto, signal?: AbortSignal)=>Promise<PhotoSignals>, progress?:(done:number,total:number)=>void):Promise<PhotoRecommendations|undefined> {
+    const measured = await this.measurements(photos, load, progress, true);
+    if (!measured) return;
+    const {version, unique, signals} = measured;
     let rankedPhotos = unique.filter(photo => photo.current?.() !== false);
     let steps = recommendationSteps(rankedPhotos, signals);
     while (version === this.version) {
@@ -219,6 +234,11 @@ export class PickAnalyzer {
       await this.yieldWork();
     }
   }
+  async cleanup(photos:LocalPhoto[], load:(photo:LocalPhoto, signal?: AbortSignal)=>Promise<PhotoSignals>, progress?:(done:number,total:number)=>void) {
+    const measured = await this.measurements(photos, load, progress);
+    if (!measured || measured.version !== this.version) return;
+    return cleanupCandidates(measured.unique, measured.signals);
+  }
   // Completed measurements survive harmless metadata updates; pending work never crosses a cancellation.
   cancel() {
     this.version++;
@@ -230,14 +250,18 @@ export class PickAnalyzer {
 
 export function cleanupCandidates(photos: readonly LocalPhoto[], signals: ReadonlyMap<string, PhotoSignals>) {
   const reasons = new Map<string, string[]>(), digests = new Map<string, LocalPhoto>();
+  const current = [...new Map(photos.map(photo => [photo.id, photo])).values()].filter(photo => photo.current?.() !== false && !isPhotoTrashed(photo));
+  // Preserve an explicit favorite independently of gallery order, matching iOS.
+  for (const photo of current) if (photo.digest) {
+    const previous = digests.get(photo.digest);
+    if (!previous || photo.favorite && !previous.favorite) digests.set(photo.digest, photo);
+  }
   let unassessed = 0;
   const recent: LocalPhoto[] = [];
-  for (const photo of photos) {
-    if (photo.current?.() === false || isPhotoTrashed(photo)) continue;
+  for (const photo of current) {
     const why: string[] = [];
     if (photo.digest) {
-      const previous = digests.get(photo.digest);
-      if (previous) why.push("Identical original · keep another copy"); else digests.set(photo.digest, photo);
+      if (digests.get(photo.digest)?.id !== photo.id) why.push("Identical original · keep another copy");
     }
     const signal = signals.get(photo.id);
     // Screenshots and favorites are useful even when flat, dark or soft.
@@ -263,9 +287,7 @@ export function cleanupCandidates(photos: readonly LocalPhoto[], signals: Readon
 export class CleanupAnalyzer {
   private analyzer = new PickAnalyzer();
   async run(photos: LocalPhoto[], load: (photo: LocalPhoto, signal?: AbortSignal) => Promise<PhotoSignals>, progress: (done: number) => void) {
-    const signals = new Map<string, PhotoSignals>();
-    const result = await this.analyzer.run(photos, async (photo, signal) => {const value = await load(photo, signal); signals.set(photo.id, value); return value;}, progress);
-    return result ? cleanupCandidates(photos, signals) : undefined;
+    return this.analyzer.cleanup(photos, load, progress);
   }
   clear() {this.analyzer.clear();}
 }

@@ -2,9 +2,34 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {analyzePixels, recommendPhotos, PickAnalyzer, type PhotoSignals} from "../src/local/auto-picks";
 import type {LocalPhoto} from "../src/local/resources";
+import {withPhotoOrganization} from "@fotoro/contracts/organization";
 
 const photo = (id: string, date?: string): LocalPhoto => ({id, filename: id + ".png", date: date ?? "2026-10-02", dateSource: date ? "exif" : "selected", captureVerified: date ? true : undefined, width: 1200, height: 800});
 const signal = (hash: bigint, sharpness = .12): PhotoSignals => ({hash, sharpness, luminance: .5, contrast: .15, color: [120, 120, 120]});
+
+test("screenshots stay out of moment highlights unless favorited and Trash never reappears", async () => {
+  const screen = withPhotoOrganization({...photo("screen"), file: new File(["screen"], "screen.png")}, {screenshot: true});
+  const trashed = withPhotoOrganization({...photo("trashed"), favorite: true, file: new File(["trash"], "trash.png")}, {trash: true});
+  const kept = {...photo("kept"), file: new File(["kept"], "kept.png")};
+  const photos = [screen, trashed, kept], signals = new Map(photos.map(photo => [photo.id, signal(0n)]));
+  assert.deepEqual([...recommendPhotos(photos, signals).ids], ["kept"]);
+  assert.equal(recommendPhotos(photos, signals).unassessed, 0);
+  const analyzer = new PickAnalyzer(), reads: string[] = [];
+  const result = await analyzer.run(photos, async photo => {reads.push(photo.id); return signal(0n);});
+  assert.deepEqual(reads, ["kept"], "Ineligible sources should not be decoded");
+  assert.deepEqual([...result!.ids], ["kept"]);
+  const favorite = {...screen, favorite: true};
+  assert.deepEqual([...recommendPhotos([favorite], signals).ids], ["screen"]);
+});
+
+test("every explicit favorite survives similar burst grouping", () => {
+  const photos = [{...photo("first", "2026-10-01T12:00:00Z"), favorite: true},
+    {...photo("second", "2026-10-01T12:00:10Z"), favorite: true}, photo("soft", "2026-10-01T12:00:20Z")];
+  const result = recommendPhotos(photos, new Map(photos.map(photo => [photo.id, signal(0n, photo.favorite ? .12 : .01)])));
+  assert.deepEqual([...result.ids], ["first", "second"]);
+  assert.equal(result.groupCount, 1); assert.equal(result.duplicateCount, 2);
+  assert.deepEqual(result.reasons.get("second"), ["Favorite"]);
+});
 
 test("Picks never reads withdrawn sources and a withdrawn measured winner cannot suppress its runner-up", async () => {
   let allowed = true, release!: (value: PhotoSignals) => void;

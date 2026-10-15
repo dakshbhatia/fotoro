@@ -45,7 +45,15 @@ export function suggestedPhotoName(input: {filename: string; digest?: string; da
   const extension = input.filename.match(/\.([a-zA-Z0-9]{1,10})$/)?.[1].toLowerCase();
   const slug = (text: string) => text.normalize("NFC").replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "");
   const date = ["exif", "photos"].includes(input.dateSource ?? "") && input.date && Number.isFinite(Date.parse(input.date)) ? new Date(input.date).toISOString().slice(0, 10) : undefined;
-  const words = [input.screenshot ? "Screenshot" : undefined, input.location?.name, ...(input.labels ?? []).slice(0, 2)].filter((value): value is string => !!value).map(slug).filter(Boolean);
+  const words: string[] = [], seen = new Set<string>();
+  const add = (text: string | undefined) => {
+    const word = text ? slug(text) : "", key = word.toLowerCase();
+    if (!word || seen.has(key)) return false;
+    seen.add(key); words.push(word); return true;
+  };
+  add(input.screenshot ? "Screenshot" : undefined); add(input.location?.name);
+  let tags = 0;
+  for (const label of input.labels ?? []) if (add(label) && ++tags === 2) break;
   // Digest suffix prevents common date/tag collisions, independent of device locale/timezone.
   let digest = input.digest;
   if (digest && !/^[a-fA-F0-9]{64}$/.test(digest)) {
@@ -54,7 +62,8 @@ export function suggestedPhotoName(input: {filename: string; digest?: string; da
   const identity = digest?.toLowerCase().slice(0, 10);
   const evidence = Array.from([date, ...new Set(words)].filter(Boolean).join("_")).slice(0, 120);
   while (new TextEncoder().encode(evidence.join("")).length > 210) evidence.pop();
-  const stem = [evidence.join(""), identity].filter(Boolean).join("_") || "Photo";
+  let stem = [evidence.join(""), identity].filter(Boolean).join("_") || "Photo";
+  if (/^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])$/i.test(stem)) stem = "Photo_" + stem;
   return stem + (extension ? "." + extension : "");
 }
 export function renamedPhotoFile(file: File, name: string) {

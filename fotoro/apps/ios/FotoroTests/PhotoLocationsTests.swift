@@ -5,6 +5,18 @@ import XCTest
 @testable import Fotoro
 
 final class PhotoLocationsTests: XCTestCase {
+  func testSuggestedNamesUseDistinctUsefulTagsAndRemainApplicable() {
+    let date = ISO8601DateFormatter().date(from: "2018-02-03T23:50:00Z")
+    XCTAssertEqual(PhotoOrganizationFacts.suggestedName(original: "IMG.JPG", digest: String(repeating: "00", count: 32),
+      capturedAt: date, labels: ["seoul", "", "BTS", "BTS", "Family"], place: "Seoul", screenshot: false),
+      "2018-02-03_Seoul_BTS_Family_0000000000.jpg")
+    let reserved = PhotoOrganizationFacts.suggestedName(original: "IMG.JPG", digest: nil,
+      capturedAt: nil, labels: ["CON"], place: nil, screenshot: false)
+    XCTAssertEqual(reserved, "Photo_CON.jpg")
+    XCTAssertTrue(PhotoOrganizationFacts.validName(reserved))
+    XCTAssertEqual(PhotoOrganizationFacts.suggestedName(original: "IMG.JPG", digest: nil,
+      capturedAt: Date(timeIntervalSince1970: .infinity), labels: [], place: nil, screenshot: false), "Photo.jpg")
+  }
   func testOrganizationNamesMatchWebAndTrashRestoresWithoutDestroyingWords() throws {
     let digest = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     let date = try XCTUnwrap(ISO8601DateFormatter().date(from: "2018-02-03T23:50:00Z"))

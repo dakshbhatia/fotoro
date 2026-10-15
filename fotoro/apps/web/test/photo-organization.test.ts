@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {photoName, isPhotoScreenshot, isPhotoTrashed, withPhotoOrganization, suggestedPhotoName, validPhotoName, inOrganizationScope, renamedPhotoFile} from "@fotoro/contracts/organization";
 import {mergeAnnotationFacts} from "../src/exchange/annotations";
-import {cleanupCandidates} from "../src/local/auto-picks";
+import {cleanupCandidates, CleanupAnalyzer} from "../src/local/auto-picks";
 import {PhotoSearchIndex} from "../src/local/search";
 import {inBrowseRange} from "../src/local/consumer-range";
 import type {LocalPhoto} from "../src/local/resources";
@@ -16,6 +16,13 @@ test("suggested names use recorded evidence and the same suffix for hex or wire 
   assert.equal(suggestedPhotoName({...original, digest: "00".repeat(32)}), expected);
   assert.equal(suggestedPhotoName({...original, dateSource: "selected"}).startsWith("2018"), false);
   assert.equal(suggestedPhotoName({...original, screenshot: true}).includes("Screenshot"), true);
+});
+test("suggested names avoid repeated place/tag words and always provide an applicable safe name", () => {
+  const name = suggestedPhotoName({...original, labels: ["seoul", "", "BTS", "BTS", "Family"]});
+  assert.equal(name, "2018-02-03_Seoul_BTS_Family_0000000000.jpg");
+  const reserved = suggestedPhotoName({filename: "IMG.JPG", labels: ["CON"]});
+  assert.equal(reserved, "Photo_CON.jpg"); assert.equal(validPhotoName(reserved), true);
+  assert.equal(suggestedPhotoName({filename: "IMG.JPG", date: "garbage", dateSource: "photos"}), "Photo.jpg");
 });
 test("organization records preserve original words and restore without destroying other metadata", async () => {
   const base = {facts: ["My EXACT words", "fotoro.future.v2:keep"], labels: ["BTS"], caption: "My caption"};
@@ -76,6 +83,28 @@ test("cleanup protects screenshots and favorites from flat-preview heuristics, l
   assert.equal(result.reasons.has("unknown"), false); assert.match(result.reasons.get("duplicate")!.join(" "), /Identical original/);
   assert.equal(result.reasons.get("blank")!.some(reason => reason.includes("Identical")), false);
   assert.equal(photos.some(isPhotoTrashed), false);
+});
+test("duplicate cleanup retains a favorite even when another copy arrives first", () => {
+  const ordinary = {id: "ordinary", ...original};
+  const favorite = {...ordinary, id: "favorite", favorite: true};
+  const result = cleanupCandidates([ordinary, favorite], new Map());
+  assert.deepEqual([...result.reasons.keys()], ["ordinary"]);
+  assert.deepEqual(result.reasons.get("ordinary"), ["Identical original · keep another copy"]);
+  assert.equal(result.unassessed, 2);
+  assert.deepEqual([...cleanupCandidates([favorite, ordinary], new Map()).reasons.keys()], ["ordinary"]);
+});
+test("cleanup reuses measured previews without losing hints after a metadata edit", async () => {
+  const photo = {id: "flat", ...original, digest: "flat", file: new File(["flat"], "flat.jpg")};
+  const analyzer = new CleanupAnalyzer();
+  let reads = 0;
+  const load = async () => {reads++; return {hash: 0n, luminance: 1, contrast: 0, sharpness: 0, color: [255, 255, 255] as [number, number, number]};};
+  assert.deepEqual((await analyzer.run([photo], load, () => {}))!.reasons.get(photo.id), ["Possibly too dark or bright"]);
+  const named = withPhotoOrganization(photo, {name: "Chosen name.jpg"});
+  assert.deepEqual((await analyzer.run([named], load, () => {}))!.reasons.get(photo.id), ["Possibly too dark or bright"]);
+  assert.equal(reads, 1);
+  assert.equal((await analyzer.run([{...named, favorite: true}], load, () => {}))!.reasons.size, 0);
+  assert.equal(reads, 1);
+  analyzer.clear();
 });
 
 test("pending Trash, Restore, names and screenshot edits override the previous cached index immediately", () => {

@@ -64,6 +64,18 @@ final class AutomaticPhotoPicksTests: XCTestCase {
     XCTAssertTrue(result.reasons["19"]?.contains("Favorite") == true)
   }
 
+  func testEveryExplicitFavoriteSurvivesSimilarBurstGrouping() {
+    let photos = [photo("first", seconds: 0, favorite: true),
+      photo("second", seconds: 10, favorite: true), photo("soft", seconds: 20)]
+    let result = AutomaticPhotoPickPolicy.recommend(photos,
+      signals: ["first": signal(), "second": signal(), "soft": signal(sharpness: 0.01)])
+    XCTAssertEqual(result.ids, ["first", "second"])
+    XCTAssertEqual(result.groupCount, 1)
+    XCTAssertEqual(result.duplicateCount, 2)
+    XCTAssertEqual(result.reasons["second"], ["Favorite"])
+    XCTAssertEqual(photos.count, 3)
+  }
+
   func testFavoritesDoNotCrowdDistinctStrongMomentHighlightsOutOfSuggestionBudget() {
     let photos = [
       photo("favorite-a", seconds: 0, favorite: true),
