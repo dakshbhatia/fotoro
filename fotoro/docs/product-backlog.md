@@ -27,8 +27,10 @@ Cloudflare proposals become tasks here only when a consumer need admits them.
    source/revision/processor-bound stage retry deadlines. Reopening preserves
    completed OCR/classification/vectors; due work resumes through one admitted
    wakeup and model readiness releases only model-deferred vectors. Metadata
-   comes first; native analysis visits every permitted local photo newest first
-   while the app is active and browsing is idle. Original backup has a separate
+   comes first; this iteration starts heavy native analysis with the latest ten
+   calendar days. Photo analysis explicitly expands to All photos, which visits
+   older/undated permitted photos newest first while active and browsing is idle.
+   Existing indexed evidence remains searchable. Original backup has a separate
    opt-in date horizon; do not mistake that horizon for local search coverage.
    Opt-in browser vectors and per-photo retry deadlines now reopen from existing
    encrypted storage, bound to current source/digest/processor and account.
@@ -42,7 +44,11 @@ Cloudflare proposals become tasks here only when a consumer need admits them.
    catalog publication for acknowledgment-only changes.
    Date-only filtering keeps warm thumbnails and requests. Sync counts use
    transactional SQL aggregates instead of decoding every checkpoint per photo;
-   annotation eligibility uses an indexed photo lookup, and unchanged analysis
+   annotation eligibility uses an indexed photo lookup. Hydration now reads current
+   records and applies up to 200 overlays per transaction, skips unchanged writes,
+   and publishes search/organization changes once per changed chunk. Derived
+   annotation uploads coalesce into a fixed window with one trailing drain;
+   explicit owner edits retain their immediate path. Unchanged analysis
    does not republish overlays. Background summary bursts share one fixed window;
    inventory decoding runs off-main and publication checks transactional source
    revisions and current access. Photos notification bursts share one refresh.
@@ -114,9 +120,10 @@ Automatic Picks waits through sync preflight and backup; an explicit Picks reque
 remains available. Already scheduled ciphertext uploads may finish in the background.
 Existing 10-day Sync anchors preserve their journal and exclusions until explicit
 expansion to 30 days. Date and reviewed-People metadata scope heavy processing;
-automatic local analysis continues through older and undated permitted photos
-when browsing is idle, including due source retries. This does not expand the
-original-backup horizon. Query-scoped checks and immediate retry remain explicit
+automatic local analysis starts with ten days for this experiment. Choosing All
+photos includes older and undated permitted photos while browsing is idle,
+including due source retries. This does not expand the original-backup horizon.
+Query-scoped checks and immediate retry remain explicit
 choices; model readiness cannot bypass unavailable-source deadlines. Current
 coverage, retry waits and operational gaps are documented in
 [diagnostics](diagnostics.md); incomplete evidence must remain visible.

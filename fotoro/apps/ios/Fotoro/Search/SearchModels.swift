@@ -176,6 +176,16 @@ struct SearchScope: Equatable, Sendable {
     return people.isEmpty ? dates : dates + "|people:" + people.key
   }
 }
+enum PhotoAnalysisWindow: String, Codable, Sendable {
+  case allPhotos, tenDays
+  func scope(now: Date = Date(), calendar: Calendar = .current) -> PhotoAnalysisScope {
+    var value = PhotoAnalysisScope(includesOlder: true, now: now, calendar: calendar)
+    if self == .tenDays {
+      value.scope.from = calendar.date(byAdding: .day, value: -9, to: calendar.startOfDay(for: now))
+    }
+    return value
+  }
+}
 struct PhotoAnalysisScope: Equatable, Sendable {
   var query: String
   var metadataText: String

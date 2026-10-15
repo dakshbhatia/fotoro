@@ -3,6 +3,50 @@ import XCTest
 @testable import Fotoro
 
 final class AutomaticPhotoSyncRetryTests: XCTestCase {
+  @MainActor func testDerivedBurstUsesOneFixedWindowWithoutPostponingItsFlush() async {
+    let batch = FixedWindowWorkBatch<Int>()
+    let gate = RetrySleepGate(entered: expectation(description: "Fixed window sleeping"))
+    defer { batch.cancel(); gate.open() }
+    var actions = 0
+    for _ in 0..<100 { batch.enqueue(binding: 1, current: { 1 }, sleep: { try await gate.sleep(.milliseconds(500)) }, run: { actions += 1 }) }
+    await fulfillment(of: [gate.entered], timeout: 3)
+    for _ in 0..<100 { batch.enqueue(binding: 1, current: { 1 }, run: { actions += 1 }) }
+    XCTAssertEqual(gate.delays.count, 1)
+    gate.open(); await batch.waitUntilSettled()
+    XCTAssertEqual(actions, 1); XCTAssertFalse(batch.pending)
+  }
+  @MainActor func testDerivedChangesDuringDrainProduceOneTrailingWindow() async {
+    let batch = FixedWindowWorkBatch<Int>()
+    let gate = RetrySleepGate(entered: expectation(description: "Drain held"))
+    defer { batch.cancel(); gate.open() }
+    var actions = 0, windows = 0
+    let sleep: @MainActor () async throws -> Void = { windows += 1; await Task.yield() }
+    let run: @MainActor () async -> Void = {
+      actions += 1
+      if actions == 1 { try? await gate.sleep(.zero) }
+    }
+    batch.enqueue(binding: 1, current: { 1 }, sleep: sleep, run: run)
+    await fulfillment(of: [gate.entered], timeout: 3)
+    for _ in 0..<100 { batch.enqueue(binding: 1, current: { 1 }, sleep: sleep, run: run) }
+    gate.open(); await batch.waitUntilSettled()
+    XCTAssertEqual(actions, 2); XCTAssertEqual(windows, 2)
+  }
+  @MainActor func testDerivedWindowRejectsWithdrawnAccessAndCannotEraseSuccessorAfterCancel() async {
+    let batch = FixedWindowWorkBatch<Int>()
+    let old = RetrySleepGate(entered: expectation(description: "Old window"))
+    let next = RetrySleepGate(entered: expectation(description: "Successor window"))
+    defer { batch.cancel(); old.open(); next.open() }
+    var binding: Int? = 1, actions = 0
+    batch.enqueue(binding: 1, current: { binding }, sleep: { try await old.sleep(.zero) }, run: { actions += 1 })
+    await fulfillment(of: [old.entered], timeout: 3)
+    batch.cancel(); binding = 2
+    batch.enqueue(binding: 2, current: { binding }, sleep: { try await next.sleep(.zero) }, run: { actions += 1 })
+    await fulfillment(of: [next.entered], timeout: 3)
+    old.open(); await Task.yield()
+    XCTAssertTrue(batch.pending); XCTAssertEqual(actions, 0)
+    binding = nil; next.open(); await batch.waitUntilSettled()
+    XCTAssertEqual(actions, 0); XCTAssertFalse(batch.pending)
+  }
   func testOnlyTemporaryTransportAndServerFailuresReceiveBoundedRetries() {
     for code in [URLError.Code.timedOut, .networkConnectionLost, .notConnectedToInternet,
       .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed] {

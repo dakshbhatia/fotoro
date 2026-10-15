@@ -356,6 +356,7 @@ export default function CloudApp({
   const unlocked = (() => {try {return !!account && requireVault().accountId === account;} catch {return false;}})();
   const accountReference = account ? account.slice(0, 8) + "…" + account.slice(-4) : "";
   const publicDemo = fixtureMode || isPublicDemoAccount(account);
+  const choosePhotos = () => {setReselect(undefined); input.current?.click();};
   const clear = () => {
     cancelOriginals();
     cancelSavedBrowse();
@@ -1208,7 +1209,7 @@ export default function CloudApp({
           {unlocked && (
             <>
             {!received && photos.length > 0 && <button disabled={busy} aria-pressed={selecting} onClick={() => {if (!running.current) setSelecting(value => !value);}}>{selecting ? "Done" : "Select"}</button>}
-            {!received && <button className="menu-button" onClick={() => {setReselect(undefined); input.current?.click();}} aria-label="Add photos" disabled={busy || publicDemo}><PlusIcon /></button>}
+            {!received && <button className="menu-button" onClick={choosePhotos} aria-label="Add photos" disabled={busy || publicDemo}><PlusIcon /></button>}
             <button className="menu-button" aria-label="Settings" onClick={() => setMenu(!menu)}>
               <svg
                 viewBox="0 0 24 24"
@@ -1406,7 +1407,7 @@ export default function CloudApp({
                 </p>
                 {bestShots.active && <p className="hint">All matches remain available. You choose what to Share.</p>}
                 {recentActive && photos.length > 0 && <button onClick={() => setRecentOnly(false)}>Show all photos</button>}
-                {!query && !browseFilter && !received && !photos.length && <button onClick={onBack}>Choose photos to Save</button>}
+                {!query && !browseFilter && !received && !photos.length && <button disabled={busy || publicDemo} onClick={choosePhotos}>Choose photos to Save</button>}
                 {query && (
                   <button onClick={() => setQuery("")}>Clear search</button>
                 )}

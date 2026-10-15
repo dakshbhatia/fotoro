@@ -134,3 +134,119 @@ test("local stage sampling is bounded while failures, counts and account mismatc
   assert.equal(diagnosticReason(new Error("INVITATION_RECIPIENT_MISMATCH")), "account_changed");
   clearDiagnostics();
 });
+
+type History = typeof import("../src/diagnostics");
+let reload = 0;
+class DiagnosticStorage {
+  values = new Map<string, string>();
+  writes = 0;
+  denied: "get" | "set" | "all" | undefined;
+  getItem(key: string) {if (this.denied === "get" || this.denied === "all") throw new DOMException("Denied", "SecurityError"); return this.values.get(key) ?? null;}
+  setItem(key: string, value: string) {if (this.denied === "set" || this.denied === "all") throw new DOMException("Full", "QuotaExceededError"); this.writes++; this.values.set(key, value);}
+  removeItem(key: string) {if (this.denied === "all") throw new DOMException("Denied", "SecurityError"); this.values.delete(key);}
+}
+async function retained(run: (scope: {storage: DiagnosticStorage; windowTarget: EventTarget; fresh: () => Promise<History>}) => Promise<void>) {
+  const previous = ["sessionStorage", "window"].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
+  const storage = new DiagnosticStorage(), windowTarget = new EventTarget(), histories: History[] = [];
+  Object.defineProperty(globalThis, "sessionStorage", {configurable: true, value: storage});
+  Object.defineProperty(globalThis, "window", {configurable: true, value: windowTarget});
+  const fresh = async () => {
+    const history: History = await import(`../src/diagnostics.ts?reload=${++reload}`);
+    histories.push(history); return history;
+  };
+  try {await run({storage, windowTarget, fresh});}
+  finally {
+    for (const history of histories) history.clearDiagnostics();
+    for (const [key, descriptor] of previous) if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key);
+  }
+}
+const historyEntries = (history: History) => JSON.parse(history.exportDiagnostics()).events as Array<Record<string, any>>;
+const storageKey = "fotoro:diagnostics:v1";
+
+test("tab diagnostics survive reload and batch storage writes until a lifecycle flush", () => retained(async ({storage, windowTarget, fresh}) => {
+  const history = await fresh();
+  for (let index = 0; index < 30; index++) {
+    const context = new history.DiagnosticContext("catalog", "refresh"); context.start(); context.items(index); context.finish();
+  }
+  const before = historyEntries(history);
+  assert.equal(storage.writes, 0, "A progress burst must not synchronously rewrite storage per event");
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(storage.writes, 1, "The bounded write window persists steady foreground work");
+  new history.DiagnosticContext("metadata").finish();
+  windowTarget.dispatchEvent(new Event("pagehide"));
+  assert.equal(storage.writes, 2, "Leaving flushes the newest pending event before reload");
+  const reloaded = await fresh();
+  assert.notEqual(reloaded.DiagnosticContext, history.DiagnosticContext, "A fresh module simulates a new page lifetime");
+  assert.deepEqual(historyEntries(reloaded).slice(0, before.length), before);
+  assert.equal(historyEntries(reloaded).length, before.length + 1);
+}));
+
+test("restored diagnostic history revalidates every field and bounds retained entries", () => retained(async ({storage, windowTarget, fresh}) => {
+  const safe = {operation: "search", step: "analysis", outcome: "failed", reason: "unavailable", traceId: crypto.randomUUID(), elapsedMs: 9e20,
+    count: 9e20, status: 1000, requestId: "private filename", action: "private query", payload: {password: "secret value"}};
+  storage.values.set(storageKey, JSON.stringify({version: 1, client: "web", private: "secret value", events: [
+    ...Array.from({length: 200}, () => safe), {...safe, operation: "private query"}, {...safe, traceId: "secret value"},
+  ]}));
+  const history = await fresh(), restored = historyEntries(history);
+  assert.equal(restored.length, diagnosticEventLimit - 2);
+  assert.ok(restored.every(event => event.elapsedMs === 86_400_000 && event.count === 1_000_000 && event.status === 599));
+  for (let index = 0; index < 200; index++) new history.DiagnosticContext("metadata").finish();
+  windowTarget.dispatchEvent(new Event("pagehide"));
+  assert.equal(historyEntries(history).length, diagnosticEventLimit);
+  for (const value of [history.exportDiagnostics(), storage.values.get(storageKey)!]) {
+    assert.doesNotMatch(value, /private|secret|password|payload/);
+    assert.ok(value.length < 64 * 1024);
+  }
+}));
+
+test("corrupt, oversized and unavailable storage leaves diagnostics usable in memory", () => retained(async ({storage, windowTarget, fresh}) => {
+  for (const value of ["not json", JSON.stringify({version: 2, client: "web", events: []}), JSON.stringify({version: 1, client: "web", events: "secret"}), "x".repeat(64 * 1024 + 1)]) {
+    storage.values.set(storageKey, value);
+    const history = await fresh();
+    assert.deepEqual(historyEntries(history), []);
+    assert.equal(storage.values.has(storageKey), false);
+  }
+  for (const denial of ["get", "set", "all"] as const) {
+    storage.denied = denial;
+    const history = await fresh();
+    const context = new history.DiagnosticContext("search"); context.start(); context.finish();
+    assert.equal(historyEntries(history).length, 2);
+    windowTarget.dispatchEvent(new Event("pagehide"));
+    assert.doesNotThrow(() => history.clearDiagnostics());
+    assert.deepEqual(historyEntries(history), []);
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage")!;
+  Object.defineProperty(globalThis, "sessionStorage", {configurable: true, get() {throw new DOMException("Denied", "SecurityError");}});
+  const denied = await fresh(); new denied.DiagnosticContext("search").finish();
+  assert.equal(historyEntries(denied).length, 1);
+  assert.doesNotThrow(() => denied.clearDiagnostics());
+  Object.defineProperty(globalThis, "sessionStorage", descriptor);
+}));
+
+test("explicit clear erases retained events and fences late work from the old history", () => retained(async ({storage, windowTarget, fresh}) => {
+  const history = await fresh(), context = new history.DiagnosticContext("search");
+  context.start(); windowTarget.dispatchEvent(new Event("pagehide"));
+  let release!: () => void;
+  const pending = context.stage("analysis", () => new Promise<void>(resolve => {release = resolve;}));
+  history.clearDiagnostics();
+  assert.equal(storage.values.has(storageKey), false);
+  release(); await pending; context.request("request", "failed", "network", 10); context.finish();
+  windowTarget.dispatchEvent(new Event("pagehide"));
+  assert.deepEqual(historyEntries(history), []);
+  assert.deepEqual(historyEntries(await fresh()), []);
+  new history.DiagnosticContext("metadata").finish();
+  assert.equal(historyEntries(history).length, 1, "New work can be inspected after clear");
+}));
+
+test("manual lock used by sign-out clears retained history while expiry and unlock keep troubleshooting", () => retained(async ({storage, windowTarget, fresh}) => {
+  const history = await fresh(), context = new history.DiagnosticContext("auth", "password"); context.start();
+  const lock = (reason: string) => windowTarget.dispatchEvent(Object.assign(new Event("fotoro-lock"), {detail: {reason}}));
+  lock("expired"); lock("unlock");
+  assert.equal(historyEntries(history).length, 1);
+  windowTarget.dispatchEvent(new Event("pagehide"));
+  assert.equal(storage.values.has(storageKey), true);
+  lock("manual"); context.finish();
+  assert.deepEqual(historyEntries(history), []);
+  assert.equal(storage.values.has(storageKey), false);
+  assert.deepEqual(historyEntries(await fresh()), []);
+}));

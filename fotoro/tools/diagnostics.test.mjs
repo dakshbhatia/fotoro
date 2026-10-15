@@ -1,6 +1,38 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {parseDiagnostics, summarizeDiagnostics} from "./diagnostics.mjs";
+test("standalone analysis batches do not pretend to be request-only flows or completed whole-library actions", () => {
+  const trace = "69224569-9dde-4c86-82c9-dcce1c56a375";
+  const report = summarizeDiagnostics([
+    {phase: "search", traceId: trace, step: "analysis", outcome: "started", pending: 100},
+    {phase: "search", traceId: trace, step: "analysis", outcome: "completed", completed: 5, pending: 95},
+  ]);
+  assert.equal(report.flows[0].result, "stage_events_only");
+  assert.equal(report.flows[0].counters.pending, 95);
+});
+test("progress warning requires an active long-running unfinished cohort and distinguishes recent checkpoints", () => {
+  const base = {phase: "search", step: "snapshot", outcome: "changed", analysisStage: "ocr", analysisActivity: "running", total: 100, completed: 20, analysisRunAgeMS: 90_000};
+  assert.equal(summarizeDiagnostics([base]).indexSnapshot.progressSignal, "no_recent_checkpoint");
+  assert.equal(summarizeDiagnostics([{...base, lastAttemptAgeMS: 1000}]).indexSnapshot.progressSignal, "recent_checkpoint");
+  assert.equal(summarizeDiagnostics([{...base, analysisRunAgeMS: 1000}]).indexSnapshot.progressSignal, "starting");
+  assert.equal(summarizeDiagnostics([{...base, analysisActivity: "inactive"}]).indexSnapshot.progressSignal, "not_running");
+  assert.equal(summarizeDiagnostics([{...base, completed: 100}]).indexSnapshot.progressSignal, "unknown");
+  assert.equal(summarizeDiagnostics([{...base, analysisRunAgeMS: undefined}]).indexSnapshot.progressSignal, "unknown");
+});
+test("ten-day experiment coverage stays separate from whole-catalog coverage and durable progress ages", () => {
+  const trace = "69224569-9dde-4c86-82c9-dcce1c56a375";
+  const base = {phase: "search", step: "snapshot", outcome: "changed", traceId: trace, analysisStage: "ocr", analysisActivity: "running", analysisWindow: "tenDays"};
+  const report = summarizeDiagnostics([
+    {...base, coverageScope: "catalog", total: 1000, completed: 50, pending: 950, lastAttemptAgeMS: 1000, lastCompleteAgeMS: 3000},
+    {...base, coverageScope: "automaticWindow", total: 100, completed: 50, pending: 50, lastAttemptAgeMS: 1000, lastCompleteAgeMS: 3000},
+  ]);
+  assert.equal(report.indexSnapshot.analysisWindow, "tenDays");
+  assert.equal(report.indexSnapshot.coverage[0].total, 1000);
+  assert.equal(report.indexSnapshot.automaticWindowCoverage[0].total, 100);
+  assert.equal(report.indexSnapshot.coverage[0].lastAttemptAgeMS, 1000);
+  const [safe] = parseDiagnostics(JSON.stringify({...base, lastAttemptAgeMS: -1, lastCompleteAgeMS: "private"}));
+  assert.equal(safe.lastAttemptAgeMS, undefined); assert.equal(safe.lastCompleteAgeMS, undefined);
+});
 test("reports separate index stages and snapshot age without presenting status as an unfinished action", () => {
   const snapshotTrace = "69224569-9dde-4c86-82c9-dcce1c56a375";
   const events = ["ocr", "visual", "semantic"].map(analysisStage => ({phase: "search", outcome: "changed", step: "snapshot",

@@ -5,6 +5,51 @@ import XCTest
 @testable import Fotoro
 
 final class SearchPerformanceTests: XCTestCase {
+  #if !FOTORO_LOCAL_PREVIEW
+  func testTenDayAnnotationHydrationBatchBenchmark() throws {
+    let index = try SearchIndex(), now = Date(timeIntervalSince1970: 1_792_065_600)
+    var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    let records = (0..<1000).map { number -> SearchRecord in
+      var record = SearchRecord(id: "public-\(number)")
+      record.capturedAt = calendar.date(byAdding: .day, value: -(number / 100), to: now)
+      record.labels = ["Public fixture"]; return record
+    }
+    let buildStarted = CFAbsoluteTimeGetCurrent()
+    try index.replacePermitted(records)
+    let buildMS = (CFAbsoluteTimeGetCurrent() - buildStarted) * 1000
+    let digest = Data("public synthetic cohort".utf8).digest
+    let updates = records.map { record -> SearchIndex.AnnotationUpdate in
+      var value = PhotoAnnotationsV1(photoId: record.id, originalSha256: digest)
+      value.labels = record.labels
+      return SearchIndex.AnnotationUpdate(value: value, photoID: record.id, revision: record.revision, accountId: "public-owner")
+    }
+    for start in stride(from: 0, to: updates.count, by: 200) {
+      _ = try index.applyAnnotationsBatch(Array(updates[start..<min(start + 200, updates.count)]))
+    }
+    XCTAssertEqual(try index.analysisCoverage(now: now, scope: PhotoAnalysisWindow.tenDays.scope(now: now, calendar: calendar)).first?.total, 1000)
+    var single: [Double] = [], batched: [Double] = []
+    for _ in 0..<3 {
+      var started = CFAbsoluteTimeGetCurrent()
+      for update in updates {
+        _ = try index.record(update.photoID)
+        XCTAssertTrue(try index.applyAnnotations(update.value, photoID: update.photoID, revision: update.revision, accountId: update.accountId))
+        _ = try index.record(update.photoID)
+      }
+      single.append((CFAbsoluteTimeGetCurrent() - started) * 1000)
+      started = CFAbsoluteTimeGetCurrent()
+      var accepted = 0
+      for start in stride(from: 0, to: updates.count, by: 200) {
+        let result = try index.applyAnnotationsBatch(Array(updates[start..<min(start + 200, updates.count)]))
+        accepted += result.acceptedPhotoIDs.count
+        XCTAssertTrue(result.changedRecords.isEmpty)
+      }
+      batched.append((CFAbsoluteTimeGetCurrent() - started) * 1000)
+      XCTAssertEqual(accepted, 1000)
+    }
+    single.sort(); batched.sort()
+    print("Ten-day public cohort: 1000 records, 100/day; metadata index \(buildMS) ms; unchanged per-photo hydration \(single[1]) ms, 200-record batches \(batched[1]) ms; \(single[1] / max(0.001, batched[1]))x. Conservative same-code SQL comparison; excludes crypto, inference, Photos, network and rendering.")
+  }
+  #endif
   func testBroadPrefixAcrossManyMeaningsDoesNotMultiplyByTheWholeLibrary() throws {
     let index = try SearchIndex()
     let records = (0..<10_000).map { number -> SearchRecord in

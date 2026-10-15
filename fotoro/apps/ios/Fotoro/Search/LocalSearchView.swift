@@ -73,13 +73,24 @@ private struct SearchAnalysisActions: View {
       }
       DisclosureGroup("Photo analysis") {
         VStack(alignment: .leading, spacing: 6) {
+          Picker("Automatic analysis range", selection: Binding(
+            get: { search.automaticAnalysisWindow }, set: { search.setAutomaticAnalysisWindow($0) })) {
+              Text("Latest 10 days").tag(PhotoAnalysisWindow.tenDays)
+              Text("All photos").tag(PhotoAnalysisWindow.allPhotos)
+            }.accessibilityIdentifier("search.analysis.range")
+          if search.automaticAnalysisWindow == .tenDays {
+            Text("Automatic checks cover the latest 10 days. Earlier indexed photos remain searchable. Choose All photos to analyze older photos.")
+              .font(.caption).foregroundStyle(.secondary)
+          }
           if search.analysisRemaining > 0 {
             Text("\(search.analysisRemaining) more photos to check").font(.caption).foregroundStyle(.secondary)
             Button("Next batch", systemImage: "arrow.forward") { search.analyzeMetadataMatches(nextBatch: true) }
               .accessibilityIdentifier("search.analysis.next")
+              .disabled(!search.canAnalyzeMetadataMatches)
           } else {
             Button(search.analysisUnavailable > 0 ? "Retry unavailable photos" : "Check matching photos", systemImage: "text.viewfinder") { search.analyzeMetadataMatches() }
               .accessibilityIdentifier("search.analysis.matches")
+              .disabled(!search.canAnalyzeMetadataMatches)
             Text("Checks up to 500 matching photos on this device.")
               .font(.caption).foregroundStyle(.secondary)
           }
@@ -87,7 +98,7 @@ private struct SearchAnalysisActions: View {
             Text("\(search.analysisUnavailable) photos need another attempt.")
               .font(.caption).foregroundStyle(.secondary)
           }
-        }.disabled(search.indexing || !search.canAnalyzeMetadataMatches)
+        }
       }.font(.footnote).padding(.horizontal)
     }
   }

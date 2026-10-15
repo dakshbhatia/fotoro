@@ -4,6 +4,83 @@ import XCTest
 @testable import Fotoro
 
 final class SearchStoreTests: XCTestCase {
+  @MainActor func testChangingAnalysisWindowKeepsExistingEvidenceAndCurrentQuery() async throws {
+    let index = try SearchIndex()
+    var record = SearchRecord(id: "old"); record.capturedAt = Date(timeIntervalSince1970: 1)
+    record.labels = ["public receipt"]; record.ocrStatus = .complete
+    try index.replacePermitted([record])
+    let store = LocalSearchStore(index: index, analysisWindow: .tenDays)
+    store.setAutomaticAnalysisActive(false)
+    defer { store.pause() }
+    store.updateQuery("receipt")
+    let context = store.consumerContextGeneration
+    store.setAutomaticAnalysisWindow(.allPhotos)
+    XCTAssertEqual(store.automaticAnalysisWindow, .allPhotos)
+    XCTAssertEqual(store.query, "receipt"); XCTAssertEqual(store.consumerContextGeneration, context)
+    XCTAssertEqual(try index.record("old")?.ocrStatus, .complete)
+    store.setAutomaticAnalysisWindow(.tenDays)
+    XCTAssertEqual(try index.search("receipt").leading?.id, "old")
+  }
+  func testTenDayExperimentKeepsWholeCatalogSearchButBoundsHeavyWork() throws {
+    var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    let now = Date(timeIntervalSince1970: 1_792_065_600)
+    let index = try SearchIndex()
+    let records = (0..<20).map { day -> SearchRecord in
+      var record = SearchRecord(id: "day-\(day)"); record.capturedAt = calendar.date(byAdding: .day, value: -day, to: now)
+      record.labels = ["public cohort"]; return record
+    }
+    var undated = SearchRecord(id: "undated"); undated.labels = ["public cohort"]
+    var future = SearchRecord(id: "future"); future.capturedAt = now.addingTimeInterval(86400)
+    try index.replacePermitted(records + [undated, future])
+    let scope = PhotoAnalysisWindow.tenDays.scope(now: now, calendar: calendar)
+    let jobs = try index.pendingMetadataAnalysisWork(scope: scope, now: now)
+    XCTAssertEqual(Set(jobs.map { $0.record.id }), Set((0..<10).map { "day-\($0)" }))
+    XCTAssertEqual(try index.analysisCoverage(now: now).first?.total, 22)
+    XCTAssertEqual(try index.analysisCoverage(now: now, scope: scope).first?.total, 10)
+    XCTAssertTrue(try index.search("public cohort").results.flatMap { [$0.id] + $0.children }.contains("day-19"),
+      "The experiment cannot hide older indexed metadata or imply it has been OCR-checked")
+    XCTAssertEqual(try index.pendingMetadataAnalysisWork(scope: PhotoAnalysisWindow.allPhotos.scope(now: now), now: now).count, 21)
+  }
+  func testReadyAnalysisBatchRollsBackRecordsPostingsAndProgressTogether() throws {
+    let index = try SearchIndex(), now = Date(timeIntervalSince1970: 1_790_000_000)
+    try index.replacePermitted([SearchRecord(id: "first"), SearchRecord(id: "second")])
+    let checkpoints = ["first", "second"].map { SearchAnalysisCheckpoint(photoID: $0, revision: "1", attemptedAt: now,
+      ocr: SearchOCRCheckpoint(result: SearchOCRResult(text: "public receipt", confidence: 1), status: .complete, processor: "vision-text-v1")) }
+    try index.database.write { db in
+      try db.execute(sql: "CREATE TRIGGER reject_second BEFORE UPDATE ON searchRecords WHEN new.id='second' BEGIN SELECT RAISE(ABORT,'injected'); END")
+    }
+    XCTAssertThrowsError(try index.applyAnalysisBatch(checkpoints))
+    XCTAssertEqual(try index.record("first")?.ocrStatus, .pending)
+    XCTAssertTrue(try index.search("receipt").results.isEmpty)
+    XCTAssertNil(try index.analysisCoverage(now: now).first?.lastAttemptAt)
+    try index.database.write { try $0.execute(sql: "DROP TRIGGER reject_second") }
+    XCTAssertEqual(try index.applyAnalysisBatch(checkpoints).count, 2)
+    XCTAssertEqual(try index.analysisCoverage(now: now).first?.lastCompleteAt, now)
+    XCTAssertThrowsError(try index.applyAnalysisBatch(Array(repeating: checkpoints[0], count: 33)))
+    try index.setWorkGeneration(2)
+    XCTAssertTrue(try index.applyAnalysisBatch(checkpoints, generation: 1).isEmpty)
+    var wrong = checkpoints[0]; wrong.ocr?.processor = "old-processor"
+    XCTAssertTrue(try index.applyAnalysisBatch([wrong]).isEmpty)
+  }
+  func testDurableStageProgressDistinguishesAttemptFromCompletionAndSurvivesReopen() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let now = Date(timeIntervalSince1970: 1_790_000_000)
+    var index: SearchIndex? = try SearchIndex(root: root)
+    try index!.replacePermitted([SearchRecord(id: "public")])
+    XCTAssertTrue(try index!.applyOCR(nil, status: .unavailable, photoID: "public", revision: "1", attemptedAt: now))
+    var coverage = try XCTUnwrap(index!.analysisCoverage(now: now).first)
+    XCTAssertEqual(coverage.lastAttemptAt, now); XCTAssertNil(coverage.lastCompleteAt)
+    XCTAssertTrue(try index!.applyOCR(SearchOCRResult(text: "", confidence: 0), status: .complete,
+      photoID: "public", revision: "1", attemptedAt: now.addingTimeInterval(10)))
+    index = nil
+    let reopened = try SearchIndex(root: root)
+    coverage = try XCTUnwrap(reopened.analysisCoverage(now: now.addingTimeInterval(20)).first)
+    XCTAssertEqual(coverage.lastCompleteAt, now.addingTimeInterval(10))
+    XCTAssertEqual(coverage.lastAttemptAt, now.addingTimeInterval(10))
+    try reopened.replacePermitted([])
+    XCTAssertNil(try reopened.analysisCoverage(now: now).first?.lastAttemptAt)
+  }
   func testCoveragePartitionsWholePhotosCatalogAndIgnoresStaleRetryAttempts() throws {
     let index = try SearchIndex(), now = Date(timeIntervalSince1970: 1_790_000_000)
     var records = ["complete", "pending", "failed", "unavailable"].map { SearchRecord(id: $0) }

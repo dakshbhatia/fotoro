@@ -1,5 +1,40 @@
 import Foundation
 
+// One fixed window for a burst, with one trailing window when edits arrive
+// during the drain. Withdrawal cancels the old binding even if it later returns.
+@MainActor final class FixedWindowWorkBatch<Binding: Equatable> {
+  private var task: Task<Void, Never>?
+  private var generation = UUID()
+  private var binding: Binding?
+  private var requested = false
+  var pending: Bool { task != nil }
+  func cancel() {
+    generation = UUID(); task?.cancel(); task = nil; binding = nil; requested = false
+  }
+  func enqueue(binding: Binding, current: @escaping @MainActor () -> Binding?,
+    sleep: @escaping @MainActor () async throws -> Void = { try await Task.sleep(for: .milliseconds(500)) },
+    run: @escaping @MainActor () async -> Void) {
+    guard current() == binding else { return }
+    if self.binding == binding, task != nil { requested = true; return }
+    cancel()
+    self.binding = binding; requested = true
+    let token = generation
+    task = Task { [weak self] in
+      defer {
+        if let self, generation == token { task = nil; self.binding = nil; requested = false }
+      }
+      while let self, generation == token, requested {
+        do { try await sleep() } catch { return }
+        guard !Task.isCancelled, generation == token, current() == binding else { return }
+        requested = false
+        await run()
+        guard !Task.isCancelled, generation == token, current() == binding else { return }
+      }
+    }
+  }
+  func waitUntilSettled() async { await task?.value }
+}
+
 enum AutomaticPhotoSyncRetryPolicy {
   static func permits(_ error: Error) -> Bool {
     if let error = error as? BackgroundUploadFailure { return error.retryable }
