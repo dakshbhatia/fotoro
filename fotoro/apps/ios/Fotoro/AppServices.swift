@@ -164,6 +164,7 @@ enum ReviewedPhotosBackupPolicy {
     }
     @ObservationIgnored var catalogSearchWillRead: (@Sendable () -> Void)?
     @ObservationIgnored var savedVisualEmbedding: (@MainActor (SearchPreview) async throws -> [Float])?
+    @ObservationIgnored var savedVisualQueryEmbedding: (@MainActor (String) async throws -> [Float]?)?
     func waitForSavedVisualEvidence() async {
       await savedSemanticIdleTask?.value
       while let task = savedVisualTask {
@@ -270,7 +271,8 @@ enum ReviewedPhotosBackupPolicy {
   }
   private func consumerSavedVisualSearch(_ query: String, people: PeopleSearchSelection = PeopleSearchSelection()) async throws -> [LocalPhoto] {
     let phrase = NaturalDateQuery.parse(query).text.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard phrase.count >= 3, vault.isUnlocked, let account = session.accountId else { return [] }
+    guard phrase.count >= 3, SearchResponse(query: query).permitsSemanticMatches,
+      vault.isUnlocked, let account = session.accountId, let access = photoAccountAccess else { return [] }
     let catalog = store, generation = vault.generation
     let origin = BackgroundUploadPolicy.origin(api.baseURL)
     let root = catalog.root.appendingPathComponent("VisualSearch", isDirectory: true)
@@ -286,7 +288,7 @@ enum ReviewedPhotosBackupPolicy {
       let candidates = try await searchCatalog("").filter { ["committed", "saved"].contains($0.transferState) }
       try Task.checkCancellation()
       guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account,
-        consumerCatalogGeneration == catalogSnapshotGeneration,
+        consumerCatalogGeneration == catalogSnapshotGeneration, photoAccountAccess == access,
         BackgroundUploadPolicy.origin(api.baseURL) == origin else {
         throw CancellationError()
       }
@@ -302,7 +304,7 @@ enum ReviewedPhotosBackupPolicy {
       _ = try await Task.detached(priority: .utility) { try index.replacePermitted(records) }.value
       try Task.checkCancellation()
       guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account,
-        consumerCatalogGeneration == catalogSnapshotGeneration,
+        consumerCatalogGeneration == catalogSnapshotGeneration, photoAccountAccess == access,
         BackgroundUploadPolicy.origin(api.baseURL) == origin else {
         throw CancellationError()
       }
@@ -311,13 +313,37 @@ enum ReviewedPhotosBackupPolicy {
       savedVisualSnapshotOrigin = origin
       savedVisualSnapshotCatalog = ObjectIdentifier(catalog)
     }
+    let lexicalWorker = Task.detached(priority: .userInitiated) {
+      try index.search(query, scope: SearchScope(source: "saved", people: people))
+    }
+    let base = try await withTaskCancellationHandler { try await lexicalWorker.value }
+      onCancel: { lexicalWorker.cancel() }
+    try Task.checkCancellation()
+    guard photoAccountAccess == access, consumerCatalogGeneration == catalogSnapshotGeneration,
+      BackgroundUploadPolicy.origin(api.baseURL) == origin else { throw CancellationError() }
+    // Filename meanings are known only after lexical retrieval. Check them before
+    // admitting image preparation or encoding the query.
+    guard base.permitsSemanticMatches else { return [] }
     startSavedSemanticAnalysis()
-    guard let vector = try? await PhotoSemanticProcessor.shared.textIfReady(phrase) else { return [] }
-    let response = try await Task.detached(priority: .userInitiated) {
-      let base = try index.search(query, scope: SearchScope(source: "saved", people: people))
-      return try index.addingSemantic(vector, to: base)
-    }.value
+    let queryVector: [Float]?
+    #if DEBUG
+      if let savedVisualQueryEmbedding { queryVector = try await savedVisualQueryEmbedding(phrase) }
+      else { queryVector = try? await PhotoSemanticProcessor.shared.textIfReady(phrase) }
+    #else
+      queryVector = try? await PhotoSemanticProcessor.shared.textIfReady(phrase)
+    #endif
+    try Task.checkCancellation()
+    guard photoAccountAccess == access, consumerCatalogGeneration == catalogSnapshotGeneration,
+      BackgroundUploadPolicy.origin(api.baseURL) == origin else { throw CancellationError() }
+    guard let vector = queryVector else { return [] }
+    let semanticWorker = Task.detached(priority: .userInitiated) {
+      try index.addingSemantic(vector, to: base)
+    }
+    let response = try await withTaskCancellationHandler { try await semanticWorker.value }
+      onCancel: { semanticWorker.cancel() }
+    try Task.checkCancellation()
     guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account,
+      photoAccountAccess == access, consumerCatalogGeneration == catalogSnapshotGeneration,
       BackgroundUploadPolicy.origin(api.baseURL) == origin else {
       throw CancellationError()
     }
@@ -1979,6 +2005,9 @@ enum ReviewedPhotosBackupPolicy {
     people: PeopleSearchSelection = PeopleSearchSelection()) async throws -> [LocalPhoto] {
     let generation = vault.generation
     let catalog = store
+    let access = photoAccountAccess
+    let catalogGeneration = consumerCatalogGeneration
+    let origin = BackgroundUploadPolicy.origin(api.baseURL)
     guard let account = session.accountId else { throw FotoroError("Sign in first") }
     let bundle = try vault.requireBundle()
     let card = try session.requireCard(account)
@@ -2024,7 +2053,9 @@ enum ReviewedPhotosBackupPolicy {
       worker.cancel()
     }
     try Task.checkCancellation()
-    guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account else { throw CancellationError() }
+    guard vault.isUnlocked, vault.generation == generation, store === catalog, session.accountId == account,
+      photoAccountAccess == access, consumerCatalogGeneration == catalogGeneration,
+      BackgroundUploadPolicy.origin(api.baseURL) == origin else { throw CancellationError() }
     return result
   }
   func matches(_ photo: LocalPhoto, query: String) -> Bool {

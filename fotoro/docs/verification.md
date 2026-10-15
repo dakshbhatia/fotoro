@@ -1,9 +1,38 @@
-# Verification — October 11, 2026
+# Verification — October 14, 2026
 
 This is the current evidence record. [The backlog](product-backlog.md) owns next
 work; [product](product.md) owns the intended experience. Earlier measurements and
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
+
+## October 14 released search, sync and Favorites; Saved search follow-up
+
+PR 100 merge `155b54aa5b52deb8583c1767eea04d2cffceacac` is live at
+fotoro.cloud on Worker `ec22e7f4-ceda-4291-a810-d3aa885c8495` at 100%.
+All 49 non-HTML emitted assets match the merged build. Live public-fixture
+receipt, missing-number, Favorites and scene searches pass without console errors.
+The isolated second-browser recovery and original download match source bytes.
+Local qualification passed 771 web tests and 716 native tests with two platform
+skips; all required final-head hosted checks succeeded or intentionally skipped.
+
+Native 0.1.0 (75) passed archive and distribution IPA audits and Apple upload and
+processing. Its declaration preserves the owner-approved France exclusion and
+standard encryption outside Apple's OS. App Store Connect confirms the existing
+Fotoro Internal group includes build 75 with one tester. Physical installation of
+75 remains unverified. Apple accepted the upload with a missing vendor ONNX Runtime
+framework dSYM warning; app symbols and release audits passed.
+
+A follow-up native regression reproduced unnecessary visual-index construction and
+image preparation during exact identifier and filename queries. Identifier search
+now stops before constructing the visual catalog; filename evidence stops before
+image preparation/query encoding. Recognized date-scene queries remain eligible.
+Catalog and visual query results recheck origin, account access and metadata
+snapshot, including an unavailable model response. Parent cancellation reaches
+lexical and semantic workers. The three initial regressions failed before the fix;
+126 affected native search, annotation and consumer tests now pass. Hosted
+qualification and a replacement release build remain pending for this follow-up.
+This source evidence does not establish physical frame pacing or broad retrieval
+quality.
 
 ## October 11 durable native retries — awaiting hosted qualification
 

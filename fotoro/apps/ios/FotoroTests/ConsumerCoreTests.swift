@@ -307,6 +307,110 @@ final class ConsumerCoreTests: XCTestCase {
       XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
     }
   }
+  @MainActor func testSavedIdentifierQueriesSkipVisualCatalogAndPreviewWork() async throws {
+    try await withSavedLibrary { services, server in
+      var photo = try self.samplePhoto()
+      photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+      photo.metadata.filename = "invoice-4826.png"
+      let preview = try Data(contentsOf: XCTUnwrap(Bundle(for: Self.self).url(forResource: "neutral-a", withExtension: "png")))
+      photo.previewURL = try services.store.write(preview, name: "identifier-preview.png")
+      try services.store.put(photo); try services.reload()
+      let reads = SavedSemanticObservationCounter()
+      services.catalogSearchWillRead = { reads.increment() }
+      var embeddings = 0
+      services.savedVisualEmbedding = { _ in embeddings += 1; return [Float](repeating: 0, count: 512) }
+      services.setSavedSemanticAnalysisActive(true)
+      defer { services.setSavedSemanticAnalysisActive(false); services.catalogSearchWillRead = nil }
+      let requests = server.requests.count
+      let local = LocalSearchStore(index: try SearchIndex())
+      let queries = ["invoice 4826", "invoice 4827", "4826", "invoice ٤٨٢٦", "room A104"]
+      for query in queries {
+        let matches = try await services.consumerSearch(query, local: local)
+        if ["invoice 4826", "4826"].contains(query) { XCTAssertEqual(matches.map(\.photo), [.saved(photo.id)]) }
+        else { XCTAssertTrue(matches.isEmpty, query) }
+        await services.waitForSavedVisualEvidence()
+      }
+      XCTAssertEqual(reads.value, queries.count, "Each exact query needs one lexical scan, never a second full visual-catalog scan")
+      XCTAssertEqual(embeddings, 0, "Exact identifiers cannot admit image preparation")
+      XCTAssertEqual(server.requests.count, requests, "Exact search cannot download previews")
+      XCTAssertFalse(FileManager.default.fileExists(atPath: services.store.root.appendingPathComponent("VisualSearch").path))
+    }
+  }
+
+  @MainActor func testSavedFilenameQuerySkipsImagePreparationWhileDateScenesRemainEligible() async throws {
+    try await withSavedLibrary { services, _ in
+      var photo = try self.samplePhoto()
+      photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+      let preview = try Data(contentsOf: XCTUnwrap(Bundle(for: Self.self).url(forResource: "neutral-a", withExtension: "png")))
+      photo.previewURL = try services.store.write(preview, name: "filename-preview.png")
+      try services.store.put(photo); try services.reload()
+      var embeddings = 0
+      var vector = [Float](repeating: 0, count: 512); vector[0] = 1
+      services.savedVisualEmbedding = { _ in embeddings += 1; return vector }
+      services.setSavedSemanticAnalysisActive(true)
+      defer { services.setSavedSemanticAnalysisActive(false) }
+      let local = LocalSearchStore(index: try SearchIndex())
+      let filenameMatches = try await services.consumerSearch("receipt", local: local)
+      XCTAssertEqual(filenameMatches.map(\.photo), [.saved(photo.id)])
+      await services.waitForSavedVisualEvidence()
+      XCTAssertEqual(embeddings, 0, "A selected filename meaning must stop before image preparation")
+      _ = try await services.consumerSearch("birthday on " + String(photo.metadata.sourceDate.prefix(10)), local: local)
+      await services.waitForSavedVisualEvidence()
+      XCTAssertEqual(embeddings, 1, "Recognized date digits must not disable scene preparation")
+    }
+  }
+
+  @MainActor func testSavedCatalogSearchRejectsChangedOriginAndMetadataDuringScan() async throws {
+    for change in ["origin", "metadata"] {
+      try await withSavedLibrary { services, _ in
+        var photo = try self.samplePhoto()
+        photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+        try services.store.put(photo); try services.reload()
+        let gate = CatalogScanGate()
+        services.catalogSearchWillRead = { gate.visit() }
+        defer { services.catalogSearchWillRead = nil; gate.release.signal() }
+        let scan = Task { try await services.searchCatalog("receipt") }
+        for _ in 0..<200 where gate.count == 0 { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(gate.count, 1, "The catalog worker must be held before withdrawal")
+        if change == "origin" { services.api.baseURL = URL(string: "https://changed-origin.test")! }
+        else { try services.setLabels(["Corrected label"], photo: photo) }
+        gate.release.signal()
+        do { _ = try await scan.value; XCTFail("A changed \(change) snapshot must not publish") }
+        catch is CancellationError {} catch { XCTFail("Unexpected failure: \(error)") }
+      }
+    }
+  }
+
+  @MainActor func testSavedVisualQueryRejectsWithdrawalWhileEncodingIncludingUnavailableModel() async throws {
+    for change in ["origin", "metadata", "lock", "cancel", "metadata-without-vector"] {
+      try await withSavedLibrary { services, _ in
+        var photo = try self.samplePhoto()
+        photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+        try services.store.put(photo); try services.reload()
+        let held = self.expectation(description: "Saved scene query encoding held")
+        let gate = SavedSemanticEmbeddingGate()
+        var vector = [Float](repeating: 0, count: 512); vector[0] = 1
+        services.savedVisualQueryEmbedding = { phrase in
+          XCTAssertEqual(phrase, "birthday")
+          held.fulfill(); await gate.wait()
+          return change == "metadata-without-vector" ? nil : vector
+        }
+        defer { services.savedVisualQueryEmbedding = nil; gate.open() }
+        let query = Task { try await services.consumerSearch("birthday", local: LocalSearchStore(index: try SearchIndex())) }
+        await self.fulfillment(of: [held], timeout: 3)
+        switch change {
+        case "origin": services.api.baseURL = URL(string: "https://changed-query-origin.test")!
+        case "lock": services.vault.lock()
+        case "cancel": query.cancel()
+        default: try services.setLabels(["Corrected label"], photo: photo)
+        }
+        gate.open()
+        do { _ = try await query.value; XCTFail("A \(change) query must not complete from an old snapshot") }
+        catch is CancellationError {} catch { XCTFail("Unexpected failure: \(error)") }
+      }
+    }
+  }
+
   @MainActor func testSavedSemanticPublicationRefreshesEvidenceWithoutInvalidatingBrowseCatalog() async throws {
     try await withSavedLibrary { services, _ in
       var photo = try self.samplePhoto()
