@@ -8,6 +8,10 @@ struct AutomaticPhotoPickCandidate: Sendable {
   var height: Int
   var favorite: Bool
   var isScreenshot: Bool
+  // Eligibility may be corrected in Fotoro. Source validation still checks
+  // the unmodified PhotoKit subtype observed when this candidate was created.
+  var photoKitScreenshot: Bool? = nil
+  var sourceScreenshot: Bool { photoKitScreenshot ?? isScreenshot }
 }
 struct AutomaticPhotoPickSignals: Sendable {
   var hash: UInt64

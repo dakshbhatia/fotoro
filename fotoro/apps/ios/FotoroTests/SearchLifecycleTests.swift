@@ -17,6 +17,38 @@ private actor AdmissionQueryProbe {
 
 final class SearchLifecycleTests: XCTestCase {
   #if !FOTORO_LOCAL_PREVIEW
+  @MainActor func testOrganizationPublicationIgnoresOCRProgressAndPublishesScreenshotCorrections() throws {
+    guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+      let asset = PHAsset.fetchAssets(with: .image, options: nil).firstObject, !asset.isHidden else {
+      throw XCTSkip("Permit an existing public Simulator photo for organization publication.")
+    }
+    let photo = RecentPhoto(asset: asset), index = try SearchIndex()
+    var record = SearchRecord(id: photo.id); record.revision = photo.sourceRevision
+    try index.replacePermitted([record])
+    let store = LocalSearchStore(index: index)
+    defer { store.pause() }
+    store.setAutomaticAnalysisActive(false); store.completePermittedSnapshotRefresh(photos: [photo])
+    let source = BackupSource(id: photo.id, photoId: Wire.id(), sourceRevision: photo.sourceRevision)
+    var value = PhotoAnnotationsV1(photoId: source.photoId, originalSha256: Data("public-fixture".utf8).digest)
+    value.ocr = PhotoAnnotationsV1.OCR(text: "Public receipt", confidence: 0.9, processor: "vision-text-v1")
+    var publications = 0
+    store.onOrganizationSnapshotChanged = { publications += 1 }
+    let generation = store.organizationGeneration
+    try store.applyAnnotations(value, source: source, accountId: "fixture-owner")
+    store.updateQuery("receipt")
+    XCTAssertEqual(store.organizationGeneration, generation)
+    XCTAssertEqual(publications, 0, "OCR and query progress must not rebuild browse/Picks facts")
+    value.facts = [PhotoOrganizationFacts.screenshotPrefix + "true"]
+    try store.applyAnnotations(value, source: source, accountId: "fixture-owner")
+    XCTAssertEqual(publications, 1)
+    XCTAssertTrue(PhotoOrganizationFacts.screenshot(try store.record(photo.id)?.facts))
+    value.ocr?.text = "Updated public receipt"
+    try store.applyAnnotations(value, source: source, accountId: "fixture-owner")
+    XCTAssertEqual(publications, 1)
+    store.clearSyncedAnnotations()
+    XCTAssertEqual(publications, 2)
+    XCTAssertFalse(PhotoOrganizationFacts.screenshot(try store.record(photo.id)?.facts))
+  }
   @MainActor func testColdSemanticPreparationCannotHoldRecentBatchesOrScrollResume() async throws {
     let fetched = PHAsset.fetchAssets(with: .image, options: nil)
     guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)), fetched.count >= 3 else {

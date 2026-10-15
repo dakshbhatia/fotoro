@@ -207,9 +207,50 @@ struct PhotoPreviewProgress {
   private(set) var picksGeneration: UInt64 = 0
   private(set) var picksSnapshot: PhotoPicksSnapshot? { didSet { picksGeneration &+= 1 } }
   var pickedPhotos: [RecentPhoto] { recentPhotos.filter { picksSnapshot?.recommendations.ids.contains($0.id) == true } }
+  var visiblePickPhotos: [RecentPhoto] {
+    (picksSnapshot == nil ? recentPhotos : pickedPhotos).filter { !isScreenshot($0) || $0.isFavorite }
+  }
+  @ObservationIgnored private var organizationSource: @MainActor (RecentPhotoSource) -> [String] = { _ in [] }
+  @ObservationIgnored private var organizationCache: [RecentPhotoSource: [String]] = [:]
+  @ObservationIgnored private var organizationGeneration: UInt64 = 0
+  @ObservationIgnored private var organizationRefreshTask: Task<Void, Never>?
+  func bindOrganizationSource(_ read: @escaping @MainActor (RecentPhotoSource) -> [String]) {
+    organizationSource = read
+    organizationDidChange()
+  }
+  func organizationDidChange() {
+    organizationCache.removeAll(keepingCapacity: true)
+    organizationGeneration &+= 1
+    // Reuse the metadata-page identity; correction changes must invalidate
+    // cached browse facts without tying them to OCR or query progress.
+    browsePage = UUID()
+    cancelAnalysis()
+    picksSnapshot = nil
+    guard organizationRefreshTask == nil else { return }
+    organizationRefreshTask = Task { @MainActor [weak self] in
+      await Task.yield()
+      guard let self, !Task.isCancelled else { return }
+      organizationRefreshTask = nil
+      if RecentPhotosPolicy.canRead(status) { beginAnalysis() }
+    }
+  }
+  func isScreenshot(_ photo: RecentPhoto) -> Bool {
+    let source = RecentPhotoSource(photo)
+    let facts: [String]
+    if let cached = organizationCache[source] { facts = cached }
+    else {
+      facts = organizationSource(source).filter { $0 == "screenshot" || PhotoOrganizationFacts.category($0) != nil }
+      organizationCache[source] = facts
+    }
+    return PhotoOrganizationFacts.screenshot(facts, detected: photo.isScreenshot)
+  }
+  func pickCandidate(_ photo: RecentPhoto) -> AutomaticPhotoPickCandidate {
+    AutomaticPhotoPickCandidate(id: photo.id, sourceRevision: photo.sourceRevision, capturedAt: photo.capturedAt,
+      width: photo.asset.pixelWidth, height: photo.asset.pixelHeight, favorite: photo.isFavorite,
+      isScreenshot: isScreenshot(photo), photoKitScreenshot: photo.isScreenshot)
+  }
   var pickCandidates: [AutomaticPhotoPickCandidate] {
-    recentPhotos.map { AutomaticPhotoPickCandidate(id: $0.id, sourceRevision: $0.sourceRevision, capturedAt: $0.capturedAt,
-      width: $0.asset.pixelWidth, height: $0.asset.pixelHeight, favorite: $0.isFavorite, isScreenshot: $0.isScreenshot) }
+    recentPhotos.map(pickCandidate)
   }
   @ObservationIgnored private var analysisTask: Task<Void, Never>?
   @ObservationIgnored private var analysisCandidates: [AutomaticPhotoPickCandidate]?
@@ -286,6 +327,7 @@ struct PhotoPreviewProgress {
   }
   func pauseAnalysis() {
     cancelObserverRefresh()
+    organizationRefreshTask?.cancel(); organizationRefreshTask = nil
     analysisPermitted = false
     idleAnalysisTask?.cancel(); idleAnalysisTask = nil
     browseInteractionActive = false
@@ -347,6 +389,7 @@ struct PhotoPreviewProgress {
       !explicitAnalysisRequests.isEmpty || automaticAnalysisAdmitted
     else { return }
     let candidates = pickCandidates
+    let organization = organizationGeneration
     analysisCandidates = candidates
     let token = UUID()
     analysisGeneration = token
@@ -360,7 +403,7 @@ struct PhotoPreviewProgress {
         guard analysisGeneration == token else { throw CancellationError() }
         let result = try await picks.snapshot(candidates, valid: { [weak self] in
           guard let self else { return false }
-          return analysisGeneration == token && RecentPhotosPolicy.canRead(authorization())
+          return analysisGeneration == token && organizationGeneration == organization && RecentPhotosPolicy.canRead(authorization())
         })
         try Task.checkCancellation()
         guard analysisGeneration == token, result.matches(pickCandidates) else { throw CancellationError() }
@@ -508,6 +551,8 @@ struct PhotoPreviewProgress {
     browseIndices = Dictionary(photos.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { _, current in current })
     hasMorePhotos = browseOffset < source.count
     recentPhotos = candidates.filter { !validatesBrowsingSources || revisions[$0.id] == $0.sourceRevision }
+    let currentSources = Set((photos + recentPhotos).map(RecentPhotoSource.init))
+    organizationCache = organizationCache.filter { currentSources.contains($0.key) }
     if let snapshot = picksSnapshot, snapshot.recommendations.unassessed == 0,
       snapshot.matches(pickCandidates) { return }
     if analysisTask != nil, let analysisCandidates, PhotoPicksSnapshot.matches(analysisCandidates, pickCandidates) { return }
@@ -551,7 +596,7 @@ struct PhotoPreviewProgress {
       guard generation == browseGeneration, browseOffset > offset else { return }
       if photos.dropFirst(count).contains(where: { photo in
         filter.includes(RecentPhotoFacts(capturedAt: photo.capturedAt, favorite: photo.isFavorite,
-          screenshot: photo.isScreenshot, livePhoto: photo.isLivePhoto, location: photo.location))
+          screenshot: isScreenshot(photo), livePhoto: photo.isLivePhoto, location: photo.location))
       }) { return }
     }
   }
@@ -651,6 +696,7 @@ struct PhotoPreviewProgress {
     }
   }
   private func clearThumbnails() {
+    organizationCache.removeAll()
     thumbnails.removeAllObjects()
     thumbnailSources.removeAll()
     thumbnailGeneration = UUID()

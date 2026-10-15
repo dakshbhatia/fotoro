@@ -47,6 +47,10 @@ enum SearchMetadataIntake {
   @ObservationIgnored private var analysisScope: PhotoAnalysisScope?
   @ObservationIgnored private var analysisCursor: PhotoAnalysisCursor?
   private(set) var libraryGeneration: UInt64 = 0
+  private(set) var organizationGeneration: UInt64 = 0 {
+    didSet { onOrganizationSnapshotChanged?() }
+  }
+  @ObservationIgnored var onOrganizationSnapshotChanged: (() -> Void)?
   private(set) var query = ""
   private(set) var peopleSelection = PeopleSearchSelection()
   private(set) var selectedPeopleNames: [String: String] = [:]
@@ -315,6 +319,7 @@ enum SearchMetadataIntake {
     // Immediately remove public UI references before awaiting database work on withdrawal.
     guard RecentPhotosPolicy.canRead(status) else {
       assets = [:]
+      organizationGeneration &+= 1
       response = SearchResponse()
       displayedID = nil
       acceptedMeaningID = nil
@@ -336,6 +341,7 @@ enum SearchMetadataIntake {
       ready = false
       response = SearchResponse()
       assets = [:]
+      organizationGeneration &+= 1
       displayedID = nil
       acceptedMeaningID = nil
       priorPermittedResponse = nil
@@ -786,6 +792,7 @@ enum SearchMetadataIntake {
   func completePermittedSnapshotRefresh(photos: [RecentPhoto]) {
     ready = true
     assets = Dictionary(uniqueKeysWithValues: photos.map { ($0.id, $0) })
+    organizationGeneration &+= 1
     updateQuery(query)
   }
   // Uses the same ranking and accepted meaning without recording a new choice or query history.
@@ -1028,14 +1035,17 @@ enum SearchMetadataIntake {
     } catch { self.error = error.localizedDescription }
   }
   func clearSyncedAnnotations() {
-    do { try index?.clearSyncedAnnotations(); updateQuery(query) }
+    do { try index?.clearSyncedAnnotations(); organizationGeneration &+= 1; updateQuery(query) }
     catch { self.error = error.localizedDescription }
   }
   func record(_ photoID: String) throws -> SearchRecord? { try index?.record(photoID) }
   #if !FOTORO_LOCAL_PREVIEW
   func applyAnnotations(_ value: PhotoAnnotationsV1, source: BackupSource, accountId: String) throws {
-    guard ready, let revision = source.sourceRevision,
-      try index?.applyAnnotations(value, photoID: source.id, revision: revision, accountId: accountId) == true else { return }
+    guard ready, let index, let revision = source.sourceRevision else { return }
+    let before = try index.record(source.id)?.facts.filter { PhotoOrganizationFacts.category($0) != nil }
+    guard try index.applyAnnotations(value, photoID: source.id, revision: revision, accountId: accountId) else { return }
+    let after = try index.record(source.id)?.facts.filter { PhotoOrganizationFacts.category($0) != nil }
+    if before != after { organizationGeneration &+= 1 }
     updateQuery(query)
   }
   #endif
@@ -1046,6 +1056,7 @@ enum SearchMetadataIntake {
       // A linked account mutation reads the latest ledger instead of copying stale local facts.
       try onOrganizationChanged?(record, change)
       guard try index.setOrganization(change, photoID: photoID) else { return false }
+      organizationGeneration &+= 1
       updateQuery(query)
       return true
     } catch { self.error = error.localizedDescription; return false }

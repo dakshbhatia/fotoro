@@ -435,7 +435,7 @@ struct RecentPhotosView: View {
   }
   private var baseHomePhotos: [RecentPhoto] {
     if allPhotos { return store.photos }
-    return store.picksSnapshot == nil ? store.recentPhotos : store.pickedPhotos
+    return store.visiblePickPhotos
   }
   // Completing automatic picks must not rebuild the unchanged Photos timeline.
   private var browsePicksGeneration: UInt64 { scope == .picks ? store.picksGeneration : 0 }
@@ -465,7 +465,7 @@ struct RecentPhotosView: View {
           #endif
         }.map { photo in
           PhotoBrowseItem(source: RecentPhotoSource(photo), facts: RecentPhotoFacts(
-            capturedAt: photo.capturedAt, favorite: photo.isFavorite, screenshot: photo.isScreenshot,
+            capturedAt: photo.capturedAt, favorite: photo.isFavorite, screenshot: store.isScreenshot(photo),
             livePhoto: photo.isLivePhoto, location: photo.location))
         }
       }
@@ -508,7 +508,7 @@ struct RecentPhotosView: View {
         #endif
         guard let photo = device[id], photo.sourceRevision == source.revision else { return nil }
         return RecentPhotoFacts(capturedAt: photo.capturedAt, favorite: photo.isFavorite,
-          screenshot: photo.isScreenshot, livePhoto: photo.isLivePhoto, location: photo.location)
+          screenshot: store.isScreenshot(photo), livePhoto: photo.isLivePhoto, location: photo.location)
       }
     }
   }
@@ -610,7 +610,7 @@ struct RecentPhotosView: View {
       let items = timelineItemsProjection.value(for: browseProjectionID.metadata) {
         let device = homePhotoLookup.values.filter { !PhotoOrganizationFacts.trashed((try? search.record($0.id))?.facts) }.map { photo in
           PhotoBrowseItem(source: RecentPhotoSource(photo), facts: RecentPhotoFacts(
-            capturedAt: photo.capturedAt, favorite: photo.isFavorite, screenshot: photo.isScreenshot,
+            capturedAt: photo.capturedAt, favorite: photo.isFavorite, screenshot: store.isScreenshot(photo),
             livePhoto: photo.isLivePhoto, location: photo.location))
         }
         let saved = allOwnedPhotos.filter { !PhotoOrganizationFacts.trashed(services?.annotation($0).facts) }.map { photo in
@@ -845,6 +845,7 @@ struct RecentPhotosView: View {
     homePresentations
         .onChange(of: query) { cancelBestShots(); search.updateQuery(query) }
         .onChange(of: search.response.generation) { cancelBestShots() }
+        .onChange(of: search.organizationGeneration) { cancelBestShots() }
         .onChange(of: search.acceptedMeaningID) { cancelBestShots() }
         .onChange(of: search.peopleSelection) { cancelBestShots() }
         .onChange(of: store.status) { cancelBestShots() }
@@ -891,6 +892,7 @@ struct RecentPhotosView: View {
           defer { restoringPhotoAccount = false; updateAutomaticAnalysisAdmission() }
 #endif
           updateAutomaticAnalysisAdmission()
+          bindPhotoOrganization()
           restorePhotos()
 #if !FOTORO_LOCAL_PREVIEW
           do {
@@ -1217,6 +1219,7 @@ struct RecentPhotosView: View {
     let matchCount = searchMatchCount
     let queryToken = query
     let library = search.libraryGeneration
+    let organization = search.organizationGeneration
     let response = search.response.generation
     let meaning = search.acceptedMeaningID
     let selection = selectedPhotos.mapValues(\.source)
@@ -1230,7 +1233,7 @@ struct RecentPhotosView: View {
     #endif
     @MainActor func valid() -> Bool {
       guard bestShotsRequest == request, scenePhase == .active, search.hasSearch,
-        query == queryToken, search.libraryGeneration == library,
+        query == queryToken, search.libraryGeneration == library, search.organizationGeneration == organization,
         search.response.generation == response, search.acceptedMeaningID == meaning else { return false }
       #if !FOTORO_LOCAL_PREVIEW
         return token == searchTaskID && hits == searchHits && services === originalServices
@@ -1337,9 +1340,17 @@ struct RecentPhotosView: View {
     }
   }
   private func bestShotsCandidate(_ photo: RecentPhoto) -> AutomaticPhotoPickCandidate {
-    AutomaticPhotoPickCandidate(id: "device:" + photo.id, sourceRevision: photo.sourceRevision,
-      capturedAt: photo.capturedAt, width: photo.asset.pixelWidth, height: photo.asset.pixelHeight,
-      favorite: photo.isFavorite, isScreenshot: photo.isScreenshot)
+    var candidate = store.pickCandidate(photo)
+    candidate.id = "device:" + photo.id
+    return candidate
+  }
+  private func bindPhotoOrganization() {
+    store.bindOrganizationSource { [weak search] source in
+      guard let search, search.assets[source.id]?.sourceRevision == source.revision,
+        let record = try? search.record(source.id), record.revision == source.revision else { return [] }
+      return record.facts
+    }
+    search.onOrganizationSnapshotChanged = { [weak store] in store?.organizationDidChange() }
   }
   #if !FOTORO_LOCAL_PREVIEW
   private func cachedBestShotsPreview(_ photo: LocalPhoto, root: URL) async throws -> FindBestShotsCachedPreview? {

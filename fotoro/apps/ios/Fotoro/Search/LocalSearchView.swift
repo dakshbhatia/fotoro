@@ -441,6 +441,13 @@ struct LocalPhotoDetails: View {
       .onChange(of: search?.canEditLabels(photo.id) ?? false) {
         labels = search?.labels(photo.id) ?? []
       }
+      .onChange(of: search?.organizationGeneration) {
+        guard let search, search.assets[photo.id]?.sourceRevision == photo.sourceRevision,
+          let record = try? search.record(photo.id), record.revision == photo.sourceRevision else { return }
+        let previousName = PhotoOrganizationFacts.name(organizationFacts, original: originalName)
+        organizationFacts = record.facts
+        if nameDraft == previousName { nameDraft = PhotoOrganizationFacts.name(organizationFacts, original: originalName) }
+      }
       .task(id: readIdentity) { await readCapture() }
       .presentationDetents([.medium, .large])
   }
@@ -451,7 +458,8 @@ struct LocalPhotoDetails: View {
             TextField("Filename", text: $nameDraft).autocorrectionDisabled().textInputAutocapitalization(.never).accessibilityLabel("Photo filename")
             Button("Suggest name") {
               nameDraft = PhotoOrganizationFacts.suggestedName(original: originalName, digest: nil,
-                capturedAt: photo.capturedAt, labels: labels, place: photo.photoLocation?.name, screenshot: photo.isScreenshot)
+                capturedAt: photo.capturedAt, labels: labels, place: photo.photoLocation?.name,
+                screenshot: PhotoOrganizationFacts.screenshot(organizationFacts, detected: photo.isScreenshot))
             }
             Button("Apply name") { applyOrganization(.name(nameDraft)) }
               .disabled(!PhotoOrganizationFacts.validName(nameDraft) || nameDraft == PhotoOrganizationFacts.name(organizationFacts, original: originalName))
