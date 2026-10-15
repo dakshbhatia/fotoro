@@ -7,6 +7,19 @@ import { emptyFeedback } from "../src/local/search";
 const fixture = () => ({ id: "sha-photo", digest: "sha-photo", filename: "private-name.jpg", labels: ["Ronald"], date: "2026-09-01T00:00:00Z", dateSource: "exif" as const, width: 640, height: 480, originalSize: 1234, preview: new Blob(["bounded jpeg"], { type: "image/jpeg" }) });
 const store = (budget?: number) => new LocalRetention({ name: "test-search-" + crypto.randomUUID(), budget });
 
+test("retention distinguishes an unedited label list from an explicit removal across reopen and reselection", async () => {
+  const saved = store();
+  const {labels: _labels, ...unedited} = fixture();
+  try {
+    await saved.save([unedited, {...fixture(), id: "removed", labels: []}, {...fixture(), id: "edited"}], emptyFeedback());
+    const reopened = await saved.load();
+    assert.equal(reopened.skipped, 0);
+    assert.equal(reopened.photos.find(photo => photo.id === unedited.id)?.labels, undefined);
+    assert.deepEqual(reopened.photos.find(photo => photo.id === "removed")?.labels, []);
+    assert.deepEqual(reopened.photos.find(photo => photo.id === "edited")?.labels, ["Ronald"]);
+  } finally {await saved.clear();}
+});
+
 test("GPS and absolute capture-time evidence survive encrypted retention and Clear", async () => {
   const saved = store(), location = {latitude: 41.9028, longitude: 12.4964, source: "exif" as const};
   await saved.save([{...fixture(), location, captureVerified: true as const, captureTimezoneVerified: true as const}], emptyFeedback());

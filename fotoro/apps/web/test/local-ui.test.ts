@@ -24,6 +24,14 @@ test('digest-based reselection reconnects labels without trusting an equal filen
  assert.equal(merged.length,2);assert.equal(merged.find(p=>p.id==='digest-a')?.file,original);
  assert.deepEqual(merged.find(p=>p.id==='digest-a')?.labels,['Ronald']);assert.deepEqual(merged.find(p=>p.id==='digest-b')?.labels,[]);
 });
+test('opening and reselecting an unedited original does not create a label-removal intent',()=>{
+ const {labels:_labels,...unedited}=photo('digest-a');
+ const original={...unedited,file:new File(['matching original'],'same.png')};
+ const [opened]=mergeSelectedPhotos([],[original]);
+ assert.equal(opened.labels,undefined);
+ assert.equal(mergeSelectedPhotos([opened],[original])[0].labels,undefined);
+ assert.deepEqual(mergeSelectedPhotos([{...opened,labels:[]}],[original])[0].labels,[]);
+});
 test('account selection callback includes only actual selected originals, never retained previews',()=>{
  const original=new File(['unchanged original'],'same.png');
  assert.deepEqual(selectedOriginals([photo('retained'),{...photo('live'),file:original}]),[original]);

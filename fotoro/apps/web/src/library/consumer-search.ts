@@ -31,9 +31,10 @@ export function mergeConsumerSearchPhotos<T extends {id: string}>(local: T[], sa
       || (savedPhoto as Partial<LocalPhoto>).current?.() === false) return photo;
     const location = original.location ?? source.location;
     const favorite = original.favorite ?? (savedPhoto as Partial<LocalPhoto>).favorite;
+    const labels = original.labels ?? (savedPhoto as Partial<LocalPhoto>).labels;
     const promoteDate = original.dateSource === "selected" && ["photos", "exif"].includes(source.dateSource) && Number.isFinite(Date.parse(source.date));
-    if (!promoteDate && location === original.location && favorite === original.favorite) return photo;
-    return {...photo, ...(promoteDate ? {date: source.date, dateSource: source.dateSource, captureVerified: source.dateSource === "exif" ? true : original.captureVerified} : {}), ...(location ? {location} : {}), ...(favorite !== undefined ? {favorite} : {}),
+    if (!promoteDate && location === original.location && favorite === original.favorite && labels === original.labels) return photo;
+    return {...photo, ...(promoteDate ? {date: source.date, dateSource: source.dateSource, captureVerified: source.dateSource === "exif" ? true : original.captureVerified} : {}), ...(location ? {location} : {}), ...(favorite !== undefined ? {favorite} : {}), ...(labels !== undefined ? {labels} : {}),
       current: () => source.snapshot.current() && original.current?.() !== false && (savedPhoto as Partial<LocalPhoto>).current?.() !== false};
   });
   return [...displayed, ...currentSaved.filter(photo => !localIDs.has(photo.id))];
