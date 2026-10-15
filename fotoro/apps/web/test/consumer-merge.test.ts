@@ -56,6 +56,26 @@ test("a pending local Unfavorite cannot reappear through the overlapping Saved m
   assert.deepEqual([...browseFavoritePhotoIDs(saved, merge([favorite], saved))], [local.id]);
 });
 
+test("reopening an unchanged original inherits its verified Saved favorite until a local choice is made", () => {
+  const {local: reviewed, snapshot, invalidate} = matchingCapture();
+  const {favorite: _favorite, ...local} = reviewed;
+  const saved = savedSearchPhotos(snapshot, [local]);
+  const displayed = merge([local], saved);
+  assert.equal(displayed[0].favorite, true);
+  assert.equal(displayed[0].file, local.file);
+  assert.equal(local.favorite, undefined, "Reading Saved state does not create a local edit");
+  assert.deepEqual([...browseFavoritePhotoIDs(saved, displayed)], [local.id]);
+  invalidate();
+  assert.equal(displayed[0].current?.(), false);
+  assert.equal(merge([local], saved)[0].favorite, undefined, "Withdrawn Saved state cannot promote an imported original");
+});
+
+test("unloaded Saved favorite metadata admits a reselected original without overriding an explicit Unfavorite", () => {
+  const records = [{id: "local-original", favorite: true}];
+  assert.deepEqual([...browseFavoritePhotoIDs(records, [{id: "local-original"}])], ["local-original"]);
+  assert.deepEqual([...browseFavoritePhotoIDs(records, [{id: "local-original", favorite: false}])], []);
+});
+
 test("matching saved capture evidence reaches search details without replacing local originals or edits", () => {
   const {now, captured, local, snapshot} = matchingCapture(), before = {...local, labels: [...local.labels!]};
   const saved = savedSearchPhotos(snapshot, [local]);
