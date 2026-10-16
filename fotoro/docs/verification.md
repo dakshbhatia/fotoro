@@ -35,6 +35,10 @@ it does not retain queries, OCR, photo IDs, paths or coordinates. Late/offscreen
 callbacks cannot complete another search. Empty results, source unavailability,
 backgrounding and withdrawal have separate outcomes. This measures UI image
 availability, not display presentation, physical tap routing or frame pacing.
+The hosted compiler also exposed a type-checking limit in the long home-event
+modifier chain. Search observation now has a small explicit modifier and the
+query, permission and catalog handlers are named actions; event behavior and
+view identity stay intact.
 
 A private, read-only copy of the installed phone index contains 21,486 records.
 Its current ten-calendar-day window has 201 records with OCR, visual stages and

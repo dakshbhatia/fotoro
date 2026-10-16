@@ -442,6 +442,21 @@ enum PhotoPicksAdmission {
   }
 }
 
+@MainActor private struct RecentPhotosSearchEvents: ViewModifier {
+  let query: String
+  let search: LocalSearchStore
+  let queryChanged: @MainActor () -> Void
+  let cancelBestShots: @MainActor () -> Void
+  func body(content: Content) -> some View {
+    content
+      .onChange(of: query) { queryChanged() }
+      .onChange(of: search.response.generation) { cancelBestShots() }
+      .onChange(of: search.organizationGeneration) { cancelBestShots() }
+      .onChange(of: search.acceptedMeaningID) { cancelBestShots() }
+      .onChange(of: search.peopleSelection) { cancelBestShots() }
+  }
+}
+
 struct RecentPhotosView: View {
   @State private var store = RecentPhotosStore()
   @State private var search = LocalSearchStore()
@@ -965,22 +980,9 @@ struct RecentPhotosView: View {
   }
   private var homeEvents: some View {
     homePresentations
-        .onChange(of: query) {
-          #if !FOTORO_LOCAL_PREVIEW
-          cancelSearchPreview(reason: .contextChanged)
-          #endif
-          cancelBestShots(); search.updateQuery(query)
-        }
-        .onChange(of: search.response.generation) { cancelBestShots() }
-        .onChange(of: search.organizationGeneration) { cancelBestShots() }
-        .onChange(of: search.acceptedMeaningID) { cancelBestShots() }
-        .onChange(of: search.peopleSelection) { cancelBestShots() }
-        .onChange(of: store.status) {
-          #if !FOTORO_LOCAL_PREVIEW
-          cancelSearchPreview(reason: RecentPhotosPolicy.canRead(store.status) ? .contextChanged : .permissionRequired)
-          #endif
-          cancelBestShots()
-        }
+        .modifier(RecentPhotosSearchEvents(query: query, search: search,
+          queryChanged: handleSearchQueryChange, cancelBestShots: cancelBestShots))
+        .onChange(of: store.status) { handlePhotoPermissionChange() }
         .onChange(of: viewer?.id) {
           #if !FOTORO_LOCAL_PREVIEW
           if viewer != nil { cancelSearchPreview(reason: .inactive) }
@@ -1003,22 +1005,35 @@ struct RecentPhotosView: View {
             homeAuthenticationTask?.cancel(); homeAuthenticationTask = nil; savedRefresh.cancel()
           #endif
         }
-        .onChange(of: search.libraryGeneration) {
-          #if !FOTORO_LOCAL_PREVIEW
-          cancelSearchPreview(reason: .contextChanged)
-          #endif
-          cancelBestShots()
-          validatePhotosPresentation()
-#if !FOTORO_LOCAL_PREVIEW
-          searchHits = []
-          savedResults = [:]
-          services?.kickAutomaticPhotoSync(sourcesChanged: true)
-#endif
-          if galleryRestorationGeneration == search.libraryGeneration {
-            galleryRestorationGeneration = nil
-          } else { store.refresh() }
-        }
+        .onChange(of: search.libraryGeneration) { handlePhotoLibraryGenerationChange() }
         .onChange(of: scenePhase) { handleScenePhaseChange(scenePhase) }
+  }
+  private func handleSearchQueryChange() {
+    #if !FOTORO_LOCAL_PREVIEW
+    cancelSearchPreview(reason: .contextChanged)
+    #endif
+    cancelBestShots(); search.updateQuery(query)
+  }
+  private func handlePhotoPermissionChange() {
+    #if !FOTORO_LOCAL_PREVIEW
+    cancelSearchPreview(reason: RecentPhotosPolicy.canRead(store.status) ? .contextChanged : .permissionRequired)
+    #endif
+    cancelBestShots()
+  }
+  private func handlePhotoLibraryGenerationChange() {
+    #if !FOTORO_LOCAL_PREVIEW
+    cancelSearchPreview(reason: .contextChanged)
+    #endif
+    cancelBestShots()
+    validatePhotosPresentation()
+    #if !FOTORO_LOCAL_PREVIEW
+    searchHits = []
+    savedResults = [:]
+    services?.kickAutomaticPhotoSync(sourcesChanged: true)
+    #endif
+    if galleryRestorationGeneration == search.libraryGeneration {
+      galleryRestorationGeneration = nil
+    } else { store.refresh() }
   }
   private var sharedHome: some View {
     homeEvents
