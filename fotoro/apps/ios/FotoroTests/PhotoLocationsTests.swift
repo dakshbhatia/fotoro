@@ -5,6 +5,38 @@ import XCTest
 @testable import Fotoro
 
 final class PhotoLocationsTests: XCTestCase {
+  func testNameDraftFollowsUntouchedNamesButKeepsTypingAcrossIncomingCorrections() {
+    var draft = PhotoNameDraft(savedName: "IMG_4826.jpg")
+    draft.receive("Receipt.jpg")
+    XCTAssertEqual(draft.value, "Receipt.jpg")
+    draft.edit("  My receipt draft.jpg ")
+    draft.receive("Reviewed receipt.jpg")
+    draft.receive("Final receipt.jpg")
+    XCTAssertEqual(draft.value, "  My receipt draft.jpg ", "Typing is preserved verbatim, including unfinished formatting")
+    XCTAssertEqual(draft.savedName, "Final receipt.jpg")
+    XCTAssertTrue(draft.savedNameChanged)
+    draft.edit("Final receipt.jpg")
+    XCTAssertFalse(draft.savedNameChanged)
+    draft.receive("Another receipt.jpg")
+    XCTAssertEqual(draft.value, "Another receipt.jpg")
+  }
+
+  func testSuccessfulNameResetResolvesDraftWhileUnrelatedAnnotationKeepsIt() {
+    var draft = PhotoNameDraft(savedName: "Receipt.jpg")
+    draft.edit("Uncommitted name.jpg")
+    draft.receive("Receipt.jpg") // Screenshot/Trash edits do not change the name.
+    XCTAssertEqual(draft.value, "Uncommitted name.jpg")
+    draft.acknowledge("IMG_4826.jpg") // Successful explicit Use original name.
+    XCTAssertEqual(draft.value, "IMG_4826.jpg")
+    XCTAssertEqual(draft.savedName, "IMG_4826.jpg")
+    XCTAssertFalse(draft.savedNameChanged)
+    draft.edit("Another unfinished name.jpg")
+    draft.receive("Remote.jpg")
+    draft.acknowledge(draft.savedName) // Explicit Use saved name.
+    XCTAssertEqual(draft.value, "Remote.jpg")
+    XCTAssertFalse(draft.savedNameChanged)
+  }
+
   func testSuggestedNamesUseDistinctUsefulTagsAndRemainApplicable() {
     let date = ISO8601DateFormatter().date(from: "2018-02-03T23:50:00Z")
     XCTAssertEqual(PhotoOrganizationFacts.suggestedName(original: "IMG.JPG", digest: String(repeating: "00", count: 32),

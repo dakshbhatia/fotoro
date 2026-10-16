@@ -5,6 +5,57 @@ work; [product](product.md) owns the intended experience. Earlier measurements a
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
 
+## October 15 photo interaction and scrolling follow-up
+
+PR 110 merged as `df91a4fc77a265ec1bf83a2b63115329f92de0a5` with the
+qualified source tree unchanged and all 23 hosted contexts complete (seven
+successes, 16 intentional skips). Worker
+`093177d2-d5cf-4596-b041-1b644849d0df` serves 100% of production traffic;
+all 43 emitted non-HTML assets and three entry routes match. Build 82 passed
+retained archive and distribution IPA audits, Apple processing and the approved
+encryption/no-France declaration. Fresh App Store Connect readback confirms the
+existing internal group with one tester. Connected-device app metadata confirms
+build 82; the owner reports incorrect photo taps and laggy scrolling.
+
+The next patch constrains cropped photo-button interaction bounds across grids,
+search, albums and Places, and constrains still-viewer gestures to the current
+page and viewport. Missing interaction shapes are a code-level explanation for
+cropped images claiming neighboring touches; coordinate routing remains a
+physical acceptance gate. Simulator accessibility activation could not provide
+a reliable coordinate-touch regression in a temporary test-host window. That
+temporary harness was removed; no new skip masks this limitation.
+
+Thumbnail request admission and degraded/final image callbacks now validate
+current Photos source revisions in actor-coalesced slices of at most 200, rather
+than synchronously fetching metadata for each callback. Two regressions failed
+before repair. A 200-callback/100-source burst uses one fresh metadata read;
+1,000 unique requests use five bounded slices. Later bursts revalidate edited or
+removed sources. Visibility, permission and generation are checked before each
+publication; a prior completion can withdraw later work. This is a reduction in
+metadata-read amplification, not a measured whole-app speedup.
+
+Saved still previews use decode-time ImageIO thumbnailing through the existing
+Nuke pipeline, capped at 1600 pixels. Tests decode actual oversized landscape and
+portrait JPEGs and preserve their source bytes. Original files are no longer a
+fallback for ordinary preview display; missing derivatives show an unavailable
+state. Fallback thumbnails require matching photo ID, metadata and manifest.
+
+Both clients expose All, Photos and Screenshots choices. The existing default
+still includes every non-Trash item; the explicit Photos choice excludes current
+screenshot evidence and respects owner corrections and digest bindings. Missing
+capture metadata does not establish camera origin. Native filename drafts also
+survive incoming names, reappearance and unrelated Screenshot changes; explicit
+successful name apply/reset resolves the draft. Local metadata edits recheck the
+displayed source revision and Photos permission, and tag actions merge against
+current labels rather than an old editor snapshot.
+
+The affected native suite passes 108 tests with no failures or skips. The full
+workspace check passes, including 821 browser and 129 API tests. Full native,
+hosted and release qualification are separate pending gates for this patch.
+A physical Animation Hitches recording attached and reached its time limit but
+did not finalize into a readable trace; it supplies no frame-pacing evidence.
+
+
 ## October 15 core follow-through
 
 PR 109 merged as `2d83b292e03da46cada3011673139962fde95757`, with the same

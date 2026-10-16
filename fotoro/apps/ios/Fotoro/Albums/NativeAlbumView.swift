@@ -895,6 +895,7 @@ private struct NativeAlbumPhotoPicker: View {
                 }
               }
             }
+            .contentShape(.interaction, Rectangle())
           }.disabled(adding || pendingAddition != nil).accessibilityLabel(NativeAlbumPhotoAccessibility.label(photo))
         }
         if picker.busy { ProgressView("Loading Saved photos…") }
@@ -975,7 +976,10 @@ private struct NativeAlbumThumbnail: View {
     let current = identity
     LazyImage(url: loadedIdentity == current && current.access != nil ? url : nil) { state in
       if loadedIdentity == current, current.access != nil, let image = state.image {
-        Button(action: open) { image.resizable().scaledToFill() }.buttonStyle(.plain)
+        Button(action: open) {
+          image.resizable().scaledToFill().frame(maxWidth: .infinity).frame(height: 110)
+            .clipped().contentShape(.interaction, Rectangle())
+        }.buttonStyle(.plain)
       } else if loadedIdentity == current && (unavailable || state.error != nil) {
         Rectangle().fill(.secondary.opacity(0.2)).overlay {
           VStack(spacing: 8) {

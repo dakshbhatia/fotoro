@@ -398,6 +398,41 @@ final class PhotoBrowsingTests: XCTestCase {
     XCTAssertEqual(PhotoBrowsing.groups(items, filter: .screenshots).flatMap(\.sources).map(\.id), ["screen"])
     XCTAssertEqual(PhotoBrowsing.groups(items, filter: .withLocation).flatMap(\.sources).map(\.id), ["gps"])
   }
+  func testPhotosAndScreenshotsPartitionCurrentFactsWithoutChangingAllOrClaimingCameraOrigin() {
+    let unknown = photo("Screenshot-looking.png")
+    let screen = photo("screen", screenshot: true)
+    let stale = photo("corrected", revision: "old", screenshot: true)
+    let corrected = photo("corrected", revision: "current", screenshot: false)
+    let items = [unknown, screen, stale, corrected]
+    XCTAssertEqual(PhotoBrowsing.groups(items, filter: .all).flatMap(\.sources).map(\.id),
+      ["Screenshot-looking.png", "corrected", "screen"])
+    XCTAssertEqual(PhotoBrowsing.groups(items, filter: .photos).flatMap(\.sources),
+      [unknown.source, corrected.source])
+    XCTAssertEqual(PhotoBrowsing.groups(items, filter: .screenshots).flatMap(\.sources), [screen.source])
+    XCTAssertTrue(PhotoBrowseFilter.includesSavedType(screenshot: true, scope: "photos"), "Existing Saved photos scope includes screenshots")
+    XCTAssertTrue(PhotoBrowseFilter.includesSavedType(screenshot: false, scope: "photos"))
+    XCTAssertFalse(PhotoBrowseFilter.includesSavedType(screenshot: true, scope: "photosOnly"))
+    XCTAssertTrue(PhotoBrowseFilter.includesSavedType(screenshot: false, scope: "photosOnly"))
+    XCTAssertTrue(PhotoBrowseFilter.includesSavedType(screenshot: true, scope: "screenshots"))
+    XCTAssertFalse(PhotoBrowseFilter.includesSavedType(screenshot: false, scope: "screenshots"))
+  }
+  func testSavedTypePartitionUsesExactCaptureDigestAndCurrentScreenshotCorrection() throws {
+    let digest = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    let capture = ["fotoro.capture.v1:source:" + digest,
+      #"fotoro.capture.v1:item:{"k":"subtypes","p":"photos","v":"screenshot"}"#]
+    let detected = PhotoOrganizationFacts.screenshot(capture, originalSha256: digest)
+    XCTAssertTrue(detected)
+    XCTAssertFalse(PhotoBrowseFilter.includesSavedType(screenshot: detected, scope: "photosOnly"))
+    let mismatched = PhotoOrganizationFacts.screenshot(capture,
+      originalSha256: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
+    XCTAssertFalse(mismatched)
+    XCTAssertTrue(PhotoBrowseFilter.includesSavedType(screenshot: mismatched, scope: "photosOnly"))
+    let correction = try PhotoOrganizationFacts.replacing(capture, change: .screenshot(false))
+    let corrected = PhotoOrganizationFacts.screenshot(correction, originalSha256: digest)
+    XCTAssertFalse(corrected)
+    XCTAssertTrue(PhotoBrowseFilter.includesSavedType(screenshot: corrected, scope: "photosOnly"))
+    XCTAssertFalse(PhotoBrowseFilter.includesSavedType(screenshot: corrected, scope: "screenshots"))
+  }
   func testLatestSourceSnapshotReplacesRevisionAndFilterFactsTogether() {
     let stale = photo("same", at: date(10, 1), favorite: true)
     let current = photo("same", at: date(10, 2), revision: "edited", screenshot: true)

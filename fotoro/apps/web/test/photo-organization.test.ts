@@ -63,6 +63,26 @@ test("screenshot evidence is source-bound, overrideable, and independent from fi
   assert.equal(isPhotoScreenshot(withPhotoOrganization({...capture, digest}, {screenshot: false})), false);
   assert.equal(isPhotoScreenshot({filename: "screenshot-looking.png"}), false);
 });
+test("All preserves existing scope while Photos and Screenshots partition current screenshot evidence", () => {
+  const capture = ["fotoro.capture.v1:source:" + digest, 'fotoro.capture.v1:item:{"k":"subtypes","p":"photos","v":"screenshot"}'];
+  const unknown: LocalPhoto = {id: "unknown", filename: "Screenshot-looking.png", date: original.date, dateSource: "selected", digest};
+  const screenshot: LocalPhoto = {...unknown, id: "screen", facts: capture};
+  const corrected = withPhotoOrganization({...screenshot, id: "corrected"}, {screenshot: false});
+  const marked = withPhotoOrganization({...unknown, id: "marked"}, {screenshot: true});
+  const mismatched = {...screenshot, id: "mismatched", digest: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"};
+  const trashed = withPhotoOrganization({...screenshot, id: "trashed"}, {trash: true});
+  const values = [unknown, screenshot, corrected, marked, mismatched, trashed];
+  const ids = (scope: "photos" | "photosOnly" | "screenshots" | "trash") => values.filter(photo => inOrganizationScope(photo, scope)).map(photo => photo.id);
+  assert.deepEqual(ids("photos"), ["unknown", "screen", "corrected", "marked", "mismatched"]);
+  assert.deepEqual(values.filter(photo => inOrganizationScope(photo)).map(photo => photo.id), ids("photos"));
+  assert.deepEqual(ids("photosOnly"), ["unknown", "corrected", "mismatched"]);
+  assert.deepEqual(ids("screenshots"), ["screen", "marked"]);
+  assert.deepEqual(ids("trash"), ["trashed"]);
+  assert.equal(inBrowseRange({...corrected, favorite: true}, false, true, Date.now(), "photosOnly"), true);
+  assert.equal(inBrowseRange({...marked, favorite: true}, false, true, Date.now(), "photosOnly"), false);
+  const restored = withPhotoOrganization(trashed, {trash: false, screenshot: false});
+  assert.equal(inOrganizationScope(restored, "photosOnly"), true);
+});
 test("Trash is excluded from default browsing/search eligibility and remains restorable", () => {
   const photo: LocalPhoto = {id: "a", filename: "IMG.JPG", date: original.date, dateSource: "photos", digest};
   const named = withPhotoOrganization(photo, {name: "BTS Seoul.jpg"});

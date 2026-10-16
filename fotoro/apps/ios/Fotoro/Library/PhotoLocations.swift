@@ -137,6 +137,25 @@ enum PhotoLocationError: LocalizedError {
 
 // Private organization records use the released annotation facts envelope.
 enum PhotoOrganizationChange { case name(String?), trash(Bool), screenshot(Bool?) }
+// Incoming annotations may update the saved name while its editor is open.
+// Only an explicit successful name operation acknowledges an edited draft.
+struct PhotoNameDraft: Equatable {
+  private(set) var savedName: String
+  private(set) var value: String
+  private(set) var savedNameChanged = false
+  init(savedName: String) { self.savedName = savedName; value = savedName }
+  mutating func edit(_ value: String) {
+    self.value = value
+    savedNameChanged = savedNameChanged && value != savedName
+  }
+  mutating func receive(_ name: String) {
+    guard name != savedName else { return }
+    if value == savedName || value == name { self = Self(savedName: name) }
+    else { savedName = name; savedNameChanged = true }
+  }
+  mutating func acknowledge(_ name: String) { self = Self(savedName: name) }
+}
+
 enum PhotoOrganizationFacts {
   static let namePrefix = "fotoro.name.v1:"
   static let trashPrefix = "fotoro.trash.v1:"

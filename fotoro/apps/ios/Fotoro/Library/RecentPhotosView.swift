@@ -57,8 +57,7 @@ struct PhotosImage: View {
       let source = RecentPhotoSource(photo)
       if displayedSource != source { image = nil; displayedSource = source }
       progress = PhotoPreviewProgress()
-      guard scenePhase != .background,
-        store.canPublishThumbnail(source: source, generation: thumbnailGeneration) else {
+      guard scenePhase != .background else {
         image = nil
         _ = progress.receive(hasImage: false, degraded: false)
         return
@@ -67,36 +66,49 @@ struct PhotosImage: View {
       generation = token
       active = true
       let target = targetSize
-      if !large, let cached = store.cachedThumbnail(for: source, targetSize: target, networkAllowed: networkAllowed) {
-        image = cached
-        _ = progress.receive(hasImage: true, degraded: false)
-        return
+      let isCurrent: @MainActor () -> Bool = {
+        active && generation == token && scenePhase != .background
       }
-      let options = PHImageRequestOptions()
-      options.isNetworkAccessAllowed = networkAllowed
-      options.deliveryMode = .opportunistic
-      if !large { options.resizeMode = .fast }
-      request = store.images.requestImage(
-        for: photo.asset,
-        targetSize: target,
-        contentMode: large ? .aspectFit : .aspectFill, options: options
-      ) { value, info in
-        let cancelled = (info?[PHImageCancelledKey] as? Bool) == true
-        let failed = info?[PHImageErrorKey] != nil
-        Task { @MainActor in
-          guard active, generation == token else { return }
-          guard scenePhase != .background,
-            store.canPublishThumbnail(source: source, generation: thumbnailGeneration) else {
-            stop(); image = nil
-            _ = progress.receive(hasImage: false, degraded: false)
-            return
-          }
-          let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) == true
-          if progress.receive(hasImage: value != nil, degraded: degraded, cancelled: cancelled, failed: failed) {
-            image = value
-            if !large, !degraded, let value {
-              store.cacheThumbnail(value, for: source, targetSize: target, networkAllowed: networkAllowed,
-                generation: thumbnailGeneration)
+      store.validateThumbnail(source: source, generation: thumbnailGeneration, isCurrent: isCurrent) { allowed in
+        guard isCurrent() else { return }
+        guard allowed else {
+          stop(); image = nil
+          _ = progress.receive(hasImage: false, degraded: false)
+          return
+        }
+        if !large, let cached = store.cachedThumbnail(for: source, targetSize: target, networkAllowed: networkAllowed) {
+          image = cached
+          _ = progress.receive(hasImage: true, degraded: false)
+          return
+        }
+        let options = PHImageRequestOptions()
+        options.isNetworkAccessAllowed = networkAllowed
+        options.deliveryMode = .opportunistic
+        if !large { options.resizeMode = .fast }
+        request = store.images.requestImage(
+          for: photo.asset,
+          targetSize: target,
+          contentMode: large ? .aspectFit : .aspectFill, options: options
+        ) { value, info in
+          let cancelled = (info?[PHImageCancelledKey] as? Bool) == true
+          let failed = info?[PHImageErrorKey] != nil
+          Task { @MainActor in
+            guard isCurrent() else { return }
+            store.validateThumbnail(source: source, generation: thumbnailGeneration, isCurrent: isCurrent) { allowed in
+              guard isCurrent() else { return }
+              guard allowed else {
+                stop(); image = nil
+                _ = progress.receive(hasImage: false, degraded: false)
+                return
+              }
+              let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) == true
+              if progress.receive(hasImage: value != nil, degraded: degraded, cancelled: cancelled, failed: failed) {
+                image = value
+                if !large, !degraded, let value {
+                  store.cacheThumbnail(value, for: source, targetSize: target, networkAllowed: networkAllowed,
+                    generation: thumbnailGeneration)
+                }
+              }
             }
           }
         }
@@ -145,15 +157,17 @@ struct PhotoViewerStillInteraction: ViewModifier {
     GeometryReader { geometry in
       content.frame(width: geometry.size.width, height: geometry.size.height)
         .scaleEffect(zoom.scale).offset(zoom.offset)
+        .frame(width: geometry.size.width, height: geometry.size.height).clipped()
+        .contentShape(.interaction, Rectangle())
         .highPriorityGesture(DragGesture()
-          .onChanged { zoom.drag($0.translation, viewport: geometry.size) }
-          .onEnded { zoom.settleDrag($0.translation, viewport: geometry.size) },
+          .onChanged { if isCurrent { zoom.drag($0.translation, viewport: geometry.size) } }
+          .onEnded { if isCurrent { zoom.settleDrag($0.translation, viewport: geometry.size) } },
           including: zoom.scale > 1 ? .all : .none)
         .simultaneousGesture(MagnifyGesture()
-          .onChanged { zoom.change($0.magnification); zoom.constrain(to: geometry.size) }
-          .onEnded { zoom.settle($0.magnification); zoom.constrain(to: geometry.size) })
-        .onTapGesture(count: 2) { zoom.toggle() }
-        .onTapGesture { if !voiceOver { controlsVisible.toggle() } }
+          .onChanged { if isCurrent { zoom.change($0.magnification); zoom.constrain(to: geometry.size) } }
+          .onEnded { if isCurrent { zoom.settle($0.magnification); zoom.constrain(to: geometry.size) } })
+        .onTapGesture(count: 2) { if isCurrent { zoom.toggle() } }
+        .onTapGesture { if isCurrent, !voiceOver { controlsVisible.toggle() } }
         .onChange(of: geometry.size) { if isCurrent { zoom.constrain(to: geometry.size) } }
         .onChange(of: voiceOver) { if isCurrent, voiceOver { controlsVisible = true } }
     }.clipped()
@@ -258,7 +272,7 @@ struct RecentPhotoViewer: View {
         .toolbar(controlsVisible ? .visible : .hidden, for: .navigationBar, .bottomBar)
         .sheet(isPresented: $details) {
           if let current {
-            LocalPhotoDetails(photo: current, search: search)
+            LocalPhotoDetails(photo: current, search: search).id(current.id)
           }
         }
     }.preferredColorScheme(.dark)
@@ -580,7 +594,8 @@ struct RecentPhotosView: View {
       let photos = allOwnedPhotos.filter { photo in
         let value = services.annotation(photo), trash = PhotoOrganizationFacts.trashed(value.facts)
         return (savedOrganization == "trash" ? trash : !trash)
-          && (savedOrganization != "screenshots" || PhotoOrganizationFacts.screenshot(value.facts, originalSha256: photo.metadata.originalSha256))
+          && PhotoBrowseFilter.includesSavedType(screenshot: PhotoOrganizationFacts.screenshot(value.facts,
+            originalSha256: photo.metadata.originalSha256), scope: savedOrganization)
           && (!savedFavoritesOnly || value.favorite == true)
       }
       let groups = Dictionary(grouping: photos) { photo in
@@ -1625,7 +1640,8 @@ struct RecentPhotosView: View {
       #if !FOTORO_LOCAL_PREVIEW
         if !search.hasSearch, scope == .saved, let services, services.photoAccountAccess != nil {
           Picker("Show", selection: $savedOrganization) {
-            Text("Photos").tag("photos")
+            Text("All").tag("photos")
+            Text("Photos").tag("photosOnly")
             Text("Screenshots").tag("screenshots")
             Text("Fotoro Trash").tag("trash")
           }.accessibilityLabel("Photo type")
@@ -1687,6 +1703,7 @@ struct RecentPhotosView: View {
   private var browseFilterTitle: String {
     switch browseFilter {
     case .all: return "All photos"
+    case .photos: return "Photos"
     case .favorites: return "Favorites"
     case .screenshots: return "Screenshots"
     case .withLocation: return "With a location"
@@ -1695,6 +1712,7 @@ struct RecentPhotosView: View {
   private var browseFilterPicker: some View {
     Picker("Show", selection: $browseFilter) {
       Text("All").tag(PhotoBrowseFilter.all)
+      Text("Photos").tag(PhotoBrowseFilter.photos)
       Text("Favorites").tag(PhotoBrowseFilter.favorites)
       Text("Screenshots").tag(PhotoBrowseFilter.screenshots)
       Text("With a location").tag(PhotoBrowseFilter.withLocation)
@@ -2458,6 +2476,9 @@ private struct RecentPhotoCell: View {
         .overlay(alignment: .bottomTrailing) {
           if selected { Image(systemName: "checkmark.circle.fill").padding(8) }
         }
+        // Clipping only trims pixels; aspect-fill content can still claim a
+        // neighboring tile's touches unless the label's hit region is bounded.
+        .contentShape(.interaction, Rectangle())
     }.buttonStyle(.plain)
       .accessibilityValue(accessibilityStatus(syncText: syncText))
       .contextMenu { Button(selected ? "Deselect" : "Select", action: toggle) }
@@ -2541,6 +2562,7 @@ private struct PhotoBrowseOverviewCard<Cover: View>: View {
         }
     }.aspectRatio(dynamicTypeSize.isAccessibilitySize ? 1 : 4.0 / 3.0, contentMode: .fit)
       .clipShape(.rect(cornerRadius: 16))
+      .contentShape(.interaction, .rect(cornerRadius: 16))
       .accessibilityElement(children: .ignore)
       .accessibilityLabel(group.title)
       .accessibilityValue("\(group.loadedCount) loaded photos")
