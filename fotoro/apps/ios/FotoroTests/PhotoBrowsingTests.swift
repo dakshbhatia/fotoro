@@ -1,9 +1,294 @@
 import Foundation
+import GRDB
 import XCTest
 
 @testable import Fotoro
 
 final class PhotoBrowsingTests: XCTestCase {
+  @MainActor func testDeviceOrganizationOuterProjectionAdmitsFactsWhenSearchBecomesReady() async throws {
+    let index = try SearchIndex(), search = LocalSearchStore(index: index)
+    search.setAutomaticAnalysisActive(false)
+    defer { search.pause() }
+    var record = SearchRecord(id: "ready-transition"); record.revision = "current"
+    try index.replacePermitted([record])
+    search.beginPermittedSnapshotRefresh()
+    let source = RecentPhotoSource(id: record.id, revision: record.revision)
+    let organization = PhotoBrowseOrganizationProjection(), groups = PhotoBrowseProjection()
+    let metadata = PhotoBrowseValueProjection<PhotoBrowseMetadataID, [PhotoBrowseItem]>()
+    let page = UUID()
+    func read() -> [RecentPhotoSource] {
+      let identity = PhotoBrowseProjectionID(storePage: page, organization: organization.generation,
+        filter: .all, dates: .all, moments: false, scope: "Photos", calendar: calendar, day: date(10, 16))
+        .observingOrganization(search)
+      return groups.groups(for: identity) {
+        let items = metadata.value(for: identity.metadata) {
+          let facts = organization.facts(for: [source], identity: identity.metadata, search: search)
+          return facts[source] == nil ? [] : [PhotoBrowseItem(source: source,
+            facts: RecentPhotoFacts(capturedAt: nil, favorite: false, screenshot: false, livePhoto: false))]
+        }
+        return PhotoBrowsing.groups(items, dates: .all)
+      }.flatMap(\.sources)
+    }
+    XCTAssertTrue(read().isEmpty, "Before permitted metadata is ready, unchecked photos must remain withheld")
+    search.completePermittedSnapshotRefresh(photos: [])
+    var admitted: [RecentPhotoSource] = []
+    for _ in 0..<100 {
+      admitted = read()
+      if !admitted.isEmpty { break }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    XCTAssertEqual(admitted, [source], "A ready read context must replace the cached pre-readiness empty projection")
+  }
+
+  @MainActor func testDeviceOrganizationOuterProjectionResumesAfterHeldAdmissionIsInvalidatedByPause() async throws {
+    let index = try SearchIndex(), search = LocalSearchStore(index: index)
+    search.setAutomaticAnalysisActive(false)
+    defer { search.pause() }
+    var record = SearchRecord(id: "pause-transition"); record.revision = "current"
+    try index.replacePermitted([record])
+    let source = RecentPhotoSource(id: record.id, revision: record.revision)
+    let gate = BrowseOrganizationDatabaseGate()
+    defer { gate.open() }
+    let holder = Task.detached(priority: .userInitiated) { try await index.database.write { _ in gate.hold() } }
+    for _ in 0..<400 where !gate.entered { try await Task.sleep(for: .milliseconds(10)) }
+    XCTAssertTrue(gate.entered)
+    let organization = PhotoBrowseOrganizationProjection(), groups = PhotoBrowseProjection()
+    let metadata = PhotoBrowseValueProjection<PhotoBrowseMetadataID, [PhotoBrowseItem]>()
+    let page = UUID()
+    func read() -> [RecentPhotoSource] {
+      let identity = PhotoBrowseProjectionID(storePage: page, organization: organization.generation,
+        filter: .all, dates: .all, moments: false, scope: "Photos", calendar: calendar, day: date(10, 16))
+        .observingOrganization(search)
+      return groups.groups(for: identity) {
+        let items = metadata.value(for: identity.metadata) {
+          let facts = organization.facts(for: [source], identity: identity.metadata, search: search)
+          return facts[source] == nil ? [] : [PhotoBrowseItem(source: source,
+            facts: RecentPhotoFacts(capturedAt: nil, favorite: false, screenshot: false, livePhoto: false))]
+        }
+        return PhotoBrowsing.groups(items, dates: .all)
+      }.flatMap(\.sources)
+    }
+    XCTAssertTrue(read().isEmpty)
+    await Task.yield()
+    search.pause()
+    gate.open()
+    try await holder.value
+    var admitted: [RecentPhotoSource] = []
+    for _ in 0..<100 {
+      admitted = read()
+      if !admitted.isEmpty { break }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    XCTAssertEqual(admitted, [source], "A new work context must restart admission despite an unchanged Photos page and no prior publication")
+  }
+
+  @MainActor func testDeviceOrganizationPagingRetainsWarmFactsWithoutReadingOldPrefix() async throws {
+    let index = try SearchIndex()
+    // Use the exact index owned by the production reader, without Photos or OCR work.
+    let reader = LocalSearchStore(index: index)
+    reader.setAutomaticAnalysisActive(false)
+    defer { reader.pause() }
+    let records = (0..<2200).map { offset -> SearchRecord in
+      var value = SearchRecord(id: String(format: "browse-%04d", offset))
+      value.revision = "current"
+      value.ocrText = String(repeating: "Public receipt fixture ", count: 16)
+      if offset == 0 { value.facts = [PhotoOrganizationFacts.trashPrefix + "true"] }
+      if offset == 2000 { value.facts = [PhotoOrganizationFacts.screenshotPrefix + "true"] }
+      return value
+    }
+    try index.replacePermitted(records)
+    let sources = records.map { RecentPhotoSource(id: $0.id, revision: "current") }
+    var identity = PhotoBrowseProjectionID(storePage: UUID(), filter: .all, dates: .all,
+      moments: false, scope: "Photos", calendar: calendar, day: date(10, 16)).metadata
+    let projection = PhotoBrowseOrganizationProjection(), reads = BrowseOrganizationReadCounter()
+    try await index.database.write { db in
+      db.trace { event in if case .statement(let statement) = event { reads.record(statement.sql) } }
+    }
+    func resolved(_ current: [RecentPhotoSource]) async throws -> [RecentPhotoSource: [String]] {
+      for _ in 0..<400 {
+        let facts = projection.facts(for: current, identity: identity, search: reader)
+        if facts.count == current.count { return facts }
+        try await Task.sleep(for: .milliseconds(10))
+      }
+      XCTFail("Current organization facts must become available without dropping admitted sources")
+      return [:]
+    }
+    let initial = try await resolved(Array(sources.prefix(2000)))
+    let initialReads = reads.count
+    // A damaged, unrelated old checkpoint must not be reopened by appending a page.
+    try await index.database.write { db in
+      try db.execute(sql: "UPDATE searchRecords SET value=? WHERE id=?",
+        arguments: [Data("not-json".utf8), "browse-0000"])
+    }
+    reads.reset()
+    identity = PhotoBrowseProjectionID(storePage: UUID(), filter: .all, dates: .all,
+      moments: false, scope: "Photos", calendar: calendar, day: date(10, 16)).metadata
+    let appended = try await resolved(sources), appendReads = reads.count
+    try await index.database.write { db in db.trace(options: []) }
+    XCTAssertEqual(initial.count, 2000)
+    XCTAssertTrue(PhotoOrganizationFacts.trashed(initial[sources[0]]))
+    XCTAssertEqual(appended.count, 2200)
+    XCTAssertTrue(PhotoOrganizationFacts.trashed(appended[sources[0]]),
+      "Appending a new metadata page must retain a warm owner's Trash decision")
+    XCTAssertTrue(PhotoOrganizationFacts.screenshot(appended[sources[2000]]))
+    XCTAssertLessThanOrEqual(initialReads, 5, "Initial facts must use bounded bulk reads rather than one read per photo")
+    XCTAssertLessThanOrEqual(appendReads, 1, "A 200-source append must not reread 2,000 admitted sources")
+  }
+
+  @MainActor func testDeviceOrganizationFactsCannotApplyTrashFromAnOldSourceRevision() async throws {
+    let index = try SearchIndex(), search = LocalSearchStore(index: index)
+    search.setAutomaticAnalysisActive(false)
+    defer { search.pause() }
+    var current = SearchRecord(id: "current"), stale = SearchRecord(id: "changed")
+    current.revision = "current"; current.facts = [PhotoOrganizationFacts.screenshotPrefix + "true"]
+    stale.revision = "old"; stale.facts = [PhotoOrganizationFacts.trashPrefix + "true"]
+    try index.replacePermitted([current, stale])
+    let sources = [RecentPhotoSource(id: "current", revision: "current"),
+      RecentPhotoSource(id: "changed", revision: "new")]
+    let identity = PhotoBrowseProjectionID(storePage: UUID(), filter: .all, dates: .all,
+      moments: false, scope: "Photos", calendar: calendar, day: date(10, 16)).metadata
+    let projection = PhotoBrowseOrganizationProjection()
+    var facts: [RecentPhotoSource: [String]] = [:]
+    for _ in 0..<400 {
+      facts = projection.facts(for: sources, identity: identity, search: search)
+      if facts[sources[0]] != nil { break }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    XCTAssertTrue(PhotoOrganizationFacts.screenshot(facts[sources[0]]))
+    XCTAssertFalse(PhotoOrganizationFacts.trashed(facts[sources[1]]),
+      "A previous file revision cannot hide its edited replacement as Trash")
+  }
+
+  @MainActor func testDeviceOrganizationAbsentRowsResolveAndCorruptNewPageRetainsWarmFactsUntilRetry() async throws {
+    let index = try SearchIndex(), search = LocalSearchStore(index: index)
+    search.setAutomaticAnalysisActive(false)
+    defer { search.pause() }
+    var warm = SearchRecord(id: "warm"); warm.revision = "current"
+    warm.facts = [PhotoOrganizationFacts.trashPrefix + "true"]
+    try index.replacePermitted([warm])
+    let projection = PhotoBrowseOrganizationProjection()
+    let identity = PhotoBrowseProjectionID(storePage: UUID(), filter: .all, dates: .all,
+      moments: false, scope: "Photos", calendar: calendar, day: date(10, 16)).metadata
+    let first = RecentPhotoSource(id: "warm", revision: "current")
+    let absent = RecentPhotoSource(id: "no-index-row-yet", revision: "current")
+    let damaged = RecentPhotoSource(id: "damaged", revision: "current")
+    var facts: [RecentPhotoSource: [String]] = [:]
+    for _ in 0..<400 {
+      facts = projection.facts(for: [first, absent], identity: identity, search: search)
+      if facts.count == 2 { break }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    XCTAssertTrue(PhotoOrganizationFacts.trashed(facts[first]))
+    XCTAssertNotNil(facts[absent], "A checked absent row must become visible with default organization facts")
+    XCTAssertTrue(facts[absent]?.isEmpty == true)
+    XCTAssertFalse(projection.admissionIncomplete)
+    try await index.database.write { db in
+      try db.execute(sql: "INSERT INTO searchRecords(id,scope,capture,favorite,moment,ocrState,visualState,preview,value) VALUES(?, 'photos', NULL, 0, 0, 'pending', 'pending', 0, ?)",
+        arguments: [damaged.id, Data("not-json".utf8)])
+    }
+    for _ in 0..<400 {
+      facts = projection.facts(for: [first, absent, damaged], identity: identity, search: search)
+      if projection.failure != nil { break }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    XCTAssertNotNil(projection.failure, "A malformed new row must offer explicit retry instead of endless loading")
+    XCTAssertTrue(projection.admissionIncomplete)
+    XCTAssertTrue(PhotoOrganizationFacts.trashed(facts[first]))
+    XCTAssertNil(facts[damaged], "Unchecked organization facts cannot transiently expose a trashed source")
+    var repaired = SearchRecord(id: damaged.id); repaired.revision = "current"
+    repaired.facts = [PhotoOrganizationFacts.screenshotPrefix + "true"]
+    try index.put(repaired)
+    projection.retry()
+    for _ in 0..<400 {
+      facts = projection.facts(for: [first, absent, damaged], identity: identity, search: search)
+      if facts.count == 3 { break }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    XCTAssertEqual(facts.count, 3)
+    XCTAssertTrue(PhotoOrganizationFacts.screenshot(facts[damaged]))
+    XCTAssertNil(projection.failure)
+    XCTAssertFalse(projection.admissionIncomplete)
+  }
+
+  @MainActor func testDeviceOrganizationCachedFactsAreWithdrawnForPermissionAndAccountBindings() async throws {
+    for changed in ["permission", "account", "vault", "catalog", "origin"] {
+      let index = try SearchIndex(), search = LocalSearchStore(index: index)
+      search.setAutomaticAnalysisActive(false)
+      defer { search.pause() }
+      var record = SearchRecord(id: "private-fixture"); record.revision = "current"
+      record.facts = [PhotoOrganizationFacts.trashPrefix + "true"]
+      try index.replacePermitted([record])
+      let source = RecentPhotoSource(id: record.id, revision: "current")
+      let catalog = NSObject(), replacementCatalog = NSObject()
+      var identity = PhotoBrowseProjectionID(storePage: UUID(), account: "first", vault: UUID(),
+        catalogIdentity: ObjectIdentifier(catalog), origin: "https://first.photos.test", filter: .all,
+        dates: .all, moments: false, scope: "Photos", calendar: calendar, day: date(10, 16)).metadata
+      let projection = PhotoBrowseOrganizationProjection()
+      for _ in 0..<400 {
+        let facts = projection.facts(for: [source], identity: identity, search: search)
+        if facts[source] != nil { break }
+        try await Task.sleep(for: .milliseconds(10))
+      }
+      XCTAssertTrue(PhotoOrganizationFacts.trashed(projection.cachedFacts(for: source, search: search)))
+      switch changed {
+      case "account": identity = PhotoBrowseProjectionID(storePage: identity.storePage, account: "second",
+        vault: identity.vault, catalogIdentity: identity.catalogIdentity, origin: identity.origin,
+        filter: .all, dates: .all, moments: false, scope: "Photos", calendar: calendar, day: date(10, 16)).metadata
+      case "vault": identity = PhotoBrowseProjectionID(storePage: identity.storePage, account: identity.account,
+        vault: UUID(), catalogIdentity: identity.catalogIdentity, origin: identity.origin,
+        filter: .all, dates: .all, moments: false, scope: "Photos", calendar: calendar, day: date(10, 16)).metadata
+      case "catalog": identity = PhotoBrowseProjectionID(storePage: identity.storePage, account: identity.account,
+        vault: identity.vault, catalogIdentity: ObjectIdentifier(replacementCatalog), origin: identity.origin,
+        filter: .all, dates: .all, moments: false, scope: "Photos", calendar: calendar, day: date(10, 16)).metadata
+      case "origin": identity = PhotoBrowseProjectionID(storePage: identity.storePage, account: identity.account,
+        vault: identity.vault, catalogIdentity: identity.catalogIdentity, origin: "https://second.photos.test",
+        filter: .all, dates: .all, moments: false, scope: "Photos", calendar: calendar, day: date(10, 16)).metadata
+      default: break
+      }
+      let withdrawn = projection.facts(for: [source], identity: identity, search: search, isCurrent: { false })
+      XCTAssertTrue(withdrawn.isEmpty)
+      XCTAssertNil(projection.cachedFacts(for: source, search: search), "Withdrawn access must clear private resolved facts")
+    }
+  }
+
+  @MainActor func testDeviceOrganizationReadCannotBlockMainActorOrPublishAfterLibraryWithdrawal() async throws {
+    let index = try SearchIndex(), search = LocalSearchStore(index: index)
+    search.setAutomaticAnalysisActive(false)
+    defer { search.pause() }
+    var record = SearchRecord(id: "held"); record.revision = "current"
+    record.facts = [PhotoOrganizationFacts.trashPrefix + "true"]
+    try index.replacePermitted([record])
+    let source = RecentPhotoSource(id: record.id, revision: "current")
+    let gate = BrowseOrganizationDatabaseGate()
+    defer { gate.open() }
+    let holder = Task.detached(priority: .userInitiated) {
+      try await index.database.write { _ in gate.hold() }
+    }
+    for _ in 0..<400 where !gate.entered { try await Task.sleep(for: .milliseconds(10)) }
+    XCTAssertTrue(gate.entered)
+    // A fallback release prevents a regressed synchronous UI read from hanging
+    // the suite. Correct code returns while the real database queue is held.
+    DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2) { gate.open() }
+    let projection = PhotoBrowseOrganizationProjection()
+    let identity = PhotoBrowseProjectionID(storePage: UUID(), filter: .all, dates: .all,
+      moments: false, scope: "Photos", calendar: calendar, day: date(10, 16)).metadata
+    let initial = projection.facts(for: [source], identity: identity, search: search)
+    XCTAssertTrue(initial.isEmpty)
+    XCTAssertFalse(gate.opened, "Gallery reads must return before a busy search database is released")
+    let context = try XCTUnwrap(search.browseOrganizationContext)
+    let reading = Task { try await search.browseOrganizationFacts([source], context: context) }
+    await Task.yield()
+    search.beginPermittedSnapshotRefresh()
+    gate.open()
+    try await holder.value
+    do { _ = try await reading.value; XCTFail("Withdrawn library metadata cannot publish a late organization snapshot") }
+    catch { XCTAssertTrue(error is CancellationError) }
+    let withdrawn = projection.facts(for: [source], identity: identity, search: search)
+    XCTAssertTrue(withdrawn.isEmpty)
+    XCTAssertNil(projection.cachedFacts(for: source, search: search))
+    XCTAssertNil(projection.failure, "A withdrawn read must not publish a misleading retry error")
+  }
+
   func testViewportChangesForNewNonemptySearchChoicesAndPreservesEquivalentChoices() {
     let first = "aaaaaaaa-1111-4111-8111-111111111111"
     let second = "bbbbbbbb-2222-4222-8222-222222222222"
@@ -572,5 +857,34 @@ final class PhotoBrowsingTests: XCTestCase {
     XCTAssertEqual(current.first?.id, initial.first?.id)
     XCTAssertEqual(current.first?.sources, [edited.source])
     XCTAssertTrue(PhotoBrowsing.groups([], calendar: calendar).isEmpty)
+  }
+}
+
+private final class BrowseOrganizationReadCounter: @unchecked Sendable {
+  private let lock = NSLock()
+  private var reads = 0
+  var count: Int { lock.lock(); defer { lock.unlock() }; return reads }
+  func reset() { lock.lock(); reads = 0; lock.unlock() }
+  func record(_ sql: String) {
+    let normalized = sql.lowercased()
+    guard normalized.contains("select"), normalized.contains("from searchrecords") else { return }
+    lock.lock(); reads += 1; lock.unlock()
+  }
+}
+
+private final class BrowseOrganizationDatabaseGate: @unchecked Sendable {
+  private let lock = NSLock()
+  private let release = DispatchSemaphore(value: 0)
+  private var didEnter = false
+  private var didOpen = false
+  var entered: Bool { lock.lock(); defer { lock.unlock() }; return didEnter }
+  var opened: Bool { lock.lock(); defer { lock.unlock() }; return didOpen }
+  func hold() {
+    lock.lock(); didEnter = true; let opened = didOpen; lock.unlock()
+    if !opened { release.wait() }
+  }
+  func open() {
+    lock.lock(); let first = !didOpen; didOpen = true; lock.unlock()
+    if first { release.signal() }
   }
 }

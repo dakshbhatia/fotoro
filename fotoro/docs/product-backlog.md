@@ -59,6 +59,10 @@ Cloudflare proposals become tasks here only when a consumer need admits them.
    overlays off-main, then publish atomically after access/cursor/write-revision
    checks; stale success and error paths are both fenced. Inventory scans still
    need measured frame, CPU and memory budgets before claiming smoothness.
+   Device gallery organization now uses compact background 400-ID reads and
+   retains warm facts on append, with revision-aware admission and explicit retry.
+   Settings exposes whole-library versus automatic-window analysis coverage
+   without requiring a query; status reads do not start inference.
 4. Qualify retrieval before replacing models. Current iOS Vision OCR/classification,
    TinyCLIP CoreML retrieval and local face models already provide AI. Measure
    date/place/person/text/visual queries, correction behavior, cold/warm latency,
@@ -83,6 +87,9 @@ Restore. These use existing encrypted annotations; original bytes, captions and
 shared copies remain intact. Current-client two-device convergence is covered by
 functional tests; physical installed-device acceptance and calibrated cleanup
 quality remain open. The ten decisions are recorded in [product](product.md).
+The combined local browser offline-edit/reopen/remote-Trash/Restore flow now
+passes on independent origins, including byte-identical original download.
+Cold offline shell loading and physical browser acceptance remain unqualified.
 
 Use existing account/owner IDs, photo IDs, original digests and source revisions
 for joins. Native records, vectors, terms, postings, feedback and People tables

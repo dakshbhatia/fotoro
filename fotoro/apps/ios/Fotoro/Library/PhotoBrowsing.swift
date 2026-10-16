@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 enum PhotoBrowseDateScope: String, CaseIterable, Identifiable, Hashable {
   case recent, all
@@ -64,6 +65,8 @@ struct PhotoBrowseProjectionID: Equatable {
   var picks: UInt64 = 0
   var catalog: UInt64 = 0
   var sources: UInt64 = 0
+  var organization: UInt64 = 0
+  var organizationRead: SearchOrganizationReadContext? = nil
   var account: String? = nil
   var vault: UUID? = nil
   var catalogIdentity: ObjectIdentifier? = nil
@@ -83,8 +86,14 @@ struct PhotoBrowseProjectionID: Equatable {
     return value
   }
 
+  @MainActor func observingOrganization(_ search: LocalSearchStore) -> Self {
+    var value = self
+    value.organizationRead = search.browseOrganizationContext
+    return value
+  }
+
   var metadata: PhotoBrowseMetadataID {
-    PhotoBrowseMetadataID(storePage: storePage, picks: picks, catalog: catalog,
+    PhotoBrowseMetadataID(storePage: storePage, picks: picks, catalog: catalog, organization: organization, organizationRead: organizationRead,
       account: account, vault: vault, catalogIdentity: catalogIdentity, origin: origin, scope: scope)
   }
 }
@@ -97,6 +106,8 @@ struct PhotoBrowseMetadataID: Equatable {
   let storePage: UUID
   let picks: UInt64
   let catalog: UInt64
+  var organization: UInt64 = 0
+  var organizationRead: SearchOrganizationReadContext? = nil
   let account: String?
   let vault: UUID?
   let catalogIdentity: ObjectIdentifier?
@@ -132,6 +143,88 @@ struct PhotoBrowseMetadataID: Equatable {
     let value = makeValue()
     cached = (identity, value)
     return value
+  }
+}
+
+// One compact snapshot for admitted device sources. Appending a page retains
+// warm facts; changed access/index/organization bindings replace the snapshot.
+@MainActor @Observable final class PhotoBrowseOrganizationProjection {
+  private struct Context: Equatable {
+    let search: ObjectIdentifier
+    let read: SearchOrganizationReadContext
+    let account: String?
+    let vault: UUID?
+    let catalog: ObjectIdentifier?
+    let origin: String?
+    let scope: String
+  }
+  private(set) var generation: UInt64 = 0
+  private(set) var failure: String?
+  @ObservationIgnored private var context: Context?
+  @ObservationIgnored private var values: [RecentPhotoSource: [String]] = [:]
+  @ObservationIgnored private var resolved: Set<RecentPhotoSource> = []
+  @ObservationIgnored private var requested: Set<RecentPhotoSource> = []
+  @ObservationIgnored private var pending: Set<RecentPhotoSource> = []
+  @ObservationIgnored private var task: Task<Void, Never>?
+  @ObservationIgnored private var taskID = UUID()
+  static func sameBinding(_ first: PhotoBrowseMetadataID, _ second: PhotoBrowseMetadataID) -> Bool {
+    first.account == second.account && first.vault == second.vault
+      && first.catalogIdentity == second.catalogIdentity && first.origin == second.origin && first.scope == second.scope
+  }
+  private func withdraw() {
+    taskID = UUID(); task?.cancel(); task = nil
+    context = nil; values = [:]; resolved = []; requested = []; pending = []; failure = nil
+  }
+  var admissionIncomplete: Bool { failure != nil || !requested.isSubset(of: resolved) }
+  func retry() {
+    failure = nil
+    resolved.formIntersection(Set(values.keys))
+    generation &+= 1
+  }
+  func cachedFacts(for source: RecentPhotoSource, search: LocalSearchStore) -> [String]? {
+    guard let context, context.search == ObjectIdentifier(search), context.read == search.browseOrganizationContext else { return nil }
+    return values[source]
+  }
+  func facts(for sources: [RecentPhotoSource], identity: PhotoBrowseMetadataID,
+    search: LocalSearchStore, isCurrent: @escaping @MainActor () -> Bool = { true }) -> [RecentPhotoSource: [String]] {
+    let next = search.browseOrganizationContext.map { read in
+      Context(search: ObjectIdentifier(search), read: read, account: identity.account, vault: identity.vault,
+        catalog: identity.catalogIdentity, origin: identity.origin, scope: identity.scope)
+    }
+    if context != next {
+      withdraw(); context = next
+    }
+    requested = Set(sources)
+    guard let context = next, isCurrent() else { withdraw(); requested = Set(sources); return [:] }
+    values = values.filter { requested.contains($0.key) }
+    resolved.formIntersection(requested)
+    if !pending.isSubset(of: requested) { taskID = UUID(); task?.cancel(); task = nil; pending = [] }
+    let missing = requested.subtracting(resolved)
+    if task == nil, failure == nil, !missing.isEmpty {
+      let id = UUID(); taskID = id; pending = missing
+      task = Task { @MainActor [weak self, weak search] in
+        guard let self, let search else { return }
+        defer { if taskID == id { task = nil; pending = [] } }
+        do {
+          let checked = try await search.browseOrganizationFacts(Array(missing), context: context.read)
+          try Task.checkCancellation()
+          guard taskID == id, self.context == context, search.browseOrganizationContext == context.read else { return }
+          guard isCurrent() else { withdraw(); generation &+= 1; return }
+          values.merge(checked) { _, current in current }
+          resolved.formUnion(missing)
+          if checked.count != missing.count { failure = "Some photo information couldn't load. Try again." }
+          generation &+= 1
+        } catch is CancellationError {
+        } catch {
+          guard !Task.isCancelled, taskID == id, self.context == context,
+            search.browseOrganizationContext == context.read else { return }
+          guard isCurrent() else { withdraw(); generation &+= 1; return }
+          failure = "Some photo information couldn't load. Try again."
+          generation &+= 1
+        }
+      }
+    }
+    return values
   }
 }
 

@@ -229,8 +229,11 @@ enum SearchMetadataIntake {
     analysisWindowPreferences?.set(window.rawValue, forKey: "fotoro.search.analysisWindow")
     scheduleAutomaticAnalysis()
   }
-  #if !FOTORO_LOCAL_PREVIEW
-  private var diagnosticAnalysisActivity: NativeAnalysisActivity {
+  #if DEBUG
+  @ObservationIgnored var analysisStatusCanRead: (() -> Bool)?
+  @ObservationIgnored var analysisStatusRead: (@MainActor (SearchIndex, Date, PhotoAnalysisWindow) async throws -> PhotoAnalysisCoverageSnapshot)?
+  #endif
+  var analysisActivity: PhotoAnalysisActivity {
     if !ready || index == nil { return .notReady }
     if indexing { return .running }
     if !automaticAnalysisActive { return .inactive }
@@ -239,11 +242,36 @@ enum SearchMetadataIntake {
     if automaticRetryTask != nil { return .retryScheduled }
     return .idle
   }
+  private var analysisStatusPermitted: Bool {
+    #if DEBUG
+      if let analysisStatusCanRead { return analysisStatusCanRead() }
+    #endif
+    return RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite))
+  }
+  func analysisStatusSnapshot() async throws -> PhotoAnalysisStatusSnapshot {
+    guard ready, let index else { throw FotoroError("Photo library is preparing. Refresh when it is ready.") }
+    guard analysisStatusPermitted else { throw FotoroError("Allow Photos access to see analysis status.") }
+    let token = work.generation, library = libraryGeneration, window = automaticAnalysisWindow, now = analysisNow()
+    let coverage: PhotoAnalysisCoverageSnapshot
+    #if DEBUG
+      if let analysisStatusRead { coverage = try await analysisStatusRead(index, now, window) }
+      else { coverage = try await SearchMetadataIntake.run { try index.analysisCoverageSnapshot(now: now, window: window) } }
+    #else
+      coverage = try await SearchMetadataIntake.run { try index.analysisCoverageSnapshot(now: now, window: window) }
+    #endif
+    try Task.checkCancellation()
+    guard ready, self.index === index, work.generation == token, libraryGeneration == library,
+      automaticAnalysisWindow == window, analysisStatusPermitted else { throw CancellationError() }
+    return PhotoAnalysisStatusSnapshot(coverage: coverage, activity: analysisActivity)
+  }
+  #if !FOTORO_LOCAL_PREVIEW
+  private var diagnosticAnalysisActivity: NativeAnalysisActivity {
+    NativeAnalysisActivity(rawValue: analysisActivity.rawValue) ?? .notReady
+  }
   func diagnosticIndexSnapshot() async -> [NativeDiagnosticEvent] {
     let trace = NativeDiagnosticTrace(.search), token = work.generation
     let snapshotGeneration = libraryGeneration, now = analysisNow()
     let window = automaticAnalysisWindow
-    let windowScope = window.scope(now: now)
     func unavailable(_ reason: NativeDiagnosticReason) -> [NativeDiagnosticEvent] {
       [NativeDiagnosticEvent(phase: .search, outcome: .changed,
         analysisActivity: diagnosticAnalysisActivity, analysisWindow: window, trace: trace, step: .snapshot, reason: reason)]
@@ -253,25 +281,26 @@ enum SearchMetadataIntake {
       return unavailable(.permissionRequired)
     }
     do {
-      let coverage: [SearchStageCoverage]
+      let snapshot: PhotoAnalysisCoverageSnapshot
       #if DEBUG
-      if let diagnosticCoverageRead { coverage = try await diagnosticCoverageRead(index, now) }
-      else { coverage = try await SearchMetadataIntake.run { try index.analysisCoverage(now: now) } }
+      if let diagnosticCoverageRead {
+        let coverage = try await diagnosticCoverageRead(index, now)
+        snapshot = PhotoAnalysisCoverageSnapshot(capturedAt: now, window: window, library: coverage,
+          automatic: try await SearchMetadataIntake.run { try index.analysisCoverage(now: now, scope: window.scope(now: now)) })
+      } else { snapshot = try await SearchMetadataIntake.run { try index.analysisCoverageSnapshot(now: now, window: window) } }
       #else
-      coverage = try await SearchMetadataIntake.run { try index.analysisCoverage(now: now) }
+      snapshot = try await SearchMetadataIntake.run { try index.analysisCoverageSnapshot(now: now, window: window) }
       #endif
-      let windowCoverage = window == .tenDays
-        ? try await SearchMetadataIntake.run { try index.analysisCoverage(now: now, scope: windowScope) } : []
       guard !Task.isCancelled, token == work.generation, snapshotGeneration == libraryGeneration,
-        self.index === index, ready else { return unavailable(.contextChanged) }
+        self.index === index, ready, automaticAnalysisWindow == window else { return unavailable(.contextChanged) }
       guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)) else {
         return unavailable(.permissionRequired)
       }
-      let catalogEvents = coverage.map { NativeDiagnosticEvent(phase: .search, outcome: .changed,
+      let catalogEvents = snapshot.library.map { NativeDiagnosticEvent(phase: .search, outcome: .changed,
         coverage: $0, analysisActivity: diagnosticAnalysisActivity, analysisWindow: window,
         coverageScope: .catalog, analysisRunStartedAt: analysisRunStartedAt, coverageTime: now,
         trace: trace, step: .snapshot) }
-      let windowEvents = windowCoverage.map { NativeDiagnosticEvent(phase: .search, outcome: .changed,
+      let windowEvents = snapshot.automatic.map { NativeDiagnosticEvent(phase: .search, outcome: .changed,
         coverage: $0, analysisActivity: diagnosticAnalysisActivity, analysisWindow: window,
         coverageScope: .automaticWindow, analysisRunStartedAt: analysisRunStartedAt, coverageTime: now,
         trace: trace, step: .snapshot) }
@@ -1208,6 +1237,26 @@ enum SearchMetadataIntake {
     catch { self.error = error.localizedDescription }
   }
   func record(_ photoID: String) throws -> SearchRecord? { try index?.record(photoID) }
+  var browseOrganizationContext: SearchOrganizationReadContext? {
+    guard ready, let index else { return nil }
+    return SearchOrganizationReadContext(index: ObjectIdentifier(index), work: work.generation,
+      library: libraryGeneration, organization: organizationGeneration)
+  }
+  func browseOrganizationFacts(_ sources: [RecentPhotoSource], context: SearchOrganizationReadContext) async throws -> [RecentPhotoSource: [String]] {
+    try Task.checkCancellation()
+    guard browseOrganizationContext == context, let index else { throw CancellationError() }
+    let worker = Task.detached(priority: .userInitiated) { try index.organizationFacts(sources) }
+    let values: [RecentPhotoSource: [String]]
+    do { values = try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() } }
+    catch {
+      try Task.checkCancellation()
+      guard browseOrganizationContext == context else { throw CancellationError() }
+      throw error
+    }
+    try Task.checkCancellation()
+    guard browseOrganizationContext == context else { throw CancellationError() }
+    return values
+  }
   #if !FOTORO_LOCAL_PREVIEW
   func applyAnnotations(_ value: PhotoAnnotationsV1, source: BackupSource, accountId: String) throws {
     guard let revision = source.sourceRevision else { return }

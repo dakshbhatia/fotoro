@@ -515,6 +515,7 @@ struct RecentPhotosView: View {
   @State private var suggestionProjection = PhotoBrowseValueProjection<PhotoBrowseProjectionID, [PhotoBrowseSearchSuggestion]>()
   @State private var homeProjection = PhotoBrowseProjection()
   @State private var homeItemsProjection = PhotoBrowseValueProjection<PhotoBrowseMetadataID, [PhotoBrowseItem]>()
+  @State private var organizationProjection = PhotoBrowseOrganizationProjection()
   @State private var deviceLookup = RecentPhotoLookup()
   #if !FOTORO_LOCAL_PREVIEW
   @State private var timelineProjection = PhotoBrowseProjection()
@@ -578,9 +579,11 @@ struct RecentPhotosView: View {
     #if !FOTORO_LOCAL_PREVIEW
       PhotoBrowseProjectionID(storePage: store.browsePage, picks: browsePicksGeneration,
         catalog: services?.consumerCatalogGeneration ?? 0, sources: services?.consumerBackupSourcesGeneration ?? 0,
+        organization: organizationProjection.generation,
         account: services?.photoAccountAccess?.account, vault: services?.vault.generation,
         catalogIdentity: services.map { ObjectIdentifier($0.store) }, origin: services?.api.baseURL.absoluteString,
         filter: browseFilter, dates: browseDates, moments: groupMoments, scope: scope.rawValue, day: Calendar.current.startOfDay(for: Date()))
+        .observingOrganization(search)
     #else
       PhotoBrowseProjectionID(storePage: store.browsePage, picks: browsePicksGeneration,
         filter: browseFilter, dates: browseDates, moments: groupMoments, scope: scope.rawValue, day: Calendar.current.startOfDay(for: Date()))
@@ -592,15 +595,29 @@ struct RecentPhotosView: View {
   private var homeGroups: [PhotoBrowseGroup] {
     homeProjection.groups(for: browseProjectionID) {
       let items = homeItemsProjection.value(for: browseProjectionID.metadata) {
-        homePhotoLookup.values.filter { photo in
+        let photos = Array(homePhotoLookup.values)
+        #if !FOTORO_LOCAL_PREVIEW
+        let identity = browseProjectionID.metadata
+        let organization = organizationProjection.facts(for: photos.map(RecentPhotoSource.init),
+          identity: identity, search: search, isCurrent: {
+            PhotoBrowseOrganizationProjection.sameBinding(identity, browseProjectionID.metadata)
+              && RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite))
+          })
+        #endif
+        return photos.filter { photo in
           #if !FOTORO_LOCAL_PREVIEW
-          !PhotoOrganizationFacts.trashed((try? search.record(photo.id))?.facts)
+          organization[RecentPhotoSource(photo)] != nil && !PhotoOrganizationFacts.trashed(organization[RecentPhotoSource(photo)])
           #else
           true
           #endif
         }.map { photo in
-          PhotoBrowseItem(source: RecentPhotoSource(photo), facts: RecentPhotoFacts(
-            capturedAt: photo.capturedAt, favorite: photo.isFavorite, screenshot: store.isScreenshot(photo),
+          #if !FOTORO_LOCAL_PREVIEW
+          let screenshot = PhotoOrganizationFacts.screenshot(organization[RecentPhotoSource(photo)], detected: photo.isScreenshot)
+          #else
+          let screenshot = store.isScreenshot(photo)
+          #endif
+          return PhotoBrowseItem(source: RecentPhotoSource(photo), facts: RecentPhotoFacts(
+            capturedAt: photo.capturedAt, favorite: photo.isFavorite, screenshot: screenshot,
             livePhoto: photo.isLivePhoto, location: photo.location))
         }
       }
@@ -744,9 +761,17 @@ struct RecentPhotosView: View {
   private var timelineGroups: [PhotoBrowseGroup] {
     timelineProjection.groups(for: browseProjectionID) {
       let items = timelineItemsProjection.value(for: browseProjectionID.metadata) {
-        let device = homePhotoLookup.values.filter { !PhotoOrganizationFacts.trashed((try? search.record($0.id))?.facts) }.map { photo in
+        let photos = Array(homePhotoLookup.values)
+        let identity = browseProjectionID.metadata
+        let organization = organizationProjection.facts(for: photos.map(RecentPhotoSource.init),
+          identity: identity, search: search, isCurrent: {
+            PhotoBrowseOrganizationProjection.sameBinding(identity, browseProjectionID.metadata)
+              && RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite))
+          })
+        let device = photos.filter { organization[RecentPhotoSource($0)] != nil && !PhotoOrganizationFacts.trashed(organization[RecentPhotoSource($0)]) }.map { photo in
           PhotoBrowseItem(source: RecentPhotoSource(photo), facts: RecentPhotoFacts(
-            capturedAt: photo.capturedAt, favorite: photo.isFavorite, screenshot: store.isScreenshot(photo),
+            capturedAt: photo.capturedAt, favorite: photo.isFavorite,
+            screenshot: PhotoOrganizationFacts.screenshot(organization[RecentPhotoSource(photo)], detected: photo.isScreenshot),
             livePhoto: photo.isLivePhoto, location: photo.location))
         }
         let saved = allOwnedPhotos.filter { !PhotoOrganizationFacts.trashed(services?.annotation($0).facts) }.map { photo in
@@ -847,6 +872,17 @@ struct RecentPhotosView: View {
       accountHome
 #endif
     }
+    #if !FOTORO_LOCAL_PREVIEW
+    .safeAreaInset(edge: .top, spacing: 0) {
+      if !search.hasSearch, scope != .saved, hasBrowseAccess, organizationProjection.failure != nil {
+        HStack {
+          Text("Photo details unavailable").font(.footnote)
+          Spacer()
+          Button("Try again") { organizationProjection.retry() }.font(.footnote.weight(.semibold))
+        }.padding(.horizontal).padding(.vertical, 8).background(.regularMaterial)
+      }
+    }
+    #endif
   }
 #if !FOTORO_LOCAL_PREVIEW
   private var accountHome: some View {
@@ -1224,7 +1260,9 @@ struct RecentPhotosView: View {
           #endif
           if allPhotos { browseContext }
           gallery
-          if allPhotos, browseDates == .recent, browseGalleryIsEmpty, !hasMoreBrowsePhotos {
+          if organizationProjection.admissionIncomplete {
+            if organizationProjection.failure == nil { ProgressView("Loading photo details…").font(.footnote).padding() }
+          } else if allPhotos, browseDates == .recent, browseGalleryIsEmpty, !hasMoreBrowsePhotos {
             ContentUnavailableView {
               Label(browseFilter == .all ? "No photos in the last 30 days" : "No matching photos in the last 30 days", systemImage: "photo")
             } description: {
@@ -1506,9 +1544,13 @@ struct RecentPhotosView: View {
     return candidate
   }
   private func bindPhotoOrganization() {
-    store.bindOrganizationSource { [weak search] source in
-      guard let search, search.assets[source.id]?.sourceRevision == source.revision,
-        let record = try? search.record(source.id), record.revision == source.revision else { return [] }
+    let projection = organizationProjection
+    store.bindOrganizationSource { [weak search, weak projection] source in
+      guard let search, search.assets[source.id]?.sourceRevision == source.revision else { return [] }
+      if let facts = projection?.cachedFacts(for: source, search: search) { return facts }
+      // Picks can assess its bounded candidate window before those sources are
+      // admitted by gallery paging. Its existing per-source cache owns misses.
+      guard let record = try? search.record(source.id), record.revision == source.revision else { return [] }
       return record.facts
     }
     search.onOrganizationSnapshotChanged = { [weak store] in store?.organizationDidChange() }
@@ -2030,6 +2072,13 @@ struct RecentPhotosView: View {
             if let error = services.error { Text(error).foregroundStyle(.red) }
           }
 #endif
+        }
+        Section("Photo search") {
+          NavigationLink {
+            PhotoAnalysisStatusView(search: search)
+          } label: {
+            Label("Photo analysis", systemImage: "viewfinder")
+          }.accessibilityIdentifier("settings.analysis")
         }
         Section("Photos access") {
           Button("Refresh photos") { restorePhotos(); settings = false }
