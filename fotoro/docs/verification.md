@@ -1,9 +1,64 @@
-# Verification — October 15, 2026
+# Verification — October 16, 2026
 
 This is the current evidence record. [The backlog](product-backlog.md) owns next
 work; [product](product.md) owns the intended experience. Earlier measurements and
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
+
+## October 16 bounded paging and search readiness
+
+PR 112 merged as `15d0fbe84526c87aa769d002b8ec687f6bac4194` with the
+qualified tree unchanged and all 23 hosted contexts complete (seven successes,
+16 intentional skips). Build 84 passed archive and distribution IPA audits,
+Apple processing, the approved encryption declaration and assignment to the
+existing internal group. Read-only connected-phone app metadata confirms build
+84 installed. Production remains on Worker
+`a2ace921-f24b-4777-ba8a-cb25f89fb271`; this patch changes no deployed browser
+or API source.
+
+Four controlled regressions reproduced Saved paging failures: unrelated corrupt
+annotations broke healthy continuations, failed pages appended photos before
+annotation preparation succeeded, concurrent readers could duplicate a page,
+and suspended work could escape its account/cursor/origin scope. A continuation
+now reads at most 1,000 new photo rows and their overlays in batches of 200 under
+one database snapshot. Decoding and crypto run off the UI actor. Photos and
+annotations publish together only after current access, catalog, cursor and a
+transactional write revision are checked. Existing warm rows and edits remain
+intact. Success and failure both obey cancellation and scope withdrawal. One
+bounded retry covers an incoming write before its UI refresh; repeated churn
+offers an explicit retry. Places owns and cancels its metadata page task.
+
+Native diagnostics now distinguish completed search rows from image availability
+in a scroll-visible result rectangle. One random trace per admitted search
+records elapsed time including debounce, aggregate counts and fixed outcomes;
+it does not retain queries, OCR, photo IDs, paths or coordinates. Late/offscreen
+callbacks cannot complete another search. Empty results, source unavailability,
+backgrounding and withdrawal have separate outcomes. This measures UI image
+availability, not display presentation, physical tap routing or frame pacing.
+The hosted compiler also exposed a type-checking limit in the long home-event
+modifier chain. Search observation now has a small explicit modifier and the
+query, permission and catalog handlers are named actions; event behavior and
+view identity stay intact.
+
+A private, read-only copy of the installed phone index contains 21,486 records.
+Its current ten-calendar-day window has 201 records with OCR, visual stages and
+vectors complete; whole-index OCR coverage is 2,484 and visual coverage 1,800.
+An owner-reported query has 117 exact text matches through the native production
+consumer engine. No reviewed named People groups are present, so those matches
+cannot establish named-person retrieval. A native opt-in audit validates exact
+photo sets for that query and 20 additional literal OCR terms; the browser
+engine validates the same 21 sets from adapted copies of the same local evidence.
+Private terms, identifiers and source content remain outside this repository.
+This qualifies retrieval of existing evidence, not OCR recognition, semantic
+quality, cloud catalog coverage or the installed UI. Automatic heavy analysis
+remains Latest 10 days; older pending evidence was not silently expanded.
+
+Final local qualification passes: 797 native tests and 208 isolated-preview
+tests, each with zero failures and three existing platform/opt-in skips; 821
+browser tests, 129 API tests, 23 diagnostics-reader tests and 20 host sync retry
+tests also pass. Hosted qualification and build 85 release remain separate
+pending gates at this source checkpoint. Physical frame pacing, gesture accuracy,
+accessibility and the complete installed cross-device journey remain open.
 
 ## October 15 single-photo edit follow-through
 

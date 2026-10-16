@@ -16,6 +16,11 @@ struct BackupSourceInventory: Sendable {
   let sources: [BackupSource]
   fileprivate let revision: String
 }
+struct OwnedPhotoPageSnapshot: Sendable {
+  let photos: [LocalPhoto]
+  var annotationStates: [String: Data]
+  fileprivate let revision: String
+}
 
 final class LibraryStore: @unchecked Sendable {
   static let ownedOriginalQuery = """
@@ -51,6 +56,25 @@ final class LibraryStore: @unchecked Sendable {
         BEGIN UPDATE state SET value=CAST(value AS INTEGER)+1 WHERE key='backupSourceRevision'; END;
         CREATE TRIGGER IF NOT EXISTS backup_inventory_delete AFTER DELETE ON backupSources
         BEGIN UPDATE state SET value=CAST(value AS INTEGER)+1 WHERE key='backupSourceRevision'; END;
+        """)
+      // A prepared Saved page crosses an await. Every photo/overlay write path,
+      // including direct SQL, must invalidate it atomically with that mutation.
+      try db.execute(sql: """
+        INSERT OR IGNORE INTO state(key,value) VALUES('savedPageRevision','0');
+        CREATE TRIGGER IF NOT EXISTS saved_page_photo_insert AFTER INSERT ON photos
+        BEGIN UPDATE state SET value=CAST(value AS INTEGER)+1 WHERE key='savedPageRevision'; END;
+        CREATE TRIGGER IF NOT EXISTS saved_page_photo_update AFTER UPDATE ON photos
+        WHEN OLD.value != NEW.value OR OLD.id != NEW.id OR OLD.sourceDate != NEW.sourceDate
+        BEGIN UPDATE state SET value=CAST(value AS INTEGER)+1 WHERE key='savedPageRevision'; END;
+        CREATE TRIGGER IF NOT EXISTS saved_page_photo_delete AFTER DELETE ON photos
+        BEGIN UPDATE state SET value=CAST(value AS INTEGER)+1 WHERE key='savedPageRevision'; END;
+        CREATE TRIGGER IF NOT EXISTS saved_page_annotation_insert AFTER INSERT ON annotations
+        BEGIN UPDATE state SET value=CAST(value AS INTEGER)+1 WHERE key='savedPageRevision'; END;
+        CREATE TRIGGER IF NOT EXISTS saved_page_annotation_update AFTER UPDATE ON annotations
+        WHEN OLD.value != NEW.value OR OLD.id != NEW.id
+        BEGIN UPDATE state SET value=CAST(value AS INTEGER)+1 WHERE key='savedPageRevision'; END;
+        CREATE TRIGGER IF NOT EXISTS saved_page_annotation_delete AFTER DELETE ON annotations
+        BEGIN UPDATE state SET value=CAST(value AS INTEGER)+1 WHERE key='savedPageRevision'; END;
         """)
       // Existing catalogs are indexed on opening; SQLite maintains the index for every write path.
       try db.execute(sql: """
@@ -268,6 +292,51 @@ final class LibraryStore: @unchecked Sendable {
           """, arguments: [accountId, min(1000, max(1, limit))])
       }
       return try rows.map { rebased(try Wire.decode(LocalPhoto.self, $0["value"] as Data)) }
+    }
+  }
+  // Call off the UI actor. Read only this bounded continuation and its overlays
+  // under one snapshot, then decode outside the serialized database queue.
+  func ownedPhotoPageSnapshot(accountId: String, after cursor: LocalPhoto) throws -> OwnedPhotoPageSnapshot {
+    try Task.checkCancellation()
+    let raw = try database.read { db -> (String, Data, [(String, String, Data)], [String: Data]) in
+      guard let revision = try String.fetchOne(db, sql: "SELECT value FROM state WHERE key='savedPageRevision'"),
+        let current = try Row.fetchOne(db, sql: "SELECT sourceDate,value FROM photos WHERE id=?", arguments: [cursor.id]),
+        (current["sourceDate"] as String) == cursor.metadata.sourceDate else { throw CancellationError() }
+      let cursorBytes: Data = current["value"]
+      let rows = try Row.fetchAll(db, sql: """
+        SELECT id,sourceDate,value FROM photos
+        WHERE json_extract(CAST(value AS TEXT),'$.manifest.ownerAccountId')=?
+          AND (sourceDate < ? OR (sourceDate = ? AND id > ?))
+        ORDER BY sourceDate DESC,id LIMIT 1000
+        """, arguments: [accountId, cursor.metadata.sourceDate, cursor.metadata.sourceDate, cursor.id])
+      let records = rows.map { row -> (String, String, Data) in (row["id"], row["sourceDate"], row["value"]) }
+      var annotations: [String: Data] = [:]
+      for offset in stride(from: 0, to: records.count, by: 200) {
+        try Task.checkCancellation()
+        let ids = records[offset..<min(offset + 200, records.count)].map { $0.0 }
+        let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+        for row in try Row.fetchAll(db, sql: "SELECT id,value FROM annotations WHERE id IN (\(placeholders))", arguments: StatementArguments(ids)) {
+          annotations[row["id"] as String] = row["value"] as Data
+        }
+      }
+      return (revision, cursorBytes, records, annotations)
+    }
+    try Task.checkCancellation()
+    let current = try Wire.decode(LocalPhoto.self, raw.1)
+    guard current.id == cursor.id, current.manifest == cursor.manifest,
+      current.metadata == cursor.metadata, current.manifest.ownerAccountId == accountId else { throw CancellationError() }
+    let photos = try raw.2.map { id, date, bytes -> LocalPhoto in
+      try Task.checkCancellation()
+      let photo = try Wire.decode(LocalPhoto.self, bytes)
+      guard photo.id == id, photo.manifest.photoId == id, photo.manifest.ownerAccountId == accountId,
+        photo.metadata.sourceDate == date else { throw FotoroError("Saved page source does not match its catalog row") }
+      return rebased(photo)
+    }
+    return OwnedPhotoPageSnapshot(photos: photos, annotationStates: raw.3, revision: raw.0)
+  }
+  func ownedPhotoPageIsCurrent(_ snapshot: OwnedPhotoPageSnapshot) throws -> Bool {
+    try database.read { db in
+      try String.fetchOne(db, sql: "SELECT value FROM state WHERE key='savedPageRevision'") == snapshot.revision
     }
   }
   // Read the current first page plus the already admitted range in one snapshot.

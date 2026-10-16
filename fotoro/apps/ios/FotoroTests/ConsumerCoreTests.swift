@@ -5,6 +5,279 @@ import Photos
 @testable import Fotoro
 
 final class ConsumerCoreTests: XCTestCase {
+  @MainActor func testSavedPageHydratesOnlyNewRowsAndPreservesWarmEditsDespiteUnrelatedCorruption() async throws {
+    try await withSavedLibrary { services, _ in
+      let values = try self.paginationPhotos(services, count: 1005)
+      let catalog = services.store
+      let account = try XCTUnwrap(services.session.accountId)
+      let bundle = try services.vault.requireBundle(), card = try services.session.requireCard(account)
+      for photo in values.suffix(5) {
+        var annotation = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+        annotation.labels = ["New page fixture"]
+        try services.annotations.ledger.edit(annotation, photo: photo, bundle: bundle, card: card)
+      }
+      try services.reload()
+      try services.setLabels(["Keep my reviewed label"], photo: values[0])
+      await services.waitForAnnotationSummaryRefresh()
+      let brokenID = values[1].id
+      try await catalog.database.write { db in
+        try db.execute(sql: "INSERT OR REPLACE INTO annotations(id,value) VALUES(?,?)",
+          arguments: [brokenID, Data("not-json".utf8)])
+      }
+      let reads = SavedEditReadCounter()
+      try await catalog.database.write { db in
+        db.trace { event in if case .statement(let statement) = event { reads.record(statement.sql) } }
+      }
+      let before = services.consumerCatalogGeneration
+      do {
+        let added = try await services.loadMore()
+        XCTAssertTrue(added)
+      } catch { XCTFail("A valid new page must not reopen a damaged old overlay") }
+      let operationReads = reads.snapshot
+      try await catalog.database.write { db in db.trace(options: []) }
+      XCTAssertEqual(services.photos.count, 1005)
+      XCTAssertEqual(Set(services.photos.map(\.id)).count, 1005)
+      XCTAssertLessThanOrEqual(operationReads.annotations, 5,
+        "Continuation cannot decrypt the 1000 previously admitted overlays")
+      XCTAssertEqual(services.consumerCatalogGeneration, before + 1)
+      XCTAssertEqual(services.photoAnnotations[values[0].id]?.labels, ["Keep my reviewed label"])
+      XCTAssertTrue(values.suffix(5).allSatisfy { services.photoAnnotations[$0.id]?.labels == ["New page fixture"] },
+        "The page and all of its overlays must publish together")
+      let corruptIsUntouched = try await catalog.database.read { db in
+        try Data.fetchOne(db, sql: "SELECT value FROM annotations WHERE id=?", arguments: [brokenID]) == Data("not-json".utf8)
+      }
+      XCTAssertTrue(corruptIsUntouched)
+    }
+  }
+
+  @MainActor func testSavedPageDecryptFailureCannotPartiallyAppendAndCanRetry() async throws {
+    try await withSavedLibrary { services, _ in
+      let values = try self.paginationPhotos(services, count: 1002)
+      try services.reload()
+      let catalog = services.store, before = services.consumerCatalogGeneration
+      let brokenID = values[1001].id
+      try await catalog.database.write { db in
+        try db.execute(sql: "INSERT INTO annotations(id,value) VALUES(?,?)",
+          arguments: [brokenID, Data("not-json".utf8)])
+      }
+      do { _ = try await services.loadMore(); XCTFail("A damaged new-page overlay must fail preparation") }
+      catch { XCTAssertFalse(error is CancellationError) }
+      XCTAssertEqual(services.photos.count, 1000, "Preparation failure cannot append even the valid first new row")
+      XCTAssertEqual(services.consumerCatalogGeneration, before)
+      XCTAssertNil(services.photoAnnotations[values[1000].id])
+      try await catalog.database.write { db in
+        try db.execute(sql: "DELETE FROM annotations WHERE id=?", arguments: [brokenID])
+      }
+      let retried = try await services.loadMore()
+      XCTAssertTrue(retried)
+      XCTAssertEqual(services.photos.count, 1002)
+      XCTAssertEqual(Set(services.photos.map(\.id)).count, 1002)
+    }
+  }
+
+  @MainActor func testSavedPageHeldResultRejectsCancellationScopeCursorAndIncomingChanges() async throws {
+    for interruption in ["cancel", "lock", "account", "origin", "catalog", "reload", "ownerEdit", "cursor", "photo", "annotation"] {
+      try await withSavedLibrary { services, _ in
+        let values = try self.paginationPhotos(services, count: 1001)
+        try services.reload()
+        let gate = SavedPagePublishGate()
+        services.savedPageWillPublish = { await gate.visit() }
+        defer { services.savedPageWillPublish = nil; Task { await gate.open() } }
+        let reading = Task { try await services.loadMore() }
+        try await gate.waitForVisits(1)
+        let visits = await gate.count
+        XCTAssertEqual(visits, 1)
+        switch interruption {
+        case "cancel": reading.cancel()
+        case "lock": services.vault.lock()
+        case "account": services.session.accountId = Wire.id()
+        case "origin": services.api.baseURL = URL(string: "https://different-page-scope.test")!
+        case "catalog": try services.activateAccount()
+        case "reload": try services.reload()
+        case "ownerEdit": try services.setLabels(["Edit while page is held"], photo: values[0])
+        case "cursor":
+          let catalog = services.store, id = values[999].id
+          try await catalog.database.write { db in try db.execute(sql: "DELETE FROM photos WHERE id=?", arguments: [id]) }
+        case "photo":
+          var changed = values[1000]; changed.metadata.filename = "changed-on-another-device.jpg"
+          try services.store.put(changed)
+        default:
+          var value = PhotoAnnotationsV1(photoId: values[1000].id, originalSha256: values[1000].metadata.originalSha256)
+          value.labels = ["Arrived while page is held"]
+          try services.annotations.ledger.edit(value, photo: values[1000], bundle: services.vault.requireBundle(),
+            card: services.session.requireCard(try XCTUnwrap(services.session.accountId)))
+        }
+        let admittedIDs = services.photos.map(\.id), admittedAnnotations = services.photoAnnotations
+        let generation = services.consumerCatalogGeneration
+        await gate.open()
+        do { _ = try await reading.value; XCTFail("A stale page must cancel: \(interruption)") }
+        catch { XCTAssertTrue(error is CancellationError, interruption) }
+        XCTAssertTrue(services.photos.map(\.id) == admittedIDs, interruption)
+        XCTAssertTrue(services.photoAnnotations == admittedAnnotations, interruption)
+        XCTAssertEqual(services.consumerCatalogGeneration, generation, interruption)
+      }
+    }
+  }
+
+  @MainActor func testConcurrentSavedPageRequestsPublishOnceAndCancellationDoesNotExhaustActiveReader() async throws {
+    for cancelFirst in [false, true] {
+      try await withSavedLibrary { services, _ in
+        _ = try self.paginationPhotos(services, count: 1001)
+        try services.reload()
+        let expected = SavedLibraryPageID(services), gate = SavedPagePublishGate()
+        services.savedPageWillPublish = { await gate.visit() }
+        defer { services.savedPageWillPublish = nil; Task { await gate.open() } }
+        let first = Task { try await SavedLibraryPageLoading.load(services, expected: expected, isActive: true) }
+        try await gate.waitForVisits(1)
+        let second = Task { try await SavedLibraryPageLoading.load(services, expected: expected, isActive: true) }
+        try await gate.waitForVisits(2)
+        let visits = await gate.count
+        XCTAssertEqual(visits, 2)
+        if cancelFirst { first.cancel() }
+        await gate.open()
+        let outcomes = try await [first.value, second.value]
+        XCTAssertEqual(outcomes.filter { $0 == true }.count, 1)
+        XCTAssertEqual(outcomes.filter { $0 == nil }.count, 1,
+          "A cancelled or superseded reader cannot report end-of-list")
+        XCTAssertFalse(outcomes.contains(false))
+        XCTAssertEqual(services.photos.count, 1001)
+        XCTAssertEqual(Set(services.photos.map(\.id)).count, 1001)
+      }
+    }
+  }
+
+  @MainActor func testSavedPageLoadingRetriesUnobservedWritesOnceAndKeepsExplicitRetryAvailable() async throws {
+    for changeEveryRead in [false, true] {
+      try await withSavedLibrary { services, _ in
+        let values = try self.paginationPhotos(services, count: 1001)
+        try services.reload()
+        let expected = SavedLibraryPageID(services), photo = values[1000]
+        let ledger = services.annotations.ledger, bundle = try services.vault.requireBundle()
+        let card = try services.session.requireCard(try XCTUnwrap(services.session.accountId))
+        let probe = SavedPageMutationProbe()
+        services.savedPageWillPublish = {
+          let count = probe.record()
+          if changeEveryRead || count == 1 {
+            var value = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+            value.labels = ["Incoming page correction \(count)"]
+            do { try ledger.edit(value, photo: photo, bundle: bundle, card: card) }
+            catch { probe.failed() }
+          }
+        }
+        defer { services.savedPageWillPublish = nil }
+        let outcome = try await SavedLibraryPageLoading.load(services, expected: expected, isActive: true)
+        XCTAssertEqual(probe.count, 2, "A same-page race permits exactly one automatic retry")
+        XCTAssertFalse(probe.failure)
+        XCTAssertFalse(probe.onMainThread, "Page preparation and its publication seam run off the UI thread")
+        if changeEveryRead {
+          XCTAssertNil(outcome, "Continuous writes require an explicit retry, never false end-of-list")
+          XCTAssertEqual(services.photos.count, 1000)
+          services.savedPageWillPublish = nil
+          let retry = try await SavedLibraryPageLoading.load(services, expected: expected, isActive: true)
+          XCTAssertEqual(retry, true)
+        } else { XCTAssertEqual(outcome, true) }
+        XCTAssertEqual(services.photos.count, 1001)
+        XCTAssertEqual(services.photoAnnotations[photo.id]?.labels,
+          [changeEveryRead ? "Incoming page correction 2" : "Incoming page correction 1"])
+      }
+    }
+  }
+
+  @MainActor func testCorruptSavedPageFailureCannotEscapeWithdrawnScopeOrCancelledReader() async throws {
+    for interruption in ["cancel", "lock", "account", "origin", "current"] {
+      try await withSavedLibrary { services, _ in
+        let values = try self.paginationPhotos(services, count: 1001)
+        try services.reload()
+        let catalog = services.store, brokenID = values[1000].id
+        try await catalog.database.write { db in
+          try db.execute(sql: "INSERT INTO annotations(id,value) VALUES(?,?)",
+            arguments: [brokenID, Data("not-json".utf8)])
+        }
+        let gate = SavedPagePublishGate(), expected = SavedLibraryPageID(services)
+        services.savedPageWillPublish = { await gate.visit() }
+        defer { services.savedPageWillPublish = nil; Task { await gate.open() } }
+        let reading = Task { try await SavedLibraryPageLoading.load(services, expected: expected, isActive: true) }
+        try await gate.waitForVisits(1)
+        let visits = await gate.count
+        XCTAssertEqual(visits, 1, "Captured malformed bytes must remain held before decoding")
+        switch interruption {
+        case "cancel": reading.cancel()
+        case "lock": services.vault.lock()
+        case "account": services.session.accountId = Wire.id()
+        case "origin": services.api.baseURL = URL(string: "https://withdrawn-page-error.test")!
+        default: break
+        }
+        let count = services.photos.count, generation = services.consumerCatalogGeneration
+        await gate.open()
+        do {
+          let outcome = try await reading.value
+          XCTAssertNotEqual(interruption, "current", "A still-current corrupt page must report its genuine error")
+          XCTAssertNil(outcome, "A stale failure must not report end-of-list or a user-visible error")
+        } catch {
+          XCTAssertEqual(interruption, "current", "A withdrawn failure must be suppressed")
+          XCTAssertTrue(error is DecodingError)
+        }
+        XCTAssertEqual(services.photos.count, count)
+        XCTAssertEqual(services.consumerCatalogGeneration, generation)
+      }
+    }
+  }
+
+  @MainActor func testSavedPageRevisionTracksDirectWritesButNotNoOpsOrRolledBackChanges() async throws {
+    try await withSavedLibrary { services, _ in
+      let values = try self.paginationPhotos(services, count: 1001)
+      let catalog = services.store, account = try XCTUnwrap(services.session.accountId)
+      let cursor = values[999], target = values[1000]
+      let ledger = services.annotations.ledger, bundle = try services.vault.requireBundle()
+      let card = try services.session.requireCard(account)
+      var value = PhotoAnnotationsV1(photoId: target.id, originalSha256: target.metadata.originalSha256)
+      value.labels = ["First correction"]
+      try ledger.edit(value, photo: target, bundle: bundle, card: card)
+      let page = try await Task.detached {
+        try catalog.ownedPhotoPageSnapshot(accountId: account, after: cursor)
+      }.value
+      try await catalog.database.write { db in
+        try db.execute(sql: "UPDATE photos SET value=value,sourceDate=sourceDate WHERE id=?", arguments: [target.id])
+        try db.execute(sql: "UPDATE annotations SET value=value WHERE id=?", arguments: [target.id])
+      }
+      XCTAssertTrue(try catalog.ownedPhotoPageIsCurrent(page), "No-op writes must not continually cancel a visible page")
+      do {
+        try await catalog.database.write { db in
+          try db.execute(sql: "DELETE FROM annotations WHERE id=?", arguments: [target.id])
+          try db.execute(sql: "DELETE FROM photos WHERE id=?", arguments: [target.id])
+          throw SavedPageControlledRollback.rollback
+        }
+        XCTFail("The controlled transaction must roll back")
+      } catch SavedPageControlledRollback.rollback {}
+      XCTAssertTrue(try catalog.ownedPhotoPageIsCurrent(page), "Rollback must restore the freshness token with its rows")
+      value.labels = ["Incoming correction"]
+      try ledger.edit(value, photo: target, bundle: bundle, card: card)
+      XCTAssertFalse(try catalog.ownedPhotoPageIsCurrent(page), "A direct overlay write is fenced before a UI generation changes")
+      let corrected = try await Task.detached {
+        try catalog.ownedPhotoPageSnapshot(accountId: account, after: cursor)
+      }.value
+      var changed = target; changed.metadata.filename = "Updated source.jpg"
+      try catalog.put(changed)
+      XCTAssertFalse(try catalog.ownedPhotoPageIsCurrent(corrected), "Photo metadata changes also invalidate prepared results")
+    }
+  }
+
+  @MainActor private func paginationPhotos(_ services: AppServices, count: Int) throws -> [LocalPhoto] {
+    var template = try samplePhoto(); template.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+    template.metadata.sourceDate = "2026-10-12T12:00:00.000Z"
+    let photos = (0..<count).map { index -> LocalPhoto in
+      var photo = template
+      photo.photoId = String(format: "20000000-0000-4000-8000-%012d", index)
+      photo.manifest.photoId = photo.id
+      photo.manifest.metadataRepresentation.binding.photoId = photo.id
+      photo.metadata.originalSha256 = Data(photo.id.utf8).digest
+      return photo
+    }
+    let catalog = services.store
+    try catalog.database.write { db in for photo in photos { try catalog.put(photo, db: db) } }
+    return photos
+  }
+
   @MainActor func testSinglePhotoEditsDoNotReadUnrelatedOverlaysOrCheckpointInventory() async throws {
     try await withSavedLibrary { services, _ in
       let account = try XCTUnwrap(services.session.accountId)
@@ -810,7 +1083,7 @@ final class ConsumerCoreTests: XCTestCase {
       try services.store.put(newest)
       try services.reload()
       let initialGeneration = services.consumerCatalogGeneration
-      try services.loadMore()
+      try await services.loadMore()
       XCTAssertEqual(services.photos.map(\.id), [newest.id])
       XCTAssertEqual(services.consumerCatalogGeneration, initialGeneration,
         "An empty continuation cannot announce a new catalog and rearm the gallery footer")
@@ -819,12 +1092,12 @@ final class ConsumerCoreTests: XCTestCase {
       older.manifest.ownerAccountId = newest.manifest.ownerAccountId
       older.metadata.sourceDate = "2026-10-07T12:00:00.000Z"
       try services.store.put(older)
-      try services.loadMore()
+      try await services.loadMore()
       XCTAssertEqual(services.photos.map(\.id), [newest.id, older.id])
       XCTAssertEqual(services.consumerCatalogGeneration, initialGeneration + 1,
         "An admitted older photo still invalidates catalog projections once")
       let completeGeneration = services.consumerCatalogGeneration
-      for _ in 0..<3 { try services.loadMore() }
+      for _ in 0..<3 { try await services.loadMore() }
       XCTAssertEqual(services.photos.map(\.id), [newest.id, older.id])
       XCTAssertEqual(services.consumerCatalogGeneration, completeGeneration,
         "Repeated end-of-list callbacks must settle without a generation feedback loop")
@@ -835,22 +1108,23 @@ final class ConsumerCoreTests: XCTestCase {
       var template = try self.samplePhoto()
       template.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
       template.metadata.sourceDate = "2026-10-08T12:00:00.000Z"
-      try services.store.database.write { db in
+      let pageTemplate = template, catalog = services.store
+      try await catalog.database.write { db in
         for index in 0..<1005 {
-          var photo = template
+          var photo = pageTemplate
           photo.photoId = String(format: "00000000-0000-4000-8000-%012d", index)
           photo.manifest.photoId = photo.photoId
-          try services.store.put(photo, db: db)
+          try catalog.put(photo, db: db)
         }
-        var peer = template
+        var peer = pageTemplate
         peer.photoId = Wire.id(); peer.manifest.photoId = peer.photoId
         peer.manifest.ownerAccountId = Wire.id()
         peer.metadata.sourceDate = "2026-10-09T12:00:00.000Z"
-        try services.store.put(peer, db: db)
+        try catalog.put(peer, db: db)
       }
       try services.reload()
       XCTAssertEqual(services.photos.count, 1000)
-      try services.loadMore()
+      try await services.loadMore()
       let loaded = services.photos.map(\.id), generation = services.consumerCatalogGeneration
       XCTAssertEqual(loaded.count, 1005)
       try services.reload()
@@ -858,20 +1132,20 @@ final class ConsumerCoreTests: XCTestCase {
         "Read-only refresh must not discard already admitted older pages")
       XCTAssertEqual(services.consumerCatalogGeneration, generation + 1)
       XCTAssertTrue(services.photos.allSatisfy { $0.manifest.ownerAccountId == services.session.accountId })
-      try services.loadMore()
+      try await services.loadMore()
       XCTAssertEqual(services.photos.map(\.id), loaded, "Retained last-page cursor must remain usable")
 
-      try services.store.database.write { db in
+      try await catalog.database.write { db in
         for _ in 0..<5 {
-          var newer = template
+          var newer = pageTemplate
           newer.photoId = Wire.id(); newer.manifest.photoId = newer.photoId
           newer.metadata.sourceDate = "2026-10-09T12:00:00.000Z"
-          try services.store.put(newer, db: db)
+          try catalog.put(newer, db: db)
         }
-        var unvisited = template
+        var unvisited = pageTemplate
         unvisited.photoId = Wire.id(); unvisited.manifest.photoId = unvisited.photoId
         unvisited.metadata.sourceDate = "2026-10-07T12:00:00.000Z"
-        try services.store.put(unvisited, db: db)
+        try catalog.put(unvisited, db: db)
       }
       try services.reload()
       XCTAssertEqual(services.photos.count, 1010)
@@ -881,11 +1155,11 @@ final class ConsumerCoreTests: XCTestCase {
       services.api.baseURL = URL(string: "https://different-origin.test")!
       try services.reload()
       XCTAssertEqual(services.photos.count, 1000, "A new endpoint cannot inherit another scope's loaded window")
-      try services.loadMore()
+      try await services.loadMore()
       XCTAssertEqual(services.photos.count, 1011)
       try services.activateAccount()
       XCTAssertEqual(services.photos.count, 1000, "A replaced catalog must start with its own bounded window")
-      try services.loadMore()
+      try await services.loadMore()
       XCTAssertEqual(services.photos.count, 1011)
       services.vault.lock()
       XCTAssertTrue(services.photos.isEmpty, "Lock still withdraws every admitted photo")
@@ -1752,6 +2026,47 @@ private final class CatalogScanGate: @unchecked Sendable {
     lock.lock(); visits += 1; let first = visits == 1; lock.unlock()
     if first { _ = release.wait(timeout: .now() + 10) }
   }
+}
+
+private actor SavedPagePublishGate {
+  private var visits = 0
+  private var waiting: [CheckedContinuation<Void, Never>] = []
+  private var opened = false
+  var count: Int { visits }
+  func visit() async {
+    visits += 1
+    guard !opened else { return }
+    await withCheckedContinuation { waiting.append($0) }
+  }
+  func open() {
+    opened = true
+    let pending = waiting; waiting = []
+    for continuation in pending { continuation.resume() }
+  }
+  func waitForVisits(_ count: Int) async throws {
+    for _ in 0..<200 {
+      if visits >= count { return }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+  }
+}
+
+private enum SavedPageControlledRollback: Error { case rollback }
+private final class SavedPageMutationProbe: @unchecked Sendable {
+  private let lock = NSLock()
+  private var visits = 0
+  private var sawFailure = false
+  private var sawMainThread = false
+  var count: Int { lock.withLock { visits } }
+  var failure: Bool { lock.withLock { sawFailure } }
+  var onMainThread: Bool { lock.withLock { sawMainThread } }
+  func record() -> Int {
+    lock.withLock {
+      visits += 1; sawMainThread = sawMainThread || Thread.isMainThread
+      return visits
+    }
+  }
+  func failed() { lock.withLock { sawFailure = true } }
 }
 
 private final class SavedEditReadCounter: @unchecked Sendable {

@@ -856,38 +856,62 @@ struct SavedLibraryPageID: Equatable {
 }
 
 enum SavedLibraryPageLoading {
-  @MainActor static func load(_ services: AppServices, expected: SavedLibraryPageID, isActive: Bool) throws -> Bool? {
-    guard isActive, !Task.isCancelled, services.photoAccountAccess != nil,
-      SavedLibraryPageID(services) == expected else { return nil }
-    try services.loadMore()
-    return services.photos.count > expected.count
+  @MainActor static func load(_ services: AppServices, expected: SavedLibraryPageID, isActive: Bool) async throws -> Bool? {
+    for _ in 0..<2 {
+      guard isActive, !Task.isCancelled, services.photoAccountAccess != nil,
+        SavedLibraryPageID(services) == expected else { return nil }
+      do {
+        let added = try await services.loadMore()
+        guard !Task.isCancelled, SavedLibraryOpenBinding(services) == expected.binding else { return nil }
+        if !added, SavedLibraryPageID(services) != expected { return nil }
+        return added
+      } catch is CancellationError {
+        // A direct incoming write can invalidate preparation before its UI
+        // generation arrives. Retry that same cursor once, never indefinitely.
+      }
+    }
+    return nil
   }
 }
 
 private struct SavedLibraryPageRequest: Equatable {
   let page: SavedLibraryPageID
   let isActive: Bool
+  let retry: Int
 }
 
 struct SavedLibraryPaginationFooter: View {
   @State private var visible = false
+  @State private var retryPage: SavedLibraryPageID?
+  @State private var retry = 0
   let services: AppServices
   @Binding var hasMore: Bool
   let isActive: Bool
   let failed: (String) -> Void
   var body: some View {
-    let request = SavedLibraryPageRequest(page: SavedLibraryPageID(services), isActive: isActive && visible)
-    ProgressView("Loading photos…").font(.footnote).padding().frame(maxWidth: .infinity)
+    let request = SavedLibraryPageRequest(page: SavedLibraryPageID(services), isActive: isActive && visible, retry: retry)
+    Group {
+      if retryPage == request.page {
+        Button("Try loading photos again") { retryPage = nil; retry &+= 1 }.disabled(!isActive)
+      } else { ProgressView("Loading photos…") }
+    }.font(.footnote).padding().frame(maxWidth: .infinity)
       .onScrollVisibilityChange(threshold: 0.1) { visible = $0 }
       .onDisappear { visible = false }
+      .onChange(of: request.page) { retryPage = nil }
       .task(id: request) {
         // A sparse filter can expose several consecutive empty metadata pages.
         // One bounded page per task lets scrolling away or leaving cancel work.
         await Task.yield()
-        guard !Task.isCancelled, isActive, visible, SavedLibraryPageID(services) == request.page else { return }
+        guard !Task.isCancelled, isActive, visible, retryPage != request.page,
+          SavedLibraryPageID(services) == request.page else { return }
         do {
-          if let more = try SavedLibraryPageLoading.load(services, expected: request.page, isActive: isActive) { hasMore = more }
+          if let more = try await SavedLibraryPageLoading.load(services, expected: request.page, isActive: isActive) { hasMore = more }
+          else if !Task.isCancelled, isActive, visible, services.photoAccountAccess != nil,
+            SavedLibraryPageID(services) == request.page { retryPage = request.page }
+        } catch is CancellationError {
         } catch {
+          guard !Task.isCancelled, isActive, visible, services.photoAccountAccess != nil,
+            SavedLibraryPageID(services) == request.page else { return }
           hasMore = false
           failed(error.localizedDescription)
         }

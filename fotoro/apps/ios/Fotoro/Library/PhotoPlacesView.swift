@@ -124,6 +124,8 @@ struct PhotoPlacesView: View {
   @State private var selectedID: String?
   @State private var recentOnly = true
   @State private var loading = false
+  @State private var metadataPageTask: Task<Void, Never>?
+  @State private var metadataPageToken = UUID()
   @State private var error: String?
   @State private var items: [PhotoPlaceItem] = []
   @State private var byID: [String: PhotoPlaceItem] = [:]
@@ -245,7 +247,7 @@ struct PhotoPlacesView: View {
             if recentOnly { Button("Include older photos") { recentOnly = false; refreshSources(recenter: true) } }
           }
           if hasMoreMetadata {
-            Button(recentOnly ? "Load more location metadata" : "Load more older locations") { loadMoreMetadata() }.disabled(loading)
+            Button(recentOnly ? "Load more location metadata" : "Load more older locations") { startLoadingMoreMetadata() }.disabled(loading)
           }
         }.listStyle(.plain)
       }
@@ -300,6 +302,7 @@ struct PhotoPlacesView: View {
     cluster.name ?? placeNames.name(for: cluster).map { "Near " + $0 } ?? snapshot.scale.areaLabel
   }
   private func clearPlaces() {
+    metadataPageToken = UUID(); metadataPageTask?.cancel(); metadataPageTask = nil; loading = false
     nameLookup?.cancel(); nameLookup = nil; placeNames.clear()
     projection?.cancel(); projection = nil; sourceToken = UUID(); selectedID = nil
     items = []; byID = [:]; devicePhotos = [:]; points = []; snapshot = .empty; visibleRows = []; areaCovers = [:]; focusedPhotoIDs = nil
@@ -433,20 +436,33 @@ struct PhotoPlacesView: View {
     }
     open(item); dismiss()
   }
-  private func loadMoreMetadata() {
+  private func startLoadingMoreMetadata() {
     guard sourceCurrent, !loading else { return }
     loading = true; error = nil
+    let token = UUID(); metadataPageToken = token
+    metadataPageTask = Task { await loadMoreMetadata(token: token) }
+  }
+  private func loadMoreMetadata(token: UUID) async {
+    defer { if metadataPageToken == token { metadataPageTask = nil; loading = false } }
+    guard !Task.isCancelled, metadataPageToken == token, scenePhase == .active, sourceCurrent else { return }
     // One explicit action loads one metadata page; map browsing never drains a library.
     if deviceNeedsMetadataPage { store.loadMorePhotos() }
     #if !FOTORO_LOCAL_PREVIEW
     if let services, let access = services.photoAccountAccess, !savedPageExhausted {
-      let count = services.photos.count
-      do { try services.loadMore(); savedPageExhausted = services.photos.count == count }
-      catch { self.error = error.localizedDescription }
-      guard services.photoAccountAccess == access else { loading = false; clearPlaces(); return }
+      do {
+        let added = try await services.loadMore()
+        guard !Task.isCancelled, metadataPageToken == token, scenePhase == .active,
+          services.photoAccountAccess == access else { return }
+        savedPageExhausted = !added
+      } catch is CancellationError { return }
+      catch {
+        guard !Task.isCancelled, metadataPageToken == token, scenePhase == .active else { return }
+        self.error = error.localizedDescription
+      }
     }
     #endif
-    loading = false; refreshSources()
+    guard !Task.isCancelled, metadataPageToken == token, scenePhase == .active else { return }
+    refreshSources()
   }
   @ViewBuilder private func thumbnail(_ item: PhotoPlaceItem, side: CGFloat) -> some View {
     if sourceCurrent {

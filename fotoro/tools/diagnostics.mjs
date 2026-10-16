@@ -5,14 +5,14 @@ import {pathToFileURL} from "node:url";
 // closed fields reaches the report, including parser errors and input paths.
 const values = {
   operation: "app api auth sync share albums album search metadata people consent picks catalog media request".split(" "),
-  step: "action request response decode credential unlock catalog verify persist transfer annotation scan prepare analysis export settlePrevious settleBackup settleJournal snapshot".split(" "),
+  step: "action request response decode credential unlock catalog verify persist transfer annotation scan prepare analysis export settlePrevious settleBackup settleJournal snapshot rowsReady uiPreview".split(" "),
   analysisStage: ["ocr", "visual", "semantic"],
   analysisActivity: "notReady inactive interacting waitingForIdle running retryScheduled idle".split(" "),
   analysisWindow: ["allPhotos", "tenDays"],
   coverageScope: ["catalog", "automaticWindow"],
   action: "passkey password enrollment refresh save create accept end add receive contribute prepare".split(" "),
   outcome: "started completed succeeded failed cancelled changed".split(" "),
-  reason: "none cancelled contextChanged inactive background recoveryProbe network http decode validation unknown signedOut locked permissionRequired paused offline retryRequired waiting pendingTransfers unpreparedSources skippedSources pendingAnnotations sourceUnavailable current invalid_wire account_changed source_changed quota unavailable verification".split(" "),
+  reason: "none cancelled contextChanged inactive background recoveryProbe network http decode validation unknown signedOut locked permissionRequired paused offline retryRequired waiting pendingTransfers unpreparedSources skippedSources pendingAnnotations sourceUnavailable current noMatches invalid_wire account_changed source_changed quota unavailable verification".split(" "),
   state: "notStarted preparing uploading checking upToDate paused offline needsAttention".split(" "),
   area: "auth account sync catalog albums sharing media intelligence other".split(" "),
   phase: "request upload.staging upload.commit".split(" "),
@@ -179,6 +179,19 @@ export function summarizeDiagnostics(events, {now = Date.now() / 1000} = {}) {
       const relativeMS = relative(e, firstTime); if (relativeMS !== undefined) stage.relativeMS = relativeMS;
       return stage;
     });
+    const rows = trace.findLast(e => e.source === "client" && e.step === "rowsReady" && e.outcome === "completed");
+    if (flow.operation === "search" && rows) {
+      const ready = trace.findLast(e => e.source === "client" && e.step === "uiPreview" && e.outcome === "completed" && e.completed > 0);
+      flow.searchUI = {
+        rows: rows.completed ?? 0,
+        preview: ready ? "ready" : terminal?.reason === "noMatches" ? "not_applicable"
+          : terminal?.outcome === "cancelled" ? "cancelled" : terminal?.outcome === "failed" ? "failed" : "pending",
+        previewUnavailable: trace.some(e => e.source === "client" && e.step === "uiPreview" && e.reason === "sourceUnavailable"),
+        measurement: "scroll_visible_result_image_available",
+      };
+      if (rows.elapsedMS !== undefined) flow.searchUI.rowsReadyMS = rows.elapsedMS;
+      if (ready?.elapsedMS !== undefined) flow.searchUI.previewReadyMS = ready.elapsedMS;
+    }
     return flow;
   });
   const untracedPicks = safe.filter(e => e.operation === "picks" && !e.traceId);
@@ -266,6 +279,7 @@ async function main(args) {
   console.log(`${summary.events} safe events; ${summary.requestLinks.matched} client/server request links.`);
   for (const count of summary.counts) console.log(`${count.kind}: ${count.count}`);
   for (const flow of summary.flows) console.log(`${flow.operation}${flow.action ? "/" + flow.action : ""}: ${flow.result}${flow.activeStep ? "; active " + flow.activeStep : ""}${flow.lastCompletedStep ? "; last completed " + flow.lastCompletedStep : ""}${flow.reason ? "; " + flow.reason : ""}${flow.elapsedMS !== undefined ? "; " + flow.elapsedMS + "ms" : ""} [${flow.traceId}]`);
+  for (const flow of summary.flows.filter(flow => flow.searchUI)) console.log(`Search UI: ${flow.searchUI.rows} rows${flow.searchUI.rowsReadyMS !== undefined ? " ready at " + flow.searchUI.rowsReadyMS + "ms" : ""}; preview ${flow.searchUI.preview}${flow.searchUI.previewReadyMS !== undefined ? " at " + flow.searchUI.previewReadyMS + "ms" : ""}. Readiness is image availability in a scroll-visible result view, not physical frame presentation or FPS.`);
   if (summary.indexSnapshot) {
     console.log(`Local index snapshot: ${summary.indexSnapshot.activity}; build ${summary.indexSnapshot.build ?? "unknown"}; age ${summary.indexSnapshot.ageMS === undefined ? "unknown" : summary.indexSnapshot.ageMS + "ms"}${summary.indexSnapshot.reason ? "; " + summary.indexSnapshot.reason : ""}.`);
     for (const stage of summary.indexSnapshot.coverage) console.log(`${stage.stage}: ${JSON.stringify(stage)}`);

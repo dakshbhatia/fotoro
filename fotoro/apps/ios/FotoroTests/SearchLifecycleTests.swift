@@ -165,6 +165,61 @@ final class SearchLifecycleTests: XCTestCase {
     XCTAssertEqual(try index.record(records[0].id)?.ocrStatus, .unavailable)
     XCTAssertEqual(try index.record(records[1].id)?.ocrStatus, .unavailable)
   }
+  @MainActor func testTenDayUnavailablePreviewRetriesAfterInactiveResumeWithoutWideningScope() async throws {
+    let fetched = PHAsset.fetchAssets(with: .image, options: nil)
+    guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)), fetched.count >= 3 else {
+      throw XCTSkip("Permit three public Simulator photos for unavailable-source retry.")
+    }
+    let photos = (0..<3).map { RecentPhoto(asset: fetched.object(at: $0)) }
+    guard photos.allSatisfy({ !$0.asset.isHidden }) else { throw XCTSkip("Use visible permitted public photos.") }
+    let index = try SearchIndex(), now = Date()
+    let records = photos.enumerated().map { offset, photo -> SearchRecord in
+      var record = SearchRecord(id: photo.id); record.revision = photo.sourceRevision
+      record.capturedAt = offset == 0 ? now : offset == 1 ? now.addingTimeInterval(-90 * 86400) : nil
+      record.visualStatus = .complete; return record
+    }
+    try index.replacePermitted(records)
+    #if !FOTORO_LOCAL_PREVIEW
+    var vector = [Float](repeating: 0, count: 512); vector[0] = 1
+    for record in records { XCTAssertTrue(try index.applySemantic(vector, photoID: record.id, revision: record.revision)) }
+    #endif
+    let image = try XCTUnwrap(UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).image { context in
+      UIColor.white.setFill(); context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+    }.cgImage)
+    let store = LocalSearchStore(index: index, analysisWindow: .tenDays)
+    store.setAutomaticAnalysisActive(false); store.completePermittedSnapshotRefresh(photos: photos)
+    var clock = now, previews = 0, recognition = 0, classification = 0
+    store.analysisNow = { clock }
+    store.analysisPreview = { asset in
+      XCTAssertEqual(asset.localIdentifier, records[0].id)
+      previews += 1; return previews == 1 ? nil : SearchPreview(image: image)
+    }
+    store.analysisRecognize = { _ in
+      recognition += 1; return SearchOCRResult(text: "Public retry ticket", confidence: 0.95)
+    }
+    store.analysisClassify = { _ in
+      classification += 1; return SearchVisualResult(labels: [], processor: SearchVisualPolicy.processor)
+    }
+    defer { store.pause() }
+    store.setAutomaticAnalysisActive(true)
+    for _ in 0..<400 where previews == 0 || store.indexing { try await Task.sleep(for: .milliseconds(10)) }
+    XCTAssertEqual(previews, 1)
+    XCTAssertEqual(try index.record(records[0].id)?.ocrStatus, .unavailable)
+    let retry = try XCTUnwrap(index.nextMetadataAnalysisRetry(scope: PhotoAnalysisWindow.tenDays.scope(now: now), now: now))
+    XCTAssertEqual(retry.timeIntervalSince1970, now.addingTimeInterval(300).timeIntervalSince1970, accuracy: 0.001)
+    store.setAutomaticAnalysisActive(false)
+    clock = now.addingTimeInterval(301)
+    store.setAutomaticAnalysisActive(true)
+    for _ in 0..<400 where (try index.record(records[0].id)?.ocrStatus) != .complete {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    XCTAssertEqual(try index.record(records[0].id)?.ocrStatus, .complete)
+    XCTAssertEqual(recognition, 1); XCTAssertEqual(classification, 0, "A completed stage cannot rerun after source recovery")
+    XCTAssertEqual(previews, 2)
+    XCTAssertEqual(try index.record(records[1].id)?.ocrStatus, .pending)
+    XCTAssertEqual(try index.record(records[2].id)?.ocrStatus, .pending)
+    XCTAssertEqual(store.automaticAnalysisWindow, .tenDays)
+  }
   #if !FOTORO_LOCAL_PREVIEW
   func testAnnotationBatchAcceptsUnchangedRowsWithoutRebuildingPostingsAndRejectsStaleSources() throws {
     let index = try SearchIndex(), records = [SearchRecord(id: "a"), SearchRecord(id: "b")]
@@ -395,6 +450,57 @@ final class SearchLifecycleTests: XCTestCase {
     for record in records { XCTAssertFalse(try index.needsSemantic(photoID: record.id, revision: record.revision)) }
     XCTAssertEqual(vectors, records.count)
     XCTAssertEqual(store.analysisUnavailable, 0)
+  }
+  @MainActor func testFailedColdModelPreparationRetriesAfterIdleWithoutRepeatingOCRAndVisual() async throws {
+    guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+      let asset = PHAsset.fetchAssets(with: .image, options: nil).firstObject, !asset.isHidden else {
+      throw XCTSkip("Permit a public Simulator photo for model preparation retry.")
+    }
+    let photo = RecentPhoto(asset: asset), index = try SearchIndex(), now = Date()
+    var record = SearchRecord(id: photo.id); record.revision = photo.sourceRevision; record.capturedAt = now
+    try index.replacePermitted([record])
+    let image = try XCTUnwrap(UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).image { context in
+      UIColor.white.setFill(); context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+    }.cgImage)
+    let store = LocalSearchStore(index: index, analysisWindow: .tenDays)
+    store.setAutomaticAnalysisActive(false); store.completePermittedSnapshotRefresh(photos: [photo])
+    var clock = now, ready = false, preparations = 0, recognition = 0, classification = 0, vectors = 0
+    store.analysisNow = { clock }
+    store.analysisPreview = { _ in SearchPreview(image: image) }
+    store.analysisRecognize = { _ in
+      recognition += 1; return SearchOCRResult(text: "Public model retry", confidence: 0.95)
+    }
+    store.analysisClassify = { _ in
+      classification += 1; return SearchVisualResult(labels: [], processor: SearchVisualPolicy.processor)
+    }
+    store.analysisSemanticReady = { ready }
+    store.analysisSemanticPreparation = {
+      preparations += 1
+      if preparations == 1 { throw FotoroError("Public fixture model preparation failed") }
+      ready = true
+    }
+    store.analysisSemanticImage = { _ in
+      vectors += 1; var vector = [Float](repeating: 0, count: 512); vector[0] = 1; return vector
+    }
+    defer { store.pause() }
+    store.setAutomaticAnalysisActive(true)
+    for _ in 0..<400 where preparations == 0 || store.indexing { try await Task.sleep(for: .milliseconds(10)) }
+    XCTAssertEqual(preparations, 1)
+    XCTAssertEqual(try index.record(record.id)?.ocrStatus, .complete)
+    XCTAssertEqual(try index.record(record.id)?.visualStatus, .complete)
+    XCTAssertTrue(try index.needsSemantic(photoID: record.id, revision: record.revision))
+    let retry = try XCTUnwrap(index.nextMetadataAnalysisRetry(scope: PhotoAnalysisWindow.tenDays.scope(now: now), now: now))
+    XCTAssertEqual(retry.timeIntervalSince1970, now.addingTimeInterval(60).timeIntervalSince1970, accuracy: 0.001)
+    store.setBrowseInteractionActive(true)
+    clock = now.addingTimeInterval(61)
+    store.setBrowseInteractionActive(false)
+    for _ in 0..<500 where try index.needsSemantic(photoID: record.id, revision: record.revision) {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    XCTAssertFalse(try index.needsSemantic(photoID: record.id, revision: record.revision))
+    XCTAssertEqual(preparations, 2); XCTAssertEqual(vectors, 1)
+    XCTAssertEqual(recognition, 1); XCTAssertEqual(classification, 1)
+    XCTAssertEqual(store.automaticAnalysisWindow, .tenDays)
   }
   @MainActor func testCancelledModelConsumerLeavesSharedInstallationAvailableForNextConsumer() async throws {
     let gate = AdmissionPreviewGate()

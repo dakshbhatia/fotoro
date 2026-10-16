@@ -55,12 +55,19 @@ Cloudflare proposals become tasks here only when a consumer need admits them.
    Browser successor indexes reuse receipt-verified unchanged token contributions.
    Sync admission reads tracked IDs without decoding checkpoints; queued retries
    use an indexed phase query and decode only admitted ordinary checkpoints.
-   Inventory scans still need measured frame, CPU
-   and memory budgets before claiming smoothness.
+   Saved continuations now prepare only one bounded page and its batched
+   overlays off-main, then publish atomically after access/cursor/write-revision
+   checks; stale success and error paths are both fenced. Inventory scans still
+   need measured frame, CPU and memory budgets before claiming smoothness.
 4. Qualify retrieval before replacing models. Current iOS Vision OCR/classification,
    TinyCLIP CoreML retrieval and local face models already provide AI. Measure
    date/place/person/text/visual queries, correction behavior, cold/warm latency,
-   memory and battery on representative photos. A small caption model is a
+   memory and battery on representative photos. A read-only phone-index audit
+   now validates 21 literal text query result sets across native and browser
+   engines using the same copied evidence. This does not establish recognition
+   or semantic quality. Native diagnostics separate search-row completion from
+   image availability in a scroll-visible result; physical presentation and
+   frame pacing remain unqualified. A small caption model is a
    separate experiment; it must improve a specific task within those budgets.
 5. Complete the installed family journey. Two accounts open one Trip, add chosen
    photos, find them by reviewed people/place/date, download the verified deduped
