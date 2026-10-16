@@ -9,6 +9,67 @@ const date = (year: number, month: number, day: number, hour = 0) => new Date(ye
 const now = date(2026, 10, 2, 12);
 const photo = (id: string, captured = date(2026, 10, 2, 10), extra: Partial<SearchPhoto> = {}): SearchPhoto => ({id, filename: "IMG_001.jpg", date: new Date(captured).toISOString(), dateSource: "exif", ...extra});
 
+test("photo requests retrieve supported subjects without requiring a date", () => {
+  const index = new PhotoSearchIndex([
+    photo("dog", now, {labels: ["dog"]}),
+    photo("person", now, {labels: ["Mary Jane"]}),
+    photo("ocr", now, {ocr: {photoID: "ocr", revision: "ocr", processor: "fixture", status: "complete", text: "receipt 123", confidence: .9}}),
+    photo("longer", now, {ocr: {photoID: "longer", revision: "longer", processor: "fixture", status: "complete", text: "receipt 1234", confidence: .9}}),
+    photo("file", now, {filename: "IMG_00123.jpg"}),
+  ]);
+  for (const query of ["photos of dog", "photo of dog", "pictures of dog", "picture of dog", "show me photos of dog"]) {
+    assert.deepEqual(index.search(query, {now}).photoIds, ["dog"], query);
+  }
+  assert.deepEqual(index.search("show me pictures of Mary Jane", {now}).photoIds, ["person"]);
+  assert.deepEqual(index.search("photos of receipt 123", {now}).photoIds, ["ocr"]);
+  assert.deepEqual(index.search("photos of IMG_00123.jpg", {now}).photoIds, ["file"]);
+  assert.equal(index.search("photos of Ronald", {now}).photoId, undefined);
+});
+
+test("photo request cleanup preserves ordinary literal phrases and incomplete requests", () => {
+  for (const query of ["photo booth", "photos of", "show me photos of", "show me love", "dog photos of beach", "photosynthesis", "dog from", "photos of dog from"]) {
+    const expected = query === "photos of dog from" ? "dog from" : query;
+    assert.deepEqual(parseNaturalDateQuery(query, {now}), {text: expected}, query);
+  }
+  const index = new PhotoSearchIndex([photo("booth", now, {labels: ["Photo Booth"]}), photo("love", now, {labels: ["Show Me Love"]})]);
+  assert.deepEqual(index.search("photo booth", {now}).photoIds, ["booth"]);
+  assert.deepEqual(index.search("photos of photo booth", {now}).photoIds, ["booth"]);
+  assert.deepEqual(index.search("show me photos of photo booth today", {now}).photoIds, ["booth"]);
+  assert.deepEqual(index.search("show me love", {now}).photoIds, ["love"]);
+});
+
+test("photo request continuation retains an eligible preview across request wording", () => {
+  const index = new PhotoSearchIndex([photo("a", now - 1000, {labels: ["dog"]}), photo("b", now, {labels: ["dog"]})]);
+  const previous = {...index.search("photos of do", {now}), photoId: "a"};
+  assert.equal(index.search("show me photos of dog", {now, previous}).photoId, "a");
+});
+
+test("dated literal names beginning with photo retain the complete phrase", () => {
+  const index = new PhotoSearchIndex([
+    photo("photo-booth", date(2026, 9, 12), {labels: ["Photo Booth"]}),
+    photo("other-booth", date(2026, 9, 12), {labels: ["Ticket Booth"]}),
+  ]);
+  for (const query of ["photo booth last month", "last month photo booth", "photos of photo booth last month"]) {
+    assert.deepEqual(index.search(query, {now}).photoIds, ["photo-booth"], query);
+  }
+});
+
+test("photo requests preserve date constraints and permission or current-source fences", () => {
+  let current = true;
+  const index = new PhotoSearchIndex([
+    photo("allowed", date(2026, 9, 12), {labels: ["dog"], current: () => current}),
+    photo("denied", date(2026, 9, 12), {labels: ["dog"]}),
+    photo("outside", date(2026, 8, 12), {labels: ["dog"]}),
+  ]);
+  const options = {now, allowedIds: new Set(["allowed", "outside"])};
+  for (const query of ["show me photos of dog last month", "last month show me photos of dog", "photos of dog in September 2026"]) {
+    assert.deepEqual(index.search(query, options).photoIds, ["allowed"], query);
+  }
+  current = false;
+  assert.deepEqual(index.search("photos of dog last month", options).photoIds, []);
+  assert.deepEqual(index.search("photos of dog", {...options, allowedIds: new Set(["allowed"])}).photoIds, []);
+});
+
 test("relative date phrases use full local calendar periods with an exclusive end", () => {
   for (const [query, from, until] of [
     ["today", date(2026, 10, 2), date(2026, 10, 3)],

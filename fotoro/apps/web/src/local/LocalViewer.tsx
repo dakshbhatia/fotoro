@@ -1,4 +1,5 @@
 import {PhotoOrganization} from "../library/PhotoOrganization";
+import {localPhotoNameAnalysis} from "../library/photo-name-analysis";
 import {photoName, renamedPhotoFile, type PhotoOrganizationPatch} from "@fotoro/contracts/organization";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Icon } from "../library/icons";
@@ -106,7 +107,7 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
         if (alive.current && currentPhoto.current === photo) onFavorite(photo.id, !photo.favorite);
       }}>{photo.favorite ? "Unfavorite" : "Favorite"}</button>}
       {photo.file && <button onClick={download} disabled={sharing}>Download original</button>}
-      <PhotoOrganization key={photo.id} source={photo} saved={!!owned} onChange={onOrganization ? patch => onOrganization(photo, patch) : undefined} />
+      <PhotoOrganization key={photo.id} source={{...photo, analysis: localPhotoNameAnalysis(photo)}} saved={!!owned} onChange={onOrganization ? patch => onOrganization(photo, patch) : undefined} />
       <h3>Tags</h3>
       <div className="local-labels">{(photo.labels ?? []).map((value, i) => <span key={i}>{value}{onLabels && <button aria-label={"Remove tag " + value} onClick={() => onLabels(photo.id, photo.labels!.filter((_, position) => position !== i))}>×</button>}</span>)}</div>
       {onLabels && <form className="local-label-form" onSubmit={event => {

@@ -8,6 +8,8 @@ import {cleanupCandidates, CleanupAnalyzer} from "../src/local/auto-picks";
 import {PhotoSearchIndex} from "../src/local/search";
 import {inBrowseRange} from "../src/local/consumer-range";
 import type {LocalPhoto} from "../src/local/resources";
+import {localPhotoNameAnalysis, savedPhotoNameAnalysis} from "../src/library/photo-name-analysis";
+import type {Photo} from "../src/library/catalog";
 const digest = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const original = {filename: "IMG_0001.JPG", digest, date: "2018-02-03T23:50:00Z", dateSource: "photos", labels: ["BTS", "Family  trip"], location: {name: "Seoul"}};
 test("suggested names use recorded evidence and the same suffix for hex or wire digest", () => {
@@ -23,6 +25,46 @@ test("suggested names avoid repeated place/tag words and always provide an appli
   const reserved = suggestedPhotoName({filename: "IMG.JPG", labels: ["CON"]});
   assert.equal(reserved, "Photo_CON.jpg"); assert.equal(validPhotoName(reserved), true);
   assert.equal(suggestedPhotoName({filename: "IMG.JPG", date: "garbage", dateSource: "photos"}), "Photo.jpg");
+});
+test("name previews use completed analysis when no supplied tags describe the photo", () => {
+  const source = {filename: "IMG.JPG", digest: "00".repeat(32)};
+  const ocr = {processor: "vision-text-v1", confidence: 0.94, text: "9:41\nALFRED COFFEE\nOrder 123456\nTotal $12.50"};
+  const visual = {processor: "vision-image-classification-r1-v1", labels: [{label: "dog", identifier: "dog", confidence: 0.92}]};
+  assert.equal(suggestedPhotoName({...source, analysis: {visual}}), "dog_0000000000.jpg");
+  assert.equal(suggestedPhotoName({...source, screenshot: true, analysis: {ocr, visual}}), "Screenshot_ALFRED-COFFEE_0000000000.jpg");
+  assert.equal(suggestedPhotoName({...source, analysis: {ocr}}), "ALFRED-COFFEE_0000000000.jpg");
+  assert.equal(suggestedPhotoName({...source, labels: ["My exact title"], analysis: {ocr, visual}}), "My-exact-title_0000000000.jpg");
+  assert.equal(suggestedPhotoName({...source, screenshot: true, analysis: {visual}}), "Screenshot_0000000000.jpg");
+});
+test("name previews fall back instead of turning uncertain text or unsupported scenes into names", () => {
+  const source = {filename: "IMG.JPG"};
+  for (const ocr of [
+    {processor: "vision-text-v1", confidence: 0.4, text: "Wrong title"},
+    {processor: "unknown-model", confidence: 1, text: "Wrong title"},
+    {processor: "vision-text-v1", confidence: NaN, text: "Wrong title"},
+    {processor: "vision-text-v1", confidence: 0.9, text: "9:41\nuser@example.com\nhttps://example.com\nOrder 123456\nTotal $12.50"},
+  ]) assert.equal(suggestedPhotoName({...source, analysis: {ocr}}), "Photo.jpg");
+  const visual = {processor: "vision-image-classification-r1-v1", labels: [{label: "Person name", identifier: "dog", confidence: 0.99}]};
+  assert.equal(suggestedPhotoName({...source, analysis: {visual}}), "Photo.jpg");
+});
+test("name analysis respects local source withdrawal, revisions and signed Saved identity", () => {
+  const ocr = {photoID: "public-photo", revision: digest, status: "complete" as const,
+    processor: "vision-text-v1", confidence: 0.94, text: "ALFRED COFFEE"};
+  const source = {id: "public-photo", filename: "IMG.JPG", digest, ocr};
+  const name = (photo: typeof source) => suggestedPhotoName({...photo, analysis: localPhotoNameAnalysis(photo)});
+  assert.equal(name(source), "ALFRED-COFFEE_0000000000.jpg");
+  for (const photo of [{...source, current: () => false}, {...source, digest: "changed"},
+    {...source, ocr: {...ocr, photoID: "other"}}, {...source, ocr: {...ocr, status: "failed" as const}}]) {
+    assert.equal(localPhotoNameAnalysis(photo)?.ocr, undefined);
+  }
+  const saved = {manifest: {photoId: "public-photo"}, metadata: {originalSha256: digest},
+    annotations: {version: 1, photoId: "public-photo", originalSha256: digest, ocr}} as Photo;
+  assert.equal(suggestedPhotoName({filename: "IMG.JPG", digest, analysis: savedPhotoNameAnalysis(saved)}), "ALFRED-COFFEE_0000000000.jpg");
+  assert.equal(savedPhotoNameAnalysis({...saved, annotations: {...saved.annotations!, photoId: "other"}}), undefined);
+  assert.equal(savedPhotoNameAnalysis({...saved, annotations: {...saved.annotations!, originalSha256: "changed"}}), undefined);
+  const applied = withPhotoOrganization(saved.annotations!, {name: "ALFRED-COFFEE_0000000000.jpg"});
+  assert.equal(photoName(applied, "IMG.JPG"), "ALFRED-COFFEE_0000000000.jpg");
+  assert.equal(saved.annotations!.facts, undefined, "A suggestion never renames its source");
 });
 test("organization records preserve original words and restore without destroying other metadata", async () => {
   const base = {facts: ["My EXACT words", "fotoro.future.v2:keep"], labels: ["BTS"], caption: "My caption"};

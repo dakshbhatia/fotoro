@@ -569,9 +569,11 @@ struct LocalPhotoDetails: View {
     Section("Photo name") {
             TextField("Filename", text: Binding(get: { nameDraft.value }, set: { nameDraft.edit($0) })).autocorrectionDisabled().textInputAutocapitalization(.never).accessibilityLabel("Photo filename")
             Button("Suggest name") {
+              guard organizationSourceIsCurrent(), let record = try? search?.record(photo.id) else { return }
               nameDraft.edit(PhotoOrganizationFacts.suggestedName(original: originalName, digest: nil,
                 capturedAt: photo.capturedAt, labels: labels, place: photo.photoLocation?.name,
-                screenshot: PhotoOrganizationFacts.screenshot(organizationFacts, detected: photo.isScreenshot)))
+                screenshot: PhotoOrganizationFacts.screenshot(organizationFacts, detected: photo.isScreenshot),
+                analysis: PhotoNameAnalysis(record: record, photoID: photo.id, revision: photo.sourceRevision)))
             }
             Button("Apply name") { applyOrganization(.name(nameDraft.value)) }
               .disabled(!PhotoOrganizationFacts.validName(nameDraft.value) || (nameDraft.value as NSString).pathExtension.lowercased() != (originalName as NSString).pathExtension.lowercased() || nameDraft.value == PhotoOrganizationFacts.name(organizationFacts, original: originalName))

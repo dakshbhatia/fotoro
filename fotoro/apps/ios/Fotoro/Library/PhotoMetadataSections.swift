@@ -154,7 +154,8 @@ struct SavedPhotoOrganizationSection: View {
         .accessibilityLabel("Photo filename").submitLabel(.done).onSubmit { if valid && draft != name { apply(.name(draft)) } }
       Button("Suggest name") {
         nameDraft.edit(PhotoOrganizationFacts.suggestedName(original: photo.metadata.filename, digest: photo.metadata.originalSha256,
-          capturedAt: CameraMedia.captureDate(photo.metadata), labels: value.labels ?? [], place: value.location?.name, screenshot: screenshot))
+          capturedAt: CameraMedia.captureDate(photo.metadata), labels: value.labels ?? [], place: value.location?.name, screenshot: screenshot,
+          analysis: PhotoNameAnalysis(annotation: value, photoID: photo.manifest.photoId, digest: photo.metadata.originalSha256)))
       }
       Button("Apply name") { apply(.name(draft)) }.disabled(!valid || draft == name)
       if name != photo.metadata.filename { Button("Use original name") { apply(.name(nil)) } }

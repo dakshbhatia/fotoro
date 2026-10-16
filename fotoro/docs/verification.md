@@ -1873,3 +1873,45 @@ three existing/opt-in skips
 Hosted checks, merge, web deployment and native distribution remain
 separate gates; these results do not establish physical latency, battery, iCloud
 background behavior or held-out personal retrieval quality.
+
+## Analysis-to-organization cohesion — October 16, 2026
+
+Source changes connect existing on-device evidence to three concrete jobs:
+complete leading photo requests retrieve their supported subject, missing Saved
+OCR can be checked in an explicit batch of at most 25 owned previews, and filename
+previews can use completed OCR or validated scenes when supplied tags are absent.
+`Photo Booth` remains literal with a date; numeric receipt matching stays exact.
+Saved OCR is a fill-missing encrypted pending annotation, not a server-side photo
+processor. Concurrent OCR, conflicts, origin/account/source withdrawal and Stop
+remain fenced. Scene publication remains disabled.
+
+Browser acceptance used an ordinary isolated local account and the public receipt
+fixture. Before text checking, exact receipt number `4826` had no result. One
+explicit Saved check kept text locally; the number then returned the receipt.
+Suggest name produced `Screenshot_SEATTLE-RECEIPT_<digest>.png`. Apply name and
+Save changes retained the reviewed name and OCR. A separate `localhost` browser
+origin unlocked the same local account and retrieved it with `photos of 4826`,
+showing both the reviewed filename and the recognized invoice text. No app
+warnings/errors appeared in that readback tab. This qualifies the local encrypted
+readback path, not production/device latency or general OCR accuracy.
+
+The full native Simulator suite passes 814 with zero failures and three existing
+skips. Its first broad run had seven infrastructure failures: the fixture server
+was stopped and another project occupied the fixed integration API port. Native
+test clients now honor `FOTORO_NATIVE_TEST_API_PORT`, matching the existing local
+API helper while retaining a loopback host. With public fixtures on 8790 and an
+isolated seeded native API on 8789, the complete rerun passes without excluding
+tests. `TEST_RUNNER_FOTORO_NATIVE_TEST_API_PORT=8789` passes this value through
+terminal xcodebuild; XcodeBuildMCP accepts it via `testRunnerEnv`.
+
+This source work is separate from the previously distributed build 86. Native
+distribution, production browser acceptance, installed-reader scene rollout and
+held-out personal search relevance remain separate gates.
+
+Final workspace `pnpm check` passes, including 836 browser and 129 API tests.
+The isolated-preview suite passes 224 with zero failures and three existing
+skips; host sync regressions pass 20/20. Review found and fixed repeated catalog
+admission for already-read photos and missing recognition cancellation when the
+source list changes. A 2,000-record regression goes from 4,000 source-admission
+reads before the fix to zero afterward. These operation counts establish a work
+bound, not a measured device speedup.

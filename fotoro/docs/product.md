@@ -95,7 +95,7 @@ screenshots, and keeping deliberate changes on other devices.
 | Decision | Result |
 | --- | --- |
 | 1. Show the useful name in Info. | An editable Fotoro filename is prominent; the original camera filename is in Technical details. |
-| 2. Suggest a consistent filename from evidence. | Recorded UTC capture date, known place, up to two distinct supplied tags, and a stable original-digest suffix. Repeated place/tag words are skipped. Missing dates and places stay missing. |
+| 2. Suggest a consistent filename from evidence. | Recorded UTC capture date, known place, up to two distinct supplied tags, and a stable original-digest suffix. Without supplied tags, a current validated scene can describe a photo; screenshots use a short readable OCR line. Text is a fallback for other photos without a scene. Repeated words are skipped. Missing dates and places stay missing. |
 | 3. Preview before applying a name. | Suggest name fills the editor; Apply name makes the deliberate change. Original bytes and camera-library names remain unchanged. Exported copies use the chosen name. |
 | 4. Separate names from captions. | Private name records never replace user captions, tags, OCR or original metadata. |
 | 5. Review cleanup before removing anything. | A bounded review shows reasons for identical originals, possible soft shots or very little detail. An explicit favorite is retained as the representative of an identical original. Nothing is selected automatically; unknown previews stay unassessed. |
@@ -108,6 +108,31 @@ screenshots, and keeping deliberate changes on other devices.
 Current clients implement these organization records. Older clients preserve the
 reserved records but do not provide the new naming, screenshot or Trash behavior.
 Quality hints are review suggestions, not a calibrated judgment of a photo’s value.
+
+### Connecting analysis to finding and naming (October 16, 2026)
+
+Explicit leading requests such as `photos of dog` or `show me pictures of beach
+last month` retrieve the same supported subject as the shorter query. A literal
+name such as `Photo Booth` stays intact, including alongside a date. This is a
+bounded grammar, not unrestricted natural-language understanding.
+
+Owned Saved photos can be missing OCR even when a decrypted preview exists.
+Settings now offers an explicit local text check for up to 25 loaded photos in
+the current filters. It requires consent, reports progress and retries, and
+stops when its scope, consent, account or source changes. It fills only missing
+OCR through the existing serialized encrypted annotation writer. Existing text
+and concurrent corrections are preserved; Save changes carries kept text to
+other devices. Received photos are excluded. This does not expand automatic
+analysis beyond the existing Latest 10 days policy.
+
+Filename previews use completed, source-bound analysis only. OCR naming accepts
+known processors and a confidence gate of 0.8, considers at most the first 12
+lines of a bounded text prefix, and skips numeric identifiers, addresses with
+email/URL syntax, long paragraphs and unsupported scenes. These are conservative
+engineering gates, not calibrated accuracy scores. Supplied tags retain priority;
+previewing never changes the saved name or original. Scene publication remains
+disabled pending installed-reader qualification, so locally inferred scene-based
+suggestions can differ between devices until a reviewed name is saved.
 Cleanup covers at most 200 currently loaded previews per review; load further
 Saved pages deliberately. Personal-library retrieval, physical battery and frame
 pacing acceptance remain separate from functional source and simulator tests.

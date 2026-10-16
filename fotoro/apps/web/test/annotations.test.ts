@@ -11,6 +11,9 @@ import {VISUAL_PROCESSOR} from "@fotoro/contracts/visual";
 import {annotationObservation, withPhotoObservation} from "@fotoro/contracts/intelligence";
 import {peopleNames, factsWithPeople} from "@fotoro/contracts/people";
 import {annotationLocation, withAnnotationLocation} from "@fotoro/contracts/location";
+import {PhotoSearchIndex} from "../src/local/search";
+import {cloudSearchRecords} from "../src/library/search";
+import type {Photo} from "../src/library/catalog";
 
 const owner = "11111111-1111-4111-8111-111111111111";
 const other = "22222222-2222-4222-8222-222222222222";
@@ -29,6 +32,42 @@ function signed(revision: number, fields: object, signedOwner = owner, boundPhot
 }
 const reply = (value: unknown) => new Response(JSON.stringify(value), {status: 200});
 async function clean() {await clearAccount(owner); await clearAccount(other); lockVault();}
+
+test("Saved OCR fills only missing text under the annotation writer and keeps ciphertext pending", async () => {
+  const session = await open();
+  try {
+    await annotations.queueAnnotations(identity, {labels: ["My EXACT label"], facts: ["My exact note"]}, session);
+    assert.equal(await annotations.queueMissingPhotoOcr(identity, {text: "Public fixture receipt", confidence: .9, processor: localProcessor}, () => true, session), true);
+    const value = (await annotations.readAnnotations(identity, session))!.value;
+    assert.deepEqual(value.labels, ["My EXACT label"]); assert.deepEqual(value.facts, ["My exact note"]);
+    assert.equal(value.ocr?.text, "Public fixture receipt");
+    assert.doesNotMatch(JSON.stringify(await all("settings")), /Public fixture receipt|My EXACT label/);
+    assert.equal((await annotations.pendingAnnotations(session)).length, 1);
+    const source = (annotations: Photo["annotations"]) => ({manifest: {ownerAccountId: owner, photoId}, metadata: {filename: "fixture.png", sourceDate: "2026-10-10T12:00:00Z", dateSource: "exif", originalSha256}, annotations} as Photo);
+    assert.deepEqual(new PhotoSearchIndex(cloudSearchRecords([source(value)])).search("receipt").photoIds, [photoId]);
+    lockVault(); await open();
+    const restored = (await annotations.readAnnotations(identity))!.value;
+    assert.deepEqual(new PhotoSearchIndex(cloudSearchRecords([source(restored)])).search("receipt").photoIds, [photoId]);
+    assert.equal(restored.ocr?.processor, localProcessor); assert.deepEqual(restored.labels, ["My EXACT label"]);
+  } finally {await clean();}
+});
+
+test("late Saved OCR cannot replace text queued while recognition was running or enter a withdrawn scope", async () => {
+  const session = await open(); let release!: () => void;
+  try {
+    const held = annotations.serializeAnnotationWrites(session, () => new Promise<void>(resolve => {release = resolve;}));
+    const reviewed = annotations.queueAnnotations(identity, {ocr: {text: "Keep existing text", confidence: .8, processor: "vision-text-v1"}}, session);
+    const derived = annotations.queueMissingPhotoOcr(identity, {text: "Late machine text", confidence: .99, processor: localProcessor}, () => true, session);
+    await new Promise(resolve => setTimeout(resolve, 0)); release(); await held; await reviewed;
+    assert.equal(await derived, false);
+    assert.equal((await annotations.readAnnotations(identity, session))!.value.ocr?.text, "Keep existing text");
+    const before = (await annotations.pendingAnnotations(session))[0].signed;
+    const untouched = {...identity, photoId: "55555555-5555-4555-8555-555555555555"};
+    assert.equal(await annotations.queueMissingPhotoOcr(untouched, {text: "Withdrawn", confidence: .99, processor: localProcessor}, () => false, session), false);
+    assert.equal(await annotations.readAnnotations(untouched, session), undefined);
+    assert.deepEqual((await annotations.pendingAnnotations(session))[0].signed, before);
+  } finally {release?.(); await clean();}
+});
 
 test("local locations save only through encrypted facts and inferred Timeline cannot replace factual GPS", async () => {
   await open(); const old = globalThis.fetch;

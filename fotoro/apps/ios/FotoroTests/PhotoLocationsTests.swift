@@ -71,6 +71,45 @@ final class PhotoLocationsTests: XCTestCase {
     XCTAssertThrowsError(try PhotoOrganizationFacts.replacing((0..<64).map { "fact \($0)" }, change: .trash(true)))
   }
 
+  func testNamePreviewsUseCurrentAnalysisWithoutReplacingSuppliedTags() {
+    var record = SearchRecord(id: "public-photo", revision: "source-r1", filename: "IMG.JPG")
+    record.ocrStatus = .complete; record.ocrText = "9:41\nALFRED COFFEE\nOrder 123456\nTotal $12.50"
+    record.ocrConfidence = 0.94; record.visualStatus = .complete
+    record.visualLabels = [SearchVisualLabel(label: "dog", identifier: "dog", confidence: 0.92, processor: SearchVisualPolicy.processor)]
+    let analysis = PhotoNameAnalysis(record: record, photoID: "public-photo", revision: "source-r1")
+    func name(_ screenshot: Bool = false, labels: [String] = [], evidence: PhotoNameAnalysis? = analysis) -> String {
+      PhotoOrganizationFacts.suggestedName(original: "IMG.JPG", digest: String(repeating: "00", count: 32),
+        capturedAt: nil, labels: labels, place: nil, screenshot: screenshot, analysis: evidence)
+    }
+    XCTAssertEqual(name(), "dog_0000000000.jpg")
+    XCTAssertEqual(name(true), "Screenshot_ALFRED-COFFEE_0000000000.jpg")
+    XCTAssertEqual(name(labels: ["My exact title"]), "My-exact-title_0000000000.jpg")
+    XCTAssertEqual(name(evidence: PhotoNameAnalysis(record: record, photoID: "other", revision: "source-r1")), "0000000000.jpg")
+    XCTAssertEqual(name(evidence: PhotoNameAnalysis(record: record, photoID: "public-photo", revision: "changed")), "0000000000.jpg")
+    record.ocrStatus = .failed; record.visualStatus = .pending
+    XCTAssertEqual(name(evidence: PhotoNameAnalysis(record: record, photoID: record.id, revision: record.revision)), "0000000000.jpg")
+  }
+
+  func testNamePreviewsRejectUncertainTextIdentifiersAndUnsupportedScenes() {
+    var record = SearchRecord(id: "public-photo", revision: "source-r1", filename: "IMG.JPG")
+    record.ocrStatus = .complete; record.ocrConfidence = 0.9
+    func name() -> String {
+      PhotoOrganizationFacts.suggestedName(original: record.filename, digest: nil, capturedAt: nil, labels: [], place: nil,
+        screenshot: false, analysis: PhotoNameAnalysis(record: record, photoID: record.id, revision: record.revision))
+    }
+    record.ocrText = "9:41\nuser@example.com\nhttps://example.com\nOrder 123456\nTotal $12.50"
+    XCTAssertEqual(name(), "Photo.jpg")
+    record.ocrText = "Wrong title"; record.ocrConfidence = 0.4
+    XCTAssertEqual(name(), "Photo.jpg")
+    record.ocrConfidence = .nan
+    XCTAssertEqual(name(), "Photo.jpg")
+    record.ocrConfidence = 1; record.processor = "unknown-model"
+    XCTAssertEqual(name(), "Photo.jpg")
+    record.visualStatus = .complete
+    record.visualLabels = [SearchVisualLabel(label: "Person name", identifier: "dog", confidence: 0.99, processor: SearchVisualPolicy.processor)]
+    XCTAssertEqual(name(), "Photo.jpg")
+  }
+
   func testPlacePresentationKeepsCoordinatesForAnExplicitMapAction() throws {
     let location = PhotoLocationV1(latitude: 37.5665, longitude: 126.978, source: "photos")
     XCTAssertEqual(location.displayName, "Location on map")

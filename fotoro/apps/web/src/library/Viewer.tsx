@@ -1,5 +1,6 @@
 import {photoName} from "@fotoro/contracts/organization";
 import {PhotoOrganization} from "./PhotoOrganization";
+import {savedPhotoNameAnalysis} from "./photo-name-analysis";
 import type {PhotoOrganizationPatch} from "@fotoro/contracts/organization";
 import {isCameraMedia, LIVE_PHOTO_TYPE} from "@fotoro/contracts/camera-media";
 import {photoOriginalFiles, readCameraPlayback} from "../media/camera-original";
@@ -353,7 +354,7 @@ export function Viewer({
               }}>{savingChanges ? "Saving changes…" : correction.conflict ? "Review changes" : "Save changes"}</button>}
             </section>}
             {onFavorite && <button aria-pressed={photo.annotations?.favorite === true} onClick={() => void applyChange(() => onFavorite(photo, photo.annotations?.favorite !== true))}>{photo.annotations?.favorite ? "Unfavorite" : "Favorite"}</button>}
-            <PhotoOrganization key={photo.manifest.photoId} source={{...photo.annotations, filename: photo.metadata.filename, digest: photo.metadata.originalSha256, date: photo.metadata.sourceDate, dateSource: photo.metadata.dateSource, location: annotationLocation(photo.annotations ?? {})}} saved={!photo.grantId} onChange={onOrganization && !photo.grantId ? patch => Promise.resolve(onOrganization(photo, patch)) : undefined} />
+            <PhotoOrganization key={photo.manifest.photoId} source={{...photo.annotations, analysis: savedPhotoNameAnalysis(photo), filename: photo.metadata.filename, digest: photo.metadata.originalSha256, date: photo.metadata.sourceDate, dateSource: photo.metadata.dateSource, location: annotationLocation(photo.annotations ?? {})}} saved={!photo.grantId} onChange={onOrganization && !photo.grantId ? patch => Promise.resolve(onOrganization(photo, patch)) : undefined} />
             <h3>Tags</h3>
             <div className="local-labels">{(photo.annotations?.labels ?? []).map((value, index) => <span key={index}>{value}{onLabels && <button aria-label={"Remove tag " + value} onClick={() => void applyChange(() => onLabels(photo, photo.annotations!.labels!.filter((_, position) => position !== index)))}>×</button>}</span>)}</div>
             {onLabels && <form className="local-label-form" onSubmit={event => {

@@ -3,7 +3,7 @@ import {isPhotoScreenshot, isPhotoTrashed, photoName, suggestedPhotoName, validP
 import {applyPhotoOrganizationDraft, createPhotoNameDraft, editPhotoNameDraft, reconcilePhotoNameDraft} from "./photo-name-draft";
 
 export function PhotoOrganization({source, onChange, saved}: {
-  source: {filename: string; facts?: string[]; digest?: string; date?: string; dateSource?: string; labels?: string[]; location?: {name?: string}};
+  source: Parameters<typeof suggestedPhotoName>[0] & {facts?: string[]};
   onChange?: (patch: PhotoOrganizationPatch) => Promise<void>;
   saved: boolean;
 }) {

@@ -316,7 +316,7 @@ export class PhotoSearchIndex {
       return source;
     }
     const now = options.now ?? Date.now(), scope = options.scope ?? "local:all", dateQuery = parseNaturalDateQuery(query, {now});
-    const dated = dateQuery.phrase !== undefined, prefix = dated ? dateQuery.text : normalizeSearch(query);
+    const dated = dateQuery.phrase !== undefined, prefix = dateQuery.text;
     const empty: SearchResult = { query, scope, meanings: [], photoIds: [] };
     if (!prefix && !dated) return empty;
     const dates = new Map<string, number>();
@@ -416,7 +416,7 @@ export class PhotoSearchIndex {
       }
       return compare(a, b);
     });
-    const previous = options.previous, extending = previous && prefix.startsWith(dated ? parseNaturalDateQuery(previous.query, {now}).text : normalizeSearch(previous.query));
+    const previous = options.previous, extending = previous && prefix.startsWith(parseNaturalDateQuery(previous.query, {now}).text);
     const previousId = previous?.photoId;
     const bestTier = tier(meaning.evidence[sorted[0]]);
     const stable = extending && previous.scope === scope && previous.meaning?.id === meaning.id && previousId && sorted.includes(previousId) &&

@@ -12,6 +12,7 @@ import {clearSemanticInference} from "./semantic-persistence";
 import { PhotoSearchIndex, emptyFeedback, normalizeSearch, type SearchMeaning, type SearchResult } from "./search";
 import { OCR_PROCESSOR, hasCurrentLocalOcr, localTextSearchStatus } from "./ocr";
 import { useLocalOcr, type LocalOcrPhoto } from "./useLocalOcr";
+import {SavedTextCheck} from "./SavedTextCheck";
 import { collectLocalFiles, type LocalPhoto, LocalResources } from "./resources";
 import {loadLocalChoices, saveLocalChoices} from "./preferences";
 import {SavedSearchProjection, SavedMetadataProjection, accountSearchResultAsync, useAccountSearch, savedSearchPhotos, combineConsumerSearch, mergeConsumerSearchPhotos, ConsumerPreviewResources, type OwnedPhotoSnapshot} from "../library/consumer-search";
@@ -200,6 +201,7 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
     return peopleMatchingPhotoIDs(peopleRecords.filter(photo => browseIDs.has(photo.id) || browseScope === "photos" && (normalizeSearch(query) || browseFilter) && (!favoritesOnly || favoriteIDs.has(photo.id)) && inBrowseRange(photo, recentActive, false, Date.now(), organizationScope)), peopleFind.filter);
   }, [peopleRecords, browsePhotos, peopleFind.filter, browseScope, query, browseFilter, recentActive, favoritesOnly, favoriteIDs, organizationScope]);
   const permittedPhotos = useMemo(() => browsePhotos.filter(photo => permitted.has(photo.id)), [browsePhotos, permitted]);
+  const savedTextPhotos = useMemo(() => permittedPhotos.filter(photo => metadataAllowed.has(photo.id)), [permittedPhotos, metadataAllowed]);
   const scoped = useMemo(() => photos.filter(photo => permitted.has(photo.id)), [photos, permitted]);
   const hasPhotos = searchPhotos.length > 0;
   useEffect(() => {if (!active) {setPlacesOpen(false); setPeopleOpen(false);}}, [active]);
@@ -647,6 +649,9 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
       <h3>Search and storage</h3>
       <label className="local-check"><input type="checkbox" checked={readText} onChange={event => {const choice = {readText: event.target.checked, retain: retained}; saveLocalChoices(choice); setReadText(choice.readText);}} />Find words in photos</label>
       <p className="hint">Find photos by English words inside them. Text is read on this device.</p>
+      {ownedPhotos?.current() && <SavedTextCheck snapshot={ownedPhotos} photos={savedTextPhotos} consent={readText} active={active && ready && !progress}
+        scope={JSON.stringify([backgroundScope, sourceGeneration, organizationScope, browseScope])} changes={photoChanges}
+        onSync={() => {closeSettings(); onBackup();}} />}
       <label className="local-check"><input type="checkbox" checked={retained} disabled={!ready || retentionBusy} onChange={event => {const choice = {readText, retain: event.target.checked}; saveLocalChoices(choice); void toggleRetention(choice.retain);}} />Remember these photos</label>
       <p className="hint">Keep search data and up to 100 MB of previews in this browser. Original files are not retained.</p>
       {saving && <p role="status">{saving}</p>}

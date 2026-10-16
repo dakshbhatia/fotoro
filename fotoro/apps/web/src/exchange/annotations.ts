@@ -184,6 +184,17 @@ export async function queueAnnotations(identity: AnnotationIdentity, changes: An
     return queueAnnotationChanges(identity, changes, session, await annotationWriteState(identity, session));
   });
 }
+// Derived text may fill an empty slot, never replace a concurrent correction or
+// another device's OCR. Admission is checked inside the same serialized writer.
+export async function queueMissingPhotoOcr(identity: AnnotationIdentity, ocr: NonNullable<PhotoAnnotationsV1["ocr"]>, current: () => boolean, session = requireVault()) {
+  return serializeAnnotationWrites(session, async () => {
+    assertAnnotationWriter(identity, session);
+    if (!current()) return false;
+    const state = await annotationWriteState(identity, session);
+    if (!current() || state.existing?.conflict || state.projected?.value.ocr) return false;
+    return queueAnnotationChanges(identity, {ocr}, session, state);
+  });
+}
 /* A Timeline acknowledgement means these exact coordinates are retained. Merge
    into the latest verified facts under the writer, preserving supplied text. */
 export async function queuePhotoOrganization(identity: AnnotationIdentity, patch: PhotoOrganizationPatch, session = requireVault()) {

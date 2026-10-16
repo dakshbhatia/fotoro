@@ -9,6 +9,7 @@ import type {SearchResult, SearchMeaning, SearchPhoto, PhotoSearchIndex} from ".
 import type {PhotoLocationV1} from "@fotoro/contracts";
 import type {PhotoObservationV1} from "@fotoro/contracts/intelligence";
 import type {PeopleAssignment} from "@fotoro/contracts/people";
+import type {SavedTextProgress, SavedTextResult} from "../local/saved-ocr";
 const savedSources = new WeakMap<object, {snapshot: OwnedPhotoSnapshot; photo: Photo; date: string; dateSource: LocalPhoto["dateSource"]; digest?: string; file?: File; location?: PhotoLocationV1}>();
 // Only an adapted, owned source can bind private inference to an account.
 export function savedInferenceSource(photo: LocalPhoto) {
@@ -57,6 +58,7 @@ export interface OwnedPhotoSnapshot {
   current: () => boolean;
   sourceCurrent?: (photo: Photo) => boolean;
   preview: (photo: Photo) => Promise<Blob>;
+  checkText?: (photos: readonly LocalPhoto[], signal: AbortSignal, current: () => boolean, progress: (value: SavedTextProgress) => void) => Promise<SavedTextResult>;
   edit?: (photo: Photo, changes: {labels?: string[]; favorite?: boolean; location?: PhotoLocationV1; observation?: PhotoObservationV1; people?: PeopleAssignment[]; organization?: PhotoOrganizationPatch}) => Promise<void>;
   locate?: (updates: readonly {photo: Photo; location: PhotoLocationV1}[]) => Promise<{applied: number; failed: number; updatedPhotoIDs: string[]}>;
   people?: (updates: readonly {photo: Photo; assignments: PeopleAssignment[]}[]) => Promise<void>;

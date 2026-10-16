@@ -55,7 +55,10 @@ import {
   clearSkipped,
 } from "./exchange/sync";
 import { syncSelectedSequential } from "./exchange/selected";
-import { localOriginalDigest, queueAnnotations, queuePhotoOrganization, queuePhotoLocation, queuePhotoObservation, queuePhotoPeople, queueLocalAnnotations, pendingAnnotations, resolveAnnotationConflict, type PendingAnnotation } from "./exchange/annotations";
+import { localOriginalDigest, queueAnnotations, queueMissingPhotoOcr, queuePhotoOrganization, queuePhotoLocation, queuePhotoObservation, queuePhotoPeople, queueLocalAnnotations, pendingAnnotations, resolveAnnotationConflict, type PendingAnnotation } from "./exchange/annotations";
+import {readSavedPhotoText} from "./local/saved-ocr";
+import {SavedTextCheck} from "./local/SavedTextCheck";
+import {metadataDatePhotoIDs} from "./local/metadata-work";
 import type {PhotoObservationV1} from "@fotoro/contracts/intelligence";
 import type {PeopleAssignment} from "@fotoro/contracts/people";
 import {useSemanticFind} from "./local/useSemanticFind";
@@ -169,6 +172,8 @@ export default function CloudApp({
     [recovery, setRecovery] = useState(""),
     [pending, setPending] = useState<PendingImport[]>([]);
   const [receivedContext, setReceivedContext] = useState<{grant: GrantV1; sender: string} | null>(null);
+  const [savedTextConsent, setSavedTextConsent] = useState(false);
+  useEffect(() => {if (!menu) setSavedTextConsent(false);}, [menu]);
   const [preparingOriginals, setPreparingOriginals] = useState(false), [sharingOriginals, setSharingOriginals] = useState(false);
   const [preparedOriginals, setPreparedOriginals] = useState<{files: File[]; context: SelectedOriginalContext} | null>(null);
   const [originalShareError, setOriginalShareError] = useState("");
@@ -244,6 +249,7 @@ export default function CloudApp({
     pausedRef = useRef(true),
     intentVersion = useRef(0),
     uploadAbort = useRef<AbortController | null>(null),
+    savedTextAbort = useRef<AbortController | null>(null),
     localSynced = useRef(new WeakMap<File, string>());
   const input = useRef<HTMLInputElement>(null), searchInput = useRef<HTMLInputElement>(null), scopeSelector = useRef<HTMLSelectElement>(null);
   const activeRef = useRef(active), saveIntentRef = useRef(saveIntent), incomingRef = useRef(incoming);
@@ -393,6 +399,7 @@ export default function CloudApp({
     setPaused(true);
     intentVersion.current++;
     uploadAbort.current?.abort();
+    savedTextAbort.current?.abort();
   };
   // A lock can occur after render and before passive effects commit.
   const effectVault = () => {
@@ -784,6 +791,7 @@ export default function CloudApp({
     pausedRef.current = true;
     setPaused(true);
     uploadAbort.current?.abort();
+    savedTextAbort.current?.abort();
     try {
       pauseSync();
     } catch {}
@@ -848,6 +856,26 @@ export default function CloudApp({
     }, edit: publicDemo ? undefined : async (photo, changes) => {
       if (!current() || !photos.includes(photo) || photo.manifest.ownerAccountId !== account || photo.grantId) throw new Error("VAULT_LOCKED");
       await editAnnotations(photo, changes, session);
+    }, checkText: publicDemo ? undefined : async (candidates, signal, admitted, progress) => {
+      const intent = intentVersion.current, controller = new AbortController();
+      savedTextAbort.current?.abort(); savedTextAbort.current = controller;
+      const cancel = () => controller.abort();
+      signal.addEventListener("abort", cancel, {once: true});
+      if (signal.aborted) controller.abort();
+      const valid = () => !controller.signal.aborted && admitted() && current() && intentVersion.current === intent;
+      try {
+        const result = await readSavedPhotoText(snapshot, candidates, {signal: controller.signal, current: valid, onProgress: progress,
+          write: (photo, value, sourceCurrent) => queueMissingPhotoOcr({ownerAccountId: account, photoId: photo.manifest.photoId,
+            originalSha256: photo.metadata.originalSha256}, {text: value.text, confidence: value.confidence, processor: value.processor}, sourceCurrent, session)});
+        // Completed stages remain pending even if a later stage is cancelled.
+        // Projection reads the latest ledger, preserving concurrent owner edits.
+        if (result.applied.length && sameVault(session) && location.origin === origin)
+          await publishLocalAnnotations(result.applied, session, () => sameVault(session) && location.origin === origin);
+        return result;
+      } finally {
+        signal.removeEventListener("abort", cancel);
+        if (savedTextAbort.current === controller) savedTextAbort.current = null;
+      }
     }, preview: async photo => {
       if (!current() || !photos.includes(photo) || photo.manifest.ownerAccountId !== account || photo.grantId) throw new Error("VAULT_LOCKED");
       if (!photo.manifest.representations.some(representation => representation.binding.kind === "preview")) throw new Error("Saved preview unavailable.");
@@ -960,6 +988,10 @@ export default function CloudApp({
   }, [active, searchCorpus, matchedMetadataKey, received, photos, viewer]);
   const [savedSearchProjection] = useState(() => new SavedSearchProjection());
   const peoplePhotos = savedSearchProjection.read(ownedSnapshot, []);
+  const savedTextPhotos = useMemo(() => {
+    const allowed = metadataDatePhotoIDs(peoplePhotos, query, new Set([...permitted].map(id => "saved:" + id)));
+    return peoplePhotos.filter(photo => allowed.has(photo.id));
+  }, [peoplePhotos, query, permitted]);
   const peopleEligibleIDs = useMemo(() => new Set([...(normalizeSearch(query) ? peopleMetadataMatches(lexicalSearchResult) : permitted)].map(id => "saved:" + id)), [query, lexicalSearchResult, permitted]);
   const latestPeoplePhotos = useRef(peoplePhotos); latestPeoplePhotos.current = peoplePhotos;
   const findPhotos = useMemo(() => peoplePhotos.map(photo => ({...photo, id: photo.id.slice(6)})).filter(photo => permitted.has(photo.id)), [peoplePhotos, permitted]);
@@ -1490,6 +1522,13 @@ export default function CloudApp({
               {!paused && busy && <button onClick={pause}>Pause</button>}
               <button onClick={closeAccountPanel}>Saved photos</button>
             </div>
+            {!received && ownedSnapshot?.checkText && <>
+              <h3>Find words in photos</h3>
+              <label className="local-check"><input type="checkbox" checked={savedTextConsent} onChange={event => setSavedTextConsent(event.target.checked)} />Allow local text checks</label>
+              <SavedTextCheck snapshot={ownedSnapshot} photos={savedTextPhotos} consent={savedTextConsent} active={active && unlocked && !busy}
+                scope={JSON.stringify([query, recentActive, favoritesOnly, organizationScope, [...peopleFind.filter.ids].sort(), peopleFind.filter.mode])}
+                changes={photoChanges ?? undefined} showSaveAction={false} onSync={() => setMenu(true)} />
+            </>}
             <details>
               <summary>Open on another device</summary>
               <p className="hint">Open <a href="https://fotoro.cloud/saved" target="_blank" rel="noopener">fotoro.cloud/saved</a> and enter the same Fotoro password. In another Fotoro app, choose Saved.</p>
