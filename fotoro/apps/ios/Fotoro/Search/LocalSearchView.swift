@@ -310,6 +310,14 @@ struct ConsumerSearchResultsView: View {
         SearchPeopleSummary(search: search, edit: editPeople)
       }
       SearchAlternatives(search: search, selected: choseAlternative)
+      if review == nil, search.response.truncated {
+        Text("Showing up to 200 of \(search.response.totalMatches) indexed matches. Refine your search to narrow them.")
+          .font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+      }
+      if search.response.truncated {
+        Text("Showing up to 200 of \(search.response.totalMatches) indexed matches. Refine your search to narrow them.")
+          .font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+      }
       if matches.isEmpty {
         SearchEmptyResults(search: search, searchPending: searchPending, visualPending: visualPending, finished: searchFinished, reviewing: review != nil, failure: searchFailure, retry: retrySearch)
       } else {
@@ -516,11 +524,13 @@ struct LocalPhotoDetails: View {
             }
           }
           if let error = search.error { Text(error).font(.caption).foregroundStyle(.secondary) }
-          if let meaning = search.response.meaning,
+          if search.response.meaning != nil,
             search.matchingPhotos.contains(where: { $0.id == photo.id })
           {
             Section("Search") {
-              Text(meaning.display)
+              if let meaning = search.response.meanings.first(where: { $0.id == search.meaningID(for: photo.id) }) {
+                Text(meaning.display)
+              }
               if let hit = search.response.results.first(where: { $0.id == photo.id || $0.children.contains(photo.id) }) {
                 Text(hit.reason).font(.caption).foregroundStyle(.secondary)
               }

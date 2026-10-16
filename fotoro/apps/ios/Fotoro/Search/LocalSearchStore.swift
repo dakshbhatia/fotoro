@@ -1221,17 +1221,18 @@ enum SearchMetadataIntake {
     } catch { self.error = error.localizedDescription }
   }
   func confirm(_ photoID: String, meaningID: String? = nil) {
-    guard let index, let meaning = meaningID ?? response.meaning?.id else { return }
+    guard let index, let meaning = meaningID ?? self.meaningID(for: photoID) else { return }
     do { try index.confirmUse(meaning, photoID: photoID, scope: response.scope, sessionID: sessionID, now: Date()) } catch
     { self.error = error.localizedDescription }
   }
   func pin(_ photoID: String) {
-    guard let index, let meaning = response.meaning else { return }
+    guard let index, let meaning = meaningID(for: photoID) else { return }
     do {
-      try index.pinRepresentative(meaning.id, photoID: photoID, scope: response.scope)
+      try index.pinRepresentative(meaning, photoID: photoID, scope: response.scope)
       updateQuery(query)
     } catch { self.error = error.localizedDescription }
   }
+  func meaningID(for photoID: String) -> String? { response.meaningID(for: photoID) }
   func clearSyncedAnnotations() {
     do { try index?.clearSyncedAnnotations(); organizationGeneration &+= 1; updateQuery(query) }
     catch { self.error = error.localizedDescription }

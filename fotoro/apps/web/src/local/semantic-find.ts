@@ -1,6 +1,7 @@
 import type {LocalPhoto} from "./resources";
 import {diagnose, type DiagnosticContext} from "../diagnostics";
 import type {SearchResult} from "./search";
+import {searchMatchReceipts} from "./search";
 import {ConsumerPreviewResources} from "../library/consumer-search";
 import {parseNaturalDateQuery} from "./natural-date";
 import {SEMANTIC_DIMENSIONS, SEMANTIC_THRESHOLD} from "./semantic-config";
@@ -45,13 +46,16 @@ export function permitsSemanticMatches(base: SearchResult, committedMeaning?: st
 export function addSemanticMatches(base: SearchResult, scores: ReadonlyMap<string, number>, permitted: ReadonlySet<string>, committedMeaning?: string): SearchResult {
   if (!permitsSemanticMatches(base, committedMeaning)) return base;
   const ranked = [...scores].filter(([id, score]) => permitted.has(id) && Number.isFinite(score) && score >= SEMANTIC_THRESHOLD)
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 100).map(([id]) => id);
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([id]) => id);
   if (!ranked.length) return base;
-  const photoIds = [...new Set([...base.photoIds, ...ranked])];
+  const matches = {...searchMatchReceipts(base)};
+  for (const id of ranked) matches[id] ??= {meaningId: "semantic:" + base.query, term: base.query, kind: "visual", evidence: "visual"};
+  const photoIds = [...new Set([...base.photoIds, ...ranked.slice(0, 100)])].slice(0, 200);
   const meaning = base.meaning ? {...base.meaning, photoIds, evidence: {...base.meaning.evidence,
     ...Object.fromEntries(ranked.filter(id => !base.photoIds.includes(id)).map(id => [id, "visual" as const]))}} : {id: "semantic:" + base.query, term: base.query, kind: "visual" as const,
     photoIds: ranked, evidence: Object.fromEntries(ranked.map(id => [id, "visual" as const]))};
-  return {...base, photoIds, photoId: base.photoId ?? photoIds[0], meaning,
+  return {...base, photoIds, photoId: base.photoId ?? photoIds[0], meaning, matches,
+    totalMatches: Object.keys(matches).length, truncated: photoIds.length < Object.keys(matches).length,
     meanings: base.meaning ? base.meanings : [meaning]};
 }
 

@@ -248,10 +248,11 @@ final class SearchIndex: @unchecked Sendable {
     return values
   }
   #if !FOTORO_LOCAL_PREVIEW
-  func pendingSemanticRecords(after: String? = nil, limit: Int = 64, scope: PhotoAnalysisScope? = nil) throws -> [SearchRecord] {
+  func pendingSemanticRecords(after: String? = nil, limit: Int = 64, scope: PhotoAnalysisScope? = nil, now: Date = Date()) throws -> [SearchRecord] {
     var conditions = ["(? IS NULL OR r.id>?)",
-      "(v.photo IS NULL OR v.processor!=? OR v.revision!=json_extract(r.value,'$.revision'))"]
-    var arguments: StatementArguments = [after, after, SemanticVector.processor]
+      "(v.photo IS NULL OR v.processor!=? OR v.revision!=json_extract(r.value,'$.revision'))",
+      "NOT EXISTS(SELECT 1 FROM searchAnalysisAttempts a WHERE a.photo=r.id AND a.stage='semantic' AND a.revision=json_extract(r.value,'$.revision') AND a.processor=? AND a.retryAfter>?)"]
+    var arguments: StatementArguments = [after, after, SemanticVector.processor, SemanticVector.processor, now.timeIntervalSince1970]
     if let scope {
       conditions.append("r.scope='saved'")
       if let from = scope.scope.from { conditions.append("r.capture>=?"); arguments += [from.timeIntervalSince1970] }
@@ -264,6 +265,26 @@ final class SearchIndex: @unchecked Sendable {
         SELECT r.value FROM searchRecords r LEFT JOIN searchVectors v ON v.photo=r.id
         WHERE \(condition) ORDER BY r.id LIMIT ?
         """, arguments: arguments + [max(1, min(limit, 128))]).map(decode)
+    }
+  }
+  func savedSemanticRetryStatus(scope: PhotoAnalysisScope, now: Date = Date()) throws -> (deferred: Int, failed: Int, nextRetry: Date?) {
+    var conditions = ["r.scope='saved'", "(v.photo IS NULL OR v.processor!=? OR v.revision!=json_extract(r.value,'$.revision'))"]
+    var arguments: StatementArguments = [now.timeIntervalSince1970, SemanticVector.processor, SemanticVector.processor]
+    if let from = scope.scope.from { conditions.append("r.capture>=?"); arguments += [from.timeIntervalSince1970] }
+    if let through = scope.scope.through { conditions.append("r.capture<=?"); arguments += [through.timeIntervalSince1970] }
+    if let until = scope.scope.until { conditions.append("r.capture<?"); arguments += [until.timeIntervalSince1970] }
+    return try database.read { db in
+      let row = try Row.fetchOne(db, sql: """
+        SELECT coalesce(sum(a.retryAfter>?),0) deferred,
+          coalesce(sum(a.outcome='failed'),0) failed,
+          min(a.retryAfter) nextRetry
+        FROM searchRecords r LEFT JOIN searchVectors v ON v.photo=r.id
+        LEFT JOIN searchAnalysisAttempts a ON a.photo=r.id AND a.stage='semantic'
+          AND a.revision=json_extract(r.value,'$.revision') AND a.processor=?
+        WHERE \(conditions.joined(separator: " AND "))
+        """, arguments: arguments)!
+      let next: Double? = row["nextRetry"]
+      return (row["deferred"], row["failed"], next.map(Date.init(timeIntervalSince1970:)))
     }
   }
   func needsSemantic(photoID: String, revision: String) throws -> Bool {
@@ -1075,6 +1096,11 @@ final class SearchIndex: @unchecked Sendable {
       return try fullText(q, response: response, scope: scope, now: now, db: db)
     }
     response.meaning = meaning
+    response.totalMatches = meaning.eligibleCount
+    if acceptedMeaningID != meaning.id {
+      return try uncommittedPrefix(q, response: response, scope: scope, previous: previous,
+        previousQuery: previousQuery, now: now, db: db)
+    }
     let useSQL =
       "coalesce((SELECT sum(searchDecay(e.at,\(now.timeIntervalSince1970))) FROM searchEvents e WHERE e.kind='use' AND e.meaning=p.meaning AND e.photo=r.id AND e.scope=?),0)"
     let base =
@@ -1154,6 +1180,77 @@ final class SearchIndex: @unchecked Sendable {
     response.results = grouped
     return response
   }
+  // Keep the suggestion list small, but retrieve supported photos across every
+  // completion until the owner explicitly narrows to one meaning. SQLite does
+  // the union, evidence selection and count before admitting 200 result rows.
+  private func uncommittedPrefix(_ q: String, response: SearchResponse, scope: SearchScope,
+    previous: SearchResponse?, previousQuery: String, now: Date, db: Database) throws -> SearchResponse {
+    var response = response
+    let (condition, scopeArgs) = filter(scope)
+    let order = "exact DESC,accepted DESC,meaningMoment DESC,meaningEvidence ASC,term ASC,meaning ASC,pinned DESC,evidence ASC,uses DESC,moment DESC,favorite DESC,capture DESC,confidence DESC,id ASC"
+    var arguments: StatementArguments = [q, now.timeIntervalSince1970, now.timeIntervalSince1970, scope.key,
+      now.timeIntervalSince1970, scope.key, scope.key, q, q + "\u{10ffff}", Self.permitsTermPrefix(q), q]
+    arguments += scopeArgs
+    arguments += [previous?.leading?.id ?? ""]
+    let rows = try Row.fetchAll(db, sql: """
+      WITH supported AS (
+        SELECT p.meaning,min(t.term) term,r.id,r.preview,r.burst,p.evidence,p.confidence,r.favorite,r.moment,
+          CASE WHEN r.capture<=?2 THEN r.capture END capture,max(t.term=?1) exact,
+          coalesce((SELECT sum(searchDecay(e.at,?3)) FROM searchEvents e
+            WHERE e.kind='accept' AND e.meaning=p.meaning AND e.scope=?4),0) accepted,
+          coalesce((SELECT sum(searchDecay(e.at,?5)) FROM searchEvents e
+            WHERE e.kind='use' AND e.meaning=p.meaning AND e.photo=r.id AND e.scope=?6),0) uses,
+          EXISTS(SELECT 1 FROM searchPins pin WHERE pin.meaning=p.meaning AND pin.scope=?7 AND pin.photo=r.id) pinned
+        FROM searchTerms t INDEXED BY searchTermPrefix
+        CROSS JOIN searchPostings p ON p.meaning=t.meaning
+        CROSS JOIN searchRecords r ON r.id=p.photo
+        WHERE t.term>=?8 AND t.term<?9 AND (?10 OR t.term=?11) AND \(condition)
+        GROUP BY p.meaning,r.id
+      ), meaningRanked AS (
+        SELECT *,min(evidence) OVER(PARTITION BY meaning) meaningEvidence,
+          max(moment) OVER(PARTITION BY meaning) meaningMoment FROM supported
+      ), deduped AS (
+        SELECT *,row_number() OVER(PARTITION BY id ORDER BY \(order)) choice FROM meaningRanked
+      ), bounded AS (
+        SELECT * FROM deduped WHERE choice=1 ORDER BY \(order) LIMIT 200
+      )
+      SELECT *, (SELECT count(DISTINCT id) FROM supported) matchTotal
+      FROM bounded
+      UNION ALL
+      SELECT *, (SELECT count(DISTINCT id) FROM supported) matchTotal
+      FROM deduped WHERE choice=1 AND id=? AND id NOT IN (SELECT id FROM bounded)
+      ORDER BY \(order)
+      """, arguments: arguments)
+    response.totalMatches = rows.first?["matchTotal"] ?? 0
+    var sorted = rows
+    if let previousID = previous?.leading?.id, previous?.scope == scope,
+      previous?.meaning?.id == response.meaning?.id, q.hasPrefix(previousQuery),
+      let at = sorted.firstIndex(where: { ($0["id"] as String) == previousID }),
+      let first = sorted.first,
+      (sorted[at]["evidence"] as Int) == (first["evidence"] as Int),
+      (sorted[at]["exact"] as Int) == (first["exact"] as Int),
+      (sorted[at]["accepted"] as Double) == (first["accepted"] as Double),
+      (first["pinned"] as Int) == 0 {
+      sorted.insert(sorted.remove(at: at), at: 0)
+    }
+    var grouped: [SearchHit] = [], burstPositions: [String: Int] = [:]
+    for row in sorted.prefix(200) {
+      let id: String = row["id"], meaning: String = row["meaning"], evidence: Int = row["evidence"]
+      response.matchMeanings[id] = meaning
+      let pinned: Bool = row["pinned"]
+      let hit = SearchHit(id: id, evidenceClass: evidence,
+        reason: (pinned ? "Your representative · " : "") + Self.reason(evidence: evidence),
+        pinned: pinned, previewAvailable: row["preview"])
+      let burst: String? = row["burst"]
+      if let burst, let at = burstPositions[burst] { grouped[at].children.append(id) }
+      else {
+        if let burst { burstPositions[burst] = grouped.count }
+        grouped.append(hit)
+      }
+    }
+    response.results = grouped
+    return response
+  }
   private static func reason(evidence: Int) -> String {
     switch evidence {
     case 0: return "Supplied label"
@@ -1181,6 +1278,7 @@ final class SearchIndex: @unchecked Sendable {
       relation: .metadata, evidenceClass: 1, eligibleCount: response.total)
     response.meaning = meaning
     response.meanings = [meaning]
+    response.totalMatches = response.total
     response.results = rows.map { row in
       let id: String = row["id"]
       return SearchHit(id: id, evidenceClass: 1, reason: (id == pin ? "Your representative · " : "") + "Photos metadata",
@@ -1220,9 +1318,14 @@ final class SearchIndex: @unchecked Sendable {
           CASE WHEN r.capture<=\(now.timeIntervalSince1970) THEN r.capture END DESC,r.id LIMIT 200
         """, arguments: args)
     if let first = rows.first {
+      let total = try Int.fetchOne(db, sql: """
+        SELECT count(*) FROM searchFTS JOIN searchRecords r ON r.id=searchFTS.id
+        WHERE searchFTS MATCH ? AND searchTextEvidence(r.value,?)>=0 AND \(condition)
+        """, arguments: [match, q] + scopeArgs) ?? 0
       let m = SearchMeaning(
         id: meaningID, term: q, display: q, relation: .text, evidenceClass: first["evidence"],
-        eligibleCount: rows.count)
+        eligibleCount: total)
+      response.totalMatches = total
       response.meaning = m
       response.meanings = [m]
       response.results = rows.map { row in

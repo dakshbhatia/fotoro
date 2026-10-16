@@ -2,6 +2,133 @@ import XCTest
 @testable import Fotoro
 
 final class SavedTextAnalysisTests: XCTestCase {
+  @MainActor func testSavedSemanticRetryKeepsOneReplacementTimerAndRechecksEarlyWake() async {
+    let retry = SavedSemanticRetry<String>()
+    var now = Date(timeIntervalSince1970: 100), calls: [String] = [], sleeps = 0
+    retry.schedule(at: Date(timeIntervalSince1970: 120), binding: "old", now: { now },
+      current: { "old" }, sleep: { _ in }, retry: { calls.append("old") })
+    retry.schedule(at: Date(timeIntervalSince1970: 130), binding: "new", now: { now },
+      current: { "new" }, sleep: { _ in
+        sleeps += 1
+        XCTAssertTrue(calls.isEmpty)
+        now = Date(timeIntervalSince1970: sleeps == 1 ? 110 : 130)
+      }, retry: { calls.append("new") })
+    await retry.waitUntilSettled()
+    XCTAssertEqual(sleeps, 2); XCTAssertEqual(calls, ["new"])
+  }
+
+  @MainActor func testSavedSemanticRetryWaitsUntilDeadlineRejectsWithdrawalAndBoundsOverdueWake() async {
+    let retry = SavedSemanticRetry<String>()
+    var now = Date(timeIntervalSince1970: 100), binding: String? = "account-a"
+    var calls = 0, sleeps: [Duration] = []
+    retry.schedule(at: Date(timeIntervalSince1970: 130), binding: "account-a", now: { now },
+      current: { binding }, sleep: { delay in
+        sleeps.append(delay); XCTAssertEqual(calls, 0); now = Date(timeIntervalSince1970: 130)
+      }, retry: { calls += 1 })
+    await retry.waitUntilSettled()
+    XCTAssertEqual(sleeps, [.seconds(30)]); XCTAssertEqual(calls, 1)
+    retry.schedule(at: Date(timeIntervalSince1970: 160), binding: "account-a", now: { now },
+      current: { binding }, sleep: { _ in binding = "account-b"; now = Date(timeIntervalSince1970: 160) },
+      retry: { calls += 1 })
+    await retry.waitUntilSettled()
+    XCTAssertEqual(calls, 1)
+    binding = "account-a"
+    retry.schedule(at: Date(timeIntervalSince1970: 190), binding: "account-a", now: { now },
+      current: { binding }, sleep: { _ in retry.cancel(); now = Date(timeIntervalSince1970: 190) }, retry: { calls += 1 })
+    await retry.waitUntilSettled()
+    XCTAssertEqual(calls, 1)
+    retry.schedule(at: Date(timeIntervalSince1970: 180), binding: "account-a", now: { now },
+      current: { binding }, sleep: { delay in
+        XCTAssertEqual(delay, .milliseconds(500)); now = Date(timeIntervalSince1970: 190.5)
+      }, retry: { calls += 1 })
+    await retry.waitUntilSettled()
+    XCTAssertEqual(calls, 2)
+  }
+
+  @MainActor func testContinuationResumesCompletedPageAfterControllerRecreationAndIsolatesAccounts() async {
+    let name = "fotoro-ocr-tests-" + UUID().uuidString
+    let preferences = UserDefaults(suiteName: name)!
+    defer { preferences.removePersistentDomain(forName: name) }
+    var cursorSeen: String?
+    let load: SavedTextAnalysis<Int>.Load = { cursor, limit in
+      XCTAssertEqual(limit, 25); cursorSeen = cursor
+      return .init(sources: [1], nextCursor: "page-one", hasMore: true)
+    }
+    let first = SavedTextAnalysis<Int>()
+    first.bindContinuation(preferences: preferences, identity: ["https://one.example", "account-a", "/catalog/a"])
+    first.start(current: { true }, load: load, state: { _ in .checked },
+      recognize: { _ in XCTFail("Completed OCR must be skipped"); return .init(text: "", confidence: 0) }, commit: { _, _ in false })
+    await first.waitUntilSettled()
+    let second = SavedTextAnalysis<Int>()
+    second.bindContinuation(preferences: preferences, identity: ["https://one.example", "account-a", "/catalog/a"])
+    XCTAssertTrue(second.canResume)
+    second.start(nextBatch: second.resumeNextBatch, current: { true }, load: load, state: { _ in .checked },
+      recognize: { _ in .init(text: "", confidence: 0) }, commit: { _, _ in false })
+    await second.waitUntilSettled()
+    XCTAssertEqual(cursorSeen, "page-one")
+    for identity in [["https://one.example", "account-b", "/catalog/a"],
+      ["https://two.example", "account-a", "/catalog/a"], ["https://one.example", "account-a", "/catalog/b"]] {
+      second.bindContinuation(preferences: preferences, identity: identity)
+      XCTAssertFalse(second.canResume)
+    }
+  }
+
+  @MainActor func testUnlockResetRetainsNextPageAndStoppedNextPageResumesItsStart() async {
+    let name = "fotoro-ocr-tests-" + UUID().uuidString
+    let preferences = UserDefaults(suiteName: name)!
+    defer { preferences.removePersistentDomain(forName: name) }
+    let identity = ["https://one.example", "account-a", "/catalog/a"]
+    let analysis = SavedTextAnalysis<Int>()
+    analysis.bindContinuation(preferences: preferences, identity: identity)
+    var cursors: [String?] = []
+    let load: SavedTextAnalysis<Int>.Load = { cursor, _ in
+      cursors.append(cursor); return .init(sources: [1], nextCursor: cursor == nil ? "page-one" : "page-two", hasMore: true)
+    }
+    analysis.start(current: { true }, load: load, state: { _ in .checked },
+      recognize: { _ in .init(text: "", confidence: 0) }, commit: { _, _ in false })
+    await analysis.waitUntilSettled()
+    analysis.reset() // Vault lock clears presentation, not the persisted bookmark.
+    analysis.bindContinuation(preferences: preferences, identity: identity)
+    XCTAssertTrue(analysis.canResume)
+    analysis.start(nextBatch: analysis.resumeNextBatch, current: { true }, load: load, state: { _ in .missing },
+      recognize: { _ in analysis.stop(); return .init(text: "", confidence: 0) }, commit: { _, _ in false })
+    await analysis.waitUntilSettled()
+    let recreated = SavedTextAnalysis<Int>()
+    recreated.bindContinuation(preferences: preferences, identity: identity)
+    recreated.start(nextBatch: recreated.resumeNextBatch, current: { true }, load: load, state: { _ in .checked },
+      recognize: { _ in .init(text: "", confidence: 0) }, commit: { _, _ in false })
+    await recreated.waitUntilSettled()
+    XCTAssertEqual(cursors.count, 3)
+    XCTAssertNil(cursors[0]); XCTAssertEqual(cursors[1], "page-one"); XCTAssertEqual(cursors[2], "page-one")
+  }
+
+  @MainActor func testStoppedContinuationRetriesCurrentPageAndStartOverClearsPosition() async {
+    let name = "fotoro-ocr-tests-" + UUID().uuidString
+    let preferences = UserDefaults(suiteName: name)!
+    defer { preferences.removePersistentDomain(forName: name) }
+    let identity = ["https://one.example", "account-a", "/catalog/a"]
+    let first = SavedTextAnalysis<Int>()
+    first.bindContinuation(preferences: preferences, identity: identity)
+    var cursors: [String?] = []
+    let load: SavedTextAnalysis<Int>.Load = { cursor, _ in
+      cursors.append(cursor); return .init(sources: [1, 2], nextCursor: "end", hasMore: true)
+    }
+    first.start(current: { true }, load: load, state: { _ in .missing },
+      recognize: { _ in first.stop(); return .init(text: "", confidence: 0) }, commit: { _, _ in false })
+    await first.waitUntilSettled()
+    let second = SavedTextAnalysis<Int>()
+    second.bindContinuation(preferences: preferences, identity: identity)
+    second.start(nextBatch: second.resumeNextBatch, current: { true }, load: load, state: { _ in .checked },
+      recognize: { _ in .init(text: "", confidence: 0) }, commit: { _, _ in false })
+    await second.waitUntilSettled()
+    XCTAssertEqual(cursors.count, 2); XCTAssertNil(cursors[1])
+    second.startOver()
+    XCTAssertFalse(second.canResume); XCTAssertFalse(second.hasMore)
+    let third = SavedTextAnalysis<Int>()
+    third.bindContinuation(preferences: preferences, identity: identity)
+    XCTAssertFalse(third.canResume)
+  }
+
   @MainActor func testAdmissionAndRecognitionAreBoundedTo25WithoutScanningTheCatalog() async {
     let analysis = SavedTextAnalysis<Int>()
     var requested: [Int] = [], recognized: [Int] = [], saved: [Int] = []

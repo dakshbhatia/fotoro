@@ -128,12 +128,22 @@ OCR through the existing serialized encrypted annotation writer. Existing text
 and concurrent corrections are preserved; Save changes carries kept text to
 other devices. Received photos are excluded. This does not expand automatic
 analysis beyond the existing Latest 10 days policy.
+Native Saved text checking retains its batch position across relaunch and
+unlock, scoped to the account, origin and local catalog. Resume continues a
+completed page or retries an interrupted one; Start over clears only that
+continuation. Saved semantic failures use durable source/revision/processor retry
+deadlines and one admitted wakeup, with aggregate waiting status.
 
 When no direct word, phrase or filename meaning matches, browser search can
 find separated words in the same OCR, caption, keyword or filename field, in
 either order. It reuses indexed tokens and yields during longer checks. Numeric
 identifiers remain exact; separate fields do not become invented joint evidence.
 This is text retrieval, not general semantic understanding.
+
+Typing without accepting a completion shows supported photos across matching
+meanings, with per-photo provenance and correction history. Choosing a completion
+narrows deliberately. At most 200 results are displayed; larger totals remain
+visible. Display limits do not mean the other indexed photos are missing.
 
 Filename previews use completed, source-bound analysis only. OCR naming accepts
 known processors and a confidence gate of 0.8, considers at most the first 12

@@ -470,6 +470,26 @@ struct PhotoPreviewProgress {
     return RecentPhotosPresentationValidation(viewerIsCurrent: viewer.allSatisfy(available),
       selectedIDs: Set(selection.filter(available).map(\.id)), shareIsCurrent: share.allSatisfy(available))
   }
+  // Large presentation snapshots are checked in bounded actor turns. This is
+  // withdrawal-only validation; export paths retain their immediate checks.
+  func validatePresentationInBatches(viewer: [RecentPhotoSource], selection: [RecentPhotoSource],
+    share: [RecentPhotoSource], isCurrent: @escaping @MainActor () -> Bool) async throws -> RecentPhotosPresentationValidation {
+    let generation = thumbnailGeneration
+    let permission = authorization()
+    let denied = RecentPhotosPresentationValidation(viewerIsCurrent: false, selectedIDs: [], shareIsCurrent: false)
+    guard RecentPhotosPolicy.canRead(permission) else { return denied }
+    let valid = try await PhotoPresentationValidation.validate(viewer + selection + share,
+      authorization: {
+        let permission = self.authorization()
+        return RecentPhotosPolicy.canRead(permission) ? permission.rawValue : nil
+      }, isCurrent: { isCurrent() && self.thumbnailGeneration == generation }, read: { sources in
+        let revisions = self.sourceRevisions(Array(Set(sources.map(\.id))))
+        return Set(sources.filter { revisions[$0.id] == $0.revision })
+      })
+    guard authorization() == permission else { return denied }
+    return RecentPhotosPresentationValidation(viewerIsCurrent: viewer.allSatisfy(valid.contains),
+      selectedIDs: Set(selection.filter(valid.contains).map(\.id)), shareIsCurrent: share.allSatisfy(valid.contains))
+  }
   private static func currentSourceRevisions(_ ids: [String]) -> [String: String] {
     var result: [String: String] = [:]
     PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil).enumerateObjects { asset, _, _ in

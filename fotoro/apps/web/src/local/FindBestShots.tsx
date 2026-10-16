@@ -5,7 +5,7 @@ export function selectionCandidates(photos: readonly LocalPhoto[], recommendatio
   return photos.filter(photo => recommendations.ids.has(photo.id) && photo.current?.() !== false);
 }
 
-export function FindBestShots({total, review, showCount = false, onSelect, disabled = false}: {total: number; showCount?: boolean; onSelect?: () => void; disabled?: boolean; review: {
+export function FindBestShots({total, availableTotal, review, showCount = false, onSelect, disabled = false}: {total: number; availableTotal?: number; showCount?: boolean; onSelect?: () => void; disabled?: boolean; review: {
   active: boolean; busy: boolean; done: number; recommendations?: PhotoRecommendations; toggle: () => void;
 }}) {
   const unavailable = review.recommendations?.unassessed ?? 0;
@@ -14,6 +14,6 @@ export function FindBestShots({total, review, showCount = false, onSelect, disab
     {onSelect && review.active && !review.busy && !!review.recommendations?.ids.size && <button disabled={disabled} onClick={onSelect}>Select best shots</button>}
     {(review.active || showCount) && <p role="status">{review.active ? review.busy ? `Choosing best shots… ${review.done} of ${total}`
       : `${review.recommendations?.ids.size ?? 0} of ${total} matches${unavailable ? ` · ${unavailable} ${unavailable === 1 ? "preview" : "previews"} unavailable` : ""}`
-      : `${total} ${total === 1 ? "match" : "matches"}`}</p>}
+      : availableTotal !== undefined && availableTotal > total ? `${total} of ${availableTotal} matches` : `${total} ${total === 1 ? "match" : "matches"}`}</p>}
   </section>;
 }

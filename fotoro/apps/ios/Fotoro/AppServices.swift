@@ -126,6 +126,9 @@ enum ReviewedPhotosBackupPolicy {
   @ObservationIgnored private weak var localSearch: LocalSearchStore?
   @ObservationIgnored private var savedVisualIndex: SearchIndex?
   @ObservationIgnored private var savedVisualRoot: URL?
+  private(set) var savedSemanticDeferred = 0
+  private(set) var savedSemanticFailed = 0
+  private(set) var savedSemanticNextRetry: Date?
   @ObservationIgnored private var savedVisualTask: Task<Void, Never>?
   @ObservationIgnored private var savedVisualWork = UUID()
   private struct SavedSemanticSnapshot: Equatable {
@@ -135,6 +138,7 @@ enum ReviewedPhotosBackupPolicy {
     let index: ObjectIdentifier
     let analysisWindow: PhotoAnalysisWindow
   }
+  @ObservationIgnored private var savedSemanticRetry = SavedSemanticRetry<SavedSemanticSnapshot>()
   @ObservationIgnored private var savedVisualRunningSnapshot: SavedSemanticSnapshot?
   @ObservationIgnored private var savedVisualSuccessorForWork: UUID?
   @ObservationIgnored private var savedVisualCatalogGeneration: UInt64?
@@ -369,7 +373,22 @@ enum ReviewedPhotosBackupPolicy {
   var savedTextCheckAvailable: Bool {
     photoAccountAccess != nil && photoSyncForeground && (try? store.uploadsPaused()) == false
   }
-  func checkSavedText(nextBatch: Bool = false) {
+  func prepareSavedTextContinuation() {
+    guard let access = photoAccountAccess, let origin = BackgroundUploadPolicy.origin(api.baseURL) else {
+      savedTextAnalysis.reset()
+      return
+    }
+    savedTextAnalysis.bindContinuation(preferences: .standard,
+      identity: [origin, access.account, store.root.standardizedFileURL.path])
+  }
+  func startSavedTextOver() {
+    guard savedTextCheckAvailable, !savedTextAnalysis.running else { return }
+    prepareSavedTextContinuation()
+    savedTextAnalysis.startOver()
+    checkSavedText()
+  }
+  func checkSavedText(nextBatch: Bool = false, resume: Bool = false) {
+    prepareSavedTextContinuation()
     guard savedTextCheckAvailable, let access = photoAccountAccess,
       let origin = BackgroundUploadPolicy.origin(api.baseURL),
       let bundle = try? vault.requireBundle(), let card = try? session.requireCard(access.account) else { return }
@@ -393,7 +412,7 @@ enum ReviewedPhotosBackupPolicy {
         let url = photo.previewURL, FileManager.default.fileExists(atPath: url.path) else { return .unavailable }
       return .missing
     }
-    savedTextAnalysis.start(nextBatch: nextBatch, current: current, load: { cursor, limit in
+    savedTextAnalysis.start(nextBatch: nextBatch || (resume && savedTextAnalysis.resumeNextBatch), current: current, load: { cursor, limit in
       guard current() else { throw CancellationError() }
       // Admission is one bounded owner page, including already checked rows.
       // Never scan the full catalog to fill an inference batch.
@@ -463,6 +482,7 @@ enum ReviewedPhotosBackupPolicy {
       savedVisualUnpublishedIndex = nil
     }
     if savedVisualTask == nil {
+      savedSemanticRetry.cancel()
       let work = UUID(); savedVisualWork = work
       savedVisualFence &+= 1
       let fence = savedVisualFence
@@ -510,15 +530,31 @@ enum ReviewedPhotosBackupPolicy {
             guard current(), !pending.isEmpty else { break }
             after = pending.last?.id
             for record in pending {
-              guard current(), let photo = try consumerSavedPhoto(record.id),
-                photo.metadata.originalSha256 == record.revision else { continue }
+              guard current() else { return }
+              guard let photo = try consumerSavedPhoto(record.id),
+                photo.metadata.originalSha256 == record.revision else {
+                  _ = try await Task.detached(priority: .utility) {
+                    try index.deferSemantic(.unavailable, photoID: record.id, revision: record.revision,
+                      attemptedAt: Date(), generation: fence)
+                  }.value
+                  continue
+                }
+              var failureOutcome = SearchAnalysisOutcome.unavailable
               do {
                 try await ensurePreview(photo)
                 guard current(), let updated = try consumerSavedPhoto(photo.id),
-                  updated.metadata == photo.metadata, updated.manifest == photo.manifest,
-                  let url = updated.previewURL,
-                  let preview = try await Self.semanticPreview(url) else { continue }
+                  updated.metadata == photo.metadata, updated.manifest == photo.manifest else { continue }
+                guard let url = updated.previewURL,
+                  let preview = try await Self.semanticPreview(url) else {
+                    guard current() else { return }
+                    _ = try await Task.detached(priority: .utility) {
+                      try index.deferSemantic(.unavailable, photoID: record.id, revision: record.revision,
+                        attemptedAt: Date(), generation: fence)
+                    }.value
+                    continue
+                  }
                 guard current() else { return }
+                failureOutcome = .failed
                 let vector: [Float]
                 #if DEBUG
                   if let savedVisualEmbedding { vector = try await savedVisualEmbedding(preview) }
@@ -533,19 +569,61 @@ enum ReviewedPhotosBackupPolicy {
                 }.value
                 if applied { savedVisualUnpublishedIndex = ObjectIdentifier(index) }
                 guard current() else { return }
-                guard applied else { continue }
+                guard applied else {
+                  _ = try await Task.detached(priority: .utility) {
+                    try index.deferSemantic(.failed, photoID: record.id, revision: record.revision,
+                      attemptedAt: Date(), generation: fence)
+                  }.value
+                  continue
+                }
                 completed += 1
                 if completed % 8 == 0 { notifyProgress() }
-              } catch is CancellationError { return } catch { continue }
+              } catch is CancellationError { return } catch {
+                guard current() else { return }
+                let outcome = failureOutcome
+                _ = try? await Task.detached(priority: .utility) {
+                  try index.deferSemantic(outcome, photoID: record.id, revision: record.revision,
+                    attemptedAt: Date(), generation: fence)
+                }.value
+                continue
+              }
               await Task.yield()
             }
           }
           if current(), savedVisualUnpublishedIndex == ObjectIdentifier(index) { notifyProgress() }
+          if current() { await refreshSavedSemanticRetryStatus() }
+          if current(), let deadline = savedSemanticNextRetry {
+            savedSemanticRetry.schedule(at: deadline, binding: snapshot,
+              current: { current() ? snapshot : nil },
+              retry: { [weak self] in self?.startSavedSemanticAnalysis() })
+          }
         } catch {}
       }
     }
   }
+  func refreshSavedSemanticRetryStatus() async {
+    guard let index = savedVisualIndex, let access = photoAccountAccess,
+      savedVisualSnapshotAccess == access, savedVisualSnapshotCatalog == ObjectIdentifier(store),
+      savedVisualCatalogGeneration == consumerCatalogGeneration,
+      savedVisualSnapshotOrigin == BackgroundUploadPolicy.origin(api.baseURL) else {
+      savedSemanticDeferred = 0; savedSemanticFailed = 0; savedSemanticNextRetry = nil
+      return
+    }
+    let window = localSearch?.automaticAnalysisWindow ?? .tenDays
+    let scope = window.scope(now: Date()), catalogGeneration = consumerCatalogGeneration
+    let origin = BackgroundUploadPolicy.origin(api.baseURL)
+    guard let status = try? await Task.detached(priority: .utility, operation: {
+      try index.savedSemanticRetryStatus(scope: scope)
+    }).value else { return }
+    guard photoAccountAccess == access, savedVisualIndex === index,
+      consumerCatalogGeneration == catalogGeneration, BackgroundUploadPolicy.origin(api.baseURL) == origin,
+      (localSearch?.automaticAnalysisWindow ?? .tenDays) == window else { return }
+    savedSemanticDeferred = status.deferred; savedSemanticFailed = status.failed
+    savedSemanticNextRetry = status.nextRetry
+  }
   private func invalidateSavedVisualSearch() {
+    savedSemanticRetry.cancel()
+    savedSemanticDeferred = 0; savedSemanticFailed = 0; savedSemanticNextRetry = nil
     savedVisualTask?.cancel()
     savedVisualFence &+= 1
     try? savedVisualIndex?.setWorkGeneration(savedVisualFence)

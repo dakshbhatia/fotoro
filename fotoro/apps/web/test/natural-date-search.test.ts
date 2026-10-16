@@ -163,7 +163,8 @@ test("compound dates require independent existing text evidence inside the perio
   const textual = label.meanings.find(meaning => meaning.kind === "caption")!;
   assert.deepEqual(new Set(textual.photoIds), new Set(["caption", "filename", "ocr"]));
   assert.deepEqual(textual.evidence, {caption: "caption", filename: "filename", ocr: "ocr"});
-  assert.deepEqual(index.search("last month beach", {now}).photoIds, ["label"]);
+  assert.deepEqual(index.search("last month beach", {now}).photoIds, ["label", "caption", "filename", "ocr"]);
+  assert.deepEqual(index.search("last month beach", {now, committedMeaning: label.meaning!.id}).photoIds, ["label"]);
   assert.equal(index.search("Ronald last month", {now}).photoId, undefined);
   assert.equal(index.search("beach yesterday", {now}).photoId, undefined);
   assert.equal(index.search("a beach last month", {now}).meaning?.evidence.caption, "caption");

@@ -319,7 +319,10 @@ struct RecentPhotoViewer: View {
     else { return false }
     return RecentPhotosPolicy.shouldLoadPage(index, current: current)
   }
-  var current: RecentPhoto? { photos.first { $0.id == selected } }
+  var current: RecentPhoto? {
+    guard let index = photoIndices[selected], photos.indices.contains(index) else { return nil }
+    return photos[index]
+  }
   var body: some View {
     NavigationStack {
       TabView(selection: $selected) {
@@ -386,6 +389,7 @@ struct RecentPhotoViewer: View {
 }
 
 private struct RecentPhotoViewerPresentation: Identifiable {
+  let validationID = UUID()
   let initial: RecentPhoto
   let photos: [RecentPhoto]
   let sources: [RecentPhotoSource]
@@ -396,6 +400,7 @@ private struct RecentPhotoViewerPresentation: Identifiable {
 }
 
 private struct SelectedRecentPhoto {
+  let validationID = UUID()
   let photo: RecentPhoto
   let source: RecentPhotoSource
   init(_ photo: RecentPhoto) { self.photo = photo; source = RecentPhotoSource(photo) }
@@ -523,15 +528,17 @@ struct RecentPhotosView: View {
   @State private var savedCatalogProjection = PhotoBrowseValueProjection<SavedPhotoCatalogProjectionID, SavedPhotoCatalogSnapshot>()
   @State private var savedProjection = PhotoBrowseValueProjection<SavedPhotoBrowseProjectionID, SavedPhotoBrowseSnapshot>()
   #endif
+  @State private var presentationValidationTask: Task<Void, Never>?
+  @State private var presentationValidationID = UUID()
   @State private var viewer: RecentPhotoViewerPresentation?
   @State private var pendingShare: RecentPhoto?
   @State private var shareTask: Task<Void, Never>?
   @State private var sharing: [URL] = []
   @State private var showShare = false
   @State private var preparingShare = false
-  @State private var shareMeaning: String?
-  @State private var sharedPhotoIDs: [String] = []
+  @State private var sharedMeanings: [String: String] = [:]
   @State private var shareSources: [RecentPhotoSource] = []
+  @State private var shareValidationID = UUID()
   @State private var settings = false
   @State private var places: PhotoPlacesPresentation?
   #if !FOTORO_LOCAL_PREVIEW
@@ -991,8 +998,8 @@ struct RecentPhotosView: View {
         }
         .sheet(isPresented: $showShare, onDismiss: cleanupShare) {
           OriginalShareSheet(urls: sharing) { success in
-            if success, let meaning = shareMeaning {
-              for id in sharedPhotoIDs { search.confirm(id, meaningID: meaning) }
+            if success {
+              for (id, meaning) in sharedMeanings { search.confirm(id, meaningID: meaning) }
             }
             cleanupShare()
           }
@@ -1098,6 +1105,7 @@ struct RecentPhotosView: View {
         }
         .onDisappear {
           homeVisible = false
+          presentationValidationTask?.cancel(); presentationValidationTask = nil
           #if !FOTORO_LOCAL_PREVIEW
           cancelSearchPreview(reason: .inactive)
           #endif
@@ -1159,6 +1167,7 @@ struct RecentPhotosView: View {
       updateAutomaticAnalysisAdmission()
       if homeVisible { restorePhotos() }
     } else {
+      presentationValidationTask?.cancel(); presentationValidationTask = nil
       updateAutomaticAnalysisAdmission()
       cancelBestShots()
 #if !FOTORO_LOCAL_PREVIEW
@@ -2124,27 +2133,55 @@ struct RecentPhotosView: View {
 #endif
   }
   private func validatePhotosPresentation() {
-    let selection = selectedPhotos.values.map(\.source)
+    presentationValidationTask?.cancel()
+    let token = UUID()
+    presentationValidationID = token
+    let viewerSources = viewer?.sources ?? []
+    let viewerID = viewer?.validationID
+    let selectionIDs = selectedPhotos.mapValues(\.validationID)
+    let shareID = shareValidationID
+    let selection = Set(selectedPhotos.values.map(\.source))
     let pending = pendingShare.map { [RecentPhotoSource($0)] } ?? []
-    let validation = store.validatePresentation(viewer: viewer?.sources ?? [], selection: selection,
-      share: shareSources + pending)
-    let previousCount = selectedPhotos.count
-    selectedPhotos = selectedPhotos.filter { validation.selectedIDs.contains($0.key) }
-    if previousCount > selectedPhotos.count {
-      store.error = "Some selected photos changed or are no longer available."
-    }
-    if validation.withdrawsDeviceShare(shareSources + pending) {
-      pendingShare = nil
-      shareTask?.cancel()
-      cleanupShare()
-    }
-    if !validation.viewerIsCurrent { viewer = nil }
+    let shares = shareSources
 #if !FOTORO_LOCAL_PREVIEW
-    if let photo = pendingSavePhoto,
-      !store.validatePresentation(viewer: [], selection: [], share: [RecentPhotoSource(photo)]).shareIsCurrent {
-      pendingSavePhoto = nil
-    }
+    let pendingSave = pendingSavePhoto.map(RecentPhotoSource.init)
 #endif
+    let current: @MainActor () -> Bool = {
+      presentationValidationID == token && scenePhase == .active
+    }
+    presentationValidationTask = Task { @MainActor in
+      defer { if presentationValidationID == token { presentationValidationTask = nil } }
+      do {
+        let validation = try await store.validatePresentationInBatches(viewer: viewerSources,
+          selection: Array(selection), share: shares + pending, isCurrent: current)
+        try Task.checkCancellation()
+        guard current() else { return }
+        // Each surface withdraws only the identities this pass inspected. A
+        // newly selected B must not shield unchanged stale A from withdrawal.
+        let withdrawn = PhotoPresentationValidation.withdrawnSelection(captured: selectionIDs,
+          current: selectedPhotos.mapValues(\.validationID), valid: validation.selectedIDs)
+        if !withdrawn.isEmpty {
+          selectedPhotos = selectedPhotos.filter { !withdrawn.contains($0.key) }
+          store.error = "Some selected photos changed or are no longer available."
+        }
+        if shareValidationID == shareID, shareSources == shares,
+          (pendingShare.map { [RecentPhotoSource($0)] } ?? []) == pending,
+          validation.withdrawsDeviceShare(shares + pending) {
+          pendingShare = nil
+          shareTask?.cancel()
+          cleanupShare()
+        }
+        if viewer?.validationID == viewerID, !validation.viewerIsCurrent { viewer = nil }
+#if !FOTORO_LOCAL_PREVIEW
+        if pendingSavePhoto.map(RecentPhotoSource.init) == pendingSave, let photo = pendingSavePhoto,
+          !store.validatePresentation(viewer: [], selection: [], share: [RecentPhotoSource(photo)]).shareIsCurrent {
+          pendingSavePhoto = nil
+        }
+#endif
+      } catch is CancellationError {
+        // A superseded snapshot must never withdraw newer UI or publish errors.
+      } catch { }
+    }
   }
   private func restorePhotos() {
     store.restoreAccess()
@@ -2386,6 +2423,7 @@ struct RecentPhotosView: View {
     guard !preparingShare, !showShare, !photos.isEmpty else { return }
     preparingShare = true
     let sources = photos.map(RecentPhotoSource.init)
+    shareValidationID = UUID()
     shareSources = sources
     shareTask = Task {
       defer { preparingShare = false; shareTask = nil; if !showShare { shareSources = [] } }
@@ -2395,8 +2433,9 @@ struct RecentPhotosView: View {
         try Task.checkCancellation()
         guard store.validatePresentation(viewer: [], selection: [], share: sources).shareIsCurrent else { throw CancellationError() }
         sharing = exported
-        shareMeaning = search.hasSearch ? search.response.meaning?.id : nil
-        sharedPhotoIDs = photos.map(\.id)
+        sharedMeanings = search.hasSearch ? Dictionary(photos.compactMap { photo in
+          search.meaningID(for: photo.id).map { (photo.id, $0) }
+        }, uniquingKeysWith: { first, _ in first }) : [:]
         showShare = true
       } catch is CancellationError { removeShareFiles(exported) }
       catch { removeShareFiles(exported); store.error = error.localizedDescription }
@@ -2407,6 +2446,7 @@ struct RecentPhotosView: View {
     RecentShareExports.remove(urls)
   }
   private func cleanupShare() {
+    shareValidationID = UUID()
     #if !FOTORO_LOCAL_PREVIEW
     removeShareFiles(deviceShareExports)
     ConsumerShareExports.remove(savedShareExports)
@@ -2419,8 +2459,7 @@ struct RecentPhotosView: View {
     #endif
     sharing = []
     showShare = false
-    shareMeaning = nil
-    sharedPhotoIDs = []
+    sharedMeanings = [:]
     shareSources = []
   }
 #if !FOTORO_LOCAL_PREVIEW
@@ -2447,6 +2486,7 @@ struct RecentPhotosView: View {
       }
     }
     preparingShare = true
+    shareValidationID = UUID()
     shareSources = sources
     savedShareSources = saved
     savedShareBinding = saved.isEmpty ? nil : binding
@@ -2480,8 +2520,9 @@ struct RecentPhotosView: View {
         deviceShareExports = completed.device
         savedShareExports = completed.saved
         sharing = completed.urls
-        shareMeaning = search.hasSearch ? search.response.meaning?.id : nil
-        sharedPhotoIDs = device.map(\.id)
+        sharedMeanings = search.hasSearch ? Dictionary(device.compactMap { photo in
+          search.meaningID(for: photo.id).map { (photo.id, $0) }
+        }, uniquingKeysWith: { first, _ in first }) : [:]
         showShare = true
         pending = nil
       } catch is CancellationError {

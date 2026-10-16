@@ -39,6 +39,43 @@ enum SavedTextPhase { case idle, checking, finished, stopped }
   @ObservationIgnored private var generation = UUID()
   @ObservationIgnored private var batchStart: String?
   @ObservationIgnored private var nextCursor: String?
+  private(set) var canResume = false
+  private struct Continuation: Codable {
+    let version: Int
+    let batchStart: String?
+    let nextCursor: String?
+    let hasMore: Bool
+    let completed: Bool
+  }
+  @ObservationIgnored private var continuationPreferences: UserDefaults?
+  @ObservationIgnored private var continuationKey: String?
+  private var batchCompleted = false
+  var resumeNextBatch: Bool { batchCompleted && hasMore }
+  func bindContinuation(preferences: UserDefaults, identity: [String]) {
+    guard let encoded = try? JSONEncoder().encode(identity) else { return }
+    let key = "fotoro.savedText.continuation.v1." + encoded.base64EncodedString()
+    guard continuationKey != key || continuationPreferences !== preferences else { return }
+    reset()
+    continuationPreferences = preferences; continuationKey = key
+    guard let data = preferences.data(forKey: key),
+      let saved = try? JSONDecoder().decode(Continuation.self, from: data), saved.version == 1 else { return }
+    batchStart = saved.batchStart; nextCursor = saved.nextCursor; hasMore = saved.hasMore
+    batchCompleted = saved.completed; canResume = true
+  }
+  private func persistContinuation() {
+    guard let preferences = continuationPreferences, let key = continuationKey else { return }
+    let saved = Continuation(version: 1, batchStart: batchStart, nextCursor: nextCursor,
+      hasMore: hasMore, completed: batchCompleted)
+    guard let data = try? JSONEncoder().encode(saved) else { return }
+    preferences.set(data, forKey: key); canResume = true
+  }
+  func startOver() {
+    guard task == nil else { return }
+    if let key = continuationKey { continuationPreferences?.removeObject(forKey: key) }
+    let preferences = continuationPreferences, key = continuationKey
+    reset()
+    continuationPreferences = preferences; continuationKey = key
+  }
   private(set) var running = false
   func start(nextBatch: Bool = false, current: @escaping @MainActor () -> Bool,
     load: @escaping Load, state: @escaping @MainActor (Source) throws -> SavedTextState,
@@ -47,6 +84,8 @@ enum SavedTextPhase { case idle, checking, finished, stopped }
     if nextBatch { batchStart = nextCursor }
     let cursor = batchStart, token = UUID()
     generation = token
+    batchCompleted = false; hasMore = false; nextCursor = nil
+    persistContinuation()
     checked = 0; existing = 0; unavailable = 0; failed = 0; pageFailed = false; processed = 0; total = 0
     phase = .checking; running = true
     task = Task { [weak self] in
@@ -55,6 +94,8 @@ enum SavedTextPhase { case idle, checking, finished, stopped }
       defer {
         if generation == token {
           if phase == .checking { phase = valid() ? .finished : .stopped }
+          batchCompleted = phase == .finished && !pageFailed && failed == 0 && processed == total
+          persistContinuation()
         }
         task = nil; running = false
       }
@@ -102,7 +143,40 @@ enum SavedTextPhase { case idle, checking, finished, stopped }
     stop(); generation = UUID()
     batchStart = nil; nextCursor = nil; hasMore = false
     checked = 0; existing = 0; unavailable = 0; failed = 0; pageFailed = false; processed = 0; total = 0
-    phase = .idle
+    phase = .idle; canResume = false; batchCompleted = false
+    continuationPreferences = nil; continuationKey = nil
+  }
+  func waitUntilSettled() async { await task?.value }
+}
+
+// One deadline timer; cancellation fences even a sleep that returns late.
+@MainActor final class SavedSemanticRetry<Binding: Equatable> {
+  private var task: Task<Void, Never>?
+  private var generation = UUID()
+  func cancel() {
+    generation = UUID(); task?.cancel(); task = nil
+  }
+  func schedule(at deadline: Date, binding: Binding, now: @escaping @MainActor () -> Date = { Date() },
+    current: @escaping @MainActor () -> Binding?,
+    sleep: @escaping @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+    retry: @escaping @MainActor () -> Void) {
+    guard current() == binding else { return }
+    let scheduledAt = now()
+    let wake = deadline <= scheduledAt ? scheduledAt.addingTimeInterval(0.5) : deadline
+    cancel()
+    let token = generation
+    task = Task { [weak self] in
+      defer { if let self, generation == token { task = nil } }
+      do {
+        while now() < wake {
+          try await sleep(.seconds(wake.timeIntervalSince(now())))
+          guard let self, !Task.isCancelled, generation == token, current() == binding else { return }
+        }
+        guard let self, !Task.isCancelled, generation == token, current() == binding else { return }
+        task = nil
+        retry()
+      } catch { }
+    }
   }
   func waitUntilSettled() async { await task?.value }
 }

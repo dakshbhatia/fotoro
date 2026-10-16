@@ -1983,3 +1983,72 @@ builds in CI; its summary explicitly marks runtime checks unrun. Default PRs and
 all main pushes retain native/preview Simulator checks. This source remains
 separate from distributed build 86; native runtime interaction/performance,
 production acceptance and held-out search relevance remain unqualified.
+
+
+## Three foundation slices — October 16, 2026
+
+Uncommitted browser and native prefix search now retrieve supported photos across
+all matching completions, with explicit accepted meanings narrowing. The browser
+retains complete deduplicated support receipts and a 200-photo display. Native
+SQLite unions and deduplicates before the limit, returning at most 200 hits plus
+one private previous-choice candidate for stable typing. Counts precede the limit;
+per-photo meaning receipts keep confirmation, pins and share feedback honest.
+Meaning precedence remains ahead of pins within a weaker meaning. Incompatible
+accepted completions return to union retrieval. Date, exact-number, allowed/source
+and current-evidence fences remain active. Full-text and native date counts also
+retain their uncapped totals. Saved adapter composition hydrates the final
+combined window, including off-window rows introduced by alias deduplication.
+
+Saved text continuation persists only cursor/completion flags in local account/
+origin/catalog-scoped preferences; existing OCR/draft state stays in the existing
+ledger. Relaunch, unlock, stopped second-page Retry, explicit Resume/Start over
+and account/origin/catalog replacement have host regressions. Saved semantic
+failures use existing durable stage-attempt rows and exponential deadlines.
+Missing, unreadable and revised sources are deferred. One fenced timer wakes at
+the earliest deadline, clamping overdue work to a 500 ms wake after long passes;
+withdrawn account/origin/vault/catalog/window/activity cancels old work. The view
+rebinds on access identity changes and displays aggregate deferred/failed status.
+
+Native presentation validation reads at most 200 source revisions per actor
+slice and yields before each slice. A 10,000-source fixture changes one unbounded
+lookup into 50 bounded reads. Permission, cancellation and library generation
+checks fence publication. Each viewer/selection/share surface withdraws only
+captured identities; toggling B cannot preserve stale A, while reselected A stays
+protected. Immediate export authorization remains synchronous and unchanged.
+Viewer current-photo lookup uses the existing ID index. These operation counts
+prove a work bound, not frame pacing or an end-to-end device speedup.
+
+The new macOS index host harness compiles the actual production SearchIndex,
+models, normalization, date grammar and supporting declarations with the exact
+GRDB revision already pinned by the app. It exercises real SQLite; it does not
+substitute a query implementation. It runs existing SearchTests and
+NaturalDateSearchTests alongside the new union/count/retry regressions. Other
+host runners execute the actual Saved draft/coordinator and bounded validation
+policies. No iPhone or Simulator was used. Native SwiftUI/PhotoKit/Vision runtime,
+physical performance/battery and installed cross-device acceptance remain open.
+
+On the unchanged private 201-photo frozen ten-day snapshot, deterministic
+single-prefix support rises from 27/38 fully retrieved to 38/38; two-word support
+remains 22/22. All 170 supported photo-query pairs are retrieved. Expected matches
+come from indexed OCR token support, not human intent; this is not a calibrated
+semantic-relevance score. Private inputs and queries remain outside the repo.
+The public synthetic ten-day benchmark remains a separate fixed workload.
+
+Browser acceptance runs the real search index, resources and search component on
+public synthetic fixtures: eight completions appear for `ha`, choosing Happiness
+narrows, the 205-photo case shows `200 of 205 matches`, and Next opens the correct
+second photo. The ordinary isolated local account still finds and opens the
+encrypted public receipt with reversed OCR words. Page identity, meaningful
+content, no framework overlay, correct interactions and clean app warning/error
+consoles pass. Temporary fixture entry points were removed; screenshots and logs
+remain under `Fotoro-Artifacts/sol-foundations-20261016`.
+
+Final local qualification: `pnpm check` passes 856 browser and 129 API tests,
+plus the existing core checks and artifact audits. Host qualification passes 92
+cases: 20 sync, 18 Saved text/timer, four cleanup, seven presentation-validation
+scenarios and 43 actual SQLite/search/date tests. Both full and isolated-preview
+generic iOS SDK builds pass with signing disabled. No native runtime tests ran.
+Review fixes for incompatible accepted completions, per-meaning pins, previous
+choices outside the first 200, cross-source hydration and independent stale
+selection withdrawal all have regressions. Distribution preflight currently sees
+no local Apple Distribution identity; it does not verify the Xcode account.

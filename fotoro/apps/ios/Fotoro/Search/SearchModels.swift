@@ -276,6 +276,12 @@ struct SearchResponse: Sendable {
   var meaning: SearchMeaning?
   var meanings: [SearchMeaning] = []
   var results: [SearchHit] = []
+  var matchMeanings: [String: String] = [:]
+  var totalMatches = 0
+  var truncated: Bool { totalMatches > results.reduce(0) { $0 + 1 + $1.children.count } }
+  func meaningID(for photoID: String) -> String? {
+    matchMeanings[photoID] ?? (results.contains { $0.id == photoID || $0.children.contains(photoID) } ? meaning?.id : nil)
+  }
   var leading: SearchHit? { results.first }
   var alternatives: [SearchMeaning] { Array(meanings.filter { $0.id != meaning?.id }.prefix(3)) }
   var indexed = 0

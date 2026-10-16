@@ -1414,7 +1414,7 @@ export default function CloudApp({
               </div>
             )}
             {normalizeSearch(query) && !received && searchResult.meaning?.kind === "label" && <button aria-pressed={committedMeaning === searchResult.meaning.id} onClick={() => setCommittedMeaning(searchResult.meaning!.id)}>Only this tag</button>}
-            {normalizeSearch(query) && !received && (findMatches.length > 0 || bestShots.active) && <FindBestShots total={findMatches.length} review={bestShots} showCount onSelect={selectBestShots} disabled={busy || preparingOriginals || sharingOriginals} />}
+            {normalizeSearch(query) && !received && (findMatches.length > 0 || !!searchResult.totalMatches || bestShots.active) && <FindBestShots total={bestShots.active ? findMatches.length : shown.length} availableTotal={searchResult.totalMatches} review={bestShots} showCount onSelect={selectBestShots} disabled={busy || preparingOriginals || sharingOriginals} />}
             {shown.length ? (
               <>
               {normalizeSearch(query) && visualSearchFeedback(searchResult) && <p className="hint" role="status">{visualSearchFeedback(searchResult)}</p>}

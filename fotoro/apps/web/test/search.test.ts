@@ -9,6 +9,55 @@ const now = Date.parse("2026-10-01T12:00:00Z");
 const photo = (id: string, filename: string, labels: string[] = [], date = "2020-01-01T00:00:00Z"): SearchPhoto =>
   ({ id, filename, labels, date, dateSource: "exif" });
 
+test("uncommitted prefixes retrieve every completion while accepted meanings narrow", () => {
+  const rows = ["harbor", "harvest", "hat", "hatch", "hate", "haven", "hazel", "haze"].map((caption, i) => ({...photo(String(i), "IMG.jpg"), caption}));
+  rows.push({...photo("both", "IMG.jpg"), caption: "harbor haze"});
+  const index = new PhotoSearchIndex(rows), result = index.search("ha", {now});
+  assert.deepEqual(new Set(result.photoIds), new Set(["0", "1", "2", "3", "4", "5", "6", "7", "both"]));
+  assert.equal(result.meanings.length, 6, "Suggestion limits must not limit supported photos");
+  assert.equal(result.totalMatches, 9);
+  assert.equal(result.matches?.["7"].term, "haze");
+  assert.equal(result.matches?.["7"].evidence, "caption");
+  const narrowed = index.search("ha", {now, committedMeaning: "text:haze"});
+  assert.deepEqual(new Set(narrowed.photoIds), new Set(["7", "both"]));
+  assert.equal(narrowed.totalMatches, 2);
+  assert.equal(narrowed.meaning?.id, "text:haze");
+});
+
+test("bounded results retain the exact supported total after deduplication and scope", () => {
+  const rows = Array.from({length: 205}, (_, i) => ({...photo(String(i), "IMG.jpg", ["Harbor"]), caption: "harbor"}));
+  const index = new PhotoSearchIndex(rows), result = index.search("harbor", {now});
+  assert.equal(result.photoIds.length, 200);
+  assert.equal(result.totalMatches, 205);
+  assert.equal(result.truncated, true);
+  const scoped = index.search("harbor", {now, allowedIds: new Set(["0", "204"])});
+  assert.equal(scoped.totalMatches, 2);
+  assert.equal(scoped.truncated, false);
+});
+
+test("union results fence completions beyond the suggestion limit and release withdrawn hits", async () => {
+  let visible = true;
+  const rows = ["harbor", "harvest", "hat", "hatch", "hate", "haven", "hazel", "haze"].map((caption, i) => ({...photo(String(i), "IMG.jpg"), caption, current: () => i !== 7 || visible}));
+  const index = new PhotoSearchIndex(rows), result = await index.searchAsync("ha", {now});
+  assert.equal(result.photoIds.includes("7"), true);
+  visible = false;
+  assert.equal(result.current?.(), false);
+  const next = await index.searchAsync("ha", {now, previous: {...result, photoId: "7"}});
+  assert.equal(next.photoIds.includes("7"), false);
+  assert.equal(next.totalMatches, 7);
+});
+
+test("union browsing keeps a supported later completion stable and its feedback scoped to that meaning", () => {
+  const index = new PhotoSearchIndex([photo("a", "IMG.jpg", ["Harbor"]), photo("b", "IMG.jpg", ["Haze"]), photo("c", "IMG.jpg", ["Haze"])]);
+  const previous = {...index.search("h", {now}), photoId: "c"};
+  const result = index.search("ha", {now, previous});
+  assert.equal(result.photoId, "c");
+  assert.deepEqual(result.photoIds, ["a", "b", "c"]);
+  index.choosePhoto(result.matches!.c.meaningId, "c", "choose-haze", now, true, result.scope);
+  assert.equal(index.search("ha", {now, committedMeaning: "label:haze"}).photoId, "c");
+  assert.equal(index.search("ha", {now, committedMeaning: "label:harbor"}).photoId, "a");
+});
+
 test("words inside supplied facts remain findable through batched ingestion and corrected successors", async () => {
   const rehearsal = {...photo("rehearsal", "neutral-a.png"), facts: ["Backstage rehearsal", "fotoro.trash.v1:false"]};
   const other = {...photo("other", "neutral-b.png"), facts: ["Frontstage show"]};
