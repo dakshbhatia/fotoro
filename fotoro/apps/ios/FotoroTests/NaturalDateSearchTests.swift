@@ -22,6 +22,56 @@ final class NaturalDateSearchTests: XCTestCase {
     value.labels = labels
     return value
   }
+  func testPhotoRequestsRetrieveSupportedSubjectsWithoutRequiringADate() throws {
+    let index = try SearchIndex()
+    var receipt = photo("receipt", captured: now); receipt.ocrStatus = .complete
+    receipt.ocrText = "receipt 123"
+    var longer = photo("longer", captured: now); longer.ocrStatus = .complete
+    longer.ocrText = "receipt 1234"
+    var file = photo("file", captured: now); file.filename = "IMG_00123.jpg"
+    try index.replacePermitted([
+      photo("dog", captured: now, labels: ["dog"]),
+      photo("person", captured: now, labels: ["Mary Jane"]),
+      photo("other-source", captured: now, source: "imports", labels: ["dog"]),
+      receipt, longer, file,
+    ])
+    for query in ["photos of dog", "photo of dog", "pictures of dog", "picture of dog", "show me photos of dog"] {
+      XCTAssertEqual(try index.search(query, now: now, calendar: calendar).results.map(\.id), ["dog"], query)
+    }
+    XCTAssertEqual(try index.search("show me pictures of Mary Jane", now: now, calendar: calendar).results.map(\.id), ["person"])
+    XCTAssertEqual(try index.search("photos of receipt 123", now: now, calendar: calendar).results.map(\.id), ["receipt"])
+    XCTAssertEqual(try index.search("photos of IMG_00123.jpg", now: now, calendar: calendar).results.map(\.id), ["file"])
+    XCTAssertEqual(try index.search("photos of dog", scope: SearchScope(source: "imports"), now: now, calendar: calendar).results.map(\.id), ["other-source"])
+    XCTAssertNil(try index.search("photos of Ronald", now: now, calendar: calendar).leading)
+  }
+  func testPhotoRequestCleanupPreservesLiteralPhrasesAndOnlyConsumesRecognizedDates() {
+    for query in ["photo booth", "photos of", "show me photos of", "show me love", "dog photos of beach", "photosynthesis", "dog from"] {
+      let parsed = NaturalDateQuery.parse(query, now: now, calendar: calendar)
+      XCTAssertEqual(parsed.text, query, query)
+      XCTAssertNil(parsed.datePhrase, query)
+    }
+    XCTAssertEqual(NaturalDateQuery.parse("photos of dog from", now: now, calendar: calendar).text, "dog from")
+    XCTAssertEqual(NaturalDateQuery.parse("photos of photo booth", now: now, calendar: calendar).text, "photo booth")
+    for query in ["show me photos of photo booth last month", "last month show me photos of photo booth"] {
+      let scope = SearchScope(source: "imports", from: date(2026, 9, 10), through: date(2026, 9, 28))
+      let parsed = NaturalDateQuery.parse(query, scope: scope, now: now, calendar: calendar)
+      XCTAssertEqual(parsed.text, "photo booth", query)
+      XCTAssertEqual(parsed.scope.source, "imports", query)
+      XCTAssertEqual(parsed.scope.from, date(2026, 9, 10), query)
+      XCTAssertEqual(parsed.scope.through, date(2026, 9, 28), query)
+      XCTAssertEqual(parsed.scope.until, date(2026, 10, 1), query)
+    }
+  }
+  func testDatedLiteralNamesBeginningWithPhotoRetainTheCompletePhrase() throws {
+    let index = try SearchIndex()
+    try index.replacePermitted([
+      photo("photo-booth", captured: date(2026, 9, 12), labels: ["Photo Booth"]),
+      photo("other-booth", captured: date(2026, 9, 12), labels: ["Ticket Booth"]),
+    ])
+    for query in ["photo booth last month", "last month photo booth", "photos of photo booth last month"] {
+      XCTAssertEqual(try index.search(query, now: now, calendar: calendar).results.map(\.id), ["photo-booth"], query)
+    }
+  }
   func testRelativePeriodsHaveDeterministicCalendarBoundaries() {
     let expected: [(String, Date, Date)] = [
       ("today", date(2026, 10, 2), date(2026, 10, 3)),

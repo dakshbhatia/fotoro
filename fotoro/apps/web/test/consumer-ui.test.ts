@@ -166,7 +166,10 @@ test("joining saved hits preserves local ranking, preferred default and engine r
   const result = combineConsumerSearch(local, saved);
   assert.deepEqual(result.photoIds, ["c", "a", "b", "saved:d"]); assert.equal(result.photoId, "c");
   const capped = new PhotoSearchIndex(Array.from({length: 201}, (_, index) => photo("local:" + index.toString().padStart(3, "0")))).search("receipt");
-  assert.equal(combineConsumerSearch(capped, saved).photoIds.length, 201);
+  const combined = combineConsumerSearch(capped, saved);
+  assert.equal(combined.photoIds.length, 200);
+  assert.equal(combined.totalMatches, 202);
+  assert.equal(combined.truncated, true);
 });
 test("saved preview dimensions are read before bounded decode and Lock fences a late preview", async () => {
   const module = await import("../src/library/consumer-search");

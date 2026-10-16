@@ -169,6 +169,9 @@ async function queueAnnotationChanges(identity: AnnotationIdentity, changes: Ann
   const patch: AnnotationPatch = {...existing?.patch};
   for (const field of fields) if (Object.hasOwn(changes, field)) (patch as Record<string, unknown>)[field] = changes[field];
   const value = {...(projected?.value ?? empty(identity)), ...patch};
+  // Reverted fields no longer express local intent during a remote rebase.
+  const base = existing?.base ?? remote?.value ?? empty(identity);
+  for (const field of fields) if (Object.hasOwn(patch, field) && same(patch[field], base[field])) delete patch[field];
   const next: PendingAnnotation = {version: 1, photoId: identity.photoId, originalSha256: identity.originalSha256, base: existing?.base ?? remote?.value ?? empty(identity), patch, conflict: existing?.conflict ?? false, signed: createSigned(identity, value, projected?.revision ?? 1, session)};
   if (!existing) next.signed = createSigned(identity, value, (remote?.revision ?? 0) + 1, session);
   if (projected && same(value, projected.value)) return false;
@@ -182,6 +185,17 @@ export async function queueAnnotations(identity: AnnotationIdentity, changes: An
     assertAnnotationWriter(identity, session);
     if (!Object.keys(changes).length) return false;
     return queueAnnotationChanges(identity, changes, session, await annotationWriteState(identity, session));
+  });
+}
+// Derived text may fill an empty slot, never replace a concurrent correction or
+// another device's OCR. Admission is checked inside the same serialized writer.
+export async function queueMissingPhotoOcr(identity: AnnotationIdentity, ocr: NonNullable<PhotoAnnotationsV1["ocr"]>, current: () => boolean, session = requireVault()) {
+  return serializeAnnotationWrites(session, async () => {
+    assertAnnotationWriter(identity, session);
+    if (!current()) return false;
+    const state = await annotationWriteState(identity, session);
+    if (!current() || state.existing?.conflict || state.projected?.value.ocr) return false;
+    return queueAnnotationChanges(identity, {ocr}, session, state);
   });
 }
 /* A Timeline acknowledgement means these exact coordinates are retained. Merge
@@ -367,29 +381,30 @@ export async function queueLocalAnnotations(identity: AnnotationIdentity, local:
     const currentLocation = state.projected && annotationLocation(state.projected.value);
     if (Object.hasOwn(patch, "facts")) {
       const supplied = (facts: string[] | undefined) => (facts ?? []).filter(fact => !isLocationFact(fact) && !isPeopleFact(fact) && !isCloudObservationFact(fact) && !organizationFactCategory(fact));
-      // A reserved-evidence delta is independent of supplied-fact edits. Merge
-      // only categories changed in the local source into the latest account
-      // value, so another device's words, names and observations survive.
-      if (same(supplied(previous?.facts), supplied(next.facts))) {
-        let merged = state.projected?.value.facts ?? (next.facts ?? []).filter(fact => !isPeopleFact(fact) && !isCloudObservationFact(fact) && !organizationFactCategory(fact));
-        const category = (facts: string[] | undefined, matches: (fact: string) => boolean) => (facts ?? []).filter(matches);
-        const nextCloud = category(next.facts, isCloudObservationFact);
-        if (!same(category(previous?.facts, isCloudObservationFact), nextCloud)) {
-          const rebound = annotationObservation(next, {photoId: identity.photoId, sourceRevision: identity.originalSha256});
-          if (rebound || !nextCloud.length) merged = withPhotoObservation({facts: merged}, rebound).facts;
-        }
-        const nextPeople = category(next.facts, isPeopleFact);
-        if (!same(category(previous?.facts, isPeopleFact), nextPeople)) {
-          const assignments = validatedPeopleAssignments(next.facts, identity.originalSha256);
-          if (assignments.length || !nextPeople.length) merged = factsWithPeople(merged, identity.originalSha256, assignments);
-        }
-        for (const key of ["name", "trash", "screenshot"] as const) {
-          const matches = (fact: string) => organizationFactCategory(fact) === key;
-          const replacement = category(next.facts, matches);
-          if (!same(category(previous?.facts, matches), replacement)) merged = [...(merged ?? []).filter(fact => !matches(fact)), ...replacement];
-        }
-        patch.facts = merged;
+      // Merge only categories changed in the source into the latest account
+      // value, including when supplied text changes alongside stale evidence.
+      let merged = state.projected?.value.facts ?? (next.facts ?? []).filter(fact => !isPeopleFact(fact) && !isCloudObservationFact(fact) && !organizationFactCategory(fact));
+      if (!same(supplied(previous?.facts), supplied(next.facts))) {
+        const retained = merged.filter(fact => !supplied([fact]).length);
+        merged = [...supplied(next.facts), ...retained];
       }
+      const category = (facts: string[] | undefined, matches: (fact: string) => boolean) => (facts ?? []).filter(matches);
+      const nextCloud = category(next.facts, isCloudObservationFact);
+      if (!same(category(previous?.facts, isCloudObservationFact), nextCloud)) {
+        const rebound = annotationObservation(next, {photoId: identity.photoId, sourceRevision: identity.originalSha256});
+        if (rebound || !nextCloud.length) merged = withPhotoObservation({facts: merged}, rebound).facts;
+      }
+      const nextPeople = category(next.facts, isPeopleFact);
+      if (!same(category(previous?.facts, isPeopleFact), nextPeople)) {
+        const assignments = validatedPeopleAssignments(next.facts, identity.originalSha256);
+        if (assignments.length || !nextPeople.length) merged = factsWithPeople(merged, identity.originalSha256, assignments);
+      }
+      for (const key of ["name", "trash", "screenshot"] as const) {
+        const matches = (fact: string) => organizationFactCategory(fact) === key;
+        const replacement = category(next.facts, matches);
+        if (!same(category(previous?.facts, matches), replacement)) merged = [...(merged ?? []).filter(fact => !matches(fact)), ...replacement];
+      }
+      patch.facts = merged;
     }
     // Explicit supplied-fact edits retain existing GPS. A generated location
     // delta merges into current facts instead of replacing account-only text.

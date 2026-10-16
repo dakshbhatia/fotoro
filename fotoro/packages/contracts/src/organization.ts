@@ -1,4 +1,5 @@
 import {annotationCaptureMetadata} from "./capture-metadata";
+import {validatedVisualLabels} from "./visual";
 
 // These remain private, owner/digest-bound annotation facts. Older readers keep them.
 export const ORGANIZATION_PREFIXES = {name: "fotoro.name.v1:", trash: "fotoro.trash.v1:", screenshot: "fotoro.screenshot.v1:"} as const;
@@ -41,7 +42,24 @@ export function withPhotoOrganization<T extends {facts?: string[]}>(value: T, pa
   if (facts.length > 64) throw new Error("Photo facts are full. Remove an unused fact before changing this photo.");
   return {...value, facts};
 }
-export function suggestedPhotoName(input: {filename: string; digest?: string; date?: string; dateSource?: string; labels?: readonly string[]; location?: {name?: string}; screenshot?: boolean}) {
+export interface PhotoNameAnalysis {
+  ocr?: {text: string; confidence: number; processor: string};
+  visual?: import("./models").PhotoVisualV1;
+}
+// A preview may quote readable text, never guess a person, place or document type.
+// Bound work even when the retained OCR contains an entire document.
+function nameText(ocr: PhotoNameAnalysis["ocr"]): string | undefined {
+  if (!ocr || !["vision-text-v1", "tesseract.js-7.0.0/eng-1.0.0/lstm-orientation-v2"].includes(ocr.processor)
+    || !Number.isFinite(ocr.confidence) || ocr.confidence < 0.8 || ocr.confidence > 1) return;
+  for (const line of ocr.text.slice(0, 8192).split(/\r\n|[\n\r\u2028\u2029]/u).slice(0, 12)) {
+    const text = line.normalize("NFC").trim().replace(/\s+/gu, " ");
+    if (!text || Array.from(text).length > 64 || !/^[\p{L}\p{M}\s'’&():—–-]+$/u.test(text)) continue;
+    const words = text.match(/\p{L}[\p{L}\p{M}]*/gu) ?? [];
+    if (!words.length || words.length > 6 || Array.from(words.join("")).length < 4) continue;
+    return text;
+  }
+}
+export function suggestedPhotoName(input: {filename: string; digest?: string; date?: string; dateSource?: string; labels?: readonly string[]; location?: {name?: string}; screenshot?: boolean; analysis?: PhotoNameAnalysis}) {
   const extension = input.filename.match(/\.([a-zA-Z0-9]{1,10})$/)?.[1].toLowerCase();
   const slug = (text: string) => text.normalize("NFC").replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "");
   const date = ["exif", "photos"].includes(input.dateSource ?? "") && input.date && Number.isFinite(Date.parse(input.date)) ? new Date(input.date).toISOString().slice(0, 10) : undefined;
@@ -54,6 +72,11 @@ export function suggestedPhotoName(input: {filename: string; digest?: string; da
   add(input.screenshot ? "Screenshot" : undefined); add(input.location?.name);
   let tags = 0;
   for (const label of input.labels ?? []) if (add(label) && ++tags === 2) break;
+  if (!tags) {
+    const text = nameText(input.analysis?.ocr);
+    const scene = input.screenshot ? undefined : validatedVisualLabels(input.analysis?.visual)[0]?.label;
+    add(input.screenshot ? text : scene ?? text);
+  }
   // Digest suffix prevents common date/tag collisions, independent of device locale/timezone.
   let digest = input.digest;
   if (digest && !/^[a-fA-F0-9]{64}$/.test(digest)) {

@@ -1,5 +1,6 @@
 import {validatedPeopleAssignments} from "@fotoro/contracts/people";
 import type {SearchPhoto, SearchResult} from "../local/search";
+import {searchPhotoMeaning} from "../local/search";
 
 export interface PeopleFilter {ids: ReadonlySet<string>; mode: "any" | "everyone"}
 export interface ReviewedPerson {id: string; names: string[]; photoCount: number}
@@ -8,6 +9,7 @@ export function peopleReviewPhotos<T extends SearchPhoto>(photos: readonly T[], 
   return photos.filter(photo => !!photo.digest && photo.current?.() !== false && (!eligibleIDs || eligibleIDs.has(photo.id)) && (!selectedOnly || selectedIDs?.has(photo.id)));
 }
 export function peopleMetadataMatches(result: SearchResult, sources?: readonly SearchResult[]): Set<string> {
+  if (result.matches) return new Set(Object.keys(result.matches));
   if (sources && result.meaning) return new Set(sources.flatMap(source => source.meanings.filter(meaning => meaning.id === result.meaning!.id).flatMap(meaning => meaning.photoIds)));
   return new Set(result.meaning?.photoIds ?? result.photoIds);
 }
@@ -37,9 +39,12 @@ export function peopleFilteredResult(result: SearchResult, permitted: ReadonlySe
   const restrict = (ids: readonly string[]) => ids.filter(id => permitted.has(id));
   const photoIds = restrict(result.photoIds);
   const meaning = result.meaning ? {...result.meaning, photoIds: restrict(result.meaning.photoIds)} : undefined;
-  return {...result, photoIds, photoId: result.photoId && permitted.has(result.photoId) ? result.photoId : photoIds[0],
-    meanings: result.meanings.map(meaning => ({...meaning, photoIds: restrict(meaning.photoIds)})).filter(meaning => meaning.photoIds.length),
-    meaning: meaning?.photoIds.length ? meaning : undefined};
+  const matches = result.matches ? Object.fromEntries(Object.entries(result.matches).filter(([id]) => permitted.has(id))) : undefined;
+  const totalMatches = matches ? Object.keys(matches).length : meaning?.photoIds.length ?? photoIds.length;
+  const meanings = result.meanings.map(meaning => ({...meaning, photoIds: restrict(meaning.photoIds)})).filter(meaning => meaning.photoIds.length);
+  const photoId = result.photoId && permitted.has(result.photoId) ? result.photoId : photoIds[0];
+  return {...result, photoIds, photoId, matches, totalMatches, truncated: photoIds.length < totalMatches, meanings,
+    meaning: !photoIds.length ? undefined : meaning?.photoIds.length ? meaning : meanings[0] ?? (photoId ? searchPhotoMeaning({...result, matches}, photoId) : undefined)};
 }
 // An explicit Select these action replaces old picks with the current result set.
 export function peopleResultSelection(photos: readonly SearchPhoto[], results: readonly SearchPhoto[], localIDs: ReadonlySet<string>) {

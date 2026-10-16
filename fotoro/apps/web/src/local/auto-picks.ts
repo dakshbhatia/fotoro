@@ -239,6 +239,18 @@ export class PickAnalyzer {
     if (!measured || measured.version !== this.version) return;
     return cleanupCandidates(measured.unique, measured.signals);
   }
+  cleanupSnapshot(photos: readonly LocalPhoto[]) {
+    const signals = new Map<string, PhotoSignals>(), ids = new Set(photos.map(photo => photo.id));
+    for (const id of this.cache.keys()) if (!ids.has(id)) this.cache.delete(id);
+    for (const photo of photos) {
+      const entry = this.cache.get(photo.id), source = photo.file ?? photo.preview ?? photo.previewLoader;
+      if (!source || photo.previewAvailable === false || photo.current?.() === false ||
+        entry && (entry.source.deref() !== source || entry.digest !== photo.digest || entry.width !== photo.width || entry.height !== photo.height)) {
+        this.cache.delete(photo.id);
+      } else if (entry?.signal && !isPhotoTrashed(photo)) signals.set(photo.id, entry.signal);
+    }
+    return cleanupCandidates(photos, signals);
+  }
   // Completed measurements survive harmless metadata updates; pending work never crosses a cancellation.
   cancel() {
     this.version++;
@@ -289,5 +301,6 @@ export class CleanupAnalyzer {
   async run(photos: LocalPhoto[], load: (photo: LocalPhoto, signal?: AbortSignal) => Promise<PhotoSignals>, progress: (done: number) => void) {
     return this.analyzer.cleanup(photos, load, progress);
   }
+  review(photos: readonly LocalPhoto[]) {return this.analyzer.cleanupSnapshot(photos);}
   clear() {this.analyzer.clear();}
 }

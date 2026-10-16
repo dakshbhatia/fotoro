@@ -50,6 +50,12 @@ export interface SearchMeaning {
   photoIds: string[];
   evidence: Record<string, SearchEvidence>;
 }
+export interface SearchMatch {
+  meaningId: string;
+  term: string;
+  kind: SearchEvidence;
+  evidence: SearchEvidence;
+}
 export interface SearchResult {
   query: string;
   scope: string;
@@ -57,12 +63,31 @@ export interface SearchResult {
   meaning?: SearchMeaning;
   photoIds: string[];
   photoId?: string;
+  // Complete deduplicated support receipts; photoIds is the bounded display window.
+  matches?: Record<string, SearchMatch>;
+  totalMatches?: number;
+  truncated?: boolean;
   searching?: boolean;
   current?: () => boolean;
   metadataIncomplete?: boolean;
   visualStatus?: "unavailable" | "incomplete" | "missing-preview";
   visualPending?: "preparing" | "checking";
   textStatus?: "indexing" | "incomplete";
+}
+export function searchPhotoMeaning(result: SearchResult, id = result.photoId): SearchMeaning | undefined {
+  if (!id) return;
+  const match = result.matches?.[id];
+  return match ? {id: match.meaningId, term: match.term, kind: match.kind, photoIds: [id], evidence: {[id]: match.evidence}} :
+    result.matches ? undefined : result.meaning;
+}
+export function searchMatchReceipts(result: SearchResult): Record<string, SearchMatch> {
+  if (result.matches) return result.matches;
+  const matches: Record<string, SearchMatch> = {};
+  if (result.meaning) for (const id of result.meaning.photoIds) matches[id] = {
+    meaningId: result.meaning.id, term: result.meaning.term, kind: result.meaning.kind,
+    evidence: result.meaning.evidence[id] ?? result.meaning.kind,
+  };
+  return matches;
 }
 interface IndexedMeaning {
   id: string;
@@ -108,6 +133,7 @@ function datedMeaning(id: string): DatedMeaning | undefined {
 /* Perception happens elsewhere. Typing only retrieves supported local meanings. */
 export class PhotoSearchIndex {
   private records: Map<string, SearchPhoto>;
+  private disposed = false;
   private dictionary: IndexedMeaning[];
   private phrases = new Map<string, PhrasePosition[]>();
   private history: SearchFeedback;
@@ -118,7 +144,7 @@ export class PhotoSearchIndex {
     const terms = new Map<string, IndexedMeaning>();
     const phraseSource = (text: string, source: SearchEvidence, photoId: string) => {
       const display = words(text.slice(0, 256 * 1024)), normalized = display.map(normalizeSearch);
-      for (let start = 0; start + 1 < normalized.length; start++) {
+      for (let start = 0; start < normalized.length; start++) {
         const positions = this.phrases.get(normalized[start]) ?? [];
         positions.push({ photoId, source, display, normalized, start });
         this.phrases.set(normalized[start], positions);
@@ -190,7 +216,7 @@ export class PhotoSearchIndex {
     }
     this.dictionary = [...terms.values()].sort((a, b) => compare(a.normalized, b.normalized) || compare(a.id, b.id));
   }
-  dispose() {this.records.clear(); this.dictionary = []; this.phrases.clear(); this.indexedPhotos.clear();}
+  dispose() {this.disposed = true; this.records.clear(); this.dictionary = []; this.phrases.clear(); this.indexedPhotos.clear();}
   // Account metadata can be much larger than the grid. Build once outside render,
   // yielding after bounded work, with an explicit transient-memory admission budget.
   static async build(photos: SearchPhoto[], signal: AbortSignal, current: () => boolean, budgetBytes = 128 * 1024 * 1024,
@@ -261,13 +287,40 @@ export class PhotoSearchIndex {
     const dated = datedMeaning(meaning), baseMeaning = dated?.[2] ?? meaning, photo = this.records.get(id), captured = photo && Date.parse(photo.date);
     if (dated && (!photo || !hasCaptureDate(photo) || !Number.isFinite(captured) || (dated[0] !== null && captured! < dated[0]) || (dated[1] !== null && captured! >= dated[1]))) return;
     const derived = /^(?:date|text|label):/.test(baseMeaning) ? this.search(baseMeaning.slice(baseMeaning.indexOf(":") + 1), { now, scope, committedMeaning: baseMeaning }).meaning : undefined;
+    // Validate the selected receipt itself: a direct phrase in another scope
+    // must not suppress feedback for this photo's supported conjunction.
+    let conjunction = false;
+    if (baseMeaning.startsWith("fulltext:") && photo && photo.current?.() !== false) {
+      for (const position of this.conjunctionMatches(words(baseMeaning.slice(9)), candidate => candidate === id)) {
+        if (position) {conjunction = true; break;}
+      }
+    }
     const supported = (dated && baseMeaning === "date") || this.dictionary.some(term => term.id === baseMeaning && term.sources.has(id)) ||
-      (derived?.id === baseMeaning && derived.photoIds.includes(id)) ||
+      conjunction || (derived?.id === baseMeaning && derived.photoIds.includes(id)) ||
       (baseMeaning.startsWith("file:") && photo && searchableFilenames(photo).some(name => normalizeSearch(name) === baseMeaning.slice(5)));
     if (!supported) return;
     const key = meaningKey(scope, meaning);
     this.record(this.history.photos, photoKey(key, id), session, now);
     if (pin) this.history.pins[key] = id;
+  }
+  private *conjunctionMatches(tokens: string[], eligible: (id: string) => boolean): Generator<PhrasePosition | undefined> {
+    if (tokens.length < 2 || tokens.length > 16) return;
+    const visited = new Set<string[]>(), required = new Set(tokens.slice(0, -1)), last = tokens.at(-1)!;
+    const prefixLast = !/^\d+$/.test(last);
+    for (const position of this.phrases.get(tokens[0]) ?? []) {
+      yield;
+      if (!["caption", "keyword", "filename", "ocr"].includes(position.source)
+        || visited.has(position.normalized) || !eligible(position.photoId)) continue;
+      visited.add(position.normalized);
+      const remaining = new Set(required); let lastFound = false;
+      for (let i = 0; i < position.normalized.length; i++) {
+        const word = position.normalized[i]; remaining.delete(word);
+        if (prefixLast ? word.startsWith(last) : word === last) lastFound = true;
+        if (!remaining.size && lastFound) break;
+        if (i % 128 === 0) yield;
+      }
+      if (!remaining.size && lastFound) yield position;
+    }
   }
   private record(target: Record<string, Event[]>, key: string, session: string, at: number) {
     const events = target[key] ?? [];
@@ -281,7 +334,7 @@ export class PhotoSearchIndex {
   }
   async searchAsync(query: string, options: { allowedIds?: Set<string>; scope?: string; committedMeaning?: string; previous?: SearchResult; now?: number } = {}, signal?: AbortSignal, current: () => boolean = () => true): Promise<SearchResult> {
     const work = this.query(query, options); let deadline = performance.now() + 4;
-    const check = () => {if (signal?.aborted || !current()) throw new DOMException("Search cancelled", "AbortError");};
+    const check = () => {if (signal?.aborted || !current()) throw new DOMException("Search cancelled", "AbortError"); if (this.disposed) throw new Error("CACHED_SEARCH_SOURCE_CHANGED");};
     try {
       check(); let step = work.next();
       while (!step.done) {
@@ -296,7 +349,11 @@ export class PhotoSearchIndex {
           if (this.records.get(id)?.current) sources.set(id, this.records.get(id)!);
           if (performance.now() >= deadline) {await new Promise(resolve => setTimeout(resolve, 0)); check(); deadline = performance.now() + 4;}
         }
-      if (sources.size) result.current = () => {for (const [id, record] of sources) if (this.records.get(id) !== record || record.current?.() === false) return false; return true;};
+      for (const id of Object.keys(result.matches ?? {})) {
+        if (this.records.get(id)?.current) sources.set(id, this.records.get(id)!);
+        if (performance.now() >= deadline) {await new Promise(resolve => setTimeout(resolve, 0)); check(); deadline = performance.now() + 4;}
+      }
+      result.current = () => {if (this.disposed) return false; for (const [id, record] of sources) if (this.records.get(id) !== record || record.current?.() === false) return false; return true;};
       check(); if (result.current?.() === false) throw new Error("CACHED_SEARCH_SOURCE_CHANGED"); return result;
     } finally {work.return(undefined as never);}
   }
@@ -316,8 +373,8 @@ export class PhotoSearchIndex {
       return source;
     }
     const now = options.now ?? Date.now(), scope = options.scope ?? "local:all", dateQuery = parseNaturalDateQuery(query, {now});
-    const dated = dateQuery.phrase !== undefined, prefix = dated ? dateQuery.text : normalizeSearch(query);
-    const empty: SearchResult = { query, scope, meanings: [], photoIds: [] };
+    const dated = dateQuery.phrase !== undefined, prefix = dateQuery.text;
+    const empty: SearchResult = { query, scope, meanings: [], photoIds: [], matches: {}, totalMatches: 0, truncated: false };
     if (!prefix && !dated) return empty;
     const dates = new Map<string, number>();
     const captured = (id: string) => {
@@ -378,37 +435,57 @@ export class PhotoSearchIndex {
         }
       }
     }
+    // Like native FTS, fall back to all requested words within one text source
+    // when there is no direct meaning/phrase/file match. Reuse indexed tokens;
+    // never decode or concatenate every photo's OCR during typing.
+    if (!candidates.length && tokens.length > 1 && tokens.length <= 16) {
+      for (const position of this.conjunctionMatches(tokens, eligible)) {
+        yield;
+        if (position) include("fulltext:" + prefix, prefix, position.photoId, position.source);
+      }
+    }
     for (const candidate of candidates) for (const id of candidate.photoIds) {yield; if (!eligible(id)) throw new Error("CACHED_SEARCH_SOURCE_CHANGED");}
     const orderedCandidates = yield* ordered(candidates, (a, b) =>
       Number(normalizeSearch(b.term) === prefix) - Number(normalizeSearch(a.term) === prefix) ||
       count(this.history.meanings[meaningKey(scope, b.id)], now) - count(this.history.meanings[meaningKey(scope, a.id)], now) ||
       tier(b.kind) - tier(a.kind) || compare(a.id, b.id));
-    const meaning = orderedCandidates.find(candidate => candidate.id === options.committedMeaning) ?? orderedCandidates[0];
+    const committed = orderedCandidates.find(candidate => candidate.id === options.committedMeaning);
+    const meaning = committed ?? orderedCandidates[0];
     if (!meaning) return { ...empty, meanings: orderedCandidates.slice(0, 6) };
-    const key = meaningKey(scope, meaning.id), pin = this.history.pins[key];
+    const selected = committed ? [committed] : orderedCandidates;
+    const matches: Record<string, SearchMatch> = {}, meaningRanks = new Map<string, number>();
+    for (const [rank, candidate] of selected.entries()) {
+      for (const id of candidate.photoIds) {
+        yield;
+        if (matches[id]) continue;
+        matches[id] = {meaningId: candidate.id, term: candidate.term, kind: candidate.kind, evidence: candidate.evidence[id]};
+        meaningRanks.set(id, rank);
+      }
+    }
     const ranks = new Map<string, number[]>();
-    for (const id of meaning.photoIds) {
+    for (const id of Object.keys(matches)) {
       yield;
+      const match = matches[id], key = meaningKey(scope, match.meaningId), pin = this.history.pins[key];
       const photo = this.records.get(id)!, parsed = captured(id);
       // Keep the immutable camera name as an alias; an equally supported current
       // display name takes precedence over that alias, before recency/feedback.
       let currentFilename = false;
-      if (meaning.evidence[id] === "filename") {
+      if (match.evidence === "filename") {
         const currentName = normalizeSearch(photoName(photo, photo.filename));
         if (currentName === normalizeSearch(photo.filename)) currentFilename = true;
         else {
           const currentWords = " " + words(currentName.replace(/\.[^.]+$/, "")).join(" ") + " ";
-          currentFilename = normalizeSearch(meaning.term) === currentName ||
-            currentWords.includes(" " + words(normalizeSearch(meaning.term)).join(" ") + " ");
+          currentFilename = normalizeSearch(match.term) === currentName ||
+            currentWords.includes(" " + words(normalizeSearch(match.term)).join(" ") + " ");
         }
       }
       ranks.set(id, [
-        Number(id === pin), tier(meaning.evidence[id]), Number(currentFilename), count(this.history.photos[photoKey(key, id)], now),
-        meaning.evidence[id] === "ocr" ? photo.ocr?.confidence ?? 0 : 0,
+        -meaningRanks.get(id)!, Number(id === pin), tier(match.evidence), Number(currentFilename), count(this.history.photos[photoKey(key, id)], now),
+        match.evidence === "ocr" ? photo.ocr?.confidence ?? 0 : 0,
         Number(photo.favorite === true), hasCaptureDate(photo) && parsed <= now && Number.isFinite(parsed) ? parsed : 0,
       ]);
     }
-    const sorted = yield* ordered(meaning.photoIds.slice(), (a, b) => {
+    const sorted = yield* ordered(Object.keys(matches), (a, b) => {
       const left = ranks.get(a)!, right = ranks.get(b)!;
       for (let position = 0; position < left.length; position++) {
         const difference = right[position] - left[position];
@@ -416,11 +493,14 @@ export class PhotoSearchIndex {
       }
       return compare(a, b);
     });
-    const previous = options.previous, extending = previous && prefix.startsWith(dated ? parseNaturalDateQuery(previous.query, {now}).text : normalizeSearch(previous.query));
+    const previous = options.previous, extending = previous && prefix.startsWith(parseNaturalDateQuery(previous.query, {now}).text);
     const previousId = previous?.photoId;
-    const bestTier = tier(meaning.evidence[sorted[0]]);
+    const previousMatch = previousId ? matches[previousId] : undefined, previousReceipt = previousId ? searchPhotoMeaning(previous!, previousId) : undefined;
+    const pin = previousMatch && this.history.pins[meaningKey(scope, previousMatch.meaningId)];
+    const cohortBest = previousMatch && sorted.find(id => matches[id].meaningId === previousMatch.meaningId);
     const stable = extending && previous.scope === scope && previous.meaning?.id === meaning.id && previousId && sorted.includes(previousId) &&
-      (pin ? pin === previousId : tier(meaning.evidence[previousId]) === bestTier && ranks.get(previousId)![2] === ranks.get(sorted[0])![2]);
+      previousReceipt?.id === previousMatch?.meaningId && (pin ? pin === previousId : cohortBest &&
+        tier(matches[previousId].evidence) === tier(matches[cohortBest].evidence) && ranks.get(previousId)![3] === ranks.get(cohortBest)![3]);
     const photoIds = sorted.slice(0, 200);
     if (stable && !photoIds.includes(previousId!)) photoIds.splice(199, 1, previousId!);
     // No await/yield may separate this evidence fence from returning the result.
@@ -428,6 +508,8 @@ export class PhotoSearchIndex {
     for (const candidate of new Set([...orderedCandidates.slice(0, 6), meaning])) {
       for (const id of candidate.photoIds) if (!eligible(id)) throw new Error("CACHED_SEARCH_SOURCE_CHANGED");
     }
-    return { query, scope, meanings: orderedCandidates.slice(0, 6), meaning, photoIds, photoId: stable ? previousId : photoIds[0] };
+    for (const id of Object.keys(matches)) if (!eligible(id)) throw new Error("CACHED_SEARCH_SOURCE_CHANGED");
+    return { query, scope, meanings: orderedCandidates.slice(0, 6), meaning, matches, totalMatches: sorted.length,
+      truncated: photoIds.length < sorted.length, photoIds, photoId: stable ? previousId : photoIds[0] };
   }
 }

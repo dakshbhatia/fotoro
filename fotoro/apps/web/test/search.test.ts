@@ -9,6 +9,55 @@ const now = Date.parse("2026-10-01T12:00:00Z");
 const photo = (id: string, filename: string, labels: string[] = [], date = "2020-01-01T00:00:00Z"): SearchPhoto =>
   ({ id, filename, labels, date, dateSource: "exif" });
 
+test("uncommitted prefixes retrieve every completion while accepted meanings narrow", () => {
+  const rows = ["harbor", "harvest", "hat", "hatch", "hate", "haven", "hazel", "haze"].map((caption, i) => ({...photo(String(i), "IMG.jpg"), caption}));
+  rows.push({...photo("both", "IMG.jpg"), caption: "harbor haze"});
+  const index = new PhotoSearchIndex(rows), result = index.search("ha", {now});
+  assert.deepEqual(new Set(result.photoIds), new Set(["0", "1", "2", "3", "4", "5", "6", "7", "both"]));
+  assert.equal(result.meanings.length, 6, "Suggestion limits must not limit supported photos");
+  assert.equal(result.totalMatches, 9);
+  assert.equal(result.matches?.["7"].term, "haze");
+  assert.equal(result.matches?.["7"].evidence, "caption");
+  const narrowed = index.search("ha", {now, committedMeaning: "text:haze"});
+  assert.deepEqual(new Set(narrowed.photoIds), new Set(["7", "both"]));
+  assert.equal(narrowed.totalMatches, 2);
+  assert.equal(narrowed.meaning?.id, "text:haze");
+});
+
+test("bounded results retain the exact supported total after deduplication and scope", () => {
+  const rows = Array.from({length: 205}, (_, i) => ({...photo(String(i), "IMG.jpg", ["Harbor"]), caption: "harbor"}));
+  const index = new PhotoSearchIndex(rows), result = index.search("harbor", {now});
+  assert.equal(result.photoIds.length, 200);
+  assert.equal(result.totalMatches, 205);
+  assert.equal(result.truncated, true);
+  const scoped = index.search("harbor", {now, allowedIds: new Set(["0", "204"])});
+  assert.equal(scoped.totalMatches, 2);
+  assert.equal(scoped.truncated, false);
+});
+
+test("union results fence completions beyond the suggestion limit and release withdrawn hits", async () => {
+  let visible = true;
+  const rows = ["harbor", "harvest", "hat", "hatch", "hate", "haven", "hazel", "haze"].map((caption, i) => ({...photo(String(i), "IMG.jpg"), caption, current: () => i !== 7 || visible}));
+  const index = new PhotoSearchIndex(rows), result = await index.searchAsync("ha", {now});
+  assert.equal(result.photoIds.includes("7"), true);
+  visible = false;
+  assert.equal(result.current?.(), false);
+  const next = await index.searchAsync("ha", {now, previous: {...result, photoId: "7"}});
+  assert.equal(next.photoIds.includes("7"), false);
+  assert.equal(next.totalMatches, 7);
+});
+
+test("union browsing keeps a supported later completion stable and its feedback scoped to that meaning", () => {
+  const index = new PhotoSearchIndex([photo("a", "IMG.jpg", ["Harbor"]), photo("b", "IMG.jpg", ["Haze"]), photo("c", "IMG.jpg", ["Haze"])]);
+  const previous = {...index.search("h", {now}), photoId: "c"};
+  const result = index.search("ha", {now, previous});
+  assert.equal(result.photoId, "c");
+  assert.deepEqual(result.photoIds, ["a", "b", "c"]);
+  index.choosePhoto(result.matches!.c.meaningId, "c", "choose-haze", now, true, result.scope);
+  assert.equal(index.search("ha", {now, committedMeaning: "label:haze"}).photoId, "c");
+  assert.equal(index.search("ha", {now, committedMeaning: "label:harbor"}).photoId, "a");
+});
+
 test("words inside supplied facts remain findable through batched ingestion and corrected successors", async () => {
   const rehearsal = {...photo("rehearsal", "neutral-a.png"), facts: ["Backstage rehearsal", "fotoro.trash.v1:false"]};
   const other = {...photo("other", "neutral-b.png"), facts: ["Frontstage show"]};
@@ -216,6 +265,48 @@ test("a phrase prefix retrieves adjacent OCR words without joining unrelated fie
     assert.ok(!result.photoIds.includes("spread"));
   }
 });
+test("nonadjacent OCR words retrieve the same document without joining fields or prefixing receipt numbers", () => {
+  const text = (id: string, value: string) => ({...photo(id, "neutral.png"), ocr: {photoID: id, revision: id, processor: "fixture-v1", status: "complete" as const, text: value, confidence: .94}});
+  const index = new PhotoSearchIndex([text("receipt", "ALFRED COFFEE\nOrder lunch\nInvoice 4826"),
+    {...text("spread", "Invoice 4826"), caption: "Alfred"}, text("different-number", "ALFRED COFFEE\nInvoice 48260")]);
+  for (const query of ["alfred 4826", "4826 alfred", "coffee order invo"]) {
+    const result = index.search(query, {now});
+    assert.equal(result.photoId, "receipt", query);
+    assert.equal(result.meaning?.kind, "ocr");
+    assert.ok(!result.photoIds.includes("spread"));
+  }
+  assert.deepEqual(index.search("alfred 482", {now}).photoIds, []);
+});
+test("word conjunctions retain scoped feedback, verified incremental postings and withdrawal fences", async () => {
+  let visible = true;
+  const rows = ["a", "b"].map(id => ({...photo(id, "neutral.png"), caption: "Boarding pass to Boston", current: () => visible}));
+  const index = await PhotoSearchIndex.build(rows, new AbortController().signal, () => true);
+  const first = index.search("Boston boarding", {now, allowedIds: new Set(["a", "b"])});
+  assert.equal(first.photoIds.length, 2);
+  index.choosePhoto(first.meaning!.id, "b", "pin-conjunction", now, true);
+  assert.equal(new PhotoSearchIndex(rows, index.feedback()).search("Boston boarding", {now}).photoId, "b");
+  const reused = await PhotoSearchIndex.build(rows, new AbortController().signal, () => true, undefined,
+    {index, unchanged: new Set(["a", "b"])});
+  assert.deepEqual(reused.search("Boston boarding", {now, allowedIds: new Set(["a"])}).photoIds, ["a"]);
+  const result = await reused.searchAsync("Boston boarding", {now});
+  visible = false;
+  assert.equal(result.current?.(), false);
+  assert.deepEqual(reused.search("Boston boarding", {now}).photoIds, []);
+  index.dispose(); reused.dispose();
+});
+test("conjunction feedback validates the selected photo despite a direct phrase outside the date or allowed scope", () => {
+  const rows = ["a", "b"].map(id => ({...photo(id, "neutral.png", [], "2026-09-15T12:00:00Z"), caption: "Seattle boarding pass"}));
+  const index = new PhotoSearchIndex([...rows, {...photo("outside", "neutral.png", [], "2026-10-01T10:00:00Z"), caption: "Seattle pass"}]);
+  for (const [query, options] of [
+    ["Seattle pass last month", {scope: "dated"}],
+    ["Seattle pass", {scope: "allowed", allowedIds: new Set(["a", "b"])}],
+  ] as const) {
+    const result = index.search(query, {now, ...options});
+    assert.equal(result.meaning?.id.includes("fulltext:seattle pass"), true);
+    index.choosePhoto(result.meaning!.id, "b", options.scope, now, true, options.scope);
+    assert.equal(index.search(query, {now, ...options}).photoId, "b", query);
+  }
+});
 test("phrase completions can be accepted, confirmed and pinned with truthful source evidence", () => {
   const photos = ["a", "b"].map(id => ({ ...photo(id, "neutral.png"), caption: "Boarding pass to Boston" }));
   const index = new PhotoSearchIndex(photos);
@@ -303,4 +394,16 @@ test("source-bound People and observations use the existing search without expos
   for (const query of ["moonlight", "fotoro.ai", "gemini", digest]) assert.equal(index.search(query, {now}).photoId, undefined);
   const stale = new PhotoSearchIndex([{...source, digest: "b".repeat(64)}]);
   for (const query of ["bicycle", "Cafe", "Ron"]) assert.equal(stale.search(query, {now}).photoId, undefined);
+});
+
+test("async local hits and empty results expire when their index is disposed", async () => {
+  for (const query of ["harbor", "absent"]) {
+    const index = new PhotoSearchIndex([{...photo("local", "IMG.jpg"), caption: "harbor"}]);
+    const result = await index.searchAsync(query);
+    assert.deepEqual(result.photoIds, query === "harbor" ? ["local"] : []);
+    assert.equal(result.current?.(), true);
+    index.dispose();
+    assert.equal(result.current?.(), false, `Disposed index must withdraw ${query} results`);
+    await assert.rejects(index.searchAsync(query), /CACHED_SEARCH_SOURCE_CHANGED/);
+  }
 });

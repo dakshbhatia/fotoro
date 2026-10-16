@@ -166,6 +166,42 @@ enum PhotoTagEdits {
   }
 }
 
+// Only completed evidence for the exact current source can inform a name preview.
+struct PhotoNameAnalysis {
+  private(set) var text: String?
+  private(set) var scene: String?
+  init?(record: SearchRecord, photoID: String, revision: String) {
+    guard record.id == photoID, record.revision == revision else { return nil }
+    if record.ocrStatus == .complete {
+      text = Self.readableLine(record.ocrText, confidence: record.ocrConfidence, processor: record.processor)
+    }
+    if record.visualStatus == .complete {
+      scene = SearchVisualPolicy.validated(record.visualLabels, processor: record.visualProcessor).first?.label
+    }
+  }
+  #if !FOTORO_LOCAL_PREVIEW
+  init?(annotation: PhotoAnnotationsV1, photoID: String, digest: String) {
+    guard annotation.photoId == photoID, annotation.originalSha256 == digest else { return nil }
+    if let ocr = annotation.ocr { text = Self.readableLine(ocr.text, confidence: ocr.confidence, processor: ocr.processor) }
+    scene = SearchVisualPolicy.validated(annotation.visual).first?.label
+  }
+  #endif
+  private static func readableLine(_ value: String, confidence: Double, processor: String) -> String? {
+    guard ["vision-text-v1", "tesseract.js-7.0.0/eng-1.0.0/lstm-orientation-v2"].contains(processor),
+      confidence.isFinite, confidence >= 0.8, confidence <= 1 else { return nil }
+    let bounded = String(value.unicodeScalars.prefix(8192))
+    for line in bounded.components(separatedBy: .newlines).prefix(12) {
+      let text = line.precomposedStringWithCanonicalMapping.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+      guard !text.isEmpty, text.unicodeScalars.count <= 64,
+        text.range(of: #"^[\p{L}\p{M}\s'’&():—–-]+$"#, options: .regularExpression) != nil else { continue }
+      let words = text.components(separatedBy: CharacterSet.letters.union(.nonBaseCharacters).inverted).filter { !$0.isEmpty }
+      guard !words.isEmpty, words.count <= 6, words.joined().unicodeScalars.count >= 4 else { continue }
+      return text
+    }
+    return nil
+  }
+}
+
 enum PhotoOrganizationFacts {
   static let namePrefix = "fotoro.name.v1:"
   static let trashPrefix = "fotoro.trash.v1:"
@@ -212,7 +248,7 @@ enum PhotoOrganizationFacts {
     guard result.count <= 64 else { throw PhotoOrganizationError.capacity }
     return result
   }
-  static func suggestedName(original: String, digest: String?, capturedAt: Date?, labels: [String], place: String?, screenshot: Bool) -> String {
+  static func suggestedName(original: String, digest: String?, capturedAt: Date?, labels: [String], place: String?, screenshot: Bool, analysis: PhotoNameAnalysis? = nil) -> String {
     func slug(_ value: String) -> String {
       value.precomposedStringWithCanonicalMapping.replacingOccurrences(of: #"[^\p{L}\p{N}]+"#, with: "-", options: .regularExpression).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
@@ -229,6 +265,7 @@ enum PhotoOrganizationFacts {
     _ = add(screenshot ? "Screenshot" : nil); _ = add(place)
     var tags = 0
     for label in labels where tags < 2 { if add(label) { tags += 1 } }
+    if tags == 0 { _ = add(screenshot ? analysis?.text : analysis?.scene ?? analysis?.text) }
     var identity: String?
     if let digest {
       var hex = digest.lowercased()

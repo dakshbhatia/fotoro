@@ -1,4 +1,4 @@
-import {useEffect, useRef, useState} from "react";
+import {useEffect, useMemo, useRef, useState} from "react";
 import {isPhotoTrashed, photoName} from "@fotoro/contracts/organization";
 import {CleanupAnalyzer} from "./auto-picks";
 import {readPickSignals} from "./usePhotoPicks";
@@ -20,8 +20,11 @@ export function PhotoCleanup({photos, resources, onTrash, canTrash, onOpen, chan
   onOpen: (photo: LocalPhoto) => void; changes?: ConsumerPhotoChanges; onClose: () => void;
 }) {
   const panel = useRef<HTMLElement>(null), [analyzer] = useState(() => new CleanupAnalyzer());
-  const [scan] = useState(() => photos.filter(photo => photo.current?.() !== false && !isPhotoTrashed(photo)).slice(0, 200));
-  const [result, setResult] = useState<Awaited<ReturnType<CleanupAnalyzer["run"]>>>(), [done, setDone] = useState(0), [busy, setBusy] = useState(true), [saveError, setSaveError] = useState("");
+  const [measurementScan] = useState(() => photos.filter(photo => photo.current?.() !== false && !isPhotoTrashed(photo)).slice(0, 200));
+  const scanIDs = useMemo(() => new Set(measurementScan.map(photo => photo.id)), [measurementScan]);
+  const scan = useMemo(() => photos.filter(photo => scanIDs.has(photo.id)), [photos, scanIDs]);
+  const result = analyzer.review(scan);
+  const [done, setDone] = useState(0), [busy, setBusy] = useState(true), [saveError, setSaveError] = useState("");
   const alive = useRef(false), saving = useRef(false), [saveBusy, setSaveBusy] = useState(false);
   const latestChanges = useRef(changes); latestChanges.current = changes;
   useEffect(() => {alive.current = true; return () => {alive.current = false;};}, []);
@@ -37,18 +40,19 @@ export function PhotoCleanup({photos, resources, onTrash, canTrash, onOpen, chan
   useDialogFocus(panel, onClose);
   useEffect(() => {
     let alive = true;
-    void diagnose("metadata", async () => analyzer.run(scan, (photo, signal) => readPickSignals(photo, resources(photo), signal), value => {if (alive) setDone(value);}))
-      .then(value => {if (alive) {setResult(value); setBusy(false);}}).catch(() => {if (alive) {setBusy(false); setSaveError("Review could not finish. Close and try again.");}});
+    setBusy(true); setDone(0);
+    void diagnose("metadata", async () => analyzer.run(measurementScan, (photo, signal) => readPickSignals(photo, resources(photo), signal), value => {if (alive) setDone(value);}))
+      .then(() => {if (alive) setBusy(false);}).catch(() => {if (alive) {setBusy(false); setSaveError("Review could not finish. Close and try again.");}});
     return () => {alive = false; analyzer.clear();};
-  }, [analyzer, scan]);
-  const rows = photos.filter(photo => photo.current?.() !== false && !isPhotoTrashed(photo) && result?.reasons.has(photo.id));
+  }, [analyzer, measurementScan]);
+  const rows = photos.filter(photo => photo.current?.() !== false && !isPhotoTrashed(photo) && result.reasons.has(photo.id));
   return <aside className="sheet places-sheet photo-cleanup" ref={panel} role="dialog" aria-modal="true" aria-label="Review cleanup" tabIndex={-1}>
     <header className="places-header"><h2>Review cleanup</h2><button onClick={onClose}>Done</button></header>
     <p>Review possible duplicates, blurry shots, and photos with little detail. Nothing is selected or removed automatically.</p>
     <p className="hint">This review covers up to 200 currently loaded photos. Trash is recoverable and only affects Fotoro; it does not free storage.</p>
-    {busy ? <p role="status">Checking previews… {done} / {scan.length}</p> : <p role="status">{rows.length} to review · {result?.unassessed ?? scan.length} previews unassessed.</p>}
+    {busy ? <p role="status">Checking previews… {done} / {scan.length}</p> : <p role="status">{rows.length} to review · {result.unassessed} previews unassessed.</p>}
     {!busy && !rows.length && <p>No candidates found in this review. Unassessed photos have not been judged.</p>}
-    <ul>{rows.map(photo => <CleanupRow key={photo.id} photo={photo} reasons={result!.reasons.get(photo.id)!} resources={resources(photo)} remove={canTrash(photo) ? () => onTrash(photo) : undefined} open={() => onOpen(photo)} />)}</ul>
+    <ul>{rows.map(photo => <CleanupRow key={photo.id} photo={photo} reasons={result.reasons.get(photo.id)!} resources={resources(photo)} remove={canTrash(photo) ? () => onTrash(photo) : undefined} open={() => onOpen(photo)} />)}</ul>
     {changes?.current() && changes.pending.length > 0 && <section><p>Changes are on this device until you save them.</p><button disabled={changes.busy || saveBusy} onClick={() => void save()}>{changes.pending.some(edit => edit.conflict) ? "Review changes" : "Save changes"}</button></section>}
     {saveError && <p role="alert">{saveError}</p>}
   </aside>;

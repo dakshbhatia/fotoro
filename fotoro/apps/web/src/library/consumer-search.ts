@@ -6,9 +6,11 @@ import {cloudSearchRecords} from "./search";
 import type {LocalPhoto} from "../local/resources";
 import {LocalResources, imageDimensions} from "../local/resources";
 import type {SearchResult, SearchMeaning, SearchPhoto, PhotoSearchIndex} from "../local/search";
+import {searchMatchReceipts} from "../local/search";
 import type {PhotoLocationV1} from "@fotoro/contracts";
 import type {PhotoObservationV1} from "@fotoro/contracts/intelligence";
 import type {PeopleAssignment} from "@fotoro/contracts/people";
+import type {SavedTextProgress, SavedTextResult} from "../local/saved-ocr";
 const savedSources = new WeakMap<object, {snapshot: OwnedPhotoSnapshot; photo: Photo; date: string; dateSource: LocalPhoto["dateSource"]; digest?: string; file?: File; location?: PhotoLocationV1}>();
 // Only an adapted, owned source can bind private inference to an account.
 export function savedInferenceSource(photo: LocalPhoto) {
@@ -57,6 +59,7 @@ export interface OwnedPhotoSnapshot {
   current: () => boolean;
   sourceCurrent?: (photo: Photo) => boolean;
   preview: (photo: Photo) => Promise<Blob>;
+  checkText?: (photos: readonly LocalPhoto[], signal: AbortSignal, current: () => boolean, progress: (value: SavedTextProgress) => void) => Promise<SavedTextResult>;
   edit?: (photo: Photo, changes: {labels?: string[]; favorite?: boolean; location?: PhotoLocationV1; observation?: PhotoObservationV1; people?: PeopleAssignment[]; organization?: PhotoOrganizationPatch}) => Promise<void>;
   locate?: (updates: readonly {photo: Photo; location: PhotoLocationV1}[]) => Promise<{applied: number; failed: number; updatedPhotoIDs: string[]}>;
   people?: (updates: readonly {photo: Photo; assignments: PeopleAssignment[]}[]) => Promise<void>;
@@ -66,7 +69,10 @@ export function accountSearchResult(search: PhotoSearchIndex["search"], records:
   const result = search(query, {...options, allowedIds});
   const idFor = (id: string) => ids.get(id) ?? "saved:" + id;
   const meaning = (value: SearchMeaning) => ({...value, photoIds: [...new Set(value.photoIds.map(idFor))], evidence: Object.fromEntries(Object.entries(value.evidence).map(([id, source]) => [idFor(id), source]))});
-  return {...result, photoIds: [...new Set(result.photoIds.map(idFor))], photoId: result.photoId ? idFor(result.photoId) : undefined,
+  const matches = Object.fromEntries(Object.entries(searchMatchReceipts(result)).map(([id, match]) => [idFor(id), match]));
+  const photoIds = [...new Set(result.photoIds.map(idFor))], totalMatches = Object.keys(matches).length;
+  return {...result, photoIds, photoId: result.photoId ? idFor(result.photoId) : undefined,
+    matches, totalMatches, truncated: photoIds.length < totalMatches,
     meanings: result.meanings.map(meaning), meaning: result.meaning ? meaning(result.meaning) : undefined};
 }
 export async function accountSearchResultAsync(search: PhotoSearchIndex["searchAsync"], records: SearchPhoto[], ids: ReadonlyMap<string, string>, query: string, options: Parameters<PhotoSearchIndex["search"]>[1], signal: AbortSignal, current: () => boolean) {
@@ -83,8 +89,24 @@ export async function accountSearchResultAsync(search: PhotoSearchIndex["searchA
     for (const id of value.photoIds) {const display = idFor(id); photoIds.add(display); evidence[display] = value.evidence[id]; await pause();}
     mapped.set(value, {...value, photoIds: [...photoIds], evidence});
   }
-  check(); if (result.current?.() === false) throw new Error("CACHED_SEARCH_SOURCE_CHANGED"); return {...result, photoIds: [...new Set(result.photoIds.map(idFor))], photoId: result.photoId ? idFor(result.photoId) : undefined,
+  const matches: NonNullable<SearchResult["matches"]> = {};
+  for (const [id, match] of Object.entries(searchMatchReceipts(result))) {matches[idFor(id)] = match; await pause();}
+  const photoIds = [...new Set(result.photoIds.map(idFor))], totalMatches = Object.keys(matches).length;
+  check(); if (result.current?.() === false) throw new Error("CACHED_SEARCH_SOURCE_CHANGED"); return {...result, photoIds, photoId: result.photoId ? idFor(result.photoId) : undefined,
+    matches, totalMatches, truncated: photoIds.length < totalMatches,
     meanings: result.meanings.map(value => mapped.get(value)!), meaning: result.meaning ? mapped.get(result.meaning) : undefined};
+}
+export function savedSearchHydrationIDs(displayIDs: readonly string[], records: readonly SearchPhoto[], ids: ReadonlyMap<string, string>): string[] {
+  const wanted = new Set(displayIDs);
+  const saved: string[] = [], aliases: string[] = [];
+  for (const record of records) {
+    const display = ids.get(record.id) ?? "saved:" + record.id;
+    if (!wanted.has(display) || record.current?.() === false) continue;
+    (display.startsWith("saved:") ? saved : aliases).push(record.id);
+  }
+  // Local originals already have a preview. Duplicate Saved aliases must not
+  // consume the budget needed to hydrate every displayed Saved-only photo.
+  return [...saved, ...aliases].slice(0, 200);
 }
 // A result belongs to one request. Replacement clears it and aborts its work.
 export function useAccountSearch(query: string, scope: string, request: ((signal: AbortSignal, current: () => boolean) => Promise<SearchResult>) | undefined, enabled: boolean) {
@@ -254,11 +276,19 @@ export function combineConsumerSearch(local: SearchResult, saved: SearchResult, 
     const existing = meanings.get(meaning.id);
     meanings.set(meaning.id, existing ? {...existing, photoIds: [...new Set([...existing.photoIds, ...meaning.photoIds])], evidence: {...meaning.evidence, ...existing.evidence}} : meaning);
   }
-  const meaning = meanings.get(committed ?? "") ?? meanings.get(local.meaning?.id ?? saved.meaning?.id ?? "");
-  const photoIds = [...new Set([
-    ...(local.meaning?.id === meaning?.id ? local.photoIds : []),
-    ...(saved.meaning?.id === meaning?.id ? saved.photoIds : []),
-  ])];
+  // Narrow before deduplication: a local alias with different support cannot
+  // erase an accepted meaning supplied by the Saved version of that photo.
+  const receipts = [...Object.entries(searchMatchReceipts(saved)), ...Object.entries(searchMatchReceipts(local))];
+  const narrowed = committed && receipts.some(([, match]) => match.meaningId === committed);
+  const matches = Object.fromEntries(receipts.filter(([, match]) => !narrowed || match.meaningId === committed));
+  const supported = Object.keys(matches);
+  const selected = meanings.get(committed ?? "") ?? meanings.get(local.meaning?.id ?? saved.meaning?.id ?? "");
+  const receipt = narrowed && supported.length ? matches[supported[0]] : undefined;
+  const meaning = receipt && selected?.id !== committed ? {id: receipt.meaningId, term: receipt.term, kind: receipt.kind,
+    photoIds: supported, evidence: Object.fromEntries(supported.map(id => [id, matches[id].evidence]))} : selected;
+  const photoIds = [...new Set([...local.photoIds, ...saved.photoIds, ...supported])].filter(id => !!matches[id]).slice(0, 200);
   const photoId = [local.photoId, saved.photoId].find(id => id && photoIds.includes(id)) ?? photoIds[0];
-  return {...local, searching: local.searching || saved.searching, metadataIncomplete: local.metadataIncomplete || saved.metadataIncomplete, meanings: [...meanings.values()], meaning: meaning ? {...meaning, photoIds} : undefined, photoIds, photoId};
+  return {...local, searching: local.searching || saved.searching, metadataIncomplete: local.metadataIncomplete || saved.metadataIncomplete,
+    current: local.current || saved.current ? () => local.current?.() !== false && saved.current?.() !== false : undefined,
+    meanings: [...meanings.values()], meaning, matches, totalMatches: supported.length, truncated: photoIds.length < supported.length, photoIds, photoId};
 }

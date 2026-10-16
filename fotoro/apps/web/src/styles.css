@@ -1086,3 +1086,10 @@ main:has(.consumer-selection) .local-search { padding-bottom: calc(max(140px, va
 .photo-cleanup li { padding: 1rem 0; border-bottom: 1px solid var(--line, #8884); }
 .photo-cleanup li > button:first-child { display: flex; align-items: center; gap: .75rem; text-align: left; max-width: 100%; overflow-wrap: anywhere; }
 .photo-cleanup li img { width: 5rem; height: 5rem; object-fit: contain; }
+
+.view-image { touch-action: pinch-zoom; overscroll-behavior: contain; }
+.view-image[data-zoomed="true"] { touch-action: pan-x pan-y pinch-zoom; display: block; }
+.view-image img { user-select: none; -webkit-user-drag: none; }
+@media (prefers-reduced-motion: reduce) {
+  .viewer, .viewer * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}

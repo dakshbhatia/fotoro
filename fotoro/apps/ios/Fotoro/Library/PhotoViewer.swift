@@ -17,7 +17,7 @@ struct PhotoViewer: View {
   let receivedGrant: GrantV1?
   let receivedCards: [String: AccountCardV1]?
   @State private var selected = ""
-  @State private var zoom = PhotoViewerZoom()
+  @State private var zoom = PhotoViewerZoomController()
   @State private var details: LocalPhoto?
   @State private var sharedOriginal: ConsumerSharedOriginal?
   @State private var originalExports: [URL] = []
@@ -31,6 +31,7 @@ struct PhotoViewer: View {
   @State private var feedback: String?
   @Environment(\.scenePhase) private var scenePhase
   @Environment(\.dismiss) private var dismiss
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   init(services: AppServices, initialID: String, displayedPhotos: [LocalPhoto]? = nil, receivedGrant: GrantV1? = nil) {
     self.services = services
     self.initialID = initialID
@@ -60,7 +61,9 @@ struct PhotoViewer: View {
               } else {
                 SavedPhotoPage(services: services, photo: photo, receivedGrant: receivedGrant, receivedCards: receivedCards,
                   isCurrent: photo.id == selected)
-                  .modifier(PhotoViewerStillInteraction(zoom: $zoom, controlsVisible: $controlsVisible, isCurrent: photo.id == selected))
+                  .modifier(PhotoViewerStillInteraction(zoom: zoom, controlsVisible: $controlsVisible,
+                    isCurrent: photo.id == selected, dismiss: { dismiss() }, showDetails: { details = photo }))
+                  .id(photo.manifest.ownerAccountId + ":" + photo.id + ":" + photo.metadata.originalSha256 + ":" + photo.manifest.metadataRepresentation.ciphertextSha256)
               }
             }
             else { Color.black }
@@ -78,13 +81,14 @@ struct PhotoViewer: View {
           }
         }
         .onChange(of: selected) { zoom.reset(); feedback = nil; controlsVisible = true }
+        .sensoryFeedback(.selection, trigger: selected)
         .accessibilityAction(named: "Next photo") { movePage(forward: true) }
         .accessibilityAction(named: "Previous photo") { movePage(forward: false) }
         .toolbar {
           ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() } }
           if current.map({ !CameraMedia.isMotion($0.metadata.mediaType) }) == true {
             ToolbarItem(placement: .topBarTrailing) {
-              Button(zoom.scale == 1 ? "Zoom in" : "Reset zoom", systemImage: "plus.magnifyingglass") { zoom.toggle() }
+              Button(!zoom.isZoomed ? "Zoom in" : "Reset zoom", systemImage: "plus.magnifyingglass") { withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { zoom.toggle() } }
                 .accessibilityIdentifier("viewer.zoom")
             }
           }
@@ -330,7 +334,10 @@ private struct SavedPhotoPage: View {
     else {
     LazyImage(request: SavedPhotoViewerPagePolicy.previewRequest(displayed, fallback: photo)) { state in
       ZStack(alignment: .bottom) {
-        if let image = state.image { image.resizable().scaledToFit() }
+        if let image = state.image {
+          image.resizable().scaledToFit()
+            .preference(key: PhotoViewerImageSizeKey.self, value: state.imageContainer?.image.size)
+        }
         else if !failed && state.error == nil { ProgressView().tint(.white) }
         if failed || state.error != nil {
           VStack(spacing: 8) {

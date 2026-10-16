@@ -1212,7 +1212,7 @@ final class RecoveryTests: XCTestCase {
     let account = try fixture(FixtureAccounts.self, "accounts").testSecrets[0]
     let trusted = try AppServices(
       root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
-    try trusted.configureAPI("http://127.0.0.1:8787")
+    try trusted.configureAPI(nativeTestAPIURL())
     let wrong = "fotoro1.\(account.accountId).\(Data(repeating:0,count:32).b64)"
     do {
       try await trusted.auth.recover(wrong)
@@ -1227,7 +1227,7 @@ final class RecoveryTests: XCTestCase {
     XCTAssertTrue(trusted.vault.isUnlocked)
     let newDevice = try AppServices(
       root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
-    try newDevice.configureAPI("http://127.0.0.1:8787")
+    try newDevice.configureAPI(nativeTestAPIURL())
     try await newDevice.auth.recover("fotoro1.\(account.accountId).\(account.recoverySecret)")
     newDevice.vault.lock()
     try await newDevice.deviceTrust.begin()

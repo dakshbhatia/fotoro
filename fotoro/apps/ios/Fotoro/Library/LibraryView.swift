@@ -835,7 +835,9 @@ struct LibraryPhotoCell: View {
           if let status = syncStatus { PhotoSyncTileIndicator(status: status) }
         }
         .contentShape(.interaction, Rectangle())
-    }.buttonStyle(.plain).accessibilityLabel(PhotoOrganizationFacts.name(services?.annotation(photo).facts, original: photo.metadata.filename))
+    }.buttonStyle(PhotoTilePressStyle())
+      .modifier(PhotoGridSelectionTile(id: photo.id + "|" + photo.metadata.originalSha256 + "|" + photo.manifest.metadataRepresentation.ciphertextSha256, selected: isSelected, toggle: toggleSelection))
+      .accessibilityLabel(PhotoOrganizationFacts.name(services?.annotation(photo).facts, original: photo.metadata.filename))
       .accessibilityValue([isSelected ? "Selected" : nil, syncStatus?.accessibilityText].compactMap { $0 }.joined(separator: ", "))
       .contextMenu {
         Button(isSelected ? "Deselect" : "Select", action: toggleSelection)

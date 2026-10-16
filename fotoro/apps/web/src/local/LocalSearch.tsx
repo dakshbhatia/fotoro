@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "../library/icons";
 import { type LocalPhoto, LocalResources } from "./resources";
-import { normalizeSearch, type SearchResult, type SearchMeaning } from "./search";
+import { normalizeSearch, searchPhotoMeaning, type SearchResult, type SearchMeaning } from "./search";
 import type { LocalOcrPhoto } from "./useLocalOcr";
 export function meaningRelation(meaning: SearchMeaning) {
   return meaning.kind === "visual" ? "Visual similarity" : meaning.kind === "label" ? "Your tag"
@@ -60,7 +60,7 @@ export function LocalSearch({photos, result, resources, committed, pinned, canCo
   reasons?: ReadonlyMap<string, string[]>; emptyMessage?: string; emptyHint?: string;
 }) {
   const photo = photos.find(p => p.id === result.photoId) as LocalOcrPhoto | undefined,
-    index = result.photoIds.indexOf(result.photoId ?? ""), meaning = result.meaning;
+    index = result.photoIds.indexOf(result.photoId ?? ""), meaning = searchPhotoMeaning(result);
   const [loaded, setLoaded] = useState<{photo?: LocalPhoto; url: string}>({url: ""}), [error, setError] = useState(""), [details, setDetails] = useState(false);
   const swiped = useRef(false);
   const touch = useRef<{x: number; y: number} | undefined>(undefined);
@@ -83,7 +83,7 @@ export function LocalSearch({photos, result, resources, committed, pinned, canCo
   };
   const selecting = !!photo && !!selection?.eligible(photo.id);
   return <section className="local-search" aria-label="Search result" aria-busy={result.searching || undefined}>
-    <div className="search-caption">{result.photoIds.length > 1 && <p className="local-coverage" role="status">{result.photoIds.length} matches</p>}
+    <div className="search-caption">{result.photoIds.length > 1 && <p className="local-coverage" role="status">{result.truncated ? `${result.photoIds.length} of ${result.totalMatches} matches` : `${result.photoIds.length} matches`}</p>}
       {meaning?.kind === "label" && <button aria-pressed={committed === meaning.id} onClick={() => onAccept(meaning)}>Only this tag</button>}
       <button className="text-button" aria-label="Search details" aria-expanded={details} onClick={() => setDetails(!details)}><Icon kind="info" /></button></div>
     {photo && meaning ? <>
