@@ -6,6 +6,151 @@ import XCTest
 @testable import Fotoro
 
 final class RecentPhotosTests: XCTestCase {
+  @MainActor func testThumbnailBurstBatchesCurrentSourcesWithoutCachingPublicationPermission() async {
+    var permission = PHAuthorizationStatus.authorized
+    let sources = (0..<100).map { RecentPhotoSource(id: "tile-\($0)", revision: "current") }
+    var revisions = Dictionary(uniqueKeysWithValues: sources.map { ($0.id, $0.revision) })
+    var reads: [[String]] = []
+    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in [] },
+      sourceRevisions: { ids in reads.append(ids); return revisions.filter { ids.contains($0.key) } })
+    defer { store.pauseAnalysis() }
+    let generation = store.thumbnailGeneration
+    let burst = expectation(description: "All visible callbacks validated")
+    burst.expectedFulfillmentCount = 200
+    var accepted = 0
+    for source in sources {
+      for _ in 0..<2 {
+        store.validateThumbnail(source: source, generation: generation) { allowed in
+          if allowed { accepted += 1 }
+          burst.fulfill()
+        }
+      }
+    }
+    await fulfillment(of: [burst], timeout: 1)
+    XCTAssertEqual(accepted, 200)
+    XCTAssertEqual(reads.count, 1, "One visible burst must not fetch Photos metadata per degraded/final callback")
+    XCTAssertEqual(Set(reads.flatMap { $0 }), Set(sources.map(\.id)))
+
+    let changed = expectation(description: "A later callback validates again")
+    changed.expectedFulfillmentCount = 2
+    revisions[sources[0].id] = "edited"
+    revisions[sources[1].id] = nil
+    for source in sources.prefix(2) {
+      store.validateThumbnail(source: source, generation: generation) { allowed in
+        XCTAssertFalse(allowed, "A successful burst must not cache permission for later edited or removed sources")
+        changed.fulfill()
+      }
+    }
+    await fulfillment(of: [changed], timeout: 1)
+    XCTAssertEqual(reads.count, 2)
+    permission = .denied
+    let withdrawn = expectation(description: "Withdrawn callbacks rejected")
+    store.validateThumbnail(source: sources[2], generation: generation) { allowed in
+      XCTAssertFalse(allowed); withdrawn.fulfill()
+    }
+    await fulfillment(of: [withdrawn], timeout: 1)
+    XCTAssertEqual(reads.count, 2, "Withdrawn permission must avoid a metadata read")
+  }
+
+  @MainActor func testThumbnailBatchSkipsHiddenRequestsAndRejectsPermissionChangeDuringValidation() async {
+    var permission = PHAuthorizationStatus.authorized
+    var reads = 0
+    var visible = true
+    let source = RecentPhotoSource(id: "visible", revision: "current")
+    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in [] },
+      sourceRevisions: { _ in reads += 1; permission = .limited; return [source.id: source.revision] })
+    defer { store.pauseAnalysis() }
+    let generation = store.thumbnailGeneration
+    let hidden = expectation(description: "Hidden request rejected before source fetch")
+    store.validateThumbnail(source: source, generation: generation, isCurrent: { visible }) { allowed in
+      XCTAssertFalse(allowed); hidden.fulfill()
+    }
+    visible = false
+    await fulfillment(of: [hidden], timeout: 1)
+    XCTAssertEqual(reads, 0)
+
+    let withdrawn = expectation(description: "Permission transition fences the batch")
+    store.validateThumbnail(source: source, generation: generation) { allowed in
+      XCTAssertFalse(allowed); withdrawn.fulfill()
+    }
+    await fulfillment(of: [withdrawn], timeout: 1)
+    XCTAssertEqual(reads, 1)
+    XCTAssertNotEqual(store.thumbnailGeneration, generation)
+  }
+
+  @MainActor func testThumbnailValidationStressBoundsEachReadAndRechecksGenerationBetweenPublications() async {
+    let sources = (0..<1000).map { RecentPhotoSource(id: "tile-\($0)", revision: "current") }
+    var reads: [[String]] = []
+    let store = RecentPhotosStore(authorization: { .authorized }, readPhotos: { _ in [] },
+      sourceRevisions: { ids in
+        reads.append(ids)
+        return Dictionary(uniqueKeysWithValues: ids.map { ($0, "current") })
+      })
+    defer { store.pauseAnalysis() }
+    let generation = store.thumbnailGeneration
+    let done = expectation(description: "All stress callbacks settle")
+    done.expectedFulfillmentCount = sources.count
+    var accepted = 0
+    for source in sources {
+      store.validateThumbnail(source: source, generation: generation) { allowed in
+        if allowed { accepted += 1 }
+        done.fulfill()
+      }
+    }
+    await fulfillment(of: [done], timeout: 2)
+    XCTAssertEqual(accepted, sources.count)
+    XCTAssertEqual(reads.count, 5)
+    XCTAssertTrue(reads.allSatisfy { $0.count <= 200 }, "No metadata fetch may grow with the full scroll backlog")
+    XCTAssertEqual(Set(reads.flatMap { $0 }), Set(sources.map(\.id)))
+
+    let invalidated = expectation(description: "First publication invalidates the remaining batch")
+    invalidated.expectedFulfillmentCount = 2
+    var results: [Bool] = []
+    store.validateThumbnail(source: sources[0], generation: generation) { allowed in
+      results.append(allowed)
+      store.restoreAccess()
+      invalidated.fulfill()
+    }
+    store.validateThumbnail(source: sources[1], generation: generation) { allowed in
+      results.append(allowed); invalidated.fulfill()
+    }
+    await fulfillment(of: [invalidated], timeout: 1)
+    XCTAssertEqual(results, [true, false], "A refresh during publication must fence the rest of the batch")
+  }
+
+  @MainActor func testThumbnailBatchRejectsPermissionWithdrawnBetweenPublicationsAndQueuedOldGeneration() async {
+    var permission = PHAuthorizationStatus.authorized
+    var reads = 0
+    let source = RecentPhotoSource(id: "visible", revision: "current")
+    let store = RecentPhotosStore(authorization: { permission }, readPhotos: { _ in [] },
+      sourceRevisions: { ids in
+        reads += 1
+        return Dictionary(uniqueKeysWithValues: ids.map { ($0, source.revision) })
+      })
+    defer { store.pauseAnalysis() }
+    let generation = store.thumbnailGeneration
+    let done = expectation(description: "Withdrawal fences subsequent publication")
+    done.expectedFulfillmentCount = 2
+    var results: [Bool] = []
+    store.validateThumbnail(source: source, generation: generation) { allowed in
+      results.append(allowed); permission = .denied; done.fulfill()
+    }
+    store.validateThumbnail(source: source, generation: generation) { allowed in
+      results.append(allowed); done.fulfill()
+    }
+    await fulfillment(of: [done], timeout: 1)
+    XCTAssertEqual(results, [true, false])
+    XCTAssertEqual(reads, 1)
+
+    permission = .authorized
+    let stale = expectation(description: "Old queued generation never reads metadata")
+    store.validateThumbnail(source: source, generation: generation) { allowed in
+      XCTAssertFalse(allowed); stale.fulfill()
+    }
+    await fulfillment(of: [stale], timeout: 1)
+    XCTAssertEqual(reads, 1)
+  }
+
   @MainActor func testObserverBurstRefreshesOnceAndValidatesNewestSource() async {
     for latest in ["after", nil] as [String?] {
       var reads = 0

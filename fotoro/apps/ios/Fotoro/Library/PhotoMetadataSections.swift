@@ -142,31 +142,39 @@ private struct PhotoMetadataRow: View {
 struct SavedPhotoOrganizationSection: View {
   @Bindable var services: AppServices
   let photo: LocalPhoto
-  @State private var draft = ""
+  @State private var nameDraft = PhotoNameDraft(savedName: "")
+  private var draft: String { nameDraft.value }
   private var value: PhotoAnnotationsV1 { services.annotation(photo) }
   private var name: String { PhotoOrganizationFacts.name(value.facts, original: photo.metadata.filename) }
   private var screenshot: Bool { PhotoOrganizationFacts.screenshot(value.facts, originalSha256: photo.metadata.originalSha256) }
   private var valid: Bool { PhotoOrganizationFacts.validName(draft) && (draft as NSString).pathExtension.lowercased() == (photo.metadata.filename as NSString).pathExtension.lowercased() }
   var body: some View {
     Section("Photo name") {
-      TextField("Filename", text: $draft).autocorrectionDisabled().textInputAutocapitalization(.never)
+      TextField("Filename", text: Binding(get: { draft }, set: { nameDraft.edit($0) })).autocorrectionDisabled().textInputAutocapitalization(.never)
         .accessibilityLabel("Photo filename").submitLabel(.done).onSubmit { if valid && draft != name { apply(.name(draft)) } }
       Button("Suggest name") {
-        draft = PhotoOrganizationFacts.suggestedName(original: photo.metadata.filename, digest: photo.metadata.originalSha256,
-          capturedAt: CameraMedia.captureDate(photo.metadata), labels: value.labels ?? [], place: value.location?.name, screenshot: screenshot)
+        nameDraft.edit(PhotoOrganizationFacts.suggestedName(original: photo.metadata.filename, digest: photo.metadata.originalSha256,
+          capturedAt: CameraMedia.captureDate(photo.metadata), labels: value.labels ?? [], place: value.location?.name, screenshot: screenshot))
       }
       Button("Apply name") { apply(.name(draft)) }.disabled(!valid || draft == name)
       if name != photo.metadata.filename { Button("Use original name") { apply(.name(nil)) } }
+      if nameDraft.savedNameChanged && draft != name {
+        Text("The saved name changed. Your draft is kept.").font(.caption).foregroundStyle(.secondary)
+        Button("Use saved name") { nameDraft.acknowledge(name) }
+      }
       Text("Names follow this photo in Fotoro and on exported copies. The original stays unchanged.").font(.caption).foregroundStyle(.secondary)
       Toggle("Screenshot", isOn: Binding(get: { screenshot }, set: { apply(.screenshot($0)) }))
-    }.onAppear { draft = name }.onChange(of: name) { _, value in draft = value }
+    }.onAppear { nameDraft.receive(name) }.onChange(of: name) { _, value in nameDraft.receive(value) }
     Section {
       Button(PhotoOrganizationFacts.trashed(value.facts) ? "Restore photo" : "Move to Fotoro Trash") { apply(.trash(!PhotoOrganizationFacts.trashed(value.facts))) }
       Text("Trash hides this photo in Fotoro. You can Restore it. Device Photos and storage use stay unchanged.").font(.caption).foregroundStyle(.secondary)
     }
   }
   private func apply(_ change: PhotoOrganizationChange) {
-    do { try services.setOrganization(change, photo: photo) } catch { services.error = error.localizedDescription }
+    do {
+      try services.setOrganization(change, photo: photo)
+      if case .name = change { nameDraft.acknowledge(name) }
+    } catch { services.error = error.localizedDescription }
   }
 }
 #endif

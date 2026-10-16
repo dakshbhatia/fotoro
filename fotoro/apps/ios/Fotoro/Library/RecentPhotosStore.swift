@@ -266,6 +266,14 @@ struct PhotoPreviewProgress {
   @ObservationIgnored private var explicitAnalysisRequests: Set<UUID> = []
   private(set) var thumbnailGeneration = UUID()
   @ObservationIgnored private var thumbnailAuthorization: PHAuthorizationStatus?
+  private struct ThumbnailValidation {
+    let source: RecentPhotoSource
+    let generation: UUID
+    let isCurrent: @MainActor () -> Bool
+    let completion: @MainActor (Bool) -> Void
+  }
+  @ObservationIgnored private var thumbnailValidations: [ThumbnailValidation] = []
+  @ObservationIgnored private var thumbnailValidationTask: Task<Void, Never>?
   @ObservationIgnored private var thumbnailSources: [NSString: RecentPhotoSource] = [:]
   @ObservationIgnored private let thumbnails: NSCache<NSString, UIImage> = {
     let cache = NSCache<NSString, UIImage>()
@@ -641,6 +649,52 @@ struct PhotoPreviewProgress {
       _ = recordThumbnailAuthorization(afterValidation); return false
     }
     return thumbnailAccessAllowed() && generation == thumbnailGeneration && revision == source.revision
+  }
+  func validateThumbnail(source: RecentPhotoSource, generation: UUID,
+    isCurrent: @escaping @MainActor () -> Bool = { true }, completion: @escaping @MainActor (Bool) -> Void) {
+    guard isCurrent() else { completion(false); return }
+    thumbnailValidations.append(ThumbnailValidation(source: source, generation: generation,
+      isCurrent: isCurrent, completion: completion))
+    scheduleThumbnailValidation()
+  }
+  private func scheduleThumbnailValidation() {
+    guard thumbnailValidationTask == nil, !thumbnailValidations.isEmpty else { return }
+    thumbnailValidationTask = Task { @MainActor [weak self] in
+      // Visible cells and opportunistic image callbacks arrive in bursts. Give
+      // this actor turn one bounded source lookup instead of a lookup per cell.
+      await Task.yield()
+      guard let self else { return }
+      thumbnailValidationTask = nil
+      drainThumbnailValidations()
+    }
+  }
+  private func drainThumbnailValidations() {
+    let count = min(RecentPhotosPolicy.browsePageSize, thumbnailValidations.count)
+    let batch = Array(thumbnailValidations.prefix(count))
+    thumbnailValidations.removeFirst(count)
+    let current = batch.filter { $0.isCurrent() && $0.generation == thumbnailGeneration }
+    var revisions: [String: String] = [:]
+    if !current.isEmpty, thumbnailAccessAllowed() {
+      let permission = authorization()
+      revisions = sourceRevisions(Array(Set(current.map(\.source.id))))
+      let afterValidation = authorization()
+      if afterValidation != permission {
+        _ = recordThumbnailAuthorization(afterValidation)
+        revisions = [:]
+      }
+    }
+    for request in batch {
+      // Publication stays inside this actor turn, immediately after the fresh
+      // fetch. Never retain a validation result across an await or later burst.
+      // A prior completion may itself withdraw access or refresh the sources.
+      let active = request.isCurrent()
+      let access = thumbnailAccessAllowed()
+      request.completion(active && access && request.generation == thumbnailGeneration
+        && revisions[request.source.id] == request.source.revision)
+    }
+    // Large bursts yield between slices, and disappeared cells are checked
+    // again before the next slice is allowed to fetch Photos metadata.
+    scheduleThumbnailValidation()
   }
   // Call only for a completed, nondegraded thumbnail, using the generation captured before its request.
   func cacheThumbnail(_ image: UIImage, for source: RecentPhotoSource, targetSize: CGSize,

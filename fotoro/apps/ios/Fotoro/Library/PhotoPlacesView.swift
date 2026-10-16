@@ -204,7 +204,7 @@ struct PhotoPlacesView: View {
                     }
                     Spacer()
                     Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
-                  }.padding(.vertical, 4)
+                  }.padding(.vertical, 4).contentShape(.interaction, Rectangle())
                 }.buttonStyle(.plain)
                   .accessibilityHint("Show photos in this area")
               }
@@ -227,7 +227,7 @@ struct PhotoPlacesView: View {
                   HStack(spacing: 12) {
                     thumbnail(item, side: 60).frame(width: 60, height: 60).clipped().clipShape(.rect(cornerRadius: 8)).accessibilityHidden(true)
                     PhotoPlaceRow(item: item)
-                  }
+                  }.contentShape(.interaction, Rectangle())
                 }.buttonStyle(.plain).accessibilityHint("Open photo")
               }
               if visibleRows.count < displayedCount {

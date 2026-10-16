@@ -162,6 +162,7 @@ struct NativeTripPicks: View {
                       .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                   }
                 }
+                .contentShape(.interaction, Rectangle())
               }.buttonStyle(.bordered)
             }
           }

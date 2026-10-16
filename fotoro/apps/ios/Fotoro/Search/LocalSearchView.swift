@@ -43,7 +43,7 @@ struct LocalSearchView: View {
                   Text(reasons.prefix(2).joined(separator: " · "))
                     .font(.caption).foregroundStyle(.secondary).padding(8)
                 }
-              }
+              }.contentShape(.interaction, Rectangle())
             }.buttonStyle(.plain).accessibilityValue(selectedIDs.contains(photo.id) ? "Selected" : "")
               .contextMenu {
                 if let toggleSelection {
@@ -285,7 +285,7 @@ private struct ConsumerSearchCell: View {
                 .frame(width: geometry.size.width, height: geometry.size.height).clipped()
             }.aspectRatio(1, contentMode: .fit).overlay(alignment: .bottomTrailing) { selectionMark }
             reason
-          }
+          }.contentShape(.interaction, Rectangle())
         }.buttonStyle(.plain).accessibilityValue(selectionValue)
           .contextMenu {
             if let toggleDevice { Button(selected ? "Deselect" : "Select") { toggleDevice(photo) } }
@@ -305,7 +305,7 @@ private struct ConsumerSearchCell: View {
               }.frame(width: geometry.size.width, height: geometry.size.height).clipped()
             }.aspectRatio(1, contentMode: .fit).overlay(alignment: .bottomTrailing) { selectionMark }
             reason
-          }
+          }.contentShape(.interaction, Rectangle())
         }.buttonStyle(.plain).accessibilityLabel(photo.metadata.filename).accessibilityValue(selectionValue)
           .contextMenu {
             if let toggleSaved { Button(selected ? "Deselect" : "Select") { toggleSaved(photo) } }
@@ -334,7 +334,7 @@ struct LocalPhotoDetails: View {
   let search: LocalSearchStore?
   @State private var labels: [String] = []
   @State private var label = ""
-  @State private var nameDraft = ""
+  @State private var nameDraft = PhotoNameDraft(savedName: "")
   @State private var organizationFacts: [String] = []
   @State private var capture: PhotoCaptureMetadata?
   @State private var readingCapture = false
@@ -375,15 +375,15 @@ struct LocalPhotoDetails: View {
             }
           }
           #endif
-          nameSection
+          nameSection.disabled(!search.canEditLabels(photo.id))
           Section("Tags") {
             ForEach(Array(labels.enumerated()), id: \.offset) { at, value in
               HStack {
                 Text(value)
                 Spacer()
                 Button("Remove", systemImage: "minus.circle") {
-                  var proposed = labels
-                  proposed.remove(at: at)
+                  guard organizationSourceIsCurrent(), search.canEditLabels(photo.id) else { return }
+                  let proposed = search.labels(photo.id).filter { $0 != value }
                   if search.setLabels(proposed, photoID: photo.id) { labels = proposed }
                 }.labelStyle(.iconOnly).accessibilityLabel("Remove tag \(value)").disabled(!search.canEditLabels(photo.id))
               }
@@ -447,7 +447,7 @@ struct LocalPhotoDetails: View {
     }.onAppear {
       labels = search?.labels(photo.id) ?? []
       organizationFacts = (try? search?.record(photo.id)?.facts) ?? []
-      nameDraft = PhotoOrganizationFacts.name(organizationFacts, original: originalName)
+      nameDraft.receive(PhotoOrganizationFacts.name(organizationFacts, original: originalName))
     }
       .onChange(of: search?.canEditLabels(photo.id) ?? false) {
         labels = search?.labels(photo.id) ?? []
@@ -455,9 +455,8 @@ struct LocalPhotoDetails: View {
       .onChange(of: search?.organizationGeneration) {
         guard let search, search.assets[photo.id]?.sourceRevision == photo.sourceRevision,
           let record = try? search.record(photo.id), record.revision == photo.sourceRevision else { return }
-        let previousName = PhotoOrganizationFacts.name(organizationFacts, original: originalName)
         organizationFacts = record.facts
-        if nameDraft == previousName { nameDraft = PhotoOrganizationFacts.name(organizationFacts, original: originalName) }
+        nameDraft.receive(PhotoOrganizationFacts.name(organizationFacts, original: originalName))
       }
       .task(id: readIdentity) { await readCapture() }
       .presentationDetents([.medium, .large])
@@ -466,27 +465,45 @@ struct LocalPhotoDetails: View {
   private var originalName: String { (try? search?.record(photo.id)?.filename) ?? "Photo" }
   private var nameSection: some View {
     Section("Photo name") {
-            TextField("Filename", text: $nameDraft).autocorrectionDisabled().textInputAutocapitalization(.never).accessibilityLabel("Photo filename")
+            TextField("Filename", text: Binding(get: { nameDraft.value }, set: { nameDraft.edit($0) })).autocorrectionDisabled().textInputAutocapitalization(.never).accessibilityLabel("Photo filename")
             Button("Suggest name") {
-              nameDraft = PhotoOrganizationFacts.suggestedName(original: originalName, digest: nil,
+              nameDraft.edit(PhotoOrganizationFacts.suggestedName(original: originalName, digest: nil,
                 capturedAt: photo.capturedAt, labels: labels, place: photo.photoLocation?.name,
-                screenshot: PhotoOrganizationFacts.screenshot(organizationFacts, detected: photo.isScreenshot))
+                screenshot: PhotoOrganizationFacts.screenshot(organizationFacts, detected: photo.isScreenshot)))
             }
-            Button("Apply name") { applyOrganization(.name(nameDraft)) }
-              .disabled(!PhotoOrganizationFacts.validName(nameDraft) || nameDraft == PhotoOrganizationFacts.name(organizationFacts, original: originalName))
+            Button("Apply name") { applyOrganization(.name(nameDraft.value)) }
+              .disabled(!PhotoOrganizationFacts.validName(nameDraft.value) || (nameDraft.value as NSString).pathExtension.lowercased() != (originalName as NSString).pathExtension.lowercased() || nameDraft.value == PhotoOrganizationFacts.name(organizationFacts, original: originalName))
+            if PhotoOrganizationFacts.name(organizationFacts, original: originalName) != originalName {
+              Button("Use original name") { applyOrganization(.name(nil)) }
+            }
+            if nameDraft.savedNameChanged && nameDraft.value != nameDraft.savedName {
+              Text("The saved name changed. Your draft is kept.").font(.caption).foregroundStyle(.secondary)
+              Button("Use saved name") { nameDraft.acknowledge(PhotoOrganizationFacts.name(organizationFacts, original: originalName)) }
+            }
             Toggle("Screenshot", isOn: Binding(get: { PhotoOrganizationFacts.screenshot(organizationFacts, detected: photo.isScreenshot) }, set: { applyOrganization(.screenshot($0)) }))
             Text("Names stay in Fotoro; original files in Photos stay unchanged. Save and Sync for other devices.").font(.caption).foregroundStyle(.secondary)
           }
   }
   private func applyOrganization(_ change: PhotoOrganizationChange) {
-    guard sourceIsCurrent, let search, search.setOrganization(change, photoID: photo.id) else { return }
+    guard organizationSourceIsCurrent(), let search, search.setOrganization(change, photoID: photo.id) else { return }
     organizationFacts = (try? search.record(photo.id)?.facts) ?? []
-    nameDraft = PhotoOrganizationFacts.name(organizationFacts, original: originalName)
+    if case .name = change { nameDraft.acknowledge(PhotoOrganizationFacts.name(organizationFacts, original: originalName)) }
+  }
+  private func organizationSourceIsCurrent() -> Bool {
+    guard sourceIsCurrent, let search, search.assets[photo.id]?.sourceRevision == photo.sourceRevision,
+      let record = try? search.record(photo.id), record.revision == photo.sourceRevision,
+      RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+      let asset = PHAsset.fetchAssets(withLocalIdentifiers: [photo.id], options: nil).firstObject,
+      !asset.isHidden, RecentPhoto.sourceRevision(asset) == photo.sourceRevision else {
+      sourceIsCurrent = false
+      return false
+    }
+    return true
   }
   private func addTag() {
-    guard sourceIsCurrent, let search, search.canEditLabels(photo.id),
-      let tag = SearchNormalization.newPhotoTag(label, existing: labels) else { return }
-    let proposed = labels + [tag]
+    guard organizationSourceIsCurrent(), let search, search.canEditLabels(photo.id),
+      let tag = SearchNormalization.newPhotoTag(label, existing: search.labels(photo.id)) else { return }
+    let proposed = search.labels(photo.id) + [tag]
     if search.setLabels(proposed, photoID: photo.id) {
       labels = proposed; label = ""; labelFocused = false
     }

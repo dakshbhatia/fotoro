@@ -9,15 +9,25 @@ enum PhotoBrowseDateScope: String, CaseIterable, Identifiable, Hashable {
 }
 
 enum PhotoBrowseFilter: String, CaseIterable, Identifiable, Hashable {
-  case all, favorites, screenshots, withLocation
+  case all, photos, favorites, screenshots, withLocation
   var id: String { rawValue }
   func includes(_ facts: RecentPhotoFacts) -> Bool {
     switch self {
     case .all: return true
+    // Unknown capture type remains reachable here; absence of screenshot
+    // evidence does not prove that a file came from a camera.
+    case .photos: return !facts.screenshot
     case .favorites: return facts.favorite
     case .screenshots: return facts.screenshot
     case .withLocation:
       return facts.location?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+  }
+  static func includesSavedType(screenshot: Bool, scope: String) -> Bool {
+    switch scope {
+    case "photosOnly": return !screenshot
+    case "screenshots": return screenshot
+    default: return true // Existing "photos" remains All; Trash is fenced by its caller.
     }
   }
 }

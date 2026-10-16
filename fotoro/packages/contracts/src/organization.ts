@@ -73,7 +73,12 @@ export function renamedPhotoFile(file: File, name: string) {
 export function overlayOrganizationFacts(local: string[] | undefined, saved: string[] | undefined) {
   return [...(local ?? []).filter(fact => !organizationFactCategory(fact)), ...(saved ?? []).filter(fact => !!organizationFactCategory(fact))];
 }
-export type PhotoOrganizationScope = "photos" | "screenshots" | "trash";
+// The existing "photos" scope includes screenshots. Keep that default/wire meaning;
+// an explicit Photos choice only removes items with current screenshot evidence.
+export type PhotoOrganizationScope = "photos" | "photosOnly" | "screenshots" | "trash";
 export function inOrganizationScope(photo: {facts?: readonly string[]; filename?: string; digest?: string}, scope: PhotoOrganizationScope = "photos") {
-  return scope === "trash" ? isPhotoTrashed(photo) : !isPhotoTrashed(photo) && (scope !== "screenshots" || isPhotoScreenshot(photo));
+  if (scope === "trash") return isPhotoTrashed(photo);
+  if (isPhotoTrashed(photo)) return false;
+  if (scope === "screenshots") return isPhotoScreenshot(photo);
+  return scope !== "photosOnly" || !isPhotoScreenshot(photo);
 }

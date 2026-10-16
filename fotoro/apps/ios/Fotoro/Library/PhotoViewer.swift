@@ -1,4 +1,5 @@
 import NukeUI
+import Nuke
 import AVKit
 import Photos
 import SwiftUI
@@ -261,6 +262,18 @@ struct PhotoViewer: View {
 }
 
 enum SavedPhotoViewerPagePolicy {
+  static func previewRequest(_ photo: LocalPhoto, fallback: LocalPhoto) -> ImageRequest? {
+    previewURL(photo, fallback: fallback).map {
+      ImageRequest(url: $0, userInfo: [.thumbnailKey: ImageRequest.ThumbnailOptions(maxPixelSize: 1600)])
+    }
+  }
+  static func previewURL(_ photo: LocalPhoto, fallback: LocalPhoto) -> URL? {
+    let originals = Set([photo.originalURL, fallback.originalURL].compactMap { $0 })
+    let sameSource = photo.id == fallback.id && photo.metadata == fallback.metadata && photo.manifest == fallback.manifest
+    let candidates = [photo.previewURL, photo.thumbnailURL,
+      sameSource ? fallback.thumbnailURL : nil]
+    return candidates.compactMap { $0 }.first { !originals.contains($0) }
+  }
   static func loadedIDs(_ ids: [String], selected: String) -> Set<String> {
     guard let current = ids.firstIndex(of: selected) else { return [] }
     return Set(ids[max(ids.startIndex, current - 1)...min(ids.endIndex - 1, current + 1)])
@@ -315,7 +328,7 @@ private struct SavedPhotoPage: View {
     Group {
     if let player { VideoPlayer(player: player).accessibilityLabel(photo.metadata.filename) }
     else {
-    LazyImage(url: displayed.previewURL ?? displayed.originalURL ?? photo.thumbnailURL) { state in
+    LazyImage(request: SavedPhotoViewerPagePolicy.previewRequest(displayed, fallback: photo)) { state in
       ZStack(alignment: .bottom) {
         if let image = state.image { image.resizable().scaledToFit() }
         else if !failed && state.error == nil { ProgressView().tint(.white) }
@@ -359,6 +372,7 @@ private struct SavedPhotoPage: View {
             else { throw CancellationError() }
             loaded = current
           } else { loaded = try services.consumerSavedPhoto(photo.id) }
+          failed = SavedPhotoViewerPagePolicy.previewURL(displayed, fallback: photo) == nil
         } catch is CancellationError {} catch {
           if !Task.isCancelled, request == identity { failed = true }
         }
@@ -471,7 +485,7 @@ struct SavedPhotoDetails: View {
               .font(.caption).foregroundStyle(.secondary)
           }
         }
-        SavedPhotoOrganizationSection(services: services, photo: photo)
+        SavedPhotoOrganizationSection(services: services, photo: photo).id(photo.id)
         Section("Tags") {
           ForEach(Array(labels.enumerated()), id: \.offset) { index, value in
             HStack {
