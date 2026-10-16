@@ -2052,3 +2052,12 @@ Review fixes for incompatible accepted completions, per-meaning pins, previous
 choices outside the first 200, cross-source hydration and independent stale
 selection withdrawal all have regressions. Distribution preflight currently sees
 no local Apple Distribution identity; it does not verify the Xcode account.
+
+Hosted macOS 26 qualification initially caught three disk-reopen failures: the
+runner rejects iOS file-protection attributes with EINVAL, while this macOS 27
+host accepted them. SearchIndex now applies complete data protection on its iOS
+path and omits that unsupported attribute only for macOS host tests. The same
+43 real SQLite/search/date cases pass locally after the platform fix. A new
+hosted run must qualify the exact corrected revision before release. Build 87's
+archive audit passed; distribution export reports No Accounts and a missing
+iOS Distribution identity, so it has not been uploaded.

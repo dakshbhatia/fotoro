@@ -110,9 +110,15 @@ final class SearchIndex: @unchecked Sendable {
         })
     }
     if var root {
+      #if os(macOS)
+      // Host SQLite regressions run on macOS, which may reject iOS data
+      // protection attributes. Every iOS index keeps complete protection.
+      try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+      #else
       try FileManager.default.createDirectory(
         at: root, withIntermediateDirectories: true,
         attributes: [.protectionKey: FileProtectionType.complete])
+      #endif
       var values = URLResourceValues()
       values.isExcludedFromBackup = true
       try root.setResourceValues(values)
@@ -176,8 +182,10 @@ final class SearchIndex: @unchecked Sendable {
       for file in try FileManager.default.contentsOfDirectory(
         at: root, includingPropertiesForKeys: nil)
       {
+        #if !os(macOS)
         try FileManager.default.setAttributes(
           [.protectionKey: FileProtectionType.complete], ofItemAtPath: file.path)
+        #endif
       }
     }
   }
