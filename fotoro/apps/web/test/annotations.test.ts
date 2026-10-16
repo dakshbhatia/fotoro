@@ -621,3 +621,50 @@ test("organization queues preserve latest private facts, survive an exact retry,
     lockVault(); await assert.rejects(() => annotations.queuePhotoOrganization(identity, {trash: true}, session));
   } finally {await clean();}
 });
+
+test("local note edits preserve newer account organization corrections and Restore", async () => {
+  const session = await open();
+  try {
+    const local = {id: "local", digest: originalSha256, filename: "sample.jpg", date: "2026-10-01T12:00:00Z", dateSource: "photos" as const,
+      facts: ["Original note", "fotoro.name.v1:Old.jpg", "fotoro.trash.v1:true", "fotoro.screenshot.v1:true"]};
+    await annotations.queueLocalAnnotations(identity, local, session);
+    await annotations.queuePhotoOrganization(identity, {name: "Reviewed.jpg", trash: false, screenshot: false}, session);
+    await annotations.queuePhotoPeople(identity, [{personId: crypto.randomUUID(), name: "Alex", box: [0, 0, 1000, 1000]}], session);
+    const reviewed = (await annotations.readAnnotations(identity, session))!.value.facts!;
+    await annotations.queueLocalAnnotations(identity, {...local, facts: ["Edited note", ...local.facts.slice(1)]}, session, false);
+    const value = (await annotations.readAnnotations(identity, session))!.value;
+    assert.deepEqual(value.facts, ["Edited note", ...reviewed.filter(fact => fact !== "Original note")]);
+    assert.doesNotMatch(JSON.stringify(await all("settings")), /Edited note|Reviewed\.jpg/);
+    // Explicit source changes still apply, without discarding account-only People.
+    await annotations.queueLocalAnnotations(identity, {...local, facts: ["Another note", "fotoro.name.v1:Chosen.jpg", "fotoro.screenshot.v1:true"]}, session, false);
+    const changed = (await annotations.readAnnotations(identity, session))!.value.facts!;
+    assert.deepEqual(changed.filter(fact => !fact.startsWith("fotoro:person:") && !fact.startsWith("fotoro:people-source:")),
+      ["Another note", "fotoro.screenshot.v1:false", "fotoro.name.v1:Chosen.jpg"]);
+    assert.deepEqual(peopleNames(changed, originalSha256), ["Alex"]);
+    await annotations.queueLocalAnnotations(identity, {...local, facts: []}, session, false);
+    const removed = (await annotations.readAnnotations(identity, session))!.value.facts!;
+    assert.deepEqual(peopleNames(removed, originalSha256), ["Alex"]);
+    assert.equal(removed.some(fact => fact.startsWith("fotoro.name.v1:") || fact.startsWith("fotoro.screenshot.v1:")), false);
+  } finally {await clean();}
+});
+
+test("an offline field edit reverted to its base does not conflict with a remote edit", async () => {
+  await open(); const old = globalThis.fetch;
+  try {
+    await annotations.cacheAnnotations(signed(1, {caption: "Original"}), photoId);
+    await annotations.queueAnnotations(identity, {caption: "Temporary"});
+    await annotations.queueAnnotations(identity, {caption: "Original", favorite: true});
+    const remote = signed(2, {caption: "Other device"}); let writes = 0;
+    globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
+      if (init.method !== "PUT") return reply({version: 1, annotations: remote});
+      if (++writes === 1) return new Response(JSON.stringify({code: "VERSION_CONFLICT", retryable: false}), {status: 409});
+      const outgoing = JSON.parse(init.body as string);
+      const value = annotations.verifyAnnotations(outgoing, identity).value;
+      assert.equal(value.caption, "Other device"); assert.equal(value.favorite, true);
+      return reply(outgoing);
+    }) as any;
+    await annotations.flushAnnotations();
+    assert.equal(writes, 2);
+    assert.equal((await annotations.pendingAnnotations()).length, 0);
+  } finally {globalThis.fetch = old; await clean();}
+});

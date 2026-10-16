@@ -1,3 +1,4 @@
+import {useViewerGestures, viewerKeyboardAllowed} from "./viewer-gestures";
 import {photoName} from "@fotoro/contracts/organization";
 import {PhotoOrganization} from "./PhotoOrganization";
 import {savedPhotoNameAnalysis} from "./photo-name-analysis";
@@ -68,10 +69,14 @@ export function Viewer({
     [playAttempt, setPlayAttempt] = useState(0),
     [motion, setMotion] = useState<{source: string; url?: string; failed?: boolean}>(),
     [prepared, setPrepared] = useState<{files: File[]; photo: Photo; session: UnlockedVault} | null>(null);
-  const touch = useRef<{ x: number; y: number } | undefined>(undefined);
   const panel = useRef<HTMLDivElement>(null), originalPanel = useRef<HTMLElement>(null), originalButton = useRef<HTMLButtonElement>(null), hadOriginalOptions = useRef(false);
   const index = viewerPhotoIndex(photos, selected), photo = photos[index];
   const previewSource = photo ? viewerPreviewSource(photo) : "";
+  const gestures = useViewerGestures({identity: photo?.manifest.photoId ?? "", zoom, source: previewSource, disabled: !!prepared,
+    onPrevious: () => setSelected(photos[Math.max(0, index - 1)]?.manifest.photoId ?? selected),
+    onNext: () => setSelected(photos[Math.min(photos.length - 1, index + 1)]?.manifest.photoId ?? selected),
+    onDismiss: () => {if (details) setDetails(false); else onClose();}, onDetails: () => setDetails(true),
+  });
   const currentPreviewSource = useRef(previewSource);
   currentPreviewSource.current = previewSource;
   const currentPhoto = useRef(photo), mounted = useRef(false), shareGeneration = useRef(0), savingRef = useRef(false);
@@ -110,13 +115,13 @@ export function Viewer({
   }, []);
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
-      const editing = (e.target as HTMLElement)?.matches("input,textarea,select");
-      if (!editing && !prepared && e.key === "ArrowRight") {e.preventDefault(); setSelected(photos[Math.min(photos.length - 1, index + 1)]?.manifest.photoId ?? selected);}
-      if (!editing && !prepared && e.key === "ArrowLeft") {e.preventDefault(); setSelected(photos[Math.max(0, index - 1)]?.manifest.photoId ?? selected);}
+      const editing = (e.target as HTMLElement)?.closest("input,textarea,select,[contenteditable]:not([contenteditable=false]),[role=textbox],video");
+      if (viewerKeyboardAllowed(e, !!editing, zoom) && !prepared && e.key === "ArrowRight") {e.preventDefault(); setSelected(photos[Math.min(photos.length - 1, index + 1)]?.manifest.photoId ?? selected);}
+      if (viewerKeyboardAllowed(e, !!editing, zoom) && !prepared && e.key === "ArrowLeft") {e.preventDefault(); setSelected(photos[Math.max(0, index - 1)]?.manifest.photoId ?? selected);}
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [photos, index, selected, prepared]);
+  }, [photos, index, selected, prepared, zoom]);
   useEffect(() => {
     clearPrepared(); setPlayRequest(undefined); setMotion(undefined);
   }, [photo]);
@@ -230,27 +235,13 @@ export function Viewer({
         className="view-image"
         aria-busy={previewState === "loading"}
         inert={prepared ? true : undefined}
-        onTouchStart={(e) => {
-          if (e.touches.length === 1)
-            touch.current = {
-              x: e.touches[0].clientX,
-              y: e.touches[0].clientY,
-            };
-          else touch.current = undefined;
-        }}
-        onTouchEnd={(e) => {
-          if (touch.current && !zoom && e.changedTouches.length === 1) {
-            const dx = e.changedTouches[0].clientX - touch.current.x,
-              dy = e.changedTouches[0].clientY - touch.current.y;
-            if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.5)
-              setSelected(photos[Math.max(0, Math.min(photos.length - 1, index + (dx < 0 ? 1 : -1)))].manifest.photoId);
-          }
-          touch.current = undefined;
-        }}
-        onDoubleClick={() => setZoom(!zoom)}
+        data-zoomed={zoom}
+        {...gestures}
+        onDoubleClick={event => {if ((event.target as HTMLElement).tagName === "IMG") setZoom(!zoom);}}
       >
         {motion?.source === previewSource && motion.url ? <video src={motion.url} controls autoPlay playsInline aria-label={photo.metadata.filename} style={{maxWidth: "100%", maxHeight: "100%"}} onError={() => setMotion({source: previewSource, failed: true})} /> : previewURL ? (
           <img
+            draggable={false}
             className={zoom ? "zoomed" : ""}
             src={previewURL}
             alt={photoName(photo.annotations ?? {}, photo.metadata.filename)}

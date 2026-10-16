@@ -136,6 +136,7 @@ struct PhotoViewerZoom {
   private var settledScale: CGFloat = 1
   private var settledOffset: CGSize = .zero
   mutating func change(_ magnification: CGFloat) {
+    guard magnification.isFinite, magnification > 0 else { return }
     scale = min(5, max(1, settledScale * magnification))
     if scale == 1 { offset = .zero; settledOffset = .zero }
   }
@@ -149,21 +150,37 @@ struct PhotoViewerZoom {
     offset = .zero
     settledOffset = .zero
   }
-  mutating func drag(_ translation: CGSize, viewport: CGSize) {
-    offset = clamped(CGSize(width: settledOffset.width + translation.width,
-      height: settledOffset.height + translation.height), viewport: viewport)
+  mutating func toggle(at point: CGPoint, viewport: CGSize, content: CGSize? = nil) {
+    let wasZoomed = scale > 1
+    toggle()
+    if !wasZoomed, point.x.isFinite, point.y.isFinite {
+      offset = clamped(CGSize(width: viewport.width / 2 - point.x,
+        height: viewport.height / 2 - point.y), viewport: viewport, content: content)
+      settledOffset = offset
+    }
   }
-  mutating func settleDrag(_ translation: CGSize, viewport: CGSize) {
-    drag(translation, viewport: viewport)
+  mutating func drag(_ translation: CGSize, viewport: CGSize, content: CGSize? = nil) {
+    guard translation.width.isFinite, translation.height.isFinite else { return }
+    offset = clamped(CGSize(width: settledOffset.width + translation.width,
+      height: settledOffset.height + translation.height), viewport: viewport, content: content)
+  }
+  mutating func settleDrag(_ translation: CGSize, viewport: CGSize, content: CGSize? = nil) {
+    drag(translation, viewport: viewport, content: content)
     settledOffset = offset
   }
-  mutating func constrain(to viewport: CGSize) {
-    offset = clamped(offset, viewport: viewport)
-    settledOffset = clamped(settledOffset, viewport: viewport)
+  mutating func constrain(to viewport: CGSize, content: CGSize? = nil) {
+    offset = clamped(offset, viewport: viewport, content: content)
+    settledOffset = clamped(settledOffset, viewport: viewport, content: content)
   }
-  private func clamped(_ value: CGSize, viewport: CGSize) -> CGSize {
-    let horizontal = max(0, viewport.width * (scale - 1) / 2)
-    let vertical = max(0, viewport.height * (scale - 1) / 2)
+  private func clamped(_ value: CGSize, viewport: CGSize, content: CGSize? = nil) -> CGSize {
+    guard viewport.width.isFinite, viewport.height.isFinite, viewport.width > 0, viewport.height > 0 else { return .zero }
+    var fitted = viewport
+    if let content, content.width.isFinite, content.height.isFinite, content.width > 0, content.height > 0 {
+      let ratio = min(viewport.width / content.width, viewport.height / content.height)
+      fitted = CGSize(width: content.width * ratio, height: content.height * ratio)
+    }
+    let horizontal = max(0, (fitted.width * scale - viewport.width) / 2)
+    let vertical = max(0, (fitted.height * scale - viewport.height) / 2)
     return CGSize(width: min(horizontal, max(-horizontal, value.width)),
       height: min(vertical, max(-vertical, value.height)))
   }

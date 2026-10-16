@@ -251,29 +251,103 @@ private struct DevicePhotosPaginationFooter: View {
   }
 }
 
+struct PhotoViewerImageSizeKey: PreferenceKey {
+  static var defaultValue: CGSize? { nil }
+  static func reduce(value: inout CGSize?, nextValue: () -> CGSize?) {
+    if let next = nextValue() { value = next }
+  }
+}
+
+struct PhotoTilePressStyle: ButtonStyle {
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  func makeBody(configuration: Configuration) -> some View {
+    configuration.label
+      .scaleEffect(configuration.isPressed && !reduceMotion ? 0.98 : 1)
+      .opacity(configuration.isPressed ? 0.82 : 1)
+      .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: configuration.isPressed)
+  }
+}
+
 struct PhotoViewerStillInteraction: ViewModifier {
-  @Binding var zoom: PhotoViewerZoom
+  let zoom: PhotoViewerZoomController
   @Binding var controlsVisible: Bool
   let isCurrent: Bool
+  var imageSize: CGSize? = nil
+  var dismiss: () -> Void = {}
+  var showDetails: () -> Void = {}
+  @State private var loadedImageSize: CGSize?
+  @State private var vertical = PhotoViewerVerticalGesture()
+  @State private var verticalRejected = false
+  @GestureState private var verticalActive = false
+  @GestureState private var magnifying = false
   @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  private var animation: Animation? { reduceMotion ? nil : .easeOut(duration: 0.2) }
+  private var verticalEnabled: Bool { isCurrent && !voiceOver && !magnifying && zoom.value.scale == 1 }
   func body(content: Content) -> some View {
     GeometryReader { geometry in
+      let size = imageSize ?? loadedImageSize
       content.frame(width: geometry.size.width, height: geometry.size.height)
-        .scaleEffect(zoom.scale).offset(zoom.offset)
+        .scaleEffect(isCurrent ? zoom.value.scale : 1)
+        .offset(isCurrent ? zoom.value.offset : .zero)
+        .offset(y: isCurrent ? vertical.offset : 0)
         .frame(width: geometry.size.width, height: geometry.size.height).clipped()
         .contentShape(.interaction, Rectangle())
+        .onPreferenceChange(PhotoViewerImageSizeKey.self) { loadedImageSize = $0 }
         .highPriorityGesture(DragGesture()
-          .onChanged { if isCurrent { zoom.drag($0.translation, viewport: geometry.size) } }
-          .onEnded { if isCurrent { zoom.settleDrag($0.translation, viewport: geometry.size) } },
-          including: zoom.scale > 1 ? .all : .none)
+          .onChanged { if isCurrent { zoom.drag($0.translation, viewport: geometry.size, content: size) } }
+          .onEnded { if isCurrent { zoom.settleDrag($0.translation, viewport: geometry.size, content: size) } },
+          including: isCurrent && !voiceOver && zoom.value.scale > 1 ? .all : .none)
         .simultaneousGesture(MagnifyGesture()
-          .onChanged { if isCurrent { zoom.change($0.magnification); zoom.constrain(to: geometry.size) } }
-          .onEnded { if isCurrent { zoom.settle($0.magnification); zoom.constrain(to: geometry.size) } })
-        .onTapGesture(count: 2) { if isCurrent { zoom.toggle() } }
-        .onTapGesture { if isCurrent, !voiceOver { controlsVisible.toggle() } }
-        .onChange(of: geometry.size) { if isCurrent { zoom.constrain(to: geometry.size) } }
-        .onChange(of: voiceOver) { if isCurrent, voiceOver { controlsVisible = true } }
+          .updating($magnifying) { _, state, _ in state = true }
+          .onChanged { if isCurrent && !voiceOver { zoom.change($0.magnification); zoom.constrain(to: geometry.size, content: size) } }
+          .onEnded { if isCurrent && !voiceOver { zoom.settle($0.magnification); zoom.constrain(to: geometry.size, content: size) } })
+        .simultaneousGesture(DragGesture(minimumDistance: 12)
+          .updating($verticalActive) { _, state, _ in state = true }
+          .onChanged { value in
+            if !verticalEnabled { verticalRejected = true }
+            vertical.update(value.translation, enabled: verticalEnabled && !verticalRejected)
+          }
+          .onEnded { value in
+            let action = verticalEnabled && !verticalRejected
+              ? vertical.action(predicted: value.predictedEndTranslation, height: geometry.size.height) : nil
+            resetVertical()
+            switch action {
+            case .dismiss: dismiss()
+            case .details: showDetails()
+            case nil: break
+            }
+          })
+        .gesture(SpatialTapGesture(count: 2).exclusively(before: SpatialTapGesture(count: 1))
+          .onEnded { value in
+            guard isCurrent, !voiceOver, !magnifying else { return }
+            withAnimation(animation) {
+              switch value {
+              case .first(let tap): zoom.toggle(at: tap.location, viewport: geometry.size, content: size)
+              case .second: controlsVisible.toggle()
+              }
+            }
+          })
+        .onChange(of: geometry.size) { if isCurrent { zoom.constrain(to: geometry.size, content: size) } }
+        .onChange(of: loadedImageSize) { if isCurrent { zoom.constrain(to: geometry.size, content: size) } }
+        .onChange(of: verticalActive) { if !verticalActive { resetVertical() } }
+        .onChange(of: magnifying) {
+          if magnifying { rejectVertical() }
+        }
+        .onChange(of: zoom.value.scale) { if zoom.value.scale > 1 { rejectVertical() } }
+        .onChange(of: isCurrent) { if !isCurrent { rejectVertical() } }
+        .onChange(of: voiceOver) {
+          if voiceOver { rejectVertical(); if isCurrent { controlsVisible = true } }
+        }
     }.clipped()
+  }
+  private func rejectVertical() {
+    if verticalActive { verticalRejected = true }
+    vertical.reset()
+  }
+  private func resetVertical() {
+    withAnimation(animation) { vertical.reset() }
+    verticalRejected = false
   }
 }
 
@@ -297,10 +371,11 @@ struct RecentPhotoViewer: View {
   var save: ((RecentPhoto) -> Void)? = nil
   var share: (RecentPhoto) -> Void
   @State private var selected = ""
-  @State private var zoom = PhotoViewerZoom()
+  @State private var zoom = PhotoViewerZoomController()
   @State private var details = false
   @State private var controlsVisible = true
   @Environment(\.dismiss) private var dismiss
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   init(store: RecentPhotosStore, photos: [RecentPhoto], initialID: String,
     search: LocalSearchStore? = nil, save: ((RecentPhoto) -> Void)? = nil,
     share: @escaping (RecentPhoto) -> Void) {
@@ -334,11 +409,19 @@ struct RecentPhotoViewer: View {
                 RecentMotionPhotoPage(photo: photo, store: store, isCurrent: photo.id == selected)
               } else {
                 PhotosImage(photo: photo, store: store, large: true).scaledToFit()
-                  .modifier(PhotoViewerStillInteraction(zoom: $zoom, controlsVisible: $controlsVisible, isCurrent: photo.id == selected))
+                  .modifier(PhotoViewerStillInteraction(zoom: zoom, controlsVisible: $controlsVisible,
+                    isCurrent: photo.id == selected,
+                    imageSize: CGSize(width: photo.asset.pixelWidth, height: photo.asset.pixelHeight),
+                    dismiss: { dismiss() }, showDetails: { details = true }))
+                  .id(RecentPhotoSource(photo))
               }
               #else
               PhotosImage(photo: photo, store: store, large: true).scaledToFit()
-                .modifier(PhotoViewerStillInteraction(zoom: $zoom, controlsVisible: $controlsVisible, isCurrent: photo.id == selected))
+                .modifier(PhotoViewerStillInteraction(zoom: zoom, controlsVisible: $controlsVisible,
+                    isCurrent: photo.id == selected,
+                    imageSize: CGSize(width: photo.asset.pixelWidth, height: photo.asset.pixelHeight),
+                    dismiss: { dismiss() }, showDetails: { details = true }))
+                  .id(RecentPhotoSource(photo))
               #endif
             } else {
               Color.black
@@ -349,13 +432,15 @@ struct RecentPhotoViewer: View {
       }.tabViewStyle(.page(indexDisplayMode: .never)).background(.black)
         .ignoresSafeArea(.container)
         .onChange(of: selected) { zoom.reset(); controlsVisible = true }
+        .onChange(of: current.map { RecentPhotoSource($0) }) { zoom.reset(); controlsVisible = true }
+        .sensoryFeedback(.selection, trigger: selected)
         .accessibilityAction(named: "Next photo") { movePage(forward: true) }
         .accessibilityAction(named: "Previous photo") { movePage(forward: false) }
         .toolbar {
           ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() } }
           if current.map({ !$0.isVideo && !$0.isLivePhoto }) == true {
             ToolbarItem(placement: .topBarTrailing) {
-              Button(zoom.scale == 1 ? "Zoom in" : "Reset zoom", systemImage: "plus.magnifyingglass") { zoom.toggle() }
+              Button(!zoom.isZoomed ? "Zoom in" : "Reset zoom", systemImage: "plus.magnifyingglass") { withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { zoom.toggle() } }
                 .accessibilityIdentifier("photo.zoom")
             }
           }
@@ -464,6 +549,7 @@ enum PhotoPicksAdmission {
 
 struct RecentPhotosView: View {
   @State private var store = RecentPhotosStore()
+  @State private var gridSelection = PhotoGridSelectionRegistry()
   @State private var search = LocalSearchStore()
   @State private var bestShots = FindBestShotsReview()
   @State private var bestShotsTask: Task<Void, Never>?
@@ -833,14 +919,16 @@ struct RecentPhotosView: View {
                   failed: { store.error = $0 })
               }
             }
-          }
+          }.background(PhotoGridSelectionGesture(registry: gridSelection,
+            enabled: selecting && !preparingShare && !showShare && scenePhase == .active))
           if ownedPhotos.isEmpty && !savedRefresh.isRefreshing,
             !savedHasMore || services.photos.isEmpty {
             ContentUnavailableView(savedOrganization == "trash" ? "Trash is empty" : savedOrganization == "screenshots" ? "No saved screenshots" : "No saved photos", systemImage: "photo.stack",
               description: Text(savedLibraryEmptyMessage(sync: services.automaticPhotoSync,
                 favoritesOnly: savedFavoritesOnly)))
           }
-        }.id("\(savedFavoritesOnly)|\(savedOrganization)").scrollDismissesKeyboard(.interactively)
+        }.environment(\.photoGridSelection, gridSelection)
+          .id("\(savedFavoritesOnly)|\(savedOrganization)").scrollDismissesKeyboard(.interactively)
           .defaultScrollAnchor(.top, for: .initialOffset).scrollBounceBehavior(.basedOnSize)
           .onScrollPhaseChange { _, phase in setBrowseInteractionActive(phase != .idle) }
           .onDisappear { setBrowseInteractionActive(false) }
@@ -955,7 +1043,8 @@ struct RecentPhotosView: View {
   }
 #endif
   private var homeChrome: some View {
-    homeSearchContent.background(.black).preferredColorScheme(.dark)
+    homeSearchContent.environment(\.photoGridSelection, gridSelection)
+      .background(.black).preferredColorScheme(.dark)
         .navigationBarTitleDisplayMode(.inline)
         .toolbarVisibility(showsHomeNavigation ? .visible : .hidden, for: .navigationBar)
         .toolbar {
@@ -1741,7 +1830,8 @@ struct RecentPhotosView: View {
             isActive: scenePhase == .active)
         }
       }
-    }
+    }.background(PhotoGridSelectionGesture(registry: gridSelection,
+      enabled: selecting && !preparingShare && !showShare && scenePhase == .active))
   }
 #if !FOTORO_LOCAL_PREVIEW
   private var timelineGallery: some View {
@@ -1784,7 +1874,8 @@ struct RecentPhotosView: View {
             failed: { store.error = $0 })
         }
       }
-    }
+    }.background(PhotoGridSelectionGesture(registry: gridSelection,
+      enabled: selecting && !preparingShare && !showShare && scenePhase == .active))
   }
 #endif
   @ViewBuilder private var homeSearchContent: some View {
@@ -2790,7 +2881,8 @@ private struct RecentPhotoCell: View {
         // Clipping only trims pixels; aspect-fill content can still claim a
         // neighboring tile's touches unless the label's hit region is bounded.
         .contentShape(.interaction, Rectangle())
-    }.buttonStyle(.plain)
+    }.buttonStyle(PhotoTilePressStyle())
+      .modifier(PhotoGridSelectionTile(id: photo.id + "|" + photo.sourceRevision, selected: selected, toggle: toggle))
       .accessibilityValue(accessibilityStatus(syncText: syncText))
       .contextMenu { Button(selected ? "Deselect" : "Select", action: toggle) }
   }

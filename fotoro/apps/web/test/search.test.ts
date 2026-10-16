@@ -395,3 +395,15 @@ test("source-bound People and observations use the existing search without expos
   const stale = new PhotoSearchIndex([{...source, digest: "b".repeat(64)}]);
   for (const query of ["bicycle", "Cafe", "Ron"]) assert.equal(stale.search(query, {now}).photoId, undefined);
 });
+
+test("async local hits and empty results expire when their index is disposed", async () => {
+  for (const query of ["harbor", "absent"]) {
+    const index = new PhotoSearchIndex([{...photo("local", "IMG.jpg"), caption: "harbor"}]);
+    const result = await index.searchAsync(query);
+    assert.deepEqual(result.photoIds, query === "harbor" ? ["local"] : []);
+    assert.equal(result.current?.(), true);
+    index.dispose();
+    assert.equal(result.current?.(), false, `Disposed index must withdraw ${query} results`);
+    await assert.rejects(index.searchAsync(query), /CACHED_SEARCH_SOURCE_CHANGED/);
+  }
+});

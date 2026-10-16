@@ -133,6 +133,7 @@ function datedMeaning(id: string): DatedMeaning | undefined {
 /* Perception happens elsewhere. Typing only retrieves supported local meanings. */
 export class PhotoSearchIndex {
   private records: Map<string, SearchPhoto>;
+  private disposed = false;
   private dictionary: IndexedMeaning[];
   private phrases = new Map<string, PhrasePosition[]>();
   private history: SearchFeedback;
@@ -215,7 +216,7 @@ export class PhotoSearchIndex {
     }
     this.dictionary = [...terms.values()].sort((a, b) => compare(a.normalized, b.normalized) || compare(a.id, b.id));
   }
-  dispose() {this.records.clear(); this.dictionary = []; this.phrases.clear(); this.indexedPhotos.clear();}
+  dispose() {this.disposed = true; this.records.clear(); this.dictionary = []; this.phrases.clear(); this.indexedPhotos.clear();}
   // Account metadata can be much larger than the grid. Build once outside render,
   // yielding after bounded work, with an explicit transient-memory admission budget.
   static async build(photos: SearchPhoto[], signal: AbortSignal, current: () => boolean, budgetBytes = 128 * 1024 * 1024,
@@ -333,7 +334,7 @@ export class PhotoSearchIndex {
   }
   async searchAsync(query: string, options: { allowedIds?: Set<string>; scope?: string; committedMeaning?: string; previous?: SearchResult; now?: number } = {}, signal?: AbortSignal, current: () => boolean = () => true): Promise<SearchResult> {
     const work = this.query(query, options); let deadline = performance.now() + 4;
-    const check = () => {if (signal?.aborted || !current()) throw new DOMException("Search cancelled", "AbortError");};
+    const check = () => {if (signal?.aborted || !current()) throw new DOMException("Search cancelled", "AbortError"); if (this.disposed) throw new Error("CACHED_SEARCH_SOURCE_CHANGED");};
     try {
       check(); let step = work.next();
       while (!step.done) {
@@ -352,7 +353,7 @@ export class PhotoSearchIndex {
         if (this.records.get(id)?.current) sources.set(id, this.records.get(id)!);
         if (performance.now() >= deadline) {await new Promise(resolve => setTimeout(resolve, 0)); check(); deadline = performance.now() + 4;}
       }
-      if (sources.size) result.current = () => {for (const [id, record] of sources) if (this.records.get(id) !== record || record.current?.() === false) return false; return true;};
+      result.current = () => {if (this.disposed) return false; for (const [id, record] of sources) if (this.records.get(id) !== record || record.current?.() === false) return false; return true;};
       check(); if (result.current?.() === false) throw new Error("CACHED_SEARCH_SOURCE_CHANGED"); return result;
     } finally {work.return(undefined as never);}
   }
