@@ -47,10 +47,20 @@ jobs:
       - run: npm install --global pnpm@10.17.1
       - run: pnpm install --frozen-lockfile
         working-directory: fotoro
-      - name: Sync recovery host tests
+      - name: Native host regression tests
         working-directory: fotoro
-        run: pnpm test:sync:retry:host
+        run: pnpm test:ios:host
+      # A deliberate PR-only mode for work requested without device/Simulator
+      # runtimes. Default PRs and every main push retain the runtime tests below.
+      - name: Generic iOS SDK compilation (host-only PR)
+        if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'fotoro-host-only')
+        working-directory: fotoro
+        run: |
+          xcodebuild build -project apps/ios/Fotoro.xcodeproj -scheme Fotoro -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath apps/ios/build-sdk CODE_SIGNING_ALLOWED=NO
+          xcodebuild build -project apps/ios/Fotoro.xcodeproj -scheme FotoroLocalPreview -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath apps/ios/build-sdk CODE_SIGNING_ALLOWED=NO
+          echo 'Host-only qualification: policy tests and SDK compilation passed; iPhone/Simulator runtime tests were not run.' >> "$GITHUB_STEP_SUMMARY"
       - name: Native tests against public local services
+        if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'fotoro-host-only')) }}
         working-directory: fotoro
         run: |
           pnpm seed:local
@@ -74,6 +84,7 @@ jobs:
           pnpm exec tsx tools/warm-local-api.ts
           pnpm test:ios
       - name: Local Photos preview tests
+        if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'fotoro-host-only')) }}
         working-directory: fotoro
         run: node tools/test-ios.mjs --local-preview
       - name: Local service diagnostics on failure

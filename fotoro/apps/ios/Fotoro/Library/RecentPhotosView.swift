@@ -2079,6 +2079,15 @@ struct RecentPhotosView: View {
           } label: {
             Label("Photo analysis", systemImage: "viewfinder")
           }.accessibilityIdentifier("settings.analysis")
+#if !FOTORO_LOCAL_PREVIEW
+          if let services {
+            NavigationLink {
+              SavedTextAnalysisView(services: services)
+            } label: {
+              Label("Text in Saved photos", systemImage: "text.viewfinder")
+            }.accessibilityIdentifier("settings.savedText")
+          }
+#endif
         }
         Section("Photos access") {
           Button("Refresh photos") { restorePhotos(); settings = false }

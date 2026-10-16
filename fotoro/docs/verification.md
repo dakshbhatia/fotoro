@@ -1915,3 +1915,71 @@ admission for already-read photos and missing recognition cancellation when the
 source list changes. A 2,000-record regression goes from 4,000 source-admission
 reads before the fix to zero afterward. These operation counts establish a work
 bound, not a measured device speedup.
+
+
+## Host-only foundations and indexed-text replay — October 16, 2026
+
+At the owner's request this pass uses no iPhone or Simulator runtime. The full
+Fotoro and isolated-preview applications compile for generic iOS with signing
+disabled. `pnpm test:ios:host` passes 37 macOS tests: 20 sync retry, 13 Saved-text
+coordinator/draft/media-boundary, and four cleanup-policy/source-identity tests.
+These compile actual production Foundation policies and draft construction; they
+do not execute SwiftUI, Vision inference, GRDB encryption transactions or PhotoKit.
+`pnpm check` passes with 841 browser and 129 API tests plus the core checks/audits.
+
+Native Settings now provides explicit Saved-text checking on at most 25 owned
+catalog rows per batch. It uses cached still previews only, Apple Vision and the
+existing pending encrypted annotation writer. Stop/drain, retry, explicit next
+page, current-source/account/vault/origin/revision/Pause/foreground fences,
+empty-but-complete existing OCR and concurrent pending edits have host regressions.
+JPEG/PNG/HEIC and Live Photo still previews use one explicit admission predicate;
+video and unknown containers are excluded. Saved semantic preparation also uses
+the selected automatic analysis window, defaulting to Latest 10 days.
+
+A read-only replay used an already copied private index, not a newly connected
+phone. Its frozen New York calendar window covers October 7 through October 16,
+with 201 records, unique IDs, valid dates/confidences and completed OCR/scene
+states for every row. The copy predates this run and does not establish live
+coverage. An independent same-OCR-field token oracle generated 60 deterministic
+queries. Before the browser conjunction fallback, only one of 22 two-word cases
+fully retrieved its supported photos; afterward all 22 do (25/25 supported
+photo-query pairs). Single-prefix coverage remains 27/38 fully retrieved: that
+oracle unions completions while the UI chooses one meaning. This is supported
+text retrieval, not a held-out human-intent relevance score. Private queries,
+recognized text, IDs and source rows remain outside the repository. The local
+notebook, replay code, aggregate summaries and logs are in
+`Fotoro-Artifacts/host-foundations-20261016`. No device, inference, network,
+rendering, battery or comparative whole-app speed claim follows from these data.
+
+The fallback reuses pretokenized postings, yields every bounded scan interval,
+and requires all words in one OCR/caption/keyword/filename source. Direct meanings
+retain priority; numeric identifiers stay exact. RED-to-GREEN regressions cover
+separated/reversed words, cross-field refusal, number-prefix refusal, unchanged
+index reuse, source withdrawal and selected-photo feedback with competing direct
+phrases outside date/allowed scopes. Review caught and fixed that last feedback
+collision. The fixed public synthetic ten-day benchmark passes 33 retrieval checks
+and ten daily ingestion checks.
+
+Cleanup refreshes bounded metadata over cached measurements on both clients.
+Favorites, screenshot corrections and removing the duplicate keeper immediately
+change the reasons. Changed or new sources remain unassessed. Native presentation
+uses already published metadata, with no per-body SQL reads; scan and actual Trash
+retain durable revalidation. Browser acceptance mounted the real cleanup component
+and image-analysis/resource pipeline with two public synthetic flat PNGs. After
+trashing the keeper, the other row retained its low-detail hint and lost the
+incorrect identical-copy warning. A fixture hot-reload root warning was confined
+to setup; a fresh tab repeated the flow with no warnings/errors. The temporary
+harness was removed.
+
+Ordinary local-account acceptance on `127.0.0.1:4310/saved` and independent
+`localhost:4310/saved` read the same encrypted public receipt. `Seattle 4826` and
+`4826 Seattle` returned it; its viewer showed the reviewed name and original OCR.
+`Seattle 482` returned no result. Page identity, nonblank content, no framework
+overlay, correct result opening and clean warning/error consoles pass. Screenshots
+are local artifacts. This is browser/readback evidence, not native runtime proof.
+
+PR-only label `fotoro-host-only` selects macOS host regressions and generic iOS SDK
+builds in CI; its summary explicitly marks runtime checks unrun. Default PRs and
+all main pushes retain native/preview Simulator checks. This source remains
+separate from distributed build 86; native runtime interaction/performance,
+production acceptance and held-out search relevance remain unqualified.

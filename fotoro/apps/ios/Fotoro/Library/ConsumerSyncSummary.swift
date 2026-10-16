@@ -7,13 +7,14 @@ struct ConsumerSyncSummary: Equatable, Sendable {
   var completedPhotos: Int?
   var totalPhotos: Int?
   var skippedPhotos = 0
+  var annotationsPending = 0
   var lastCheckedAt: Date?
   var detail: String?
   var action: ConsumerSyncAction = .signIn
   static func derive(_ facts: ConsumerSyncFacts) -> Self {
     guard facts.unlocked else { return Self() }
     var value = Self(completedPhotos: facts.completed, totalPhotos: facts.total,
-      skippedPhotos: facts.skipped, lastCheckedAt: facts.lastChecked, detail: facts.detail)
+      skippedPhotos: facts.skipped, annotationsPending: facts.annotationsPending, lastCheckedAt: facts.lastChecked, detail: facts.detail)
     if facts.preparing { value.state = .preparing; value.action = .none }
     else if facts.uploading { value.state = .uploading; value.action = .none }
     else if facts.checking { value.state = .checking; value.action = .none }

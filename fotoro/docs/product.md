@@ -118,12 +118,22 @@ bounded grammar, not unrestricted natural-language understanding.
 
 Owned Saved photos can be missing OCR even when a decrypted preview exists.
 Settings now offers an explicit local text check for up to 25 loaded photos in
-the current filters. It requires consent, reports progress and retries, and
+the current browser filters. Native Settings checks one owned catalog page of
+at most 25 rows, with an explicit next batch. Both use cached previews only;
+missing previews are reported without downloading originals. JPEG, PNG, HEIC
+and the still preview of a Live Photo qualify; video does not. It requires
+consent, reports progress and retries, and
 stops when its scope, consent, account or source changes. It fills only missing
 OCR through the existing serialized encrypted annotation writer. Existing text
 and concurrent corrections are preserved; Save changes carries kept text to
 other devices. Received photos are excluded. This does not expand automatic
 analysis beyond the existing Latest 10 days policy.
+
+When no direct word, phrase or filename meaning matches, browser search can
+find separated words in the same OCR, caption, keyword or filename field, in
+either order. It reuses indexed tokens and yields during longer checks. Numeric
+identifiers remain exact; separate fields do not become invented joint evidence.
+This is text retrieval, not general semantic understanding.
 
 Filename previews use completed, source-bound analysis only. OCR naming accepts
 known processors and a confidence gate of 0.8, considers at most the first 12
@@ -134,5 +144,9 @@ previewing never changes the saved name or original. Scene publication remains
 disabled pending installed-reader qualification, so locally inferred scene-based
 suggestions can differ between devices until a reviewed name is saved.
 Cleanup covers at most 200 currently loaded previews per review; load further
-Saved pages deliberately. Personal-library retrieval, physical battery and frame
+Saved pages deliberately. Its reasons refresh from current metadata after
+favorite, screenshot or Trash changes using the measurements already collected.
+Removing a duplicate keeper withdraws the remaining copy's duplicate warning;
+new or changed preview sources remain unassessed until a fresh review.
+Personal-library retrieval, physical battery and frame
 pacing acceptance remain separate from functional source and simulator tests.

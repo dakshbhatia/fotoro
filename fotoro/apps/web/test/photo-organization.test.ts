@@ -169,6 +169,51 @@ test("cleanup reuses measured previews without losing hints after a metadata edi
   analyzer.clear();
 });
 
+test("cleanup refreshes live duplicate keepers and owner protections without decoding previews again", async () => {
+  const keeper = {id: "keeper", ...original, file: new File(["same"], "fixture.jpg")};
+  const other = {...keeper, id: "other", file: new File(["same"], "fixture.jpg")};
+  const analyzer = new CleanupAnalyzer();
+  let reads = 0, allowed = true;
+  const sources = [{...keeper, current: () => allowed}, other];
+  const initial = await analyzer.run(sources, async () => {
+    reads++; return {hash: 0n, luminance: 1, contrast: 0, sharpness: 0, color: [255, 255, 255]};
+  }, () => {});
+  assert.match(initial!.reasons.get("other")!.join(" "), /Identical original/);
+  const refresh = (photos: LocalPhoto[]) => analyzer.review(photos);
+  const trashed = [withPhotoOrganization(sources[0], {trash: true}), other];
+  assert.deepEqual(refresh(trashed).reasons.get("other"), ["Possibly too dark or bright"]);
+  assert.match(refresh(sources).reasons.get("other")!.join(" "), /Identical original/, "Restore reuses the measured source");
+  const protectedOther = {...other, favorite: true};
+  assert.deepEqual(refresh([sources[0], protectedOther]).reasons.get("other"), undefined);
+  assert.match(refresh([sources[0], protectedOther]).reasons.get("keeper")!.join(" "), /Identical original/);
+  assert.equal(refresh([withPhotoOrganization(other, {screenshot: true})]).reasons.size, 0);
+  allowed = false;
+  assert.deepEqual(refresh(sources).reasons.get("other"), ["Possibly too dark or bright"]);
+  assert.equal(reads, 2);
+  analyzer.clear();
+});
+
+test("cleanup never projects cached pixels onto a replacement or unavailable source", async () => {
+  const source = {id: "flat", ...original, file: new File(["flat"], "fixture.jpg")};
+  for (const changed of [{...source, file: new File(["new"], "fixture.jpg")}, {...source, digest: "changed"},
+    {...source, width: 800}, {...source, previewAvailable: false}]) {
+    const analyzer = new CleanupAnalyzer();
+    await analyzer.run([source], async () => ({hash: 0n, luminance: 1, contrast: 0, sharpness: 0, color: [255,255,255]}), () => {});
+    assert.equal(analyzer.review([changed]).reasons.size, 0);
+    assert.equal(analyzer.review([changed]).unassessed, 1);
+    analyzer.clear();
+  }
+  const analyzer = new CleanupAnalyzer();
+  let allowed = true;
+  const guarded = {...source, current: () => allowed};
+  await analyzer.run([guarded], async () => ({hash: 0n, luminance: 1, contrast: 0, sharpness: 0, color: [255,255,255]}), () => {});
+  allowed = false;
+  assert.equal(analyzer.review([guarded]).unassessed, 0);
+  allowed = true;
+  assert.equal(analyzer.review([guarded]).unassessed, 1, "A withdrawn source cannot regain its old private measurements");
+  analyzer.clear();
+});
+
 test("pending Trash, Restore, names and screenshot edits override the previous cached index immediately", () => {
   const cached = [{id: "a", ...original}, {id: "unloaded", ...original}];
   const trash = withPhotoOrganization(cached[0], {trash: true, name: "BTS.jpg", screenshot: true});

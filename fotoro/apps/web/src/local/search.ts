@@ -118,7 +118,7 @@ export class PhotoSearchIndex {
     const terms = new Map<string, IndexedMeaning>();
     const phraseSource = (text: string, source: SearchEvidence, photoId: string) => {
       const display = words(text.slice(0, 256 * 1024)), normalized = display.map(normalizeSearch);
-      for (let start = 0; start + 1 < normalized.length; start++) {
+      for (let start = 0; start < normalized.length; start++) {
         const positions = this.phrases.get(normalized[start]) ?? [];
         positions.push({ photoId, source, display, normalized, start });
         this.phrases.set(normalized[start], positions);
@@ -261,13 +261,40 @@ export class PhotoSearchIndex {
     const dated = datedMeaning(meaning), baseMeaning = dated?.[2] ?? meaning, photo = this.records.get(id), captured = photo && Date.parse(photo.date);
     if (dated && (!photo || !hasCaptureDate(photo) || !Number.isFinite(captured) || (dated[0] !== null && captured! < dated[0]) || (dated[1] !== null && captured! >= dated[1]))) return;
     const derived = /^(?:date|text|label):/.test(baseMeaning) ? this.search(baseMeaning.slice(baseMeaning.indexOf(":") + 1), { now, scope, committedMeaning: baseMeaning }).meaning : undefined;
+    // Validate the selected receipt itself: a direct phrase in another scope
+    // must not suppress feedback for this photo's supported conjunction.
+    let conjunction = false;
+    if (baseMeaning.startsWith("fulltext:") && photo && photo.current?.() !== false) {
+      for (const position of this.conjunctionMatches(words(baseMeaning.slice(9)), candidate => candidate === id)) {
+        if (position) {conjunction = true; break;}
+      }
+    }
     const supported = (dated && baseMeaning === "date") || this.dictionary.some(term => term.id === baseMeaning && term.sources.has(id)) ||
-      (derived?.id === baseMeaning && derived.photoIds.includes(id)) ||
+      conjunction || (derived?.id === baseMeaning && derived.photoIds.includes(id)) ||
       (baseMeaning.startsWith("file:") && photo && searchableFilenames(photo).some(name => normalizeSearch(name) === baseMeaning.slice(5)));
     if (!supported) return;
     const key = meaningKey(scope, meaning);
     this.record(this.history.photos, photoKey(key, id), session, now);
     if (pin) this.history.pins[key] = id;
+  }
+  private *conjunctionMatches(tokens: string[], eligible: (id: string) => boolean): Generator<PhrasePosition | undefined> {
+    if (tokens.length < 2 || tokens.length > 16) return;
+    const visited = new Set<string[]>(), required = new Set(tokens.slice(0, -1)), last = tokens.at(-1)!;
+    const prefixLast = !/^\d+$/.test(last);
+    for (const position of this.phrases.get(tokens[0]) ?? []) {
+      yield;
+      if (!["caption", "keyword", "filename", "ocr"].includes(position.source)
+        || visited.has(position.normalized) || !eligible(position.photoId)) continue;
+      visited.add(position.normalized);
+      const remaining = new Set(required); let lastFound = false;
+      for (let i = 0; i < position.normalized.length; i++) {
+        const word = position.normalized[i]; remaining.delete(word);
+        if (prefixLast ? word.startsWith(last) : word === last) lastFound = true;
+        if (!remaining.size && lastFound) break;
+        if (i % 128 === 0) yield;
+      }
+      if (!remaining.size && lastFound) yield position;
+    }
   }
   private record(target: Record<string, Event[]>, key: string, session: string, at: number) {
     const events = target[key] ?? [];
@@ -376,6 +403,15 @@ export class PhotoSearchIndex {
             include("file:" + filename, name, photo.id, "filename");
           }
         }
+      }
+    }
+    // Like native FTS, fall back to all requested words within one text source
+    // when there is no direct meaning/phrase/file match. Reuse indexed tokens;
+    // never decode or concatenate every photo's OCR during typing.
+    if (!candidates.length && tokens.length > 1 && tokens.length <= 16) {
+      for (const position of this.conjunctionMatches(tokens, eligible)) {
+        yield;
+        if (position) include("fulltext:" + prefix, prefix, position.photoId, position.source);
       }
     }
     for (const candidate of candidates) for (const id of candidate.photoIds) {yield; if (!eligible(id)) throw new Error("CACHED_SEARCH_SOURCE_CHANGED");}

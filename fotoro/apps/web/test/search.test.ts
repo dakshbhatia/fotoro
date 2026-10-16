@@ -216,6 +216,48 @@ test("a phrase prefix retrieves adjacent OCR words without joining unrelated fie
     assert.ok(!result.photoIds.includes("spread"));
   }
 });
+test("nonadjacent OCR words retrieve the same document without joining fields or prefixing receipt numbers", () => {
+  const text = (id: string, value: string) => ({...photo(id, "neutral.png"), ocr: {photoID: id, revision: id, processor: "fixture-v1", status: "complete" as const, text: value, confidence: .94}});
+  const index = new PhotoSearchIndex([text("receipt", "ALFRED COFFEE\nOrder lunch\nInvoice 4826"),
+    {...text("spread", "Invoice 4826"), caption: "Alfred"}, text("different-number", "ALFRED COFFEE\nInvoice 48260")]);
+  for (const query of ["alfred 4826", "4826 alfred", "coffee order invo"]) {
+    const result = index.search(query, {now});
+    assert.equal(result.photoId, "receipt", query);
+    assert.equal(result.meaning?.kind, "ocr");
+    assert.ok(!result.photoIds.includes("spread"));
+  }
+  assert.deepEqual(index.search("alfred 482", {now}).photoIds, []);
+});
+test("word conjunctions retain scoped feedback, verified incremental postings and withdrawal fences", async () => {
+  let visible = true;
+  const rows = ["a", "b"].map(id => ({...photo(id, "neutral.png"), caption: "Boarding pass to Boston", current: () => visible}));
+  const index = await PhotoSearchIndex.build(rows, new AbortController().signal, () => true);
+  const first = index.search("Boston boarding", {now, allowedIds: new Set(["a", "b"])});
+  assert.equal(first.photoIds.length, 2);
+  index.choosePhoto(first.meaning!.id, "b", "pin-conjunction", now, true);
+  assert.equal(new PhotoSearchIndex(rows, index.feedback()).search("Boston boarding", {now}).photoId, "b");
+  const reused = await PhotoSearchIndex.build(rows, new AbortController().signal, () => true, undefined,
+    {index, unchanged: new Set(["a", "b"])});
+  assert.deepEqual(reused.search("Boston boarding", {now, allowedIds: new Set(["a"])}).photoIds, ["a"]);
+  const result = await reused.searchAsync("Boston boarding", {now});
+  visible = false;
+  assert.equal(result.current?.(), false);
+  assert.deepEqual(reused.search("Boston boarding", {now}).photoIds, []);
+  index.dispose(); reused.dispose();
+});
+test("conjunction feedback validates the selected photo despite a direct phrase outside the date or allowed scope", () => {
+  const rows = ["a", "b"].map(id => ({...photo(id, "neutral.png", [], "2026-09-15T12:00:00Z"), caption: "Seattle boarding pass"}));
+  const index = new PhotoSearchIndex([...rows, {...photo("outside", "neutral.png", [], "2026-10-01T10:00:00Z"), caption: "Seattle pass"}]);
+  for (const [query, options] of [
+    ["Seattle pass last month", {scope: "dated"}],
+    ["Seattle pass", {scope: "allowed", allowedIds: new Set(["a", "b"])}],
+  ] as const) {
+    const result = index.search(query, {now, ...options});
+    assert.equal(result.meaning?.id.includes("fulltext:seattle pass"), true);
+    index.choosePhoto(result.meaning!.id, "b", options.scope, now, true, options.scope);
+    assert.equal(index.search(query, {now, ...options}).photoId, "b", query);
+  }
+});
 test("phrase completions can be accepted, confirmed and pinned with truthful source evidence", () => {
   const photos = ["a", "b"].map(id => ({ ...photo(id, "neutral.png"), caption: "Boarding pass to Boston" }));
   const index = new PhotoSearchIndex(photos);

@@ -243,3 +243,58 @@ enum AutomaticPhotoPickPolicy {
     return (a.signal.hash ^ b.signal.hash).nonzeroBitCount <= 2
   }
 }
+
+struct PhotoCleanupCandidate: Sendable {
+  var id: String
+  var digest: String
+  var favorite: Bool
+  var screenshot: Bool
+  var eligible: Bool
+}
+struct PhotoCleanupRecommendations: Sendable {
+  var reasons: [String: [String]] = [:]
+  var unassessed = 0
+}
+enum PhotoCleanupPolicy {
+  static func review(_ photos: [PhotoCleanupCandidate], signals: [String: AutomaticPhotoPickSignals]) -> PhotoCleanupRecommendations {
+    let current = photos.filter(\.eligible)
+    var keepers: [String: PhotoCleanupCandidate] = [:]
+    for photo in current where !photo.digest.isEmpty {
+      if keepers[photo.digest] == nil || photo.favorite && keepers[photo.digest]?.favorite != true {
+        keepers[photo.digest] = photo
+      }
+    }
+    var result = PhotoCleanupRecommendations()
+    for photo in current {
+      var why: [String] = []
+      if !photo.digest.isEmpty && keepers[photo.digest]?.id != photo.id {
+        why.append("Identical original · keep another copy")
+      }
+      if let signal = signals[photo.id], [signal.luminance, signal.contrast, signal.sharpness].allSatisfy({ $0.isFinite && (0...1).contains($0) }),
+        signal.color.count == 3, signal.color.allSatisfy({ $0.isFinite && (0...255).contains($0) }) {
+        if !photo.favorite && !photo.screenshot {
+          if signal.luminance < 0.025 || signal.luminance > 0.985 { why.append("Possibly too dark or bright") }
+          else if signal.contrast < 0.012 { why.append("Very little visible detail") }
+          else if signal.sharpness < 0.008 && signal.contrast > 0.025 { why.append("Possibly blurry") }
+        }
+      } else { result.unassessed += 1 }
+      if !why.isEmpty { result.reasons[photo.id] = why }
+    }
+    return result
+  }
+}
+
+#if !FOTORO_LOCAL_PREVIEW
+struct PhotoCleanupSourceIdentity: Sendable {
+  var id: String
+  var metadata: PhotoMetadataV1
+  var manifest: PhotoManifestV1
+  var transferState: String
+  func matches(_ published: PhotoCleanupSourceIdentity?, account: String?) -> Bool {
+    guard let published, let account else { return false }
+    return published.id == id && published.manifest.photoId == id && published.manifest.ownerAccountId == account
+      && ["committed", "saved"].contains(published.transferState)
+      && published.metadata == metadata && published.manifest == manifest
+  }
+}
+#endif

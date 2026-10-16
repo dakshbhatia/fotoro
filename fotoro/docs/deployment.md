@@ -3,6 +3,17 @@
 The active app is `fotoro/`: SwiftUI on iPhone, React/Vite on the web, and a
 Hono Worker with D1 and private R2. The upstream Ente application is a reference.
 
+## Pending host-qualified source (October 16)
+
+PR 115 adds native explicit Saved-text batches, indexed same-field multiword
+retrieval and live cleanup reason correction. The owner requested no iPhone or
+Simulator: local qualification uses macOS host tests, generic iOS SDK builds and
+real browser/local-service acceptance. The PR's `fotoro-host-only` label selects
+the same limited CI mode; ordinary PRs and main pushes retain Simulator checks.
+This is pending source work, not a new native or production web release. Build
+86 and the production checkpoint below remain unchanged by this pass. Runtime,
+production and distribution qualification are separate gates.
+
 ## Production
 
 - Origin: `https://fotoro.cloud`, with web assets and `/v1/*` on one Worker.
