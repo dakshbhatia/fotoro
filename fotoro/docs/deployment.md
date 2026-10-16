@@ -3,16 +3,35 @@
 The active app is `fotoro/`: SwiftUI on iPhone, React/Vite on the web, and a
 Hono Worker with D1 and private R2. The upstream Ente application is a reference.
 
-## Pending host-qualified source (October 16)
+## October 16 host-qualified release
 
-PR 115 adds native explicit Saved-text batches, indexed same-field multiword
-retrieval and live cleanup reason correction. The owner requested no iPhone or
+PR 115 adds supported prefix unions, truthful capped result counts, resumable
+Saved-text batches, durable semantic retries and bounded presentation validation.
+The owner requested no iPhone or
 Simulator: local qualification uses macOS host tests, generic iOS SDK builds and
 real browser/local-service acceptance. The PR's `fotoro-host-only` label selects
 the same limited CI mode; ordinary PRs and main pushes retain Simulator checks.
-This is pending source work, not a new native or production web release. Build
-86 and the production checkpoint below remain unchanged by this pass. Runtime,
-production and distribution qualification are separate gates.
+Qualified source `5941d40e3e5c8a8c9637148030739876413e62dd` passed eight hosted
+checks; fifteen unrelated checks were intentionally skipped. Local verification
+passed 856 web tests, 129 API tests, 92 host scenarios and both generic iOS builds.
+These checks do not establish physical frame pacing, battery, installed gestures
+or an authenticated production cross-device journey.
+
+Web version `fe4807e6-21b5-4b50-a8b4-a0621f066f99` serves 100%, deployment
+`5a0cfe5b-a68c-4159-997d-70f44df9caf6`. All 47 non-HTML assets match the built
+release; root and both Saved entry routes pass, and unauthenticated vault access
+returns 401. Public Photos and Saved sign-in render with clean warning/error
+consoles. API script/runtime and eight bindings match the preceding version;
+no migration was applied. Rollback is `a2ace921-f24b-4777-ba8a-cb25f89fb271`.
+This deployment uses qualified PR source. PR 115 remains unmerged because main
+pushes still run Simulator checks, which the owner excluded from this pass.
+
+Build 87's archive and cloud-signed distribution IPA passed the release audit.
+The command-line exporter cannot read the signed-in account; Organizer can use
+the existing cloud-managed distribution certificate. Apple accepted build 87 and is processing it. Internal availability is not yet
+confirmed. Apple reports a missing dSYM for the verified empty ONNX packaging
+framework; the runtime is statically linked into Fotoro and the application
+executable has a matching dSYM.
 
 ## Production
 
@@ -28,7 +47,7 @@ production and distribution qualification are separate gates.
   require separate preview consent and explicitly configured provider/work limits;
   that route remains disabled by default.
 
-### October 15 current released checkpoint
+### October 15 previous released checkpoint
 
 PR 107 merged as `b6120ff082785e80f147b927304b1a4094ed42f5`; its tree matches
 qualified head `ff68950dff452edbb1809c00a2e9380c4bba3442`. Worker
