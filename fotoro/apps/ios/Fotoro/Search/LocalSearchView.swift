@@ -283,7 +283,8 @@ private struct ConsumerSearchCell: View {
             GeometryReader { geometry in
               PhotosImage(photo: photo, store: photos, networkAllowed: false).scaledToFill()
                 .frame(width: geometry.size.width, height: geometry.size.height).clipped()
-            }.aspectRatio(1, contentMode: .fit).overlay(alignment: .bottomTrailing) { selectionMark }
+            }.aspectRatio(1, contentMode: .fit).modifier(NativeSearchResultVisibility())
+              .overlay(alignment: .bottomTrailing) { selectionMark }
             reason
           }.contentShape(.interaction, Rectangle())
         }.buttonStyle(.plain).accessibilityValue(selectionValue)
@@ -299,11 +300,10 @@ private struct ConsumerSearchCell: View {
         } label: {
           VStack(alignment: .leading, spacing: 0) {
             GeometryReader { geometry in
-              LazyImage(url: photo.thumbnailURL ?? photo.previewURL) { state in
-                if let image = state.image { image.resizable().scaledToFill() }
-                else { Rectangle().fill(.quaternary).overlay { Image(systemName: "photo") } }
-              }.frame(width: geometry.size.width, height: geometry.size.height).clipped()
-            }.aspectRatio(1, contentMode: .fit).overlay(alignment: .bottomTrailing) { selectionMark }
+              NativeSearchSavedThumbnail(photo: photo)
+                .frame(width: geometry.size.width, height: geometry.size.height).clipped()
+            }.aspectRatio(1, contentMode: .fit).modifier(NativeSearchResultVisibility())
+              .overlay(alignment: .bottomTrailing) { selectionMark }
             reason
           }.contentShape(.interaction, Rectangle())
         }.buttonStyle(.plain).accessibilityLabel(photo.metadata.filename).accessibilityValue(selectionValue)

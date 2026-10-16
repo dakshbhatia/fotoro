@@ -5,6 +5,113 @@ import UIKit
 @testable import Fotoro
 
 final class PhotoViewerPolicyTests: XCTestCase {
+  @MainActor func testSearchPreviewReadinessSeparatesRowsFromVisibleCurrentImageAndBoundsEvents() throws {
+    let diagnostics = NativeDiagnostics(fileURL: nil, emitSystemLog: false)
+    var now = 100.0
+    let readiness = NativeSearchPreviewReadiness(diagnostics: diagnostics, clock: { now })
+    let trace = readiness.begin(startedAt: 99.8)
+    now = 100.2
+    readiness.rowsReady(trace, count: 2)
+    readiness.preview(trace, available: true, visible: false, isCurrent: { true })
+    readiness.preview(trace, available: true, visible: true, isCurrent: { false })
+    XCTAssertTrue(readiness.isPending(trace), "Neither an offscreen image nor a withdrawn source is UI ready")
+    for _ in 0..<1000 { readiness.preview(trace, available: false, visible: true, isCurrent: { true }) }
+    now = 100.8
+    readiness.preview(trace, available: true, visible: true, isCurrent: { true })
+    for _ in 0..<1000 { readiness.preview(trace, available: true, visible: true, isCurrent: { true }) }
+    let events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: diagnostics.exportJSON())
+    XCTAssertEqual(events.count, 6, "Image callbacks must not become per-tile logs")
+    XCTAssertEqual(Set(events.compactMap(\.traceId)), [trace.id])
+    let rows = try XCTUnwrap(events.first { $0.step == .rowsReady })
+    XCTAssertEqual(rows.completed, 2); XCTAssertEqual(rows.elapsedMS, 400)
+    let preview = try XCTUnwrap(events.first { $0.step == .uiPreview && $0.outcome == .completed })
+    XCTAssertEqual(preview.completed, 1); XCTAssertEqual(preview.elapsedMS, 1000)
+    XCTAssertEqual(events.filter { $0.step == .uiPreview && $0.reason == .sourceUnavailable }.count, 1)
+    XCTAssertEqual(events.filter { $0.step == .action && $0.outcome == .completed }.count, 1)
+    XCTAssertFalse(readiness.isPending(trace))
+  }
+
+  @MainActor func testSearchPreviewSupersessionCancellationAndLateCallbacksHaveOneTerminal() throws {
+    let diagnostics = NativeDiagnostics(fileURL: nil, emitSystemLog: false)
+    let readiness = NativeSearchPreviewReadiness(diagnostics: diagnostics, clock: { 10 })
+    let previous = readiness.begin(startedAt: 9)
+    readiness.rowsReady(previous, count: 1)
+    let current = readiness.begin(startedAt: 9.5)
+    readiness.rowsReady(current, count: 1)
+    readiness.preview(previous, available: true, visible: true, isCurrent: { true })
+    readiness.cancel(current, reason: .background)
+    readiness.cancel(current, reason: .inactive)
+    readiness.preview(current, available: true, visible: true, isCurrent: { true })
+    let events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: diagnostics.exportJSON())
+    for trace in [previous, current] {
+      let terminal = events.filter { $0.traceId == trace.id && $0.step == .action && $0.outcome != .started }
+      XCTAssertEqual(terminal.count, 1)
+      XCTAssertEqual(terminal.first?.outcome, .cancelled)
+    }
+    XCTAssertFalse(events.contains { $0.step == .uiPreview && $0.outcome == .completed })
+    XCTAssertEqual(events.last?.reason, .background)
+  }
+
+  @MainActor func testSearchPreviewEmptyResultsWaitForEnrichmentAndNeverClaimAnImage() throws {
+    let diagnostics = NativeDiagnostics(fileURL: nil, emitSystemLog: false)
+    let readiness = NativeSearchPreviewReadiness(diagnostics: diagnostics, clock: { 10 })
+    let empty = readiness.begin(startedAt: 9)
+    readiness.rowsReady(empty, count: 0)
+    XCTAssertTrue(readiness.isPending(empty), "Text-zero can still gain a visual match")
+    readiness.rowsReady(empty, count: 0, final: true)
+    let enriched = readiness.begin(startedAt: 9.5)
+    readiness.rowsReady(enriched, count: 0)
+    readiness.rowsReady(enriched, count: 3, final: true)
+    XCTAssertTrue(readiness.isPending(enriched))
+    readiness.preview(enriched, available: true, visible: true, isCurrent: { true })
+    let events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: diagnostics.exportJSON())
+    let emptyEvents = events.filter { $0.traceId == empty.id }
+    XCTAssertFalse(emptyEvents.contains { $0.step == .uiPreview })
+    XCTAssertEqual(emptyEvents.last?.reason, .noMatches)
+    XCTAssertEqual(emptyEvents.last?.completed, 0)
+    XCTAssertEqual(events.filter { $0.traceId == enriched.id && $0.step == .uiPreview && $0.outcome == .completed }.count, 1)
+  }
+
+  @MainActor func testSearchPreviewZeroRowsWithEnrichmentFailureIsFailedNotNoMatches() throws {
+    let diagnostics = NativeDiagnostics(fileURL: nil, emitSystemLog: false)
+    let readiness = NativeSearchPreviewReadiness(diagnostics: diagnostics, clock: { 10 })
+    let trace = readiness.begin(startedAt: 9)
+    readiness.rowsReady(trace, count: 0)
+    readiness.fail(trace, reason: .decode)
+    readiness.fail(trace, reason: .unknown)
+    readiness.rowsReady(trace, count: 0, final: true)
+    let events = try JSONDecoder().decode([NativeDiagnosticEvent].self, from: diagnostics.exportJSON())
+    XCTAssertEqual(events.last?.outcome, .failed)
+    XCTAssertEqual(events.last?.reason, .decode)
+    XCTAssertFalse(events.contains { $0.reason == .noMatches || $0.step == .uiPreview })
+    XCTAssertEqual(events.filter { $0.step == .action && $0.outcome == .failed }.count, 1)
+  }
+
+  @MainActor func testSearchPreviewRechecksLiveVisibilityAndDoesNotExportCapturedPrivateContext() throws {
+    let diagnostics = NativeDiagnostics(fileURL: nil, emitSystemLog: false)
+    let readiness = NativeSearchPreviewReadiness(diagnostics: diagnostics, clock: { 10 })
+    let trace = readiness.begin(startedAt: 9)
+    readiness.rowsReady(trace, count: 1)
+    let visibility = NativeSearchPreviewVisibilityState(); visibility.visible = true
+    let privateContext = ["query": "private-query", "photo": "private-asset", "account": "private-account"]
+    let queuedPublication = {
+      readiness.preview(trace, available: true, visible: true) {
+        visibility.visible && privateContext["photo"] == "private-asset"
+      }
+    }
+    visibility.visible = false
+    queuedPublication()
+    XCTAssertTrue(readiness.isPending(trace), "A callback queued while visible cannot complete after scrolling away")
+    visibility.visible = true
+    queuedPublication()
+    let data = diagnostics.exportJSON()
+    let text = try XCTUnwrap(String(data: data, encoding: .utf8))
+    for secret in privateContext.values { XCTAssertFalse(text.contains(secret)) }
+    let rows = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+    let allowed = Set(["timestamp", "phase", "outcome", "elapsedMS", "completed", "total", "traceId", "operation", "step", "lastCompletedStep", "currentStep", "build"])
+    XCTAssertTrue(rows.allSatisfy { Set($0.keys).isSubset(of: allowed) })
+  }
+
   func testRetainedTagRemovalUsesLatestLabelsAfterIncomingShrinkAndReorder() {
     let cases: [(incoming: [String], expected: [String], writes: Int)] = [
       (["B"], [], 1),

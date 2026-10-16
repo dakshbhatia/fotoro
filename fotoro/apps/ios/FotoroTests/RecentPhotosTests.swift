@@ -582,12 +582,15 @@ final class RecentPhotosTests: XCTestCase {
     XCTAssertTrue(services.photos.allSatisfy { $0.manifest.ownerAccountId == account })
     XCTAssertEqual(services.photos.first?.transferState, "pending", "Ownership paging must preserve existing transfer-state visibility")
     XCTAssertTrue(services.photos.filter { services.annotation($0).favorite == true }.isEmpty)
-    XCTAssertEqual(try SavedLibraryPageLoading.load(services, expected: SavedLibraryPageID(services), isActive: true), true)
+    let firstPage = try await SavedLibraryPageLoading.load(services, expected: SavedLibraryPageID(services), isActive: true)
+    XCTAssertEqual(firstPage, true)
     XCTAssertEqual(services.photos.count, 2000, "Each footer task must load at most one bounded page")
     XCTAssertTrue(services.photos.filter { services.annotation($0).favorite == true }.isEmpty)
-    XCTAssertEqual(try SavedLibraryPageLoading.load(services, expected: SavedLibraryPageID(services), isActive: true), true)
+    let lastPage = try await SavedLibraryPageLoading.load(services, expected: SavedLibraryPageID(services), isActive: true)
+    XCTAssertEqual(lastPage, true)
     XCTAssertEqual(services.photos.filter { services.annotation($0).favorite == true }.map(\.id), [oldest.id])
-    XCTAssertEqual(try SavedLibraryPageLoading.load(services, expected: SavedLibraryPageID(services), isActive: true), false)
+    let exhausted = try await SavedLibraryPageLoading.load(services, expected: SavedLibraryPageID(services), isActive: true)
+    XCTAssertEqual(exhausted, false)
     XCTAssertEqual(Set(services.photos.map(\.id)).count, 2001)
     XCTAssertEqual(try catalog.consumerCommittedCount(accountId: peerAccount), peers.count,
       "Filtering the owned projection must preserve shared catalog rows")
@@ -597,13 +600,16 @@ final class RecentPhotosTests: XCTestCase {
     let account = try XCTUnwrap(services.session.accountId)
     defer { services.vault.lock(); Keychain.remove(account); try? FileManager.default.removeItem(at: services.storageRoot) }
     let request = SavedLibraryPageID(services)
-    XCTAssertNil(try SavedLibraryPageLoading.load(services, expected: request, isActive: false))
+    let inactive = try await SavedLibraryPageLoading.load(services, expected: request, isActive: false)
+    XCTAssertNil(inactive)
     try services.reload()
-    XCTAssertNil(try SavedLibraryPageLoading.load(services, expected: request, isActive: true),
+    let replaced = try await SavedLibraryPageLoading.load(services, expected: request, isActive: true)
+    XCTAssertNil(replaced,
       "An older catalog task must not consume the replacement cursor")
     let unlocked = SavedLibraryPageID(services)
     services.vault.lock()
-    XCTAssertNil(try SavedLibraryPageLoading.load(services, expected: unlocked, isActive: true))
+    let locked = try await SavedLibraryPageLoading.load(services, expected: unlocked, isActive: true)
+    XCTAssertNil(locked)
     XCTAssertTrue(services.photos.isEmpty)
   }
   @MainActor func testLoadedUnannotatedPhotosRenderWithoutLedgerReadsAndRefreshAfterEdits() async throws {

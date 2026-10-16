@@ -5,14 +5,14 @@ import AuthenticationServices
 enum NativeDiagnosticPhase: String, Codable, Sendable { case app, api, auth, sync, share, consent, picks, albums, search, metadata, people }
 enum NativeDiagnosticOutcome: String, Codable, Sendable { case started, completed, failed, cancelled, changed }
 enum NativeDiagnosticOperation: String, Codable, Sendable { case app, api, auth, sync, share, albums, search, metadata, people, consent, picks }
-enum NativeDiagnosticStep: String, Codable, Sendable { case action, request, response, decode, credential, unlock, catalog, verify, persist, transfer, annotation, scan, prepare, analysis, export, settlePrevious, settleBackup, settleJournal, snapshot }
+enum NativeDiagnosticStep: String, Codable, Sendable { case action, request, response, decode, credential, unlock, catalog, verify, persist, transfer, annotation, scan, prepare, analysis, export, settlePrevious, settleBackup, settleJournal, snapshot, rowsReady, uiPreview }
 enum NativeAnalysisActivity: String, Codable, Sendable {
   case notReady, inactive, interacting, waitingForIdle, running, retryScheduled, idle
 }
 enum NativeIndexCoverageScope: String, Codable, Sendable { case catalog, automaticWindow }
 enum NativeDiagnosticReason: String, Codable, Sendable {
   case cancelled, contextChanged, inactive, background, recoveryProbe, network, http, decode, validation, unknown
-  case signedOut, locked, permissionRequired, paused, offline, retryRequired, waiting, pendingTransfers, unpreparedSources, skippedSources, pendingAnnotations, sourceUnavailable, current
+  case signedOut, locked, permissionRequired, paused, offline, retryRequired, waiting, pendingTransfers, unpreparedSources, skippedSources, pendingAnnotations, sourceUnavailable, current, noMatches
   static func failure(_ error: Error) -> Self {
     if error is CancellationError || (error as? URLError)?.code == .cancelled { return .cancelled }
     if error is DecodingError { return .decode }
@@ -64,6 +64,83 @@ final class NativeDiagnosticTrace: @unchecked Sendable {
         throw error
       }
     }
+  }
+}
+// One admitted search owns one bounded trace. This reports image availability
+// in a visible result view, not display presentation, frame timing or FPS.
+@MainActor final class NativeSearchPreviewReadiness {
+  private struct Attempt {
+    let trace: NativeDiagnosticTrace
+    let startedAt: Double
+    var rows: Int?
+    var previewStarted = false
+    var reportedUnavailable = false
+  }
+  private var attempt: Attempt?
+  private let diagnostics: NativeDiagnostics
+  private let clock: () -> Double
+  init(diagnostics: NativeDiagnostics = .shared,
+    clock: @escaping () -> Double = { ProcessInfo.processInfo.systemUptime }) {
+    self.diagnostics = diagnostics; self.clock = clock
+  }
+  func begin(startedAt: Double) -> NativeDiagnosticTrace {
+    cancel(reason: .contextChanged)
+    let trace = NativeDiagnosticTrace(.search)
+    attempt = Attempt(trace: trace, startedAt: startedAt)
+    diagnostics.record(NativeDiagnosticEvent(phase: .search, outcome: .started, trace: trace, step: .action))
+    return trace
+  }
+  func isPending(_ trace: NativeDiagnosticTrace) -> Bool { attempt?.trace.id == trace.id }
+  func rowsReady(_ trace: NativeDiagnosticTrace, count: Int, final: Bool = false) {
+    guard var current = attempt, current.trace.id == trace.id else { return }
+    let rows = max(0, count)
+    if current.rows == nil || (current.rows == 0 && rows > 0) {
+      current.rows = rows
+      trace.completed(.rowsReady)
+      diagnostics.record(NativeDiagnosticEvent(phase: .search, outcome: .completed,
+        elapsed: clock() - current.startedAt, completed: rows, trace: trace, step: .rowsReady))
+    }
+    if rows > 0, !current.previewStarted {
+      current.previewStarted = true
+      trace.entering(.uiPreview)
+      diagnostics.record(NativeDiagnosticEvent(phase: .search, outcome: .started, trace: trace, step: .uiPreview))
+    }
+    attempt = current
+    if final, rows == 0 { finish(trace, outcome: .completed, reason: .noMatches, previews: 0) }
+  }
+  func preview(_ trace: NativeDiagnosticTrace, available: Bool, visible: Bool, isCurrent: () -> Bool) {
+    guard var current = attempt, current.trace.id == trace.id, current.previewStarted,
+      visible, isCurrent() else { return }
+    if available {
+      trace.completed(.uiPreview)
+      diagnostics.record(NativeDiagnosticEvent(phase: .search, outcome: .completed,
+        elapsed: clock() - current.startedAt, completed: 1, trace: trace, step: .uiPreview))
+      finish(trace, outcome: .completed, previews: 1)
+    } else if !current.reportedUnavailable {
+      current.reportedUnavailable = true
+      attempt = current
+      diagnostics.record(NativeDiagnosticEvent(phase: .search, outcome: .changed,
+        elapsed: clock() - current.startedAt, unavailable: 1, trace: trace, step: .uiPreview, reason: .sourceUnavailable))
+    }
+  }
+  func fail(_ trace: NativeDiagnosticTrace, reason: NativeDiagnosticReason) {
+    finish(trace, outcome: .failed, reason: reason, previews: 0)
+  }
+  func cancel(_ trace: NativeDiagnosticTrace? = nil, reason: NativeDiagnosticReason) {
+    guard let current = attempt, trace == nil || trace?.id == current.trace.id else { return }
+    finish(current.trace, outcome: .cancelled, reason: reason, previews: 0)
+  }
+  private func finish(_ trace: NativeDiagnosticTrace, outcome: NativeDiagnosticOutcome,
+    reason: NativeDiagnosticReason? = nil, previews: Int) {
+    guard let current = attempt, current.trace.id == trace.id else { return }
+    attempt = nil
+    if current.previewStarted, outcome != .completed || previews == 0 {
+      diagnostics.record(NativeDiagnosticEvent(phase: .search, outcome: outcome == .completed ? .cancelled : outcome,
+        elapsed: clock() - current.startedAt, completed: 0, trace: trace, step: .uiPreview, reason: reason))
+    }
+    diagnostics.record(NativeDiagnosticEvent(phase: .search, outcome: outcome,
+      elapsed: clock() - current.startedAt, completed: previews,
+      total: current.rows, trace: trace, step: .action, reason: reason))
   }
 }
 enum NativeDiagnosticAccountState: String, Codable, Sendable {

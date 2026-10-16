@@ -126,6 +126,24 @@ Metadata/OCR/people work records batch counts rather than names, pixels or asset
 Native background PUTs remain independent of foreground action traces; reattachment
 and Sync state reports provide their aggregate status.
 
+Native search UI traces begin only when query work is admitted after debounce;
+their monotonic elapsed clock includes that debounce. `rowsReady` records current
+text-result publication before optional visual enrichment. `uiPreview` completes
+when the first matching thumbnail has an image available to a scroll-visible
+result view, after current query/account/source and visibility checks. Cached or
+degraded usable images count; placeholders do not. A final empty result closes
+with `noMatches` and no successful preview. Zero text rows wait for enrichment;
+failed enrichment closes as failed, not as an invented empty success. One aggregate
+preview-unavailable notice may precede a later successful image. Query replacement,
+source/account withdrawal, leaving results and suspension cancel outstanding traces.
+The query task can finish normally while image readiness remains pending.
+
+These are bounded UI readiness events, not per-tile logs. They do not establish
+physical frame presentation, occlusion, dropped frames, scrolling smoothness or FPS.
+Scroll visibility is the framework's thumbnail-rectangle threshold. Older search
+events that end at the catalog engine cannot establish UI preview latency. The
+diagnostics report keeps row readiness and preview readiness separate.
+
 Browser actions identify passkey/password entry, refresh/save, album membership and
 contributions, sharing and original preparation. Concurrent actions use explicit
 contexts. Successful request detail is limited to 12 per action, with a terminal

@@ -1,6 +1,37 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {parseDiagnostics, summarizeDiagnostics} from "./diagnostics.mjs";
+
+test("search summaries distinguish rows from UI preview readiness without exposing source context", () => {
+  const traceId = "69224569-9dde-4c86-82c9-dcce1c56a375";
+  const base = {phase: "search", operation: "search", traceId, query: "private-query", photoId: "private-asset", accountId: "private-account", filename: "private.jpg", gps: "private-coordinates"};
+  const report = summarizeDiagnostics(parseDiagnostics(JSON.stringify([
+    {...base, step: "action", outcome: "started"},
+    {...base, step: "rowsReady", outcome: "completed", completed: 2, elapsedMS: 40},
+    {...base, step: "uiPreview", outcome: "started"},
+    {...base, step: "uiPreview", outcome: "changed", reason: "sourceUnavailable", unavailable: 1},
+    {...base, step: "uiPreview", outcome: "completed", completed: 1, elapsedMS: 125},
+    {...base, step: "action", outcome: "completed", completed: 1, total: 2, elapsedMS: 125},
+  ])));
+  assert.deepEqual(report.flows[0].searchUI, {rows: 2, preview: "ready", previewUnavailable: true,
+    measurement: "scroll_visible_result_image_available", rowsReadyMS: 40, previewReadyMS: 125});
+  for (const secret of ["private-query", "private-asset", "private-account", "private.jpg", "private-coordinates"]) {
+    assert.equal(JSON.stringify(report).includes(secret), false);
+  }
+});
+
+test("empty, cancelled, failed and still-waiting searches never claim a UI preview", () => {
+  for (const [outcome, reason, expected] of [["completed", "noMatches", "not_applicable"],
+    ["cancelled", "background", "cancelled"], ["failed", "decode", "failed"], [null, null, "pending"]]) {
+    const base = {phase: "search", traceId: "69224569-9dde-4c86-82c9-dcce1c56a375"};
+    const events = [{...base, step: "action", outcome: "started"},
+      {...base, step: "rowsReady", outcome: "completed", completed: 0, elapsedMS: 40}];
+    if (outcome) events.push({...base, step: "action", outcome, reason, completed: 0});
+    const ui = summarizeDiagnostics(parseDiagnostics(JSON.stringify(events))).flows[0].searchUI;
+    assert.equal(ui.preview, expected);
+    assert.equal(ui.previewReadyMS, undefined);
+  }
+});
 test("standalone analysis batches do not pretend to be request-only flows or completed whole-library actions", () => {
   const trace = "69224569-9dde-4c86-82c9-dcce1c56a375";
   const report = summarizeDiagnostics([

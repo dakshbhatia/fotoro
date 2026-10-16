@@ -145,7 +145,8 @@ enum ReviewedPhotosBackupPolicy {
   @ObservationIgnored private var savedSemanticBrowseInteractionActive = false
   @ObservationIgnored private var savedSemanticIdleTask: Task<Void, Never>?
   let storageRoot: URL
-  var photos: [LocalPhoto] = []
+  @ObservationIgnored private var savedPhotoWindowGeneration = UUID()
+  var photos: [LocalPhoto] = [] { didSet { savedPhotoWindowGeneration = UUID() } }
   @ObservationIgnored private var loadedPhotoWindow: (access: PhotoAccountAccess, origin: String?)?
   var received: [LocalPhoto] = []
   var grants: [GrantV1] = []
@@ -163,6 +164,7 @@ enum ReviewedPhotosBackupPolicy {
       while let task = annotationSummaryTask { await task.value }
     }
     @ObservationIgnored var catalogSearchWillRead: (@Sendable () -> Void)?
+    @ObservationIgnored var savedPageWillPublish: (@Sendable () async -> Void)?
     @ObservationIgnored var savedVisualEmbedding: (@MainActor (SearchPreview) async throws -> [Float])?
     @ObservationIgnored var savedVisualQueryEmbedding: (@MainActor (String) async throws -> [Float]?)?
     func waitForSavedVisualEvidence() async {
@@ -1682,13 +1684,74 @@ enum ReviewedPhotosBackupPolicy {
     api.baseURL = url
     UserDefaults.standard.set(url.absoluteString, forKey: "fotoro.api")
   }
-  func loadMore() throws {
-    guard let account = session.accountId, let last = photos.last,
-      last.manifest.ownerAccountId == account else { return }
-    let page = try store.ownedPhotos(accountId: account, after: last.id, limit: 1000)
-    guard !page.isEmpty else { return }
-    photos += page
-    try reloadAnnotations()
+  @discardableResult func loadMore() async throws -> Bool {
+    try Task.checkCancellation()
+    guard let access = photoAccountAccess else { throw CancellationError() }
+    guard let cursor = photos.last else { return false }
+    let catalog = store, ledger = annotations.ledger
+    let origin = api.baseURL.absoluteString, scope = BackgroundUploadPolicy.origin(api.baseURL)
+    guard cursor.manifest.ownerAccountId == access.account,
+      loadedPhotoWindow?.access == access, loadedPhotoWindow?.origin == scope else { throw CancellationError() }
+    let generation = consumerCatalogGeneration, window = savedPhotoWindowGeneration
+    let count = photos.count
+    let bundle = try vault.requireBundle(), card = try session.requireCard(access.account)
+    @MainActor func bindingIsCurrent() -> Bool {
+      photoAccountAccess == access && store === catalog && annotations.ledger === ledger
+        && api.baseURL.absoluteString == origin && session.pinnedCards[access.account] == card
+        && consumerCatalogGeneration == generation && savedPhotoWindowGeneration == window
+        && photos.count == count && photos.last?.id == cursor.id
+    }
+    #if DEBUG
+      let willPublish = savedPageWillPublish
+    #endif
+    // Each caller owns cancellation of its bounded worker. Concurrent readers
+    // can prepare the same cursor, but only the unchanged window may publish.
+    let worker = Task.detached(priority: .userInitiated) {
+      var page = try catalog.ownedPhotoPageSnapshot(accountId: access.account, after: cursor)
+      do {
+        #if DEBUG
+          // Hold the captured bytes before opening them so tests can settle
+          // both successful and failing preparations after scope withdrawal.
+          await willPublish?()
+        #endif
+        var values: [String: PhotoAnnotationsV1] = [:]
+        values.reserveCapacity(page.photos.count)
+        for photo in page.photos {
+          try Task.checkCancellation()
+          // Release each captured encrypted envelope after opening it; publication
+          // retains the decoded overlay rather than a second page of ciphertext.
+          let state = try page.annotationStates.removeValue(forKey: photo.id).map { try Wire.decode(AnnotationState.self, $0) }
+          values[photo.id] = try ledger.current(state: state, photo: photo, bundle: bundle, card: card)
+            ?? PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+        }
+        try Task.checkCancellation()
+        return (page, values)
+      } catch {
+        try Task.checkCancellation()
+        guard try catalog.ownedPhotoPageIsCurrent(page) else { throw CancellationError() }
+        throw error
+      }
+    }
+    let prepared: (OwnedPhotoPageSnapshot, [String: PhotoAnnotationsV1])
+    do { prepared = try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() } }
+    catch {
+      try Task.checkCancellation()
+      guard bindingIsCurrent() else { throw CancellationError() }
+      throw error
+    }
+    try Task.checkCancellation()
+    guard bindingIsCurrent() else { throw CancellationError() }
+    // A direct incoming write can precede UI reload/generation publication.
+    // This scalar check fences that gap without rereading any admitted overlay.
+    guard try catalog.ownedPhotoPageIsCurrent(prepared.0) else { throw CancellationError() }
+    guard !prepared.0.photos.isEmpty else { return false }
+    // Every fallible read/decode/crypto check completed before these synchronous
+    // mutations. Existing rows and owner edits are retained verbatim.
+    photoAnnotations.merge(prepared.1) { _, current in current }
+    photos.append(contentsOf: prepared.0.photos)
+    loadedPhotoWindow = (access, scope)
+    consumerCatalogGeneration &+= 1
+    return true
   }
   func reload() throws {
     guard vault.isUnlocked else { return }

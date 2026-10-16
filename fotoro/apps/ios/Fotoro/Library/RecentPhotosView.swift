@@ -5,6 +5,78 @@ import UIKit
 #if !FOTORO_LOCAL_PREVIEW
 import AVKit
 import NukeUI
+import Observation
+
+struct NativeSearchPreviewObservation {
+  let id: UUID
+  let isCurrent: @MainActor () -> Bool
+  let device: @MainActor (RecentPhotoSource, Bool) -> Void
+  let saved: @MainActor (LocalPhoto, Bool) -> Void
+  let invalidated: @MainActor () -> Void
+}
+private struct NativeSearchPreviewEnvironmentKey: EnvironmentKey {
+  static let defaultValue: NativeSearchPreviewObservation? = nil
+}
+@MainActor @Observable final class NativeSearchPreviewVisibilityState { var visible = false }
+private struct NativeSearchPreviewVisibleKey: EnvironmentKey {
+  static let defaultValue: NativeSearchPreviewVisibilityState? = nil
+}
+extension EnvironmentValues {
+  var searchPreviewObservation: NativeSearchPreviewObservation? {
+    get { self[NativeSearchPreviewEnvironmentKey.self] }
+    set { self[NativeSearchPreviewEnvironmentKey.self] = newValue }
+  }
+  var searchPreviewVisibility: NativeSearchPreviewVisibilityState? {
+    get { self[NativeSearchPreviewVisibleKey.self] }
+    set { self[NativeSearchPreviewVisibleKey.self] = newValue }
+  }
+}
+enum NativeSearchPreviewAvailability: Equatable { case pending, available, unavailable }
+// Attach to the fixed thumbnail rectangle, so clipped aspect-fill overflow and
+// a visible caption cannot turn an offscreen thumbnail into a ready preview.
+@MainActor struct NativeSearchResultVisibility: ViewModifier {
+  @State private var visibility = NativeSearchPreviewVisibilityState()
+  func body(content: Content) -> some View {
+    content.environment(\.searchPreviewVisibility, visibility)
+      .onScrollVisibilityChange(threshold: 0.1) { visibility.visible = $0 }
+      .onDisappear { visibility.visible = false }
+  }
+}
+@MainActor struct NativeSearchPreviewVisibility: ViewModifier {
+  let observation: NativeSearchPreviewObservation?
+  let availability: NativeSearchPreviewAvailability
+  let publish: @MainActor (NativeSearchPreviewAvailability) -> Void
+  @Environment(\.searchPreviewVisibility) private var visibility
+  func body(content: Content) -> some View {
+    content.onChange(of: visibility?.visible) { notify() }
+      .onChange(of: availability) { notify() }
+      .onChange(of: observation?.id) { notify() }
+      .onAppear { notify() }
+  }
+  private func notify() {
+    guard visibility?.visible == true, let observation, observation.isCurrent(), availability != .pending else { return }
+    publish(availability)
+  }
+}
+
+// Search thumbnails report only when their result view is visible. The parent
+// scope rechecks the current account, catalog, hit membership and source binding.
+@MainActor struct NativeSearchSavedThumbnail: View {
+  let photo: LocalPhoto
+  @Environment(\.searchPreviewObservation) private var observation
+  var body: some View {
+    LazyImage(url: photo.thumbnailURL ?? photo.previewURL) { state in
+      let availability: NativeSearchPreviewAvailability = state.image != nil ? .available
+        : state.error != nil || (photo.thumbnailURL ?? photo.previewURL) == nil ? .unavailable : .pending
+      Group {
+        if let image = state.image { image.resizable().scaledToFill() }
+        else { Rectangle().fill(.quaternary).overlay { Image(systemName: "photo") } }
+      }.modifier(NativeSearchPreviewVisibility(observation: observation, availability: availability) { status in
+        observation?.saved(photo, status == .available)
+      })
+    }
+  }
+}
 #endif
 
 struct PhotosImage: View {
@@ -22,6 +94,10 @@ struct PhotosImage: View {
   @State private var displayedSource: RecentPhotoSource?
   @Environment(\.displayScale) private var displayScale
   @Environment(\.scenePhase) private var scenePhase
+  #if !FOTORO_LOCAL_PREVIEW
+  @Environment(\.searchPreviewObservation) private var searchPreviewObservation
+  @Environment(\.searchPreviewVisibility) private var searchPreviewVisibility
+  #endif
   private var targetSize: CGSize {
     if large { return CGSize(width: 1600, height: 1600) }
     let pixels = min(1024, max(64, ceil(thumbnailSide * displayScale / 64) * 64))
@@ -51,6 +127,13 @@ struct PhotosImage: View {
         }.padding(8).background(.regularMaterial, in: .rect(cornerRadius: 12)).padding(large ? 16 : 4)
       }
     }
+    #if !FOTORO_LOCAL_PREVIEW
+    .modifier(NativeSearchPreviewVisibility(observation: searchPreviewObservation,
+      availability: displayedSource == RecentPhotoSource(photo) && image != nil ? .available
+        : progress.unavailable ? .unavailable : .pending) { status in
+      reportSearchPreview(available: status == .available)
+    })
+    #endif
     .task(id: photo.id + "|" + photo.sourceRevision + "|\(retry)|\(targetSize.width)|\(networkAllowed)|\(thumbnailGeneration)|\(scenePhase != .background)") {
       guard !Task.isCancelled else { return }
       stop()
@@ -124,6 +207,26 @@ struct PhotosImage: View {
     if let request { store.images.cancelImageRequest(request) }
     request = nil
   }
+  #if !FOTORO_LOCAL_PREVIEW
+  private func reportSearchPreview(available: Bool) {
+    guard !large, active, scenePhase == .active, let observation = searchPreviewObservation,
+      let visibility = searchPreviewVisibility, visibility.visible,
+      observation.isCurrent(), displayedSource == RecentPhotoSource(photo) else { return }
+    let token = generation, source = RecentPhotoSource(photo), permissionGeneration = store.thumbnailGeneration
+    let current: @MainActor () -> Bool = {
+      active && generation == token && scenePhase == .active
+        && visibility.visible
+        && searchPreviewObservation?.id == observation.id && observation.isCurrent()
+        && displayedSource == source
+        && (available ? image != nil : progress.unavailable)
+    }
+    store.validateThumbnail(source: source, generation: permissionGeneration, isCurrent: current) { allowed in
+      guard current() else { return }
+      guard allowed else { observation.invalidated(); return }
+      observation.device(source, available)
+    }
+  }
+  #endif
 }
 
 // Viewport visibility, rather than lazy-view creation, admits the next page.
@@ -356,6 +459,9 @@ struct RecentPhotosView: View {
   @State private var pendingPhotoSync: Bool?
   @State private var searchHits: [ConsumerSearchHit] = []
   @State private var searchCompletion = ConsumerSearchCompletion()
+  @State private var searchPreviewReadiness = NativeSearchPreviewReadiness()
+  @State private var searchPreviewTrace: NativeDiagnosticTrace?
+  @State private var searchPreviewPresentation: ConsumerSearchPresentationID?
   @State private var visualSearch: (id: UUID, presentation: ConsumerSearchPresentationID)?
   @State private var searchAttempt: UInt64 = 0
   @State private var savedResults: [String: LocalPhoto] = [:]
@@ -733,6 +839,7 @@ struct RecentPhotosView: View {
       .fullScreenCover(item: $savedViewer) { presentation in
         if let services { PhotoViewer(services: services, initialID: presentation.initial.id, displayedPhotos: presentation.photos) }
       }
+      .onChange(of: savedViewer?.id) { if savedViewer != nil { cancelSearchPreview(reason: .inactive) } }
       .sheet(isPresented: $cleanupOpen) { if let services { PhotoCleanupReview(services: services) } }
       .sheet(item: $sharedSavedPhotos) { presentation in
         if let services { ExchangeView(services: services, selected: presentation.photos) }
@@ -858,12 +965,27 @@ struct RecentPhotosView: View {
   }
   private var homeEvents: some View {
     homePresentations
-        .onChange(of: query) { cancelBestShots(); search.updateQuery(query) }
+        .onChange(of: query) {
+          #if !FOTORO_LOCAL_PREVIEW
+          cancelSearchPreview(reason: .contextChanged)
+          #endif
+          cancelBestShots(); search.updateQuery(query)
+        }
         .onChange(of: search.response.generation) { cancelBestShots() }
         .onChange(of: search.organizationGeneration) { cancelBestShots() }
         .onChange(of: search.acceptedMeaningID) { cancelBestShots() }
         .onChange(of: search.peopleSelection) { cancelBestShots() }
-        .onChange(of: store.status) { cancelBestShots() }
+        .onChange(of: store.status) {
+          #if !FOTORO_LOCAL_PREVIEW
+          cancelSearchPreview(reason: RecentPhotosPolicy.canRead(store.status) ? .contextChanged : .permissionRequired)
+          #endif
+          cancelBestShots()
+        }
+        .onChange(of: viewer?.id) {
+          #if !FOTORO_LOCAL_PREVIEW
+          if viewer != nil { cancelSearchPreview(reason: .inactive) }
+          #endif
+        }
         .onChange(of: browseDates) {
           cancelBestShots()
           overviewSelection = nil
@@ -882,6 +1004,9 @@ struct RecentPhotosView: View {
           #endif
         }
         .onChange(of: search.libraryGeneration) {
+          #if !FOTORO_LOCAL_PREVIEW
+          cancelSearchPreview(reason: .contextChanged)
+          #endif
           cancelBestShots()
           validatePhotosPresentation()
 #if !FOTORO_LOCAL_PREVIEW
@@ -922,6 +1047,9 @@ struct RecentPhotosView: View {
         }
         .onDisappear {
           homeVisible = false
+          #if !FOTORO_LOCAL_PREVIEW
+          cancelSearchPreview(reason: .inactive)
+          #endif
           updateAutomaticAnalysisAdmission()
           cancelBestShots()
           shareTask?.cancel(); cleanupShare()
@@ -983,6 +1111,7 @@ struct RecentPhotosView: View {
       updateAutomaticAnalysisAdmission()
       cancelBestShots()
 #if !FOTORO_LOCAL_PREVIEW
+      cancelSearchPreview(reason: phase == .background ? .background : .inactive)
       updatePhotoSyncForeground(phase)
       if phase == .background {
         shareTask?.cancel(); cleanupShare()
@@ -1071,6 +1200,8 @@ struct RecentPhotosView: View {
             },
             choseAlternative: { queryFocused = false },
             editPeople: { queryFocused = false; people = PhotoPeoplePresentation() }, selectResults: selectSearchResults)
+            .environment(\.searchPreviewObservation, searchResultPreviewObservation)
+            .onDisappear { cancelSearchPreview(reason: .inactive) }
 #endif
         } else {
           #if !FOTORO_LOCAL_PREVIEW
@@ -2013,21 +2144,74 @@ struct RecentPhotosView: View {
       if let services { backupAccount = PhotosAccountPresentation(services: services, selection: selection) }
     } catch { store.error = error.localizedDescription }
   }
+  private func cancelSearchPreview(reason: NativeDiagnosticReason) {
+    searchPreviewReadiness.cancel(reason: reason)
+    searchPreviewTrace = nil; searchPreviewPresentation = nil
+  }
+  private func searchPreviewIsCurrent(_ trace: NativeDiagnosticTrace, presentation: ConsumerSearchPresentationID) -> Bool {
+    homeVisible && scenePhase == .active && viewer == nil && savedViewer == nil && search.hasSearch
+      && presentation == searchTaskID && searchCompletion.hasCompleted(presentation)
+      && searchPreviewReadiness.isPending(trace)
+  }
+  private var searchResultPreviewObservation: NativeSearchPreviewObservation? {
+    guard let trace = searchPreviewTrace, let presentation = searchPreviewPresentation else { return nil }
+    return NativeSearchPreviewObservation(id: trace.id, isCurrent: {
+      searchPreviewIsCurrent(trace, presentation: presentation)
+    }, device: { source, available in
+      searchPreviewReadiness.preview(trace, available: available, visible: true) {
+        searchPreviewIsCurrent(trace, presentation: presentation)
+          && search.assets[source.id]?.sourceRevision == source.revision
+          && searchHits.contains { $0.photo == .device(source.id) }
+          && (bestShots.snapshot?.recommendations.ids.contains("device:" + source.id) ?? true)
+      }
+    }, saved: { photo, available in
+      searchPreviewReadiness.preview(trace, available: available, visible: true) {
+        guard searchPreviewIsCurrent(trace, presentation: presentation),
+          searchHits.contains(where: { $0.photo == .saved(photo.id) }),
+          bestShots.snapshot?.recommendations.ids.contains("saved:" + photo.id) ?? true else { return false }
+        guard let services, services.photoAccountAccess != nil,
+          let current = try? services.consumerSavedPhoto(photo.id),
+          current.metadata == photo.metadata, current.manifest == photo.manifest else {
+          searchPreviewReadiness.cancel(trace, reason: .contextChanged); return false
+        }
+        return true
+      }
+    }, invalidated: {
+      guard searchPreviewIsCurrent(trace, presentation: presentation) else { return }
+      searchPreviewReadiness.cancel(trace, reason:
+        RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)) ? .contextChanged : .permissionRequired)
+    })
+  }
   private func updateSearch() async {
+    let startedAt = ProcessInfo.processInfo.systemUptime
+    cancelSearchPreview(reason: .contextChanged)
     guard search.hasSearch else { searchHits = []; savedResults = [:]; visualSearch = nil; searchCompletion = ConsumerSearchCompletion(); return }
     let token = searchTaskID
     let attempt = UUID()
+    var admittedTrace: NativeDiagnosticTrace?
     visualSearch = nil
-    defer { if visualSearch?.id == attempt { visualSearch = nil } }
+    defer {
+      if visualSearch?.id == attempt { visualSearch = nil }
+      if let trace = admittedTrace,
+        Task.isCancelled || token != searchTaskID || !homeVisible || scenePhase != .active {
+        searchPreviewReadiness.cancel(trace, reason: scenePhase == .background ? .background
+          : scenePhase != .active || !homeVisible ? .inactive : .contextChanged)
+      }
+    }
     searchCompletion.begin(token)
     do {
       if !search.indexing { try await Task.sleep(for: .milliseconds(100)) }
       try Task.checkCancellation()
       guard let services else { searchHits = []; savedResults = [:]; searchCompletion.succeed(token); return }
+      guard token == searchTaskID, homeVisible, scenePhase == .active else { return }
+      let trace = searchPreviewReadiness.begin(startedAt: startedAt)
+      admittedTrace = trace
       // Publish filename, tags and recognized text before entering Core ML.
       // Background OCR may restart enrichment; it must never hide these matches.
-      let hits = try await services.withDiagnosticAction(.search) {
-        try await services.consumerSearch(query, local: search, includeVisual: false)
+      let hits = try await NativeDiagnosticTrace.$current.withValue(trace) {
+        try await services.withDiagnosticAction(.search) {
+          try await services.consumerSearch(query, local: search, includeVisual: false)
+        }
       }
       try Task.checkCancellation()
       guard token == searchTaskID else { return }
@@ -2038,6 +2222,8 @@ struct RecentPhotosView: View {
       searchHits = hits
       savedResults = saved
       searchCompletion.succeed(token)
+      searchPreviewReadiness.rowsReady(trace, count: hits.count)
+      if !hits.isEmpty { searchPreviewPresentation = token; searchPreviewTrace = trace }
       visualSearch = (attempt, token)
       let enriched = try await services.consumerSearch(query, local: search)
       try Task.checkCancellation()
@@ -2047,10 +2233,21 @@ struct RecentPhotosView: View {
       }
       searchHits = enriched
       savedResults = saved
-    } catch is CancellationError {} catch {
+      searchPreviewReadiness.rowsReady(trace, count: enriched.count, final: true)
+      if !enriched.isEmpty { searchPreviewPresentation = token; searchPreviewTrace = trace }
+    } catch is CancellationError {
+      if let trace = admittedTrace {
+        searchPreviewReadiness.cancel(trace, reason: scenePhase == .background ? .background
+          : scenePhase != .active || !homeVisible ? .inactive : .contextChanged)
+      }
+    } catch {
       guard !Task.isCancelled, token == searchTaskID else { return }
       // Optional visual retrieval cannot turn a completed text search into an error.
-      if searchCompletion.hasCompleted(token) { return }
+      if searchCompletion.hasCompleted(token) {
+        if searchHits.isEmpty, let trace = admittedTrace { searchPreviewReadiness.fail(trace, reason: .failure(error)) }
+        return
+      }
+      if let trace = admittedTrace { searchPreviewReadiness.fail(trace, reason: .failure(error)) }
       searchHits = []
       savedResults = [:]
       searchCompletion.fail(token, message: error.localizedDescription)

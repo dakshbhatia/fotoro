@@ -229,7 +229,13 @@ final class AnnotationLedger: @unchecked Sendable {
   }
   func current(photo: LocalPhoto, bundle: AccountBundle, card: AccountCardV1) throws -> PhotoAnnotationsV1? {
     guard photo.manifest.ownerAccountId == accountId, card.accountId == accountId else { throw FotoroError("Labels belong to another account") }
-    guard let state = try state(photo.id) else { return nil }
+    return try current(state: state(photo.id), photo: photo, bundle: bundle, card: card)
+  }
+  // Opens bytes already captured by a bounded, coherent catalog snapshot.
+  // Account/original validation is identical to the single-record reader.
+  func current(state: AnnotationState?, photo: LocalPhoto, bundle: AccountBundle, card: AccountCardV1) throws -> PhotoAnnotationsV1? {
+    guard photo.manifest.ownerAccountId == accountId, card.accountId == accountId else { throw FotoroError("Labels belong to another account") }
+    guard let state else { return nil }
     try checked(state, photo: photo)
     if let draft = state.draft {
       let value = try Wire.decode(PhotoAnnotationsV1.self, CryptoAdapter().unwrap(draft, key: Data(b64: bundle.vaultKey)))
