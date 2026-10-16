@@ -14,10 +14,10 @@ struct ConsumerSyncSummary: Equatable, Sendable {
     guard facts.unlocked else { return Self() }
     var value = Self(completedPhotos: facts.completed, totalPhotos: facts.total,
       skippedPhotos: facts.skipped, lastCheckedAt: facts.lastChecked, detail: facts.detail)
-    if facts.preparing { value.state = .preparing; value.action = .none }
+    if facts.paused && (facts.pending > 0 || facts.unprepared > 0) { value.state = .paused; value.action = facts.pending > 0 ? .continue : .start }
+    else if facts.preparing { value.state = .preparing; value.action = .none }
     else if facts.uploading { value.state = .uploading; value.action = .none }
     else if facts.checking { value.state = .checking; value.action = .none }
-    else if facts.paused && facts.pending > 0 { value.state = .paused; value.action = .continue }
     else if facts.offline { value.state = .offline; value.action = facts.pending > 0 ? .retry : .start }
     else if facts.failed > 0 || facts.skipped > 0 || facts.pending > 0 || facts.unprepared > 0 {
       value.state = .needsAttention

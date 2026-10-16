@@ -1510,6 +1510,28 @@ final class ConsumerCoreTests: XCTestCase {
     XCTAssertEqual(locked.skippedPhotos, 0)
     XCTAssertEqual(locked.action, .signIn)
   }
+  func testPauseAcknowledgesUnpreparedPhotosWhileCancellationSettles() {
+    var facts = ConsumerSyncFacts()
+    facts.unlocked = true
+    facts.paused = true
+    facts.unprepared = 2
+    for activity in 0..<3 {
+      facts.preparing = activity == 0
+      facts.uploading = activity == 1
+      facts.checking = activity == 2
+      let summary = ConsumerSyncSummary.derive(facts)
+      XCTAssertEqual(summary.state, .paused)
+      XCTAssertEqual(summary.action, .start, "Unprepared manual picks need explicit Save, not upload-only Continue")
+    }
+    facts.unprepared = 0
+    facts.pending = 2
+    XCTAssertEqual(ConsumerSyncSummary.derive(facts).state, .paused)
+    XCTAssertEqual(ConsumerSyncSummary.derive(facts).action, .continue)
+    facts.paused = false
+    XCTAssertEqual(ConsumerSyncSummary.derive(facts).state, .checking)
+    facts.checking = false
+    XCTAssertEqual(ConsumerSyncSummary.derive(facts).state, .needsAttention)
+  }
   func testSkippedPhotosNeedAttentionWhileLocalDraftsKeepSavedPhotosReady() {
     var facts = ConsumerSyncFacts()
     facts.unlocked = true
