@@ -186,6 +186,30 @@ enum PhotoAnalysisWindow: String, Codable, Sendable {
     return value
   }
 }
+enum PhotoAnalysisActivity: String, Sendable {
+  case notReady, inactive, interacting, waitingForIdle, running, retryScheduled, idle
+  var label: String {
+    switch self {
+    case .notReady: return "Photo library is preparing"
+    case .inactive: return "Automatic analysis is paused"
+    case .interacting: return "Waiting while you browse"
+    case .waitingForIdle: return "Waiting for idle time"
+    case .running: return "Checking photos"
+    case .retryScheduled: return "Waiting to retry unavailable photos"
+    case .idle: return "No analysis is running"
+    }
+  }
+}
+struct PhotoAnalysisCoverageSnapshot: Sendable {
+  let capturedAt: Date
+  let window: PhotoAnalysisWindow
+  let library: [SearchStageCoverage]
+  let automatic: [SearchStageCoverage]
+}
+struct PhotoAnalysisStatusSnapshot: Sendable {
+  let coverage: PhotoAnalysisCoverageSnapshot
+  let activity: PhotoAnalysisActivity
+}
 struct PhotoAnalysisScope: Equatable, Sendable {
   var query: String
   var metadataText: String

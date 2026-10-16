@@ -16,6 +16,36 @@ private actor AdmissionQueryProbe {
 }
 
 final class SearchLifecycleTests: XCTestCase {
+  @MainActor func testAnalysisStatusRejectsDelayedScopePermissionGenerationAndCancellation() async throws {
+    for withdrawal in ["window", "permission", "generation", "cancel"] {
+      let index = try SearchIndex(), now = Date()
+      var record = SearchRecord(id: "public-status"); record.capturedAt = now
+      try index.replacePermitted([record])
+      let store = LocalSearchStore(index: index, analysisWindow: .tenDays)
+      store.setAutomaticAnalysisActive(false)
+      var permitted = true
+      store.analysisStatusCanRead = { permitted }
+      let gate = AdmissionPreviewGate(), began = expectation(description: "Status read held")
+      store.analysisStatusRead = { index, now, window in
+        let snapshot = PhotoAnalysisCoverageSnapshot(capturedAt: now, window: window,
+          library: try index.analysisCoverage(now: now), automatic: try index.analysisCoverage(now: now, scope: window.scope(now: now)))
+        began.fulfill(); await gate.wait(); return snapshot
+      }
+      defer { store.pause(); gate.open() }
+      let reading = Task { try await store.analysisStatusSnapshot() }
+      await fulfillment(of: [began], timeout: 3)
+      switch withdrawal {
+      case "window": store.setAutomaticAnalysisWindow(.allPhotos)
+      case "permission": permitted = false
+      case "generation": store.pause()
+      default: reading.cancel()
+      }
+      gate.open()
+      do { _ = try await reading.value; XCTFail("Withdrawn status must not publish: \(withdrawal)") }
+      catch is CancellationError {}
+      catch { XCTFail("Withdrawal must be ordinary cancellation: \(error)") }
+    }
+  }
   @MainActor func testOCRIsDurableAndSearchableWhileClassificationIsHeldOrCancelled() async throws {
     guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
       let asset = PHAsset.fetchAssets(with: .image, options: nil).firstObject, !asset.isHidden else {

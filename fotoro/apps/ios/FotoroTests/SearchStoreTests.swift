@@ -4,6 +4,79 @@ import XCTest
 @testable import Fotoro
 
 final class SearchStoreTests: XCTestCase {
+  @MainActor func testAnalysisStatusSeparatesWholeLibraryFromAutomaticWindowWithoutStartingWork() async throws {
+    let index = try SearchIndex(), now = Date()
+    var recent = SearchRecord(id: "recent"); recent.capturedAt = now; recent.ocrStatus = .complete
+    var older = SearchRecord(id: "older"); older.capturedAt = now.addingTimeInterval(-20 * 86400)
+    try index.replacePermitted([recent, older])
+    let store = LocalSearchStore(index: index, analysisWindow: .tenDays)
+    store.setAutomaticAnalysisActive(false); store.analysisNow = { now }; store.analysisStatusCanRead = { true }
+    defer { store.pause() }
+    let status = try await store.analysisStatusSnapshot()
+    XCTAssertEqual(status.coverage.window, .tenDays)
+    XCTAssertEqual(status.coverage.library.first?.total, 2); XCTAssertEqual(status.coverage.library.first?.complete, 1)
+    XCTAssertEqual(status.coverage.automatic.first?.total, 1); XCTAssertEqual(status.coverage.automatic.first?.complete, 1)
+    XCTAssertEqual(status.activity, .inactive)
+    XCTAssertFalse(store.indexing); XCTAssertEqual(store.automaticAnalysisWorkerStarts, 0)
+    XCTAssertEqual(store.query, "", "Status is reachable with no search and cannot change the query")
+    XCTAssertEqual(try index.record("older")?.ocrStatus, .pending)
+  }
+  @MainActor func testAnalysisStatusRequiresPermissionBeforeReadingAndKeepsStageFailuresDistinct() async throws {
+    let index = try SearchIndex(), now = Date()
+    var records = ["ready", "failed", "unavailable", "pending"].map { SearchRecord(id: $0) }
+    for offset in records.indices { records[offset].capturedAt = now }
+    records[0].ocrStatus = .complete
+    try index.replacePermitted(records)
+    XCTAssertTrue(try index.applyOCR(nil, status: .failed, photoID: "failed", revision: "1", attemptedAt: now))
+    XCTAssertTrue(try index.applyOCR(nil, status: .unavailable, photoID: "unavailable", revision: "1", attemptedAt: now))
+    let store = LocalSearchStore(index: index, analysisWindow: .tenDays)
+    store.setAutomaticAnalysisActive(false); store.analysisNow = { now }; store.analysisStatusCanRead = { false }
+    defer { store.pause() }
+    var reads = 0
+    store.analysisStatusRead = { index, now, window in reads += 1; return try index.analysisCoverageSnapshot(now: now, window: window) }
+    do { _ = try await store.analysisStatusSnapshot(); XCTFail("Permission is required for catalog counts") } catch {}
+    XCTAssertEqual(reads, 0)
+    store.analysisStatusCanRead = { true }
+    let snapshot = try await store.analysisStatusSnapshot()
+    let text = try XCTUnwrap(snapshot.coverage.library.first { $0.stage == .ocr })
+    XCTAssertEqual(text.complete, 1); XCTAssertEqual(text.pending, 1)
+    XCTAssertEqual(text.failed, 1); XCTAssertEqual(text.unavailable, 1); XCTAssertEqual(text.deferred, 2)
+    XCTAssertEqual(text.total, text.complete + text.pending + text.failed + text.unavailable)
+    XCTAssertEqual(reads, 1)
+    XCTAssertEqual(store.automaticAnalysisWindow, .tenDays)
+    XCTAssertEqual(store.automaticAnalysisWorkerStarts, 0)
+  }
+  func testAggregateAnalysisSnapshotKeepsFutureUndatedAndOlderCountsSeparateFromAutomaticRange() throws {
+    let now = Date(), index = try SearchIndex()
+    var recent = SearchRecord(id: "recent"); recent.capturedAt = now
+    var older = SearchRecord(id: "older"); older.capturedAt = now.addingTimeInterval(-20 * 86400)
+    var future = SearchRecord(id: "future"); future.capturedAt = now.addingTimeInterval(86400)
+    try index.replacePermitted([recent, older, future, SearchRecord(id: "undated")])
+    let recentSnapshot = try index.analysisCoverageSnapshot(now: now, window: .tenDays)
+    XCTAssertEqual(recentSnapshot.library.first?.total, 4); XCTAssertEqual(recentSnapshot.automatic.first?.total, 1)
+    let all = try index.analysisCoverageSnapshot(now: now, window: .allPhotos)
+    XCTAssertEqual(all.library.first?.total, 4); XCTAssertEqual(all.automatic.first?.total, 3)
+    XCTAssertEqual(all.capturedAt, now)
+  }
+  #if !FOTORO_LOCAL_PREVIEW
+  @MainActor func testAnalysisStatusSeparatesModelWaitFromVectorCompletion() async throws {
+    let index = try SearchIndex(), now = Date()
+    var records = ["ready", "model", "pending"].map { SearchRecord(id: $0) }
+    for offset in records.indices { records[offset].capturedAt = now }
+    try index.replacePermitted(records)
+    var vector = [Float](repeating: 0, count: 512); vector[0] = 1
+    XCTAssertTrue(try index.applySemantic(vector, photoID: "ready", revision: "1", attemptedAt: now))
+    XCTAssertTrue(try index.deferSemantic(.modelDeferred, photoID: "model", revision: "1", attemptedAt: now))
+    let store = LocalSearchStore(index: index, analysisWindow: .tenDays)
+    store.setAutomaticAnalysisActive(false); store.analysisNow = { now }; store.analysisStatusCanRead = { true }
+    defer { store.pause() }
+    let snapshot = try await store.analysisStatusSnapshot()
+    let semantic = try XCTUnwrap(snapshot.coverage.automatic.first { $0.stage == .semantic })
+    XCTAssertEqual(semantic.total, 3); XCTAssertEqual(semantic.complete, 1); XCTAssertEqual(semantic.pending, 2)
+    XCTAssertEqual(semantic.modelDeferred, 1); XCTAssertEqual(semantic.deferred, 1)
+    XCTAssertEqual(semantic.failed, 0); XCTAssertEqual(semantic.unavailable, 0)
+  }
+  #endif
   @MainActor func testChangingAnalysisWindowKeepsExistingEvidenceAndCurrentQuery() async throws {
     let index = try SearchIndex()
     var record = SearchRecord(id: "old"); record.capturedAt = Date(timeIntervalSince1970: 1)

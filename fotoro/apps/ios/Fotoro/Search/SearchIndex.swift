@@ -38,6 +38,13 @@ struct SearchAnalysisCheckpoint: Sendable {
   var visual: SearchVisualCheckpoint? = nil
 }
 
+struct SearchOrganizationReadContext: Equatable, Sendable {
+  let index: ObjectIdentifier
+  let work: UInt64
+  let library: UInt64
+  let organization: UInt64
+}
+
 // A device-local index. Network synchronization is handled by the owner annotation journal.
 final class SearchIndex: @unchecked Sendable {
   let database: DatabaseQueue
@@ -200,6 +207,45 @@ final class SearchIndex: @unchecked Sendable {
       }
       return records
     }
+  }
+  // Browse flags do not need OCR, labels, capture metadata or sync checkpoints.
+  // Capture only the requested primary-key rows in one coherent read, then open
+  // their small facts arrays outside the serialized database queue.
+  func organizationFacts(_ sources: [RecentPhotoSource]) throws -> [RecentPhotoSource: [String]] {
+    let sources = Array(Set(sources))
+    guard !sources.isEmpty else { return [:] }
+    try Task.checkCancellation()
+    let ids = Array(Set(sources.map(\.id)))
+    let rows = try database.read { db -> [String: (String, String?)] in
+      var values: [String: (String, String?)] = [:]
+      for offset in stride(from: 0, to: ids.count, by: 400) {
+        try Task.checkCancellation()
+        let batch = Array(ids[offset..<min(offset + 400, ids.count)])
+        let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
+        for row in try Row.fetchAll(db, sql: """
+          SELECT id,json_extract(value,'$.revision') AS revision,json_type(value,'$.revision') AS revisionType,
+            json_extract(value,'$.facts') AS facts,json_type(value,'$.facts') AS factsType
+          FROM searchRecords WHERE id IN (\(placeholders))
+          """, arguments: StatementArguments(batch)) {
+          let revisionType: String? = row["revisionType"], factsType: String? = row["factsType"]
+          guard ["text", "null"].contains(revisionType ?? "null"),
+            ["array", "null"].contains(factsType ?? "null") else { throw FotoroError("Photo information is incomplete") }
+          values[row["id"] as String] = ((row["revision"] as String?) ?? "1", row["facts"] as String?)
+        }
+      }
+      return values
+    }
+    var values: [RecentPhotoSource: [String]] = [:]
+    for source in sources {
+      try Task.checkCancellation()
+      // Absence is checked, rather than left indefinitely pending. An existing
+      // older revision is withheld until its permitted metadata is refreshed.
+      guard let row = rows[source.id] else { values[source] = []; continue }
+      guard row.0 == source.revision else { continue }
+      let facts = try row.1.map { try JSONDecoder().decode([String].self, from: Data($0.utf8)) } ?? []
+      values[source] = facts.filter { $0 == "screenshot" || PhotoOrganizationFacts.category($0) != nil }
+    }
+    return values
   }
   #if !FOTORO_LOCAL_PREVIEW
   func pendingSemanticRecords(after: String? = nil, limit: Int = 64, scope: PhotoAnalysisScope? = nil) throws -> [SearchRecord] {
@@ -527,7 +573,16 @@ final class SearchIndex: @unchecked Sendable {
   // This describes the permitted local Photos catalog, independently of a query,
   // traversal cursor or the in-memory batch's progress counters.
   func analysisCoverage(now: Date = Date(), scope: PhotoAnalysisScope? = nil) throws -> [SearchStageCoverage] {
+    try database.read { db in try analysisCoverage(now: now, scope: scope, db: db) }
+  }
+  func analysisCoverageSnapshot(now: Date = Date(), window: PhotoAnalysisWindow) throws -> PhotoAnalysisCoverageSnapshot {
     try database.read { db in
+      let library = try analysisCoverage(now: now, scope: nil, db: db)
+      let automatic = try analysisCoverage(now: now, scope: window.scope(now: now), db: db)
+      return PhotoAnalysisCoverageSnapshot(capturedAt: now, window: window, library: library, automatic: automatic)
+    }
+  }
+  private func analysisCoverage(now: Date, scope: PhotoAnalysisScope?, db: Database) throws -> [SearchStageCoverage] {
       let (filter, filterArguments) = scope.map { metadataAnalysisFilter($0) } ?? ("r.scope='photos'", StatementArguments())
       return try SearchAnalysisStage.allCases.compactMap { stage in
         let state: String, processor: String, join: String
@@ -582,7 +637,6 @@ final class SearchIndex: @unchecked Sendable {
           lastAttemptAt: lastAttempt.map(Date.init(timeIntervalSince1970:)),
           lastCompleteAt: lastComplete.map(Date.init(timeIntervalSince1970:)))
       }
-    }
   }
   func pendingMetadataAnalysisCount(scope: PhotoAnalysisScope, after: PhotoAnalysisCursor? = nil,
     retryFailed: Bool = false, now: Date = Date(), bypassDeferred: Bool = false) throws -> Int {

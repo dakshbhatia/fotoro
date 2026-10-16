@@ -104,6 +104,108 @@ private struct SearchAnalysisActions: View {
   }
 }
 
+struct PhotoAnalysisStatusView: View {
+  let search: LocalSearchStore
+  @Environment(\.dismiss) private var dismiss
+  @State private var snapshot: PhotoAnalysisStatusSnapshot?
+  @State private var failure: String?
+  @State private var loading = false
+  @State private var refresh = 0
+  @State private var completedRuns = 0
+  private struct Request: Equatable {
+    let window: PhotoAnalysisWindow
+    let library: UInt64
+    let refresh: Int
+    let completedRuns: Int
+  }
+  private var request: Request {
+    Request(window: search.automaticAnalysisWindow, library: search.libraryGeneration,
+      refresh: refresh, completedRuns: completedRuns)
+  }
+  var body: some View {
+    NavigationStack {
+      List {
+        Section {
+          Text(search.analysisActivity.label).accessibilityIdentifier("analysis.status.activity")
+          if let progress = search.analysisProgress, search.indexing {
+            Text("\(progress.processed) of \(progress.total) photos attempted in this batch")
+              .font(.caption).foregroundStyle(.secondary)
+          }
+          Button("Refresh status", systemImage: "arrow.clockwise") { refresh += 1 }
+            .disabled(loading).accessibilityIdentifier("analysis.status.refresh")
+          if loading { ProgressView("Reading analysis status…") }
+          if let failure { Text(failure).foregroundStyle(.secondary).accessibilityIdentifier("analysis.status.error") }
+        }
+        if let coverage = snapshot?.coverage {
+          Section("Whole permitted library") {
+            coverageRows(coverage.library, scope: "library")
+          }.accessibilityIdentifier("analysis.status.library")
+          Section(coverage.window == .tenDays ? "Automatic · Latest 10 days" : "Automatic · All photos") {
+            coverageRows(coverage.automatic, scope: "window")
+            Text("Counts are from the last status check. A completed text check can contain no recognized words.")
+              .font(.caption).foregroundStyle(.secondary)
+            Text("Checked \(coverage.capturedAt.formatted(date: .omitted, time: .shortened))")
+              .font(.caption).foregroundStyle(.secondary)
+          }.accessibilityIdentifier("analysis.status.window")
+        }
+        Section("Automatic analysis range") {
+          Picker("Range", selection: Binding(get: { search.automaticAnalysisWindow }, set: { search.setAutomaticAnalysisWindow($0) })) {
+            Text("Latest 10 days").tag(PhotoAnalysisWindow.tenDays)
+            Text("All photos").tag(PhotoAnalysisWindow.allPhotos)
+          }.accessibilityIdentifier("search.analysis.range")
+          Text("Earlier indexed photos remain searchable. Choosing All photos explicitly expands automatic analysis. Photos are checked while Fotoro is open and browsing is idle.")
+            .font(.caption).foregroundStyle(.secondary)
+        }
+        Section("Check a matching batch") {
+          Text(search.hasSearch ? "Uses the current search and People filters." : "This explicit batch checks the last 30 days, separately from the automatic range. Use a date search to target older photos.")
+            .font(.caption).foregroundStyle(.secondary)
+          if search.analysisRemaining > 0 {
+            Text("\(search.analysisRemaining) more photos to check")
+            Button("Next batch", systemImage: "arrow.forward") { search.analyzeMetadataMatches(nextBatch: true) }
+              .disabled(!search.canAnalyzeMetadataMatches).accessibilityIdentifier("search.analysis.next")
+          } else {
+            Button("Check matching photos", systemImage: "text.viewfinder") { search.analyzeMetadataMatches() }
+              .disabled(!search.canAnalyzeMetadataMatches).accessibilityIdentifier("search.analysis.matches")
+          }
+          Text("Checks up to 500 matching photos. Existing completed stages are kept when interrupted.")
+            .font(.caption).foregroundStyle(.secondary)
+        }
+      }.accessibilityIdentifier("analysis.status")
+        .navigationTitle("Photo analysis")
+        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        .task(id: request) {
+          let captured = request
+          snapshot = nil; failure = nil; loading = true
+          do {
+            let value = try await search.analysisStatusSnapshot(); try Task.checkCancellation()
+            guard request == captured else { return }
+            snapshot = value
+          }
+          catch is CancellationError {}
+          catch { if !Task.isCancelled, request == captured { failure = error.localizedDescription } }
+          if !Task.isCancelled, request == captured { loading = false }
+        }
+        .onChange(of: search.indexing) { wasRunning, running in if wasRunning && !running { completedRuns += 1 } }
+    }
+  }
+  @ViewBuilder private func coverageRows(_ rows: [SearchStageCoverage], scope: String) -> some View {
+    ForEach(rows, id: \.stage) { row in
+      VStack(alignment: .leading, spacing: 4) {
+        Text(row.stage == .ocr ? "Text in photos" : row.stage == .visual ? "Scenes and objects" : "Visual search vectors")
+          .font(.headline)
+        Text("\(row.complete) ready of \(row.total) · \(row.pending) pending")
+        if row.unavailable > 0 || row.failed > 0 { Text("\(row.unavailable) unavailable · \(row.failed) failed") }
+        if row.deferred > 0 { Text("\(row.deferred) waiting for retry") }
+        if row.modelDeferred > 0 { Text("\(row.modelDeferred) waiting for the visual model") }
+        if let retry = row.nextRetry { Text("Next retry after \(retry.formatted(date: .omitted, time: .shortened))") }
+        if row.deferred > 0 || row.modelDeferred > 0 {
+          Text("Waiting counts are included in pending, unavailable or failed photos.").foregroundStyle(.secondary)
+        }
+      }.font(.caption).accessibilityIdentifier("analysis.status.\(scope).\(row.stage.rawValue)")
+    }
+  }
+}
+
 private struct SearchEmptyResults: View {
   let search: LocalSearchStore
   var searchPending = false

@@ -5,6 +5,52 @@ work; [product](product.md) owns the intended experience. Earlier measurements a
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
 
+## October 16 analysis visibility and gallery metadata admission
+
+Settings now opens Photo analysis without a search query. One background SQLite
+snapshot separates the whole permitted device library from its automatic range,
+with distinct OCR, scene and vector completion, failures, unavailable sources,
+retry deadlines and model waits. View admission, explicit Refresh, range/library
+changes and completed analysis runs refresh the counts; there is no polling or
+per-photo status scan. Opening status starts no analysis. The default remains
+Latest 10 days; All photos is explicit, and the existing matching batch is capped
+at 500. Its separate no-query 30-day scope is stated in the control.
+
+Controlled regressions reproduced 2,000 synchronous record reads for an initial
+device gallery and 2,200 more after a 200-photo append, plus stale Trash facts
+hiding a changed source revision. The gallery now admits compact organization
+facts off the UI actor in at most 400-ID primary-key batches. Warm facts survive
+appends; missing records are resolved, stale revisions stay withheld, and a
+corrupt incoming page retains warm rows with an explicit retry. Permission,
+account, vault, catalog, origin, library and organization changes fence results.
+Two further regressions reproduced a cached empty gallery when readiness changed
+or a held admission was invalidated by Pause. Both outer grouping and inner
+metadata cache identities now include the live search read context, so recovery
+does not depend on an incidental Photos-page callback.
+Final local qualification passes: 809 native tests and 219 isolated-preview tests,
+each with zero failures and three existing platform/opt-in skips; the complete
+workspace check includes 821 browser tests, 129 API tests and 23 diagnostics-reader
+tests. All 20 host sync retry tests pass. Query-count reduction establishes removed
+work, not frame rate.
+
+A local browser acceptance check used an ordinary isolated account and the public
+`neutral-a.png` fixture on independent 127.0.0.1 and localhost origins. Genuine
+browser offline mode produced a failed Save without losing filename/screenshot
+edits. Reopening after reconnect retained that encrypted queue; replay merged a
+second browser's saved Trash change. Restore then reached the second browser with
+both edits intact. Its downloaded original matched all 214,852 input bytes.
+The Vite development shell did not reload while fully offline; this check does
+not qualify cold offline app-shell loading. Private credentials and screenshots
+remain outside the repository. The user requested continuing without physical
+phone measurements; frame pacing and installed gesture acceptance remain open.
+
+The preceding PR 113 merged as `6132e68a23a1a18d8d3772d75aae27ca0fdc212c`
+with its qualified source tree unchanged and all 23 hosted contexts complete
+(seven successes, 16 intentional skips). Build 85 passed archive/IPA audits,
+Apple processing, the approved encryption declaration and existing internal-group
+assignment. Its installed physical UI remains unqualified. This follow-up changes
+native source only; the production Worker is unchanged.
+
 ## October 16 bounded paging and search readiness
 
 PR 112 merged as `15d0fbe84526c87aa769d002b8ec687f6bac4194` with the
