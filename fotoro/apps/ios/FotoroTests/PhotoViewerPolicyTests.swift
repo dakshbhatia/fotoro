@@ -5,6 +5,43 @@ import UIKit
 @testable import Fotoro
 
 final class PhotoViewerPolicyTests: XCTestCase {
+  func testRetainedTagRemovalUsesLatestLabelsAfterIncomingShrinkAndReorder() {
+    let cases: [(incoming: [String], expected: [String], writes: Int)] = [
+      (["B"], [], 1),
+      (["new", "A", "B"], ["new", "A"], 1),
+      (["B", "A"], ["A"], 1),
+      (["new", "A"], ["new", "A"], 0),
+      ([], [], 0),
+    ]
+    for scenario in cases {
+      var labels = ["A", "B"]
+      var writes = 0
+      let removeRenderedB = {
+        PhotoTagEdits.remove("B", current: { labels }) { labels = $0; writes += 1 }
+      }
+      labels = scenario.incoming
+      removeRenderedB()
+      XCTAssertEqual(labels, scenario.expected, "A retained row action must remove its named tag from current labels")
+      XCTAssertEqual(writes, scenario.writes, "An already-removed tag must not create another annotation edit")
+    }
+  }
+
+  func testRapidRetainedTagRemovalsPreserveAnUnrelatedIncomingTag() {
+    var labels = ["A", "B"]
+    var writes: [[String]] = []
+    func removal(_ renderedTag: String) -> () -> Void {
+      { PhotoTagEdits.remove(renderedTag, current: { labels }) { labels = $0; writes.append($0) } }
+    }
+    let removeA = removal("A"), removeB = removal("B")
+    labels = ["new", "A", "B"]
+    removeA()
+    removeB()
+    removeB()
+    XCTAssertEqual(labels, ["new"])
+    XCTAssertEqual(writes, [["new", "B"], ["new"]],
+      "Rapid actions must merge into current labels without dropping incoming tags or repeating an absent edit")
+  }
+
   @MainActor func testOversizedCachedRenditionsDecodeWithinViewerPixelBudget() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

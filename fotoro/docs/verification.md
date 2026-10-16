@@ -5,6 +5,44 @@ work; [product](product.md) owns the intended experience. Earlier measurements a
 release checkpoints are preserved in the [historical appendix](history/verification-through-pr38.md).
 No speed, accuracy, cost or adoption claim is inferred from a passing smoke test.
 
+## October 15 single-photo edit follow-through
+
+PR 111 merged as `75afe74c91a170489fdefee674cbc5c194b0c17e` with the
+qualified tree unchanged and all 23 hosted checks complete (seven successes,
+16 intentional skips). Worker `a2ace921-f24b-4777-ba8a-cb25f89fb271` serves
+production at 100%; all 43 emitted assets and three entry routes match. Build
+83 passed archive/IPA audits, Apple processing and the approved declaration;
+fresh App Store Connect readback confirms the existing internal group. A later
+read-only connected-phone query confirms build 83 installed. Its retained
+91 runtime events contain no failed event but no search-action or coverage
+snapshot samples; this does not qualify taps, scrolling or retrieval quality.
+
+Two regressions reproduced a further edit-path problem. Two healthy-photo edits
+read 510 annotation rows and failed on an unrelated corrupt overlay; stale
+original, manifest, owner and removed-photo inputs could create tag drafts.
+Owner edits now read back and publish only their own durable annotation, then
+hydrate matching device aliases through the existing exact-photo index in pages
+of 200. The existing detached summary refresh handles inventory separately.
+Both first-page and cursor query plans use the index. A stress case includes
+250 unrelated overlays, 5,000 unrelated checkpoints and 206 valid aliases;
+two edits read at most 12 annotation rows and no full checkpoint inventory.
+Revision/digest mismatches are excluded, legacy bindings remain compatible,
+and an owned pending-photo tag draft remains editable.
+
+Saved tag removal identifies the captured tag value and reads current labels
+when invoked. Incoming tags survive stale or rapid actions; an already-removed
+tag does not create another write. Metadata refresh diagnostics now separate
+catalog opening, Photos discovery, index commit and annotation publication,
+with one aggregate action outcome and fixed cancellation/failure reasons.
+They retain no photo identifiers, names, text or raw errors and add no polling.
+
+The 132 affected native tests pass with no failures/skips. Workspace checks pass,
+including 821 browser tests, 129 API tests and 21 diagnostics-reader tests.
+Full native, preview, hosted and build-84 release qualification remain separate
+pending gates at this source checkpoint. Physical frame pacing and coordinate
+tap routing remain unqualified; reduced read amplification is not a whole-app
+speedup measurement.
+
 ## October 15 photo interaction and scrolling follow-up
 
 PR 110 merged as `df91a4fc77a265ec1bf83a2b63115329f92de0a5` with the

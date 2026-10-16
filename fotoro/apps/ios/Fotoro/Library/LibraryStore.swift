@@ -161,6 +161,26 @@ final class LibraryStore: @unchecked Sendable {
         .map { try Wire.decode(BackupSource.self, $0) }
     }
   }
+  static let backupSourcesPhotoPageSize = 200
+  static let backupSourcesPhotoPageQuery = """
+    SELECT id,value FROM backupSources
+    WHERE CASE WHEN json_valid(CAST(value AS TEXT)) THEN json_extract(CAST(value AS TEXT),'$.photoId') END = ?
+    """
+  // A single original may have several device aliases. Keep its exact indexed
+  // binding, rather than decoding the whole inventory or choosing only one ID.
+  func backupSourcesForPhoto(_ photoId: String, after: String? = nil) throws -> [BackupSource] {
+    try database.read { db in
+      let query = Self.backupSourcesPhotoPageQuery + (after == nil ? "" : " AND id > ?")
+        + " ORDER BY id LIMIT \(Self.backupSourcesPhotoPageSize)"
+      let arguments = StatementArguments(after.map { [photoId, $0] } ?? [photoId])
+      return try Row.fetchAll(db, sql: query, arguments: arguments).map { row in
+        let id: String = row["id"], bytes: Data = row["value"]
+        let source = try Wire.decode(BackupSource.self, bytes)
+        guard source.id == id, source.photoId == photoId else { throw FotoroError("Photo source binding changed") }
+        return source
+      }
+    }
+  }
   // Search needs only checkpoints for its current device hits. Read in bounded
   // primary-key batches off the caller's actor; unrelated inventory is not decoded.
   func backupSources(ids: Set<String>) async throws -> [BackupSource] {
