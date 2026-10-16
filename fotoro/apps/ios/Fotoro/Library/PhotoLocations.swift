@@ -156,6 +156,16 @@ struct PhotoNameDraft: Equatable {
   mutating func acknowledge(_ name: String) { self = Self(savedName: name) }
 }
 
+enum PhotoTagEdits {
+  // A retained row action identifies the tag, never its former array position.
+  static func remove(_ tag: String, current: () -> [String], save: ([String]) throws -> Void) rethrows {
+    let labels = current()
+    let updated = labels.filter { $0 != tag }
+    guard updated.count != labels.count else { return }
+    try save(updated)
+  }
+}
+
 enum PhotoOrganizationFacts {
   static let namePrefix = "fotoro.name.v1:"
   static let trashPrefix = "fotoro.trash.v1:"

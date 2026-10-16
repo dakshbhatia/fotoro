@@ -487,14 +487,16 @@ struct SavedPhotoDetails: View {
         }
         SavedPhotoOrganizationSection(services: services, photo: photo).id(photo.id)
         Section("Tags") {
-          ForEach(Array(labels.enumerated()), id: \.offset) { index, value in
+          ForEach(Array(labels.enumerated()), id: \.offset) { _, value in
             HStack {
               Text(value)
               Spacer()
               Button("Remove", systemImage: "minus.circle") {
-                var next = labels
-                next.remove(at: index)
-                do { try services.setLabels(next, photo: photo) } catch { services.error = error.localizedDescription }
+                do {
+                  try PhotoTagEdits.remove(value, current: { labels }) {
+                    try services.setLabels($0, photo: photo)
+                  }
+                } catch { services.error = error.localizedDescription }
               }.labelStyle(.iconOnly).accessibilityLabel("Remove tag \(value)")
             }
           }

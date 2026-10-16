@@ -2027,17 +2027,51 @@ enum ReviewedPhotosBackupPolicy {
       (name as NSString).pathExtension.lowercased() != (photo.metadata.filename as NSString).pathExtension.lowercased() { throw PhotoOrganizationError.invalid }
     value.facts = try PhotoOrganizationFacts.replacing(value.facts, change: change)
     try annotations.ledger.edit(value, photo: photo, bundle: bundle, card: card)
-    try reloadAnnotations()
-    try hydrateLocalAnnotations()
+    try publishEditedAnnotation(photo, account: account, bundle: bundle, card: card)
   }
   func setLabels(_ labels: [String], photo: LocalPhoto) throws {
     guard let account = session.accountId else { throw FotoroError("Sign in first") }
-    let bundle = try vault.requireBundle()
-    var value = try annotations.ledger.current(photo: photo, bundle: bundle, card: session.requireCard(account)) ?? PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+    guard store.root.lastPathComponent == account, photo.manifest.ownerAccountId == account,
+      let current = try store.backupPhoto(photo.id), current.manifest.photoId == photo.id,
+      current.metadata == photo.metadata, current.manifest == photo.manifest,
+      ["pending", "committed", "saved"].contains(current.transferState) else { throw FotoroError("Photo source changed") }
+    let bundle = try vault.requireBundle(), card = try session.requireCard(account)
+    var value = try annotations.ledger.current(photo: photo, bundle: bundle, card: card) ?? PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
     value.labels = labels
-    try annotations.ledger.edit(value, photo: photo, bundle: bundle, card: session.requireCard(account))
-    try reloadAnnotations()
-    try hydrateLocalAnnotations()
+    try annotations.ledger.edit(value, photo: photo, bundle: bundle, card: card)
+    try publishEditedAnnotation(photo, account: account, bundle: bundle, card: card)
+  }
+  private func publishEditedAnnotation(_ photo: LocalPhoto, account: String,
+    bundle: AccountBundle, card: AccountCardV1) throws {
+    // Read back this original's durable draft. A local owner edit must not
+    // depend on decrypting unrelated photos or rebuilding the entire catalog.
+    let value = try annotations.ledger.current(photo: photo, bundle: bundle, card: card)
+      ?? PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+    photoAnnotations[photo.id] = value
+    consumerCatalogGeneration &+= 1
+    scheduleAnnotationSummaryRefresh()
+    guard let localSearch else { return }
+    let catalog = store, generation = vault.generation
+    let origin = BackgroundUploadPolicy.origin(api.baseURL)
+    var after: String?
+    while true {
+      guard vault.isUnlocked, vault.generation == generation, session.accountId == account,
+        store === catalog, annotations.ledger.accountId == account,
+        BackgroundUploadPolicy.origin(api.baseURL) == origin else { throw CancellationError() }
+      let sources = try catalog.backupSourcesForPhoto(photo.id, after: after)
+      let updates = sources.compactMap { source -> SearchIndex.AnnotationUpdate? in
+        // Older checkpoints omit the digest; retain their established photo ID
+        // and revision binding, but never accept an explicitly different original.
+        guard let revision = source.sourceRevision,
+          source.originalSha256 == nil || source.originalSha256 == photo.metadata.originalSha256 else { return nil }
+        return SearchIndex.AnnotationUpdate(value: value, photoID: source.id, revision: revision, accountId: account)
+      }
+      // SearchIndex rechecks each current record revision inside its transaction,
+      // preserving completed OCR and the beforeSync baseline during hydration.
+      try localSearch.applyAnnotationsBatch(updates)
+      guard sources.count == LibraryStore.backupSourcesPhotoPageSize, let last = sources.last else { return }
+      after = last.id
+    }
   }
   func searchCatalog(_ query: String, now: Date = Date(), calendar: Calendar = .current,
     people: PeopleSearchSelection = PeopleSearchSelection()) async throws -> [LocalPhoto] {

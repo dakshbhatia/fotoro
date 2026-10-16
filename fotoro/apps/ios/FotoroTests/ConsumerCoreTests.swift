@@ -5,6 +5,132 @@ import Photos
 @testable import Fotoro
 
 final class ConsumerCoreTests: XCTestCase {
+  @MainActor func testSinglePhotoEditsDoNotReadUnrelatedOverlaysOrCheckpointInventory() async throws {
+    try await withSavedLibrary { services, _ in
+      let account = try XCTUnwrap(services.session.accountId)
+      let bundle = try services.vault.requireBundle(), card = try services.session.requireCard(account)
+      let catalog = services.store
+      var target = try self.samplePhoto(); target.manifest.ownerAccountId = account
+      try services.store.put(target)
+      for _ in 0..<250 {
+        var photo = try self.samplePhoto(); photo.manifest.ownerAccountId = account
+        try services.store.put(photo)
+        var value = PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+        value.labels = ["Unrelated saved fixture"]
+        try services.annotations.ledger.edit(value, photo: photo, bundle: bundle, card: card)
+      }
+      try services.reload()
+      let unrelated = try XCTUnwrap(services.photos.last { $0.id != target.id })
+      let aliases = (0..<205).map { SearchRecord(id: "same-original-\($0)", revision: "current", filename: "camera.jpg") }
+      let stale = SearchRecord(id: "edited-alias", revision: "newer", filename: "camera.jpg")
+      let wrongOriginal = SearchRecord(id: "different-original-alias", revision: "current", filename: "camera.jpg")
+      let legacy = SearchRecord(id: "legacy-alias", revision: "current", filename: "camera.jpg")
+      let unrelatedRecord = SearchRecord(id: "unrelated-local", revision: "current", labels: ["Keep this local label"])
+      let index = try SearchIndex()
+      try index.replacePermitted(aliases + [stale, wrongOriginal, legacy, unrelatedRecord])
+      let local = LocalSearchStore(index: index); services.bindLocalSearch(local)
+      let targetID = target.id, targetDigest = target.metadata.originalSha256
+      try await catalog.database.write { db in
+        for record in aliases + [stale, wrongOriginal, legacy] {
+          let source = BackupSource(id: record.id, photoId: targetID, phase: .committed,
+            sourceRevision: record.id == stale.id ? "previous" : record.revision,
+            originalSha256: record.id == legacy.id ? nil
+              : record.id == wrongOriginal.id ? Data("different original".utf8).digest : targetDigest)
+          try db.execute(sql: "INSERT INTO backupSources(id,value) VALUES(?,?)",
+            arguments: [source.id, try Wire.encode(source)])
+        }
+        for n in 0..<5_000 {
+          try db.execute(sql: "INSERT INTO backupSources(id,value) VALUES(?,?)",
+            arguments: ["unrelated-\(n)", Data("not-json".utf8)])
+        }
+        // A warm, unrelated corrupt overlay must not break an edit to a healthy original.
+        try db.execute(sql: "UPDATE annotations SET value=? WHERE id=?",
+          arguments: [Data("not-json".utf8), unrelated.id])
+      }
+      await services.waitForAnnotationSummaryRefresh()
+      let plans = try await catalog.database.read { db in
+        let first = try Row.fetchAll(db,
+          sql: "EXPLAIN QUERY PLAN " + LibraryStore.backupSourcesPhotoPageQuery + " ORDER BY id LIMIT 200",
+          arguments: [targetID])
+        let later = try Row.fetchAll(db,
+          sql: "EXPLAIN QUERY PLAN " + LibraryStore.backupSourcesPhotoPageQuery + " AND id > ? ORDER BY id LIMIT 200",
+          arguments: [targetID, "same-original-0"])
+        return [first, later].map { $0.map { $0["detail"] as String } }
+      }
+      XCTAssertTrue(plans.allSatisfy { $0.contains { $0.contains("backup_sources_photo") && $0.uppercased().contains("SEARCH") } },
+        "Every alias page must use the existing photo/source index")
+      let reads = SavedEditReadCounter()
+      try await catalog.database.write { db in
+        db.trace { event in
+          if case .statement(let statement) = event { reads.record(statement.sql) }
+        }
+      }
+      let before = services.consumerCatalogGeneration
+      XCTAssertNoThrow(try services.setLabels(["Reviewed label"], photo: target))
+      XCTAssertNoThrow(try services.setOrganization(.name("Reviewed receipt.jpg"), photo: target))
+      let operationReads = reads.snapshot
+      try await catalog.database.write { db in db.trace(options: []) }
+      XCTAssertLessThanOrEqual(operationReads.annotations, 12,
+        "Two owner edits must not decrypt the other 250 loaded overlays")
+      XCTAssertEqual(operationReads.inventory, 0,
+        "Editing one original must not synchronously decode the full checkpoint inventory")
+      XCTAssertEqual(services.consumerCatalogGeneration, before + 2,
+        "Each owner edit must still invalidate current search and browse evidence")
+      XCTAssertEqual(services.annotation(target).labels, ["Reviewed label"])
+      XCTAssertEqual(PhotoOrganizationFacts.name(services.annotation(target).facts, original: target.metadata.filename), "Reviewed receipt.jpg")
+      XCTAssertEqual(services.annotation(unrelated).labels, ["Unrelated saved fixture"],
+        "The unrelated warm overlay remains intact")
+      let hydrated = try (aliases + [legacy]).compactMap { try local.record($0.id) }
+      XCTAssertEqual(hydrated.count, aliases.count + 1)
+      XCTAssertTrue(hydrated.allSatisfy { $0.labels == ["Reviewed label"] }, "Every current alias receives the edit across the 200-row boundary")
+      XCTAssertTrue(hydrated.allSatisfy {
+        PhotoOrganizationFacts.name($0.facts, original: $0.filename) == "Reviewed receipt.jpg"
+      })
+      XCTAssertNil(try local.record(stale.id)?.syncedAccountId, "Edited revisions must not receive the old original's overlay")
+      XCTAssertNil(try local.record(wrongOriginal.id)?.syncedAccountId, "A checkpoint for another original cannot receive the edit")
+      XCTAssertEqual(try local.record(unrelatedRecord.id), unrelatedRecord)
+      XCTAssertNotNil(try services.annotations.ledger.state(target.id)?.draft, "The explicit edit is durable and queued")
+      await services.waitForAnnotationSummaryRefresh()
+      XCTAssertEqual(services.consumerSyncSummary.state, .needsAttention,
+        "Unrelated damaged inventory can fail its separate status refresh without undoing the edit")
+      XCTAssertEqual(services.annotation(target).labels, ["Reviewed label"])
+    }
+  }
+
+  @MainActor func testSavedTagEditsRejectStaleSourcesAndKeepOwnedPendingDraftsEditable() async throws {
+    for change in ["original", "manifest", "owner", "removed", "locked"] {
+      try await withSavedLibrary { services, _ in
+        var photo = try self.samplePhoto(); photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+        try services.store.put(photo); try services.reload()
+        let photoID = photo.id
+        var current = photo
+        switch change {
+        case "original": current.metadata.originalSha256 = Data("replacement original".utf8).digest
+        case "manifest": current.manifest.metadataRepresentation.objectId = Wire.id()
+        case "owner": current.manifest.ownerAccountId = Wire.id()
+        case "removed":
+          try await services.store.database.write { db in
+            try db.execute(sql: "DELETE FROM photos WHERE id=?", arguments: [photoID])
+          }
+        default: services.vault.lock()
+        }
+        if ["original", "manifest", "owner"].contains(change) { try services.store.put(current) }
+        XCTAssertThrowsError(try services.setLabels(["Cannot attach stale edit"], photo: photo), change)
+        XCTAssertTrue(try services.annotations.ledger.state(photo.id)?.draft == nil,
+          "A rejected source must not gain a durable draft before reporting failure: \(change)")
+      }
+    }
+    try await withSavedLibrary { services, _ in
+      var photo = try self.samplePhoto(); photo.manifest.ownerAccountId = try XCTUnwrap(services.session.accountId)
+      photo.transferState = "pending"
+      try services.store.put(photo)
+      try services.setLabels(["Keep this pending draft"], photo: photo)
+      XCTAssertEqual(services.annotation(photo).labels, ["Keep this pending draft"])
+      XCTAssertNotNil(try services.annotations.ledger.state(photo.id)?.draft)
+      XCTAssertTrue(try services.journal.entries().isEmpty, "Editing does not enqueue or upload an original")
+    }
+  }
+
   func testSearchCheckpointReadIsBoundedToHitsAndDoesNotDecodeUnrelatedInventory() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id())
     defer { try? FileManager.default.removeItem(at: root) }
@@ -1625,6 +1751,19 @@ private final class CatalogScanGate: @unchecked Sendable {
   func visit() {
     lock.lock(); visits += 1; let first = visits == 1; lock.unlock()
     if first { _ = release.wait(timeout: .now() + 10) }
+  }
+}
+
+private final class SavedEditReadCounter: @unchecked Sendable {
+  private let lock = NSLock()
+  private var annotations = 0
+  private var inventory = 0
+  var snapshot: (annotations: Int, inventory: Int) { lock.withLock { (annotations, inventory) } }
+  func record(_ sql: String) {
+    lock.withLock {
+      if sql.contains("SELECT value FROM annotations WHERE id=") { annotations += 1 }
+      if sql.contains("SELECT value FROM backupSources ORDER BY id") { inventory += 1 }
+    }
   }
 }
 

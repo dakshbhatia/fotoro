@@ -458,6 +458,40 @@ enum SearchMetadataIntake {
   private func runRefresh(token: UInt64, retryFailedOCR: Bool) async {
     #if !FOTORO_LOCAL_PREVIEW
     let diagnosticStarted = ProcessInfo.processInfo.systemUptime
+    let diagnosticTrace = NativeDiagnosticTrace(.metadata, parentTraceId: NativeDiagnosticTrace.current?.id)
+    var diagnosticStep: NativeDiagnosticStep?
+    var diagnosticStageStarted = diagnosticStarted
+    var diagnosticOutcome = NativeDiagnosticOutcome.cancelled
+    var diagnosticReason: NativeDiagnosticReason? = .contextChanged
+    var diagnosticCount: Int?
+    func beginDiagnosticStage(_ step: NativeDiagnosticStep) {
+      diagnosticStep = step
+      diagnosticStageStarted = ProcessInfo.processInfo.systemUptime
+      diagnosticTrace.entering(step)
+      NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .metadata, outcome: .started,
+        trace: diagnosticTrace, step: step))
+    }
+    func completeDiagnosticStage(count: Int? = nil) {
+      guard let step = diagnosticStep else { return }
+      diagnosticTrace.completed(step)
+      NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .metadata, outcome: .completed,
+        elapsed: ProcessInfo.processInfo.systemUptime - diagnosticStageStarted,
+        completed: count, trace: diagnosticTrace, step: step))
+      diagnosticStep = nil
+    }
+    NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .metadata, outcome: .started,
+      trace: diagnosticTrace, step: .action))
+    beginDiagnosticStage(.catalog)
+    defer {
+      if let diagnosticStep {
+        NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .metadata, outcome: diagnosticOutcome,
+          elapsed: ProcessInfo.processInfo.systemUptime - diagnosticStageStarted,
+          trace: diagnosticTrace, step: diagnosticStep, reason: diagnosticReason))
+      }
+      NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .metadata, outcome: diagnosticOutcome,
+        elapsed: ProcessInfo.processInfo.systemUptime - diagnosticStarted,
+        completed: diagnosticCount, trace: diagnosticTrace, step: .action, reason: diagnosticReason))
+    }
     #endif
     do {
       let localIndex: SearchIndex
@@ -471,24 +505,45 @@ enum SearchMetadataIntake {
         index = localIndex
         try localIndex.setWorkGeneration(token)
       }
+      #if !FOTORO_LOCAL_PREVIEW
+      completeDiagnosticStage()
+      beginDiagnosticStage(.scan)
+      #endif
       let scanned = try await SearchMetadataIntake.run { try await Self.scan() }
       guard token == work.generation, !Task.isCancelled,
         RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite))
       else { return }
+      #if !FOTORO_LOCAL_PREVIEW
+      completeDiagnosticStage(count: scanned.records.count)
+      beginDiagnosticStage(.persist)
+      #endif
       // DatabaseQueue serializes writes. The main-actor generation check fences the permitted snapshot.
       let applied = try await Task.detached {
         try localIndex.replacePermitted(scanned.records, generation: token)
       }.value
       guard applied, token == work.generation, !Task.isCancelled else { return }
       #if !FOTORO_LOCAL_PREVIEW
-      NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .metadata, outcome: .completed,
-        elapsed: ProcessInfo.processInfo.systemUptime - diagnosticStarted,
-        completed: scanned.records.count, trace: NativeDiagnosticTrace(.metadata), step: .scan))
+      completeDiagnosticStage(count: scanned.records.count)
+      beginDiagnosticStage(.annotation)
       #endif
       completePermittedSnapshotRefresh(photos: scanned.photos)
       try onSnapshotReady?()
       automaticRetryFailed = retryFailedOCR
-    } catch is CancellationError {} catch {
+      #if !FOTORO_LOCAL_PREVIEW
+      completeDiagnosticStage()
+      diagnosticCount = scanned.records.count
+      diagnosticOutcome = .completed
+      diagnosticReason = nil
+      #endif
+    } catch is CancellationError {
+      #if !FOTORO_LOCAL_PREVIEW
+      diagnosticReason = .cancelled
+      #endif
+    } catch {
+      #if !FOTORO_LOCAL_PREVIEW
+      diagnosticOutcome = .failure(for: error, taskCancelled: Task.isCancelled)
+      diagnosticReason = Task.isCancelled ? .cancelled : .failure(error)
+      #endif
       if token == work.generation { self.error = error.localizedDescription }
     }
     if token == work.generation { indexing = false; analysisProgress = nil; scheduleAutomaticAnalysis() }
