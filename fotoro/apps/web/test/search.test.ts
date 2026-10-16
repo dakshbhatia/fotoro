@@ -1,6 +1,7 @@
 import test from "node:test";
 import {withPhotoObservation} from "@fotoro/contracts/intelligence";
 import {factsWithPeople} from "@fotoro/contracts/people";
+import {withPhotoOrganization} from "@fotoro/contracts/organization";
 import assert from "node:assert/strict";
 import { PhotoSearchIndex, type SearchPhoto } from "../src/local/search";
 
@@ -234,6 +235,43 @@ test("literal noisy filenames remain explicitly retrievable without generic auto
   assert.equal(index.search("IMG_1234.jpg", { now }).photoId, "img");
   assert.equal(index.search("IMG_123", { now }).photoId, "img");
   assert.equal(index.search("4826", { now }).photoId, "digits");
+});
+test("renaming keeps the original camera identifier searchable without restoring old custom names", async () => {
+  let current = true;
+  const original = {...photo("renamed", "IMG_4826.jpg"), current: () => current};
+  const renamed = withPhotoOrganization(original, {name: "Boston boarding pass.jpg"});
+  const first = await PhotoSearchIndex.build([renamed], new AbortController().signal, () => true);
+  let reset: PhotoSearchIndex | undefined;
+  try {
+    for (const query of ["IMG_4826.jpg", "IMG_482", "4826", "Boston boarding pass.jpg", "Boston"]) {
+      const result = await first.searchAsync(query, {now});
+      assert.deepEqual(result.photoIds, [original.id], query);
+      assert.equal(result.meaning?.evidence[original.id], "filename");
+    }
+    assert.deepEqual(first.search("img", {now}).photoIds, [], "Camera noise stays out of autocomplete");
+    const identifier = first.search("IMG_4826.jpg", {now}).meaning!;
+    first.choosePhoto(identifier.id, original.id, "public-choice", now, true);
+    assert.equal(new PhotoSearchIndex([renamed], first.feedback()).search("IMG_4826.jpg", {now}).photoId, original.id);
+    const published = await first.searchAsync("IMG_4826.jpg", {now});
+    current = false;
+    assert.equal(published.current?.(), false, "An original-name alias cannot outlive its source");
+    assert.deepEqual(first.search("IMG_4826.jpg", {now}).photoIds, []);
+    current = true;
+    reset = await PhotoSearchIndex.build([withPhotoOrganization(renamed, {name: null})], new AbortController().signal, () => true,
+      undefined, {index: first, unchanged: new Set()});
+    assert.deepEqual(reset.search("IMG_4826.jpg", {now}).photoIds, [original.id]);
+    assert.deepEqual(reset.search("Boston", {now}).photoIds, [], "Reset removes the former custom-name evidence");
+  } finally {first.dispose(); reset?.dispose();}
+});
+test("a current filename ranks before an original-name alias while both remain reachable", () => {
+  const alias = withPhotoOrganization(photo("alias", "Boarding-pass.jpg", [], "2026-09-30T00:00:00Z"), {name: "Journey.jpg"});
+  const current = photo("current", "Boarding-pass.jpg", [], "2020-01-01T00:00:00Z");
+  const index = new PhotoSearchIndex([alias, current]);
+  for (const query of ["Boarding", "Boarding pass", "Boarding-pass.jpg"]) {
+    const result = index.search(query, {now});
+    assert.deepEqual(result.photoIds, [current.id, alias.id], query);
+  }
+  assert.deepEqual(index.search("Boarding", {now, allowedIds: new Set([alias.id])}).photoIds, [alias.id]);
 });
 test("broad-prefix ranking reads capture dates and photo history at most once per eligible photo", () => {
   const photos = Array.from({ length: 200 }, (_, i) => photo("photo-" + i.toString().padStart(3, "0"), "IMG_" + i + ".jpg", ["Receipt"], new Date(now - ((i * 7919) % 365) * 86400000).toISOString()));

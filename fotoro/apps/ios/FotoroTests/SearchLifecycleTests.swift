@@ -16,6 +16,68 @@ private actor AdmissionQueryProbe {
 }
 
 final class SearchLifecycleTests: XCTestCase {
+  @MainActor func testOCRIsDurableAndSearchableWhileClassificationIsHeldOrCancelled() async throws {
+    guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+      let asset = PHAsset.fetchAssets(with: .image, options: nil).firstObject, !asset.isHidden else {
+      throw XCTSkip("Permit an existing public Simulator photo for OCR priority.")
+    }
+    let photo = RecentPhoto(asset: asset)
+    let image = try XCTUnwrap(UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).image { context in
+      UIColor.white.setFill(); context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+    }.cgImage)
+    for cancelClassification in [false, true] {
+      let index = try SearchIndex(), gate = AdmissionPreviewGate()
+      var record = SearchRecord(id: photo.id); record.revision = photo.sourceRevision; record.capturedAt = Date()
+      try index.replacePermitted([record])
+      #if !FOTORO_LOCAL_PREVIEW
+      var vector = [Float](repeating: 0, count: 512); vector[0] = 1
+      XCTAssertTrue(try index.applySemantic(vector, photoID: record.id, revision: record.revision))
+      #endif
+      let store = LocalSearchStore(index: index, analysisWindow: .tenDays)
+      store.setAutomaticAnalysisActive(false); store.completePermittedSnapshotRefresh(photos: [photo])
+      store.analysisQueryRefreshDelay = {}
+      store.analysisPreview = { _ in SearchPreview(image: image) }
+      store.analysisRecognize = { _ in SearchOCRResult(text: "Public ticket fixture", confidence: 0.95) }
+      var publications: [SearchRecord] = []
+      store.onRecordChanged = { observed, _ in publications.append(observed) }
+      let held = expectation(description: "Classification is held after text checkpoint")
+      let classificationReturned = expectation(description: "Held classifier returns")
+      store.analysisClassify = { _ in
+        held.fulfill(); await gate.wait()
+        classificationReturned.fulfill()
+        return SearchVisualResult(labels: [], processor: SearchVisualPolicy.processor)
+      }
+      defer { store.pause(); gate.open() }
+      store.updateQuery("ticket")
+      store.setAutomaticAnalysisActive(true)
+      await fulfillment(of: [held], timeout: 3)
+      XCTAssertEqual(try index.record(record.id)?.ocrStatus, .complete,
+        "Optional scene inference cannot hold the durable OCR checkpoint")
+      XCTAssertEqual(publications.first?.ocrStatus, .complete,
+        "Completed text must reach the encrypted-annotation capture boundary before classification")
+      XCTAssertEqual(publications.first?.visualStatus, .pending)
+      XCTAssertEqual(publications.first?.revision, record.revision)
+      for _ in 0..<200 where store.response.leading?.id != record.id {
+        try await Task.sleep(for: .milliseconds(10))
+      }
+      XCTAssertEqual(store.response.leading?.id, record.id, "Text results must publish before classification completes")
+      if cancelClassification { store.pause() }
+      gate.open()
+      await fulfillment(of: [classificationReturned], timeout: 2)
+      await Task.yield()
+      for _ in 0..<200 where store.indexing { try await Task.sleep(for: .milliseconds(10)) }
+      XCTAssertEqual(try index.record(record.id)?.ocrStatus, .complete)
+      if cancelClassification {
+        XCTAssertEqual(try index.record(record.id)?.visualStatus, .pending)
+        XCTAssertEqual(publications.count, 1, "Cancellation cannot retract text or publish the unfinished scene")
+        let work = try index.pendingMetadataAnalysisWork(scope: PhotoAnalysisWindow.tenDays.scope())
+        XCTAssertEqual(work.first?.stages, [.visual], "Resume retains OCR and retries only the unfinished classifier")
+      } else {
+        XCTAssertEqual(try index.record(record.id)?.visualStatus, .complete)
+        XCTAssertEqual(publications.last?.visualStatus, .complete, "The finished scene enriches the already captured text")
+      }
+    }
+  }
   @MainActor func testManualNextBatchKeepsItsCursorAndPreemptsAutomaticWork() async throws {
     let fetched = PHAsset.fetchAssets(with: .image, options: nil)
     guard RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)), fetched.count >= 2 else {

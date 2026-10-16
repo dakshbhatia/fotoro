@@ -100,6 +100,8 @@ enum SearchMetadataIntake {
     private(set) var automaticAnalysisWorkerStarts = 0
     @ObservationIgnored var automaticAnalysisBatchLimit = 500
     @ObservationIgnored var analysisPreview: (@MainActor (PHAsset) async -> SearchPreview?)?
+    @ObservationIgnored var analysisRecognize: (@MainActor (SearchPreview) async throws -> SearchOCRResult)?
+    @ObservationIgnored var analysisClassify: (@MainActor (SearchPreview) async throws -> SearchVisualResult)?
     #if !FOTORO_LOCAL_PREVIEW
       @ObservationIgnored var diagnosticCoverageRead: (@MainActor (SearchIndex, Date) async throws -> [SearchStageCoverage])?
       @ObservationIgnored var analysisSemanticPreparation: (@MainActor () async throws -> Void)?
@@ -503,6 +505,18 @@ enum SearchMetadataIntake {
       ? query == scope.query && peopleSelection == scope.scope.people : automaticAnalysisAdmitted)
   }
   var canAnalyzeMetadataMatches: Bool { ready && (!indexing || automaticAnalysisRunning) }
+  private func recognize(_ preview: SearchPreview) async throws -> SearchOCRResult {
+    #if DEBUG
+      if let analysisRecognize { return try await analysisRecognize(preview) }
+    #endif
+    return try await processor.recognize(preview)
+  }
+  private func classify(_ preview: SearchPreview) async throws -> SearchVisualResult {
+    #if DEBUG
+      if let analysisClassify { return try await analysisClassify(preview) }
+    #endif
+    return try await processor.classify(preview)
+  }
   #if !FOTORO_LOCAL_PREVIEW
     private func semanticReady() async -> Bool {
       #if DEBUG
@@ -612,11 +626,40 @@ enum SearchMetadataIntake {
         else { break }
         let needsOCR = job.stages.contains(.ocr)
         let needsVisual = job.stages.contains(.visual)
+        var publishedOCR = false
+        if needsOCR {
+          var result: SearchOCRResult?
+          var state: SearchOCRStatus = .unavailable
+          if let preview {
+            do { result = try await recognize(preview); state = .complete }
+            catch is CancellationError { throw CancellationError() }
+            catch { state = .failed }
+          }
+          guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled, analysisSourceCurrent(record) else { break }
+          let ocrResult = result
+          let ocrState = state
+          let attemptedAt = analysisNow()
+          let committed = try await Task.detached {
+            try localIndex.applyOCR(ocrResult, status: ocrState, photoID: record.id,
+              revision: record.revision, generation: token, attemptedAt: attemptedAt, expectedProcessor: record.processor)
+          }.value
+          guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled else { break }
+          // Text survives cancellation and can answer Find while optional scene
+          // inference is still running on this same bounded derivative.
+          metadataAnalysisDidChange()
+          if committed, ocrState == .complete, let observed = try localIndex.record(record.id),
+            observed.revision == record.revision, analysisSourceCurrent(record) {
+            try onRecordChanged?(observed, false)
+            publishedOCR = true
+          }
+          guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled,
+            analysisSourceCurrent(record) else { break }
+        }
         if needsVisual {
           var result: SearchVisualResult?
           var state: SearchVisualStatus = .unavailable
           if let preview {
-            do { result = try await processor.classify(preview); state = .complete }
+            do { result = try await classify(preview); state = .complete }
             catch is CancellationError { throw CancellationError() }
             catch {
               #if targetEnvironment(simulator)
@@ -637,26 +680,9 @@ enum SearchMetadataIntake {
           }.value
           guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled else { break }
         }
-        if needsOCR {
-          var result: SearchOCRResult?
-          var state: SearchOCRStatus = .unavailable
-          if let preview {
-            do { result = try await processor.recognize(preview); state = .complete }
-            catch is CancellationError { throw CancellationError() }
-            catch { state = .failed }
-          }
-          guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled, analysisSourceCurrent(record) else { break }
-          let ocrResult = result
-          let ocrState = state
-          let attemptedAt = analysisNow()
-          _ = try await Task.detached {
-            try localIndex.applyOCR(ocrResult, status: ocrState, photoID: record.id,
-              revision: record.revision, generation: token, attemptedAt: attemptedAt, expectedProcessor: record.processor)
-          }.value
-        }
         guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled, analysisSourceCurrent(record) else { break }
         guard let observed = try localIndex.record(record.id), observed.revision == record.revision else { break }
-        try onRecordChanged?(observed, false)
+        if !publishedOCR || needsVisual { try onRecordChanged?(observed, false) }
         guard analysisIsCurrent(scope, token: token, explicit: explicit), !Task.isCancelled else { break }
         // Publish OCR/classification without waiting for a cold model download.
         metadataAnalysisDidChange()

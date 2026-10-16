@@ -206,7 +206,7 @@ struct PhotoAnalysisScope: Equatable, Sendable {
     let requested = words(text)
     guard let last = requested.last else { return true }
     let facts = record.facts.filter { !$0.hasPrefix("fotoro:people-source:v1:") && !$0.hasPrefix("fotoro:person:v1:") && !$0.hasPrefix("fotoro.ai.v1:") && !PhotoCaptureFacts.isReserved($0) && PhotoOrganizationFacts.category($0) == nil }
-    let source = record.labels + record.captions + record.keywords + facts + [PhotoOrganizationFacts.name(record.facts, original: record.filename),
+    let source = record.labels + record.captions + record.keywords + facts + [PhotoOrganizationFacts.name(record.facts, original: record.filename), record.filename,
       record.captureMetadata?.searchText ?? "", record.favorite ? "favorite" : "", record.capturedAt?.formatted(date: .complete, time: .omitted) ?? ""]
     let tokens = Set(words(source.joined(separator: " ")))
     return requested.dropLast().allSatisfy { tokens.contains($0) }
@@ -260,7 +260,7 @@ struct SearchResponse: Sendable {
   // Visual similarity cannot prove numbers in receipts or other identifiers.
   // Recognized date constraints are removed before checking the search text.
   var permitsSemanticMatches: Bool {
-    meaning?.evidenceClass != 3
+    meaning?.evidenceClass != 3 && meaning?.evidenceClass != 7
       && NaturalDateQuery.parse(query).text.rangeOfCharacter(from: .decimalDigits) == nil
   }
 }

@@ -95,8 +95,10 @@ final class SearchIndex: @unchecked Sendable {
               && tokens.contains { last.contains(where: \.isLetter) ? $0.hasPrefix(last) : $0 == last }
           }
           if matches((record.captions + record.keywords).joined(separator: " ")) { return 2 }
-          if matches((PhotoOrganizationFacts.name(record.facts, original: record.filename) as NSString).deletingPathExtension) { return 3 }
+          let displayName = PhotoOrganizationFacts.name(record.facts, original: record.filename)
+          if matches(displayName) { return 3 }
           if record.ocrStatus == .complete, matches(record.ocrText) { return 4 }
+          if displayName != record.filename, matches(record.filename) { return 7 }
           return -1
         })
     }
@@ -128,6 +130,7 @@ final class SearchIndex: @unchecked Sendable {
           CREATE TABLE IF NOT EXISTS searchEvents(kind TEXT NOT NULL, meaning TEXT NOT NULL, photo TEXT NOT NULL, scope TEXT NOT NULL, session TEXT NOT NULL, at REAL NOT NULL, PRIMARY KEY(kind,meaning,photo,scope,session));
           CREATE INDEX IF NOT EXISTS searchHistory ON searchEvents(kind,meaning,scope,photo,at);
           CREATE TABLE IF NOT EXISTS searchPins(meaning TEXT NOT NULL, scope TEXT NOT NULL, photo TEXT NOT NULL, PRIMARY KEY(meaning,scope));
+          CREATE TABLE IF NOT EXISTS searchFeatures(name TEXT PRIMARY KEY);
           CREATE VIRTUAL TABLE IF NOT EXISTS searchFTS USING fts5(id UNINDEXED, text, tokenize='unicode61 remove_diacritics 2');
           """)
       if !(try db.columns(in: "searchPostings")).contains(where: { $0.name == "display" }) {
@@ -136,6 +139,29 @@ final class SearchIndex: @unchecked Sendable {
       }
       if !(try db.columns(in: "searchRecords")).contains(where: { $0.name == "visualState" }) {
         try db.execute(sql: "ALTER TABLE searchRecords ADD COLUMN visualState TEXT NOT NULL DEFAULT 'pending'")
+      }
+      let hasOriginalAliases = try Bool.fetchOne(db,
+        sql: "SELECT EXISTS(SELECT 1 FROM searchFeatures WHERE name='original-filename-alias-v1')") ?? false
+      if !hasOriginalAliases {
+        // Existing renamed sources may otherwise remain unchanged forever.
+        // Only owner-name rows need rebuilding; decode bounded primary-key
+        // pages and commit the feature marker with all its derived postings.
+        var after = ""
+        while true {
+          let records = try Row.fetchAll(db, sql: """
+            SELECT r.value FROM searchRecords r WHERE r.id>?
+              AND EXISTS(SELECT 1 FROM json_each(r.value,'$.facts') WHERE value LIKE ?)
+            ORDER BY r.id LIMIT 200
+            """, arguments: [after, PhotoOrganizationFacts.namePrefix + "%"]).map(decode)
+          guard !records.isEmpty else { break }
+          for record in records {
+            if PhotoOrganizationFacts.name(record.facts, original: record.filename) != record.filename {
+              try put(record, db: db)
+            }
+          }
+          after = records.last!.id
+        }
+        try db.execute(sql: "INSERT INTO searchFeatures(name) VALUES('original-filename-alias-v1')")
       }
     }
     if let root {
@@ -770,9 +796,11 @@ final class SearchIndex: @unchecked Sendable {
       ])
     try db.cachedStatement(sql: "DELETE FROM searchPostings WHERE photo=?").execute(arguments: [r.id])
     try db.cachedStatement(sql: "DELETE FROM searchFTS WHERE id=?").execute(arguments: [r.id])
+    let displayName = PhotoOrganizationFacts.name(r.facts, original: r.filename)
+    let filenames = displayName == r.filename ? [displayName] : [displayName, r.filename]
     try db.cachedStatement(sql: "INSERT INTO searchFTS(id,text) VALUES(?,?)").execute(arguments: [
         r.id,
-        (r.captions + r.keywords + [PhotoOrganizationFacts.name(r.facts, original: r.filename), r.ocrStatus == .complete ? r.ocrText : ""]).joined(
+        (r.captions + r.keywords + filenames + [r.ocrStatus == .complete ? r.ocrText : ""]).joined(
           separator: " "),
       ])
     let terms = try db.cachedStatement(sql: "INSERT OR IGNORE INTO searchTerms(meaning,term,display,relation) VALUES(?,?,?,?)")
@@ -824,8 +852,12 @@ final class SearchIndex: @unchecked Sendable {
         try add(word, relation: .text, evidence: 2)
       }
     }
-    for word in Self.words((PhotoOrganizationFacts.name(r.facts, original: r.filename) as NSString).deletingPathExtension)
+    for word in Self.words((displayName as NSString).deletingPathExtension)
     where Self.suggestible(word) { try add(word, relation: .text, evidence: 3) }
+    if displayName != r.filename {
+      for word in Self.words((r.filename as NSString).deletingPathExtension)
+      where Self.suggestible(word) { try add(word, relation: .text, evidence: 7) }
+    }
     if r.ocrStatus == .complete {
       for word in Self.words(r.ocrText) where Self.suggestible(word) {
         try add(word, relation: .text, evidence: 4, confidence: r.ocrConfidence)
@@ -1075,6 +1107,7 @@ final class SearchIndex: @unchecked Sendable {
     case 2: return "Caption or keyword"
     case 3: return "Filename mention"
     case 5: return "Inferred scene"
+    case 7: return "Original filename mention"
     default: return "Text in photo"
     }
   }

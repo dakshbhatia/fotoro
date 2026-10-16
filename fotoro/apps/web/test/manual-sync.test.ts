@@ -97,6 +97,59 @@ test("read refresh and explicit Save serialize their catalog cursor work without
   assert.equal(result.annotations.length, 0);
 }));
 
+for (const withdrawal of ["signal", "scope"] as const) {
+  test(`a fresh foreground refresh recovers after an earlier ${withdrawal} withdrawal without resuming paused writes`, async () => scoped(async () => {
+    const session = await open(), queued = await stageQueuedOriginal();
+    await saveUploadPause(true, session);
+    await queueAnnotations(identity, {labels: ["public pending label"]}, session);
+    const draft = (await pendingAnnotations(session))[0].signed;
+    const old = new AbortController();
+    let current = true, release!: (value: Response) => void;
+    const calls: {path: string; method: string}[] = [];
+    globalThis.fetch = (async (path, init) => {
+      calls.push({path: String(path), method: init?.method ?? "GET"});
+      assert.match(String(path), /^\/v1\/changes\?/);
+      if (calls.length === 1) return new Promise<Response>(resolve => {release = resolve;});
+      return response(page("fresh-foreground"));
+    }) as typeof fetch;
+    const first = refreshSync(session, {limit: 100, signal: old.signal, current: () => current});
+    const rejected = assert.rejects(first, {name: "AbortError"});
+    while (!release) await new Promise(resolve => setTimeout(resolve, 0));
+    if (withdrawal === "signal") old.abort(); else current = false;
+    const next = refreshSync(session, {limit: 100, signal: new AbortController().signal, current: () => true})
+      .then(result => ({result, error: undefined}), error => ({result: undefined, error}));
+    release(response(page("withdrawn")));
+    await rejected;
+    const observed = await next;
+    assert.equal(observed.error, undefined, "The new owner must not inherit the withdrawn read's rejection");
+    assert.equal(calls.length, 2);
+    assert.ok(calls.every(call => call.method === "GET"));
+    assert.deepEqual(observed.result?.pending, [queued.pending]);
+    assert.deepEqual(observed.result?.annotations[0].signed, draft);
+    assert.equal(await loadUploadPause(session), true);
+    assert.deepEqual(await get("staging", queued.stagingKey), queued.bytes);
+  }));
+}
+
+test("cancelling a queued Saved read cannot inherit another owner's successful snapshot", async () => scoped(async () => {
+  const session = await open(), firstController = new AbortController(), secondController = new AbortController();
+  let release!: (value: Response) => void, calls = 0;
+  globalThis.fetch = (async path => {
+    assert.match(String(path), /^\/v1\/changes\?/); calls++;
+    return new Promise<Response>(resolve => {release = resolve;});
+  }) as typeof fetch;
+  const first = refreshSync(session, {limit: 100, signal: firstController.signal});
+  while (!release) await new Promise(resolve => setTimeout(resolve, 0));
+  const second = refreshSync(session, {limit: 100, signal: secondController.signal})
+    .then(result => ({result, error: undefined}), error => ({result: undefined, error}));
+  secondController.abort(); release(response(page("first-owner")));
+  const admitted = await first, cancelled = await second;
+  assert.equal(cancelled.error?.name, "AbortError");
+  assert.equal(cancelled.result, undefined);
+  assert.equal(admitted.coverage.loaded, 0);
+  assert.equal(calls, 1, "The cancelled queued owner sends no request and cannot cancel the active owner");
+}));
+
 test("Trip chosen retry waits for global Save and snapshots its selected IDs", async () => scoped(async () => {
   const session = await open();
   let release!: (value: Response) => void;

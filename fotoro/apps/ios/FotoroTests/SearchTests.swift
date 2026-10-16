@@ -1,9 +1,83 @@
 import Foundation
+import GRDB
 import XCTest
 
 @testable import Fotoro
 
 final class SearchTests: XCTestCase {
+  func testRenameKeepsOriginalFilenameIdentifiersWithoutRetainingOldCustomNames() throws {
+    var source = photo("source", filename: "Camera_4826_trip.JPG", captured: now)
+    source.ocrStatus = .pending
+    let i = try index([source])
+    XCTAssertTrue(try i.setOrganization(.name("Grandma Seoul.JPG"), photoID: source.id))
+    for query in ["Camera", "4826", "Camera 4826", "Camera_4826_trip.JPG", "Grandma Seoul.JPG"] {
+      XCTAssertEqual(try i.search(query, now: now).leading?.id, source.id, query)
+    }
+    let original = try i.search("Camera", now: now)
+    XCTAssertEqual(original.leading?.reason, "Original filename mention")
+    XCTAssertFalse(original.permitsSemanticMatches, "Visual similarity must not expand original filename identifiers")
+    let scope = PhotoAnalysisScope(query: "Camera 4826", includesOlder: true, now: now)
+    XCTAssertEqual(try i.pendingMetadataAnalysisRecords(scope: scope).map(\.id), [source.id])
+    XCTAssertTrue(try i.setOrganization(.name("Family dinner.JPG"), photoID: source.id))
+    XCTAssertNil(try i.search("Grandma", now: now).leading, "A previous owner name is not an original alias")
+    XCTAssertEqual(try i.search("Camera 4826", now: now).leading?.id, source.id)
+    XCTAssertEqual(try i.record(source.id)?.filename, source.filename)
+    XCTAssertTrue(try i.setOrganization(.trash(true), photoID: source.id))
+    for query in ["Camera", "4826", "Camera 4826"] { XCTAssertNil(try i.search(query, now: now).leading, query) }
+    XCTAssertTrue(try i.setOrganization(.trash(false), photoID: source.id))
+    source.revision = "2"; source.filename = "Revised_7351.JPG"
+    try i.replacePermitted([source])
+    XCTAssertNil(try i.search("4826", now: now).leading, "A new source revision cannot inherit an old source identifier")
+    XCTAssertEqual(try i.search("7351", now: now).leading?.id, source.id)
+  }
+  func testCurrentFilenameRanksBeforeOriginalAliasWhileExplicitPinAndSourceScopesRemainValid() throws {
+    let alias = photo("a-alias", filename: "Camera_4826.JPG", captured: now, favorite: true)
+    let current = photo("z-current", filename: "Camera_4826.JPG", captured: now.addingTimeInterval(-86400))
+    let saved = photo("saved", filename: "Camera_4826.JPG", captured: now, scope: "saved")
+    let i = try index([alias, current, saved])
+    XCTAssertTrue(try i.setOrganization(.name("Dinner.JPG"), photoID: alias.id))
+    for query in ["Camera", "Camera 4826"] {
+      let result = try i.search(query, now: now)
+      XCTAssertEqual(result.results.map(\.id), [current.id, alias.id], "Current owner name evidence wins before recency/favorite")
+      XCTAssertEqual(result.results.map(\.evidenceClass), [3, 7])
+      XCTAssertEqual(try i.search(query, scope: SearchScope(source: "saved"), now: now).results.map(\.id), [saved.id])
+      try i.pinRepresentative(try XCTUnwrap(result.meaning?.id), photoID: alias.id)
+      XCTAssertEqual(try i.search(query, now: now).leading?.id, alias.id, "An explicit representative remains authoritative")
+    }
+  }
+  func testExistingRenamedRowsBackfillOriginalAliasOnceAcrossReopen() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let records = (0..<205).map { photo("renamed-\(String(format: "%04d", $0))", filename: "Camera_\(4826 + $0).JPG") }
+    var i: SearchIndex? = try SearchIndex(root: root)
+    try i!.replacePermitted(records)
+    for record in records { XCTAssertTrue(try i!.setOrganization(.name("Dinner.JPG"), photoID: record.id)) }
+    // Recreate a released pre-alias cache: unchanged records, derived terms and
+    // FTS contain only the chosen name. No originals or owner facts are removed.
+    try i!.database.write { db in
+      try db.execute(sql: "DELETE FROM searchPostings WHERE evidence=7; DELETE FROM searchFTS; INSERT INTO searchFTS(id,text) SELECT id,'Dinner.JPG' FROM searchRecords; DELETE FROM searchFeatures WHERE name='original-filename-alias-v1'")
+    }
+    XCTAssertNil(try i!.search("4826", now: now).leading)
+    try i!.database.write { db in
+      try db.execute(sql: "CREATE TRIGGER interrupt_alias_backfill BEFORE UPDATE ON searchRecords WHEN NEW.id='renamed-0204' BEGIN SELECT RAISE(ABORT,'interrupted backfill'); END")
+    }
+    XCTAssertThrowsError(try SearchIndex(root: root))
+    XCTAssertNil(try i!.search("4826", now: now).leading, "An interrupted later page rolls back earlier derived postings")
+    XCTAssertEqual(try i!.database.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM searchFeatures WHERE name='original-filename-alias-v1'") }, 0)
+    try i!.database.write { try $0.execute(sql: "DROP TRIGGER interrupt_alias_backfill") }
+    i = nil
+    let reopened = try SearchIndex(root: root)
+    XCTAssertEqual(try reopened.search("4826", now: now).leading?.id, records[0].id)
+    XCTAssertEqual(try reopened.search("5030", now: now).leading?.id, records[204].id, "Backfill crosses the 200-row read boundary")
+    XCTAssertEqual(PhotoOrganizationFacts.name(try reopened.record(records[0].id)?.facts, original: records[0].filename), "Dinner.JPG")
+    try reopened.database.write { db in
+      try db.execute(sql: "CREATE TRIGGER forbid_alias_rebuild BEFORE UPDATE ON searchRecords BEGIN SELECT RAISE(ABORT,'repeat migration'); END")
+    }
+    let again = try SearchIndex(root: root)
+    XCTAssertEqual(try again.search("4826", now: now).leading?.id, records[0].id, "A completed backfill does not rebuild unchanged rows on every launch")
+    try again.replacePermitted([])
+    XCTAssertNil(try again.search("4826", now: now).leading, "Withdrawal removes migrated aliases too")
+  }
   func testRenamedPhotoIsSearchableAndTrashCannotLeakThroughAnyMeaningOrPin() throws {
     let record = photo("original", labels: ["BTS"], filename: "IMG_0001.JPG", ocr: "invoice 4826")
     let i = try index([record])
