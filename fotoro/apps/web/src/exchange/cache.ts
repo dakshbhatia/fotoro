@@ -157,8 +157,8 @@ export async function atomic(writes: Write[]) {
       if (cipher.length) cipherWrites(tx, cipher);
     } catch (error) {tx.abort(); reject(error); return;}
     tx.oncomplete = () => {
-      const accounts = new Set(writes.filter(w => w.store === "catalog" || w.store === "settings" && w.key.includes(":annotation:")).map(w => w.key.split(":")[0]));
-      for (const write of writes) if (write.store === "catalog" || write.store === "settings" && write.key.includes(":annotation:")) {
+      const accounts = new Set(writes.filter(w => w.store === "catalog" || w.store === "settings" && (w.key.includes(":annotation:") || w.key.includes(":annotation-outbox:"))).map(w => w.key.split(":")[0]));
+      for (const write of writes) if (write.store === "catalog" || write.store === "settings" && (write.key.includes(":annotation:") || write.key.includes(":annotation-outbox:"))) {
         const parts = write.key.split(":"), key = parts[0] + ":" + parts.at(-1);
         photoRevisions.set(key, (photoRevisions.get(key) ?? 0) + 1);
       }

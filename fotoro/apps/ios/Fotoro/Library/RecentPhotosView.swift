@@ -3040,7 +3040,7 @@ struct DeviceBatchNamingReview: View {
     let name: String
     var id: String { photo.id }
   }
-  private func key(_ value: String) -> String { value.precomposedStringWithCanonicalMapping.lowercased() }
+  private func key(_ value: String) -> String { PhotoOrganizationFacts.nameKey(value) }
   private func record(_ photo: RecentPhoto) throws -> SearchRecord {
     guard presentation.current(), RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
       search.assets[photo.id]?.sourceRevision == photo.sourceRevision,
@@ -3070,7 +3070,8 @@ struct DeviceBatchNamingReview: View {
     guard !busy else { return }
     busy = true; defer { busy = false; work = nil }
     do {
-      var used = try await reservations(excluding: Set(presentation.photos.map(\.id))), entries: [Entry] = []
+      var allocator = PhotoNameAllocator(reservedNames: try await reservations(excluding: Set(presentation.photos.map(\.id))))
+      var entries: [Entry] = []
       let context = search.browseOrganizationContext
       for photo in presentation.photos.sorted(by: { $0.id < $1.id }) {
         let value = try record(photo)
@@ -3078,18 +3079,7 @@ struct DeviceBatchNamingReview: View {
           labels: value.labels, place: photo.photoLocation?.name,
           screenshot: PhotoOrganizationFacts.screenshot(value.facts, detected: photo.isScreenshot),
           analysis: PhotoNameAnalysis(record: value, photoID: photo.id, revision: photo.sourceRevision))
-        let ext = (proposed as NSString).pathExtension, ending = ext.isEmpty ? "" : "." + ext
-        let stem = ending.isEmpty ? proposed : String(proposed.dropLast(ending.count))
-        var name = proposed, ordinal = 1
-        while used.contains(key(name)) {
-          ordinal += 1
-          let suffix = "_\(ordinal)" + ending
-          var bounded = stem
-          while !bounded.isEmpty && !PhotoOrganizationFacts.validName(bounded + suffix) { bounded.removeLast() }
-          name = bounded + suffix
-        }
-        guard PhotoOrganizationFacts.validName(name) else { throw PhotoOrganizationError.invalid }
-        used.insert(key(name))
+        let name = try allocator.reserve(proposed)
         entries.append(Entry(photo: photo, original: value.filename,
           before: PhotoOrganizationFacts.name(value.facts, original: value.filename),
           previous: PhotoOrganizationFacts.one(value.facts, prefix: PhotoOrganizationFacts.namePrefix), name: name))

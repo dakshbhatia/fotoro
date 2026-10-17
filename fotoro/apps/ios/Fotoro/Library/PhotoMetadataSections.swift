@@ -498,7 +498,7 @@ struct SavedBatchNamingReview: View {
     let name: String
     var id: String { photo.id }
   }
-  private func key(_ value: String) -> String { value.precomposedStringWithCanonicalMapping.lowercased() }
+  private func key(_ value: String) -> String { PhotoOrganizationFacts.nameKey(value) }
   private func reservedNames(excluding excludedIDs: Set<String>? = nil) async throws -> Set<String> {
     guard let account = services.session.accountId, presentation.current() else { throw FotoroError("Photo selection changed") }
     let selected = excludedIDs ?? Set(presentation.photos.map(\.id)), revision = services.consumerCatalogGeneration
@@ -524,7 +524,8 @@ struct SavedBatchNamingReview: View {
     busy = true; defer { busy = false; work = nil }
     do {
       let revision = services.consumerCatalogGeneration
-      var used = try await reservedNames(), entries: [Entry] = []
+      var allocator = PhotoNameAllocator(reservedNames: try await reservedNames())
+      var entries: [Entry] = []
       for photo in presentation.photos.sorted(by: { $0.id < $1.id }) {
         try Task.checkCancellation()
         guard presentation.current(), let current = try services.consumerSavedPhoto(photo.id), current.metadata == photo.metadata, current.manifest == photo.manifest else { throw FotoroError("Photo source changed") }
@@ -533,19 +534,7 @@ struct SavedBatchNamingReview: View {
           capturedAt: CameraMedia.captureDate(photo.metadata), labels: value.labels ?? [], place: value.location?.name,
           screenshot: PhotoOrganizationFacts.screenshot(value.facts, originalSha256: photo.metadata.originalSha256),
           analysis: PhotoNameAnalysis(annotation: value, photoID: photo.id, digest: photo.metadata.originalSha256))
-        let ext = (proposed as NSString).pathExtension
-        let suffix = ext.isEmpty ? "" : "." + ext
-        let stem = suffix.isEmpty ? proposed : String(proposed.dropLast(suffix.count))
-        var name = proposed, number = 1
-        while used.contains(key(name)) {
-          number += 1
-          var bounded = stem
-          let ending = "_\(number)" + suffix
-          while !bounded.isEmpty && !PhotoOrganizationFacts.validName(bounded + ending) { bounded.removeLast() }
-          name = bounded + ending
-        }
-        guard PhotoOrganizationFacts.validName(name) else { throw PhotoOrganizationError.invalid }
-        used.insert(key(name))
+        let name = try allocator.reserve(proposed)
         entries.append(Entry(photo: photo, before: PhotoOrganizationFacts.name(value.facts, original: photo.metadata.filename),
           previous: PhotoOrganizationFacts.one(value.facts, prefix: PhotoOrganizationFacts.namePrefix), name: name))
         if entries.count.isMultiple(of: 200) {

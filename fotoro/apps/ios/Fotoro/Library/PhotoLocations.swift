@@ -202,7 +202,35 @@ struct PhotoNameAnalysis {
   }
 }
 
+// One allocator belongs to one preview: reservations grow until that preview ends.
+struct PhotoNameAllocator {
+  private var used: Set<String>
+  private var nextOrdinals: [String: Int] = [:]
+
+  init(reservedNames: Set<String>) { used = reservedNames }
+
+  mutating func reserve(_ proposed: String) throws -> String {
+    let ext = (proposed as NSString).pathExtension
+    let ending = ext.isEmpty ? "" : "." + ext
+    let stem = ending.isEmpty ? proposed : String(proposed.dropLast(ending.count))
+    var name = proposed, ordinal = nextOrdinals[proposed] ?? 2
+    // Earlier suffixes remain reserved, so repeated suggestions resume here.
+    while used.contains(PhotoOrganizationFacts.nameKey(name)) {
+      let suffix = "_\(ordinal)" + ending
+      var bounded = stem
+      while !bounded.isEmpty && !PhotoOrganizationFacts.validName(bounded + suffix) { bounded.removeLast() }
+      name = bounded + suffix
+      ordinal += 1
+    }
+    guard PhotoOrganizationFacts.validName(name) else { throw PhotoOrganizationError.invalid }
+    nextOrdinals[proposed] = ordinal
+    used.insert(PhotoOrganizationFacts.nameKey(name))
+    return name
+  }
+}
+
 enum PhotoOrganizationFacts {
+  static func nameKey(_ value: String) -> String { value.precomposedStringWithCanonicalMapping.lowercased() }
   static let namePrefix = "fotoro.name.v1:"
   static let trashPrefix = "fotoro.trash.v1:"
   static let screenshotPrefix = "fotoro.screenshot.v1:"

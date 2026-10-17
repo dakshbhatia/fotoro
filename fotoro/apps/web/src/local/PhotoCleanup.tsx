@@ -33,12 +33,14 @@ export function PhotoCleanup({photos, resources, onTrash, canTrash, onOpen, chan
   const panel = useRef<HTMLElement>(null), [analyzer] = useState(() => new CleanupAnalyzer());
   const [reviewSnapshot, setReviewSnapshot] = useState(() => cleanupReviewPhotos(photos));
   const scope = useRef(reviewSnapshot), completed = useRef(0), runEpoch = useRef(0);
+  const reviewReady = useRef(false), closing = useRef(false);
   const [persistence] = useState(() => new CleanupReviewPersistence());
   const [request, setRequest] = useState(0), [reviewNotice, setReviewNotice] = useState("");
   const [limit, setLimit] = useState(0);
   const measurementScan = useMemo(() => reviewSnapshot.slice(0, limit), [reviewSnapshot, limit]);
-  const latestPhotos = useRef(new Map(photos.map(photo => [photo.id, photo])));
-  latestPhotos.current = new Map(photos.map(photo => [photo.id, photo]));
+  const photoMap = useMemo(() => new Map(photos.map(photo => [photo.id, photo])), [photos]);
+  const latestPhotos = useRef(photoMap);
+  latestPhotos.current = photoMap;
   // Keep measured source identity stable across harmless annotation refreshes;
   // current favorites, screenshot corrections and Trash still control the review.
   const scan = useMemo(() => measurementScan.flatMap(initial => {
@@ -71,7 +73,7 @@ export function PhotoCleanup({photos, resources, onTrash, canTrash, onOpen, chan
     if (!cleanupSourceIdentityCurrent(initial, latest)) return [];
     return [{...initial, facts: latest.facts, current: () => cleanupSourceIdentityCurrent(initial, latestPhotos.current.get(initial.id))}];
   }));
-  useDialogFocus(panel, onClose);
+  useDialogFocus(panel, () => pauseReview(true));
   useEffect(() => {
     let active = true;
     const epoch = ++runEpoch.current;
@@ -86,9 +88,10 @@ export function PhotoCleanup({photos, resources, onTrash, canTrash, onOpen, chan
     };
     setBusy(true);
     void (async () => {
-      if (request === 0) {
+      if (!reviewReady.current) {
         const restored = await persistence.read(scope.current, current, [...latestPhotos.current.values()].filter(isPhotoTrashed));
         if (!current()) return;
+        reviewReady.current = true;
         if (restored) {
           scope.current = restored.photos; setReviewSnapshot(restored.photos);
           analyzer.restore(restored.photos, restored.signals);
@@ -107,8 +110,9 @@ export function PhotoCleanup({photos, resources, onTrash, canTrash, onOpen, chan
         const guarded = {...latest, current: () => current() && cleanupSourceCurrent(photo, latestPhotos.current.get(photo.id))};
         return readPickSignals(guarded, latestResources.current(latest), signal);
       }, value => {
-        if (!current()) return;
-        completed.current = start + value; setDone(start + value);
+        if (!active || epoch !== runEpoch.current) return;
+        completed.current = start + value;
+        if (value % 8 === 0 || start + value === end) setDone(start + value);
         if ((start + value) % 32 === 0) void checkpoint(start + value).catch(() => {
           if (current()) setReviewNotice("Progress could not be kept after restart. This review remains available while open.");
         });
@@ -130,8 +134,16 @@ export function PhotoCleanup({photos, resources, onTrash, canTrash, onOpen, chan
     if (nextPending.current) return;
     nextPending.current = true; setBusy(true); setRequest(value => value + 1);
   };
-  const pauseReview = () => {
-    const epoch = ++runEpoch.current; analyzer.cancel(); nextPending.current = true; setBusy(true); setLimit(completed.current);
+  const pauseReview = (close = false) => {
+    if (closing.current) return;
+    closing.current = close;
+    const epoch = ++runEpoch.current; analyzer.cancel(); setLimit(completed.current); setDone(completed.current);
+    if (!reviewReady.current) {
+      nextPending.current = false; setBusy(false); setReviewNotice("Review paused.");
+      if (close) onClose();
+      return;
+    }
+    nextPending.current = true; setBusy(true);
     const current = () => alive.current && epoch === runEpoch.current && scope.current.every(initial => cleanupSourceIdentityCurrent(initial, latestPhotos.current.get(initial.id), true));
     const retained = scope.current.map(initial => latestPhotos.current.get(initial.id)!).filter(photo => photo && !isPhotoTrashed(photo));
     const checkedIDs = new Set(scope.current.slice(0, completed.current).map(photo => photo.id));
@@ -139,16 +151,16 @@ export function PhotoCleanup({photos, resources, onTrash, canTrash, onOpen, chan
     void persistence.write(retained, checked.length, measuredSignals(completed.current), current).then(durable => {
       if (current()) setReviewNotice(durable ? "Review paused. Progress is kept encrypted on this device." : "Review paused. Progress stays in this session.");
     }).catch(() => {if (current()) setReviewNotice("Review paused. Its latest progress could not be kept after restart.");})
-      .finally(() => {if (alive.current && epoch === runEpoch.current) {nextPending.current = false; setBusy(false);}});
+      .finally(() => {if (alive.current && epoch === runEpoch.current) {nextPending.current = false; setBusy(false); if (close) onClose();}});
   };
 
   const rows = photos.filter(photo => photo.current?.() !== false && !isPhotoTrashed(photo) && result.reasons.has(photo.id));
   return <aside className="sheet places-sheet photo-cleanup" ref={panel} role="dialog" aria-modal="true" aria-label="Review cleanup" tabIndex={-1}>
-    <header className="places-header"><h2>Review cleanup</h2><button onClick={onClose}>Done</button></header>
+    <header className="places-header"><h2>Review cleanup</h2><button onClick={() => pauseReview(true)}>Done</button></header>
     <p>Review possible duplicates, blurry shots, and photos with little detail. Nothing is selected or removed automatically.</p>
     <p className="hint">Review currently loaded photos in batches of {CLEANUP_BATCH_SIZE}. Photos outside this loaded snapshot have not been checked. Trash is recoverable and only affects Fotoro; it does not free storage.</p>
     {busy ? <p role="status">Checking previews… {done} / {measurementScan.length} · {remaining} remaining in this loaded snapshot.</p> : <p role="status">{done} scanned · {remaining} remaining · {result.unassessed} current previews unassessed · {rows.length} cleanup candidates.</p>}
-    {busy && <button onClick={pauseReview}>Pause review</button>}
+    {busy && <button onClick={() => pauseReview()}>Pause review</button>}
     {!busy && remaining > 0 && <button onClick={continueReview}>Review next {Math.min(CLEANUP_BATCH_SIZE, remaining)} photos</button>}
     {!busy && done > 0 && <button onClick={() => {analyzer.clear(); completed.current = 0; setDone(0); setLimit(0); continueReview();}}>Start review over</button>}
     {reviewNotice && <p className="hint" role="status">{reviewNotice}</p>}

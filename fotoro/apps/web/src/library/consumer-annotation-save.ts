@@ -9,6 +9,9 @@ export async function saveQueuedAnnotations(session: UnlockedVault, current = ()
   await flushAnnotations(session);
   if (!current()) throw new Error("VAULT_LOCKED");
   const result = await cachedSync(session, undefined, browse);
-  if (!current()) throw new Error("VAULT_LOCKED");
+  if (!current()) {
+    for (const photo of result.photos) photo.metadataKey.fill(0);
+    throw new Error("VAULT_LOCKED");
+  }
   return result;
 }

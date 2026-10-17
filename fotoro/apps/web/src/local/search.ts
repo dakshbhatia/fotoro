@@ -285,6 +285,9 @@ export class PhotoSearchIndex {
   }
   choosePhoto(meaning: string, id: string, session: string, now = Date.now(), pin = false, scope = "local:all") {
     const dated = datedMeaning(meaning), baseMeaning = dated?.[2] ?? meaning, photo = this.records.get(id), captured = photo && Date.parse(photo.date);
+    // A queued selection can arrive after its source was withdrawn. Stored
+    // postings alone cannot authorize new feedback or a representative pin.
+    if (this.disposed || !photo || photo.current?.() === false) return;
     if (dated && (!photo || !hasCaptureDate(photo) || !Number.isFinite(captured) || (dated[0] !== null && captured! < dated[0]) || (dated[1] !== null && captured! >= dated[1]))) return;
     const derived = /^(?:date|text|label):/.test(baseMeaning) ? this.search(baseMeaning.slice(baseMeaning.indexOf(":") + 1), { now, scope, committedMeaning: baseMeaning }).meaning : undefined;
     // Validate the selected receipt itself: a direct phrase in another scope

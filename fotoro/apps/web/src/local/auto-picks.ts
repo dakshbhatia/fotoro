@@ -208,7 +208,7 @@ export class PickAnalyzer {
         if (photo.current?.() === false) this.cache.delete(photo.id);
         else if (signal) signals.set(photo.id, signal);
       } else this.cache.delete(photo.id);
-      if ((i + 1) % 8 === 0 || i + 1 === unique.length) progress?.(i + 1, unique.length);
+      if (retainCompleted || (i + 1) % 8 === 0 || i + 1 === unique.length) progress?.(i + 1, unique.length);
       if ((i + 1) % PICK_WORK_BATCH === 0) await this.yieldWork();
     }
     return version === this.version ? {version, unique, signals} : undefined;

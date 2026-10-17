@@ -393,7 +393,7 @@ export async function cachedCatalogSnapshot(diagnostic?: DiagnosticContext, brow
   }
 }
 
-export interface CachedMetadataSource {manifest: string; annotation?: string; revision: number}
+export interface CachedMetadataSource {manifest: string; annotation?: string; outbox?: string; revision: number}
 const metadataReceipt = (wrapped: WrappedKeyV1) => digest(new TextEncoder().encode(JSON.stringify([wrapped.version, wrapped.nonce, wrapped.ciphertext])));
 // Metadata-only account traversal. No gallery keys or image representations are retained by the scan.
 export async function scanCachedMetadata(session: UnlockedVault, signal: AbortSignal, current: () => boolean,
@@ -416,8 +416,9 @@ export async function scanCachedMetadata(session: UnlockedVault, signal: AbortSi
       const photoId = id.slice(session.accountId.length + 1);
       const revision = revisions.get(id)!;
       const annotation = await get<WrappedKeyV1>("settings", session.accountId + ":annotation:" + photoId); check();
+      const outbox = await get<WrappedKeyV1>("settings", session.accountId + ":annotation-outbox:" + photoId); check();
       if (cachedPhotoRevision(session.accountId, photoId) !== revision) continue;
-      const receipt = {manifest: metadataReceipt(wrapped), annotation: annotation ? metadataReceipt(annotation) : undefined, revision};
+      const receipt = {manifest: metadataReceipt(wrapped), annotation: annotation ? metadataReceipt(annotation) : undefined, outbox: outbox ? metadataReceipt(outbox) : undefined, revision};
       if (changedBatch && !await cachedMetadataSourceCurrent(session, photoId, receipt)) continue;
       check(); if (cachedPhotoRevision(session.accountId, photoId) !== revision) continue;
       if (reuse?.(photoId, receipt)) {
@@ -431,10 +432,9 @@ export async function scanCachedMetadata(session: UnlockedVault, signal: AbortSi
         check();
         const admitted = await readAnnotations({ownerAccountId: session.accountId, photoId: manifest.photoId, originalSha256: photo.metadata.originalSha256}, session); check();
         if (admitted) {photo.annotations = admitted.value; photo.annotationRevision = admitted.revision;}
-        const source = {manifest: metadataReceipt(wrapped), annotation: annotation ? metadataReceipt(annotation) : undefined, revision};
-        if (!await cachedMetadataSourceCurrent(session, manifest.photoId, source)) continue;
+        if (!await cachedMetadataSourceCurrent(session, manifest.photoId, receipt)) continue;
         if (cachedPhotoRevision(session.accountId, photoId) !== revision) continue;
-        check(); visit(photo, source); check();
+        check(); visit(photo, receipt); check();
       } finally {photo.metadataKey.fill(0);}
       await yieldPhoto();
     }
@@ -448,7 +448,8 @@ export async function scanCachedMetadata(session: UnlockedVault, signal: AbortSi
 export async function cachedMetadataSourceCurrent(session: UnlockedVault, id: string, source: CachedMetadataSource) {
   const manifest = await get<WrappedKeyV1>("catalog", session.accountId + ":" + id); assertVault(session);
   const annotation = await get<WrappedKeyV1>("settings", session.accountId + ":annotation:" + id); assertVault(session);
-  return cachedPhotoRevision(session.accountId, id) === source.revision && !!manifest && source.manifest === metadataReceipt(manifest) && (!source.annotation && !annotation || !!source.annotation && !!annotation && source.annotation === metadataReceipt(annotation));
+  const outbox = await get<WrappedKeyV1>("settings", session.accountId + ":annotation-outbox:" + id); assertVault(session);
+  return source.outbox === (outbox ? metadataReceipt(outbox) : undefined) && cachedPhotoRevision(session.accountId, id) === source.revision && !!manifest && source.manifest === metadataReceipt(manifest) && (!source.annotation && !annotation || !!source.annotation && !!annotation && source.annotation === metadataReceipt(annotation));
 }
 
 // Plain metadata exists only for this unlocked, visible account lifetime. Receipts remain encrypted.
@@ -489,7 +490,7 @@ export class CachedAccountSearch {
       }, (id, source) => {
         const previous = this.sources.get(id), record = this.verified.get(id);
         if (!previous || !record || previous.manifest !== source.manifest
-          || previous.revision !== source.revision
+          || previous.revision !== source.revision || previous.outbox !== source.outbox
           || !!previous.annotation !== !!source.annotation || previous.annotation && source.annotation && previous.annotation !== source.annotation) return false;
         const projected = this.project(record, source.revision);
         admit(projected); this.records.push(projected); this.verified.set(id, projected); unchanged.add(id); return true;
