@@ -1009,9 +1009,12 @@ export default function CloudApp({
   }, [active, searchCorpus, matchedMetadataKey, received, photos, viewer]);
   const [savedSearchProjection] = useState(() => new SavedSearchProjection());
   const peoplePhotos = savedSearchProjection.read(ownedSnapshot, []);
+  const savedTextScope = useRef<LocalPhoto[]>([]);
   const savedTextPhotos = useMemo(() => {
     const allowed = metadataDatePhotoIDs(peoplePhotos, query, new Set([...permitted].map(id => "saved:" + id)));
-    return peoplePhotos.filter(photo => allowed.has(photo.id));
+    const next = peoplePhotos.filter(photo => allowed.has(photo.id));
+    if (next.length !== savedTextScope.current.length || next.some((photo, index) => photo !== savedTextScope.current[index])) savedTextScope.current = next;
+    return savedTextScope.current;
   }, [peoplePhotos, query, permitted]);
   const peopleEligibleIDs = useMemo(() => new Set([...(normalizeSearch(query) ? peopleMetadataMatches(lexicalSearchResult) : permitted)].map(id => "saved:" + id)), [query, lexicalSearchResult, permitted]);
   const latestPeoplePhotos = useRef(peoplePhotos); latestPeoplePhotos.current = peoplePhotos;

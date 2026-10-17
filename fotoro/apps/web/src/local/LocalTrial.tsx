@@ -208,7 +208,12 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
     return peopleMatchingPhotoIDs(peopleRecords.filter(photo => browseIDs.has(photo.id) || browseScope === "photos" && (normalizeSearch(query) || browseFilter) && (!favoritesOnly || favoriteIDs.has(photo.id)) && inBrowseRange(photo, recentActive, false, Date.now(), organizationScope)), peopleFind.filter);
   }, [peopleRecords, browsePhotos, peopleFind.filter, browseScope, query, browseFilter, recentActive, favoritesOnly, favoriteIDs, organizationScope]);
   const permittedPhotos = useMemo(() => browsePhotos.filter(photo => permitted.has(photo.id)), [browsePhotos, permitted]);
-  const savedTextPhotos = useMemo(() => permittedPhotos.filter(photo => metadataAllowed.has(photo.id)), [permittedPhotos, metadataAllowed]);
+  const savedTextScope = useRef<LocalPhoto[]>([]);
+  const savedTextPhotos = useMemo(() => {
+    const next = permittedPhotos.filter(photo => metadataAllowed.has(photo.id));
+    if (next.length !== savedTextScope.current.length || next.some((photo, index) => photo !== savedTextScope.current[index])) savedTextScope.current = next;
+    return savedTextScope.current;
+  }, [permittedPhotos, metadataAllowed]);
   const scoped = useMemo(() => photos.filter(photo => permitted.has(photo.id)), [photos, permitted]);
   const hasPhotos = searchPhotos.length > 0;
   useEffect(() => {if (!active) {setPlacesOpen(false); setPeopleOpen(false);}}, [active]);

@@ -115,3 +115,10 @@ intrinsic filenames even when originals share that name; explicit restored names
 still require collision checks. Ordinary pending edits say Changes to Save.
 Metadata refresh keeps account searches pending; cache revision receipts also
 withdraw obsolete empty results. No new test files or assertions were added.
+
+The saved original downloaded with the reviewed filename Seattle receipt.png;
+its SHA-256 matched the imported public fixture exactly. A follow-up batch audit
+found that filtering unchanged photo objects into a new array could cancel OCR
+after its first write. Saved text scopes now preserve array identity only for
+identical photo objects in identical order. Source, membership, order, explicit
+scope, account, consent, and Pause/visibility changes retain cancellation.
