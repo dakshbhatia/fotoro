@@ -2,7 +2,7 @@ import {useRef, useState} from "react";
 import {canRestorePhotoNames} from "./batch-photo-naming";
 import {planPhotoNames, photoName, type PhotoNamePlanEntry, type PhotoNamePlanSource, type PhotoOrganizationPatch} from "@fotoro/contracts/organization";
 
-/** Mount within the selection's source/account boundary; mutations use its existing annotation flow. */
+// Mount within the selection's source/account boundary; mutations use its existing annotation flow.
 export function BatchPhotoNaming({sources, reservedNames, disabled, current, onChange}: {
   sources: readonly PhotoNamePlanSource[];
   reservedNames: readonly string[];

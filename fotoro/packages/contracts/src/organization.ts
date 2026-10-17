@@ -109,7 +109,7 @@ export function inOrganizationScope(photo: {facts?: readonly string[]; filename?
 
 export type PhotoNamePlanSource = Parameters<typeof suggestedPhotoName>[0] & {id: string; facts?: readonly string[]};
 export interface PhotoNamePlanEntry {id: string; original: string; before: string; name: string; previousName: string | null; digest?: string}
-/** Caller supplies only selected photos. Unselected effective names remain reserved. */
+// Caller supplies only selected photos. Unselected effective names remain reserved.
 export function planPhotoNames(sources: readonly PhotoNamePlanSource[], reservedNames: readonly string[] = []): PhotoNamePlanEntry[] {
   const key = (name: string) => name.normalize("NFC").toLowerCase();
   const used = new Set(reservedNames.map(key)), ids = new Set<string>();

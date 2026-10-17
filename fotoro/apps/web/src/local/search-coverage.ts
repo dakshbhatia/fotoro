@@ -2,7 +2,7 @@ import {validatedVisualLabels} from "@fotoro/contracts/visual";
 import {hasCurrentLocalOcr, OCR_PROCESSOR, ocrSourceIdentity} from "./ocr";
 import type {LocalPhoto} from "./resources";
 
-/** Evidence for the supplied loaded scope only; this never schedules work. */
+// Evidence for the supplied loaded scope only; this never schedules work.
 export function searchCoverage(photos: readonly LocalPhoto[]) {
   let total = 0, textChecked = 0, textFound = 0, textUnchecked = 0, textUnavailable = 0, visualLabels = 0;
   const seen = new Set<string>();

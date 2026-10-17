@@ -144,7 +144,7 @@ export interface DiagnosticSummary {
   operation: DiagnosticOperation; succeeded: number; failed: number; cancelled: number;
   p50Ms?: number; p95Ms?: number; reasons: Partial<Record<DiagnosticReason, number>>;
 }
-/** Percentiles cover retained successful logical actions, never request/stage timings. */
+// Percentiles cover retained successful logical actions, never request/stage timings.
 export function summarizeDiagnostics(input: readonly unknown[]): DiagnosticSummary[] {
   const groups = new Map<DiagnosticOperation, {summary: DiagnosticSummary; times: number[]}>();
   for (const value of input) {
