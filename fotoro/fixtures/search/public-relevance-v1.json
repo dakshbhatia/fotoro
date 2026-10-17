@@ -1,0 +1,286 @@
+{
+  "version": 1,
+  "judgment": "Developer expectations written from repository public fixture content, plus explicitly supplied synthetic metadata. Not held-out human judgments. Threshold and production policy remain unchanged even for misses.",
+  "clock": "2026-10-17T12:00:00Z",
+  "pixels": {
+    "receipt": "neutral-a.png: SEATTLE RECEIPT / INVOICE 4826 / TOTAL 28.50",
+    "boarding": "neutral-b.png: BOARDING PASS / BOSTON / GATE TWELVE",
+    "inverted": "neutral-c.png: same boarding-pass text rotated 180 degrees",
+    "singapore": "media/singapore.jpg: fireworks, illuminated Ferris wheel, skyline, water reflections at night; no dog, cake, snow or daytime beach"
+  },
+  "lexical": [
+    {
+      "query": "Seattle receipt",
+      "expected": [
+        "receipt"
+      ],
+      "kind": "pixel OCR literal"
+    },
+    {
+      "query": "Seattle recei",
+      "expected": [
+        "receipt"
+      ],
+      "kind": "pixel OCR prefix"
+    },
+    {
+      "query": "4826",
+      "expected": [
+        "receipt"
+      ],
+      "kind": "pixel OCR identifier"
+    },
+    {
+      "query": "Seattle 4826",
+      "expected": [
+        "receipt"
+      ],
+      "kind": "pixel OCR separated terms"
+    },
+    {
+      "query": "4826 Seattle",
+      "expected": [
+        "receipt"
+      ],
+      "kind": "pixel OCR reversed terms"
+    },
+    {
+      "query": "Seattle 482",
+      "expected": [],
+      "kind": "numeric prefix must not fabricate identifier"
+    },
+    {
+      "query": "boarding pass",
+      "expected": [
+        "boarding",
+        "inverted"
+      ],
+      "kind": "pixel OCR including rotation"
+    },
+    {
+      "query": "Boston",
+      "expected": [
+        "boarding",
+        "inverted"
+      ],
+      "kind": "pixel OCR city text"
+    },
+    {
+      "query": "gate twel",
+      "expected": [
+        "boarding",
+        "inverted"
+      ],
+      "kind": "pixel OCR prefix including rotation"
+    },
+    {
+      "query": "Holiday",
+      "expected": [
+        "singapore"
+      ],
+      "kind": "supplied tag"
+    },
+    {
+      "query": "Singapore",
+      "expected": [
+        "singapore"
+      ],
+      "kind": "supplied recorded place"
+    },
+    {
+      "query": "Marina",
+      "expected": [
+        "singapore"
+      ],
+      "kind": "supplied recorded place component"
+    },
+    {
+      "query": "PUBLIC_104.jpg",
+      "expected": [
+        "receipt"
+      ],
+      "kind": "exact source filename"
+    },
+    {
+      "query": "Screen review.jpg",
+      "expected": [
+        "boarding"
+      ],
+      "kind": "reviewed effective filename"
+    },
+    {
+      "query": "2026-10-16",
+      "expected": [
+        "receipt",
+        "boarding",
+        "inverted",
+        "singapore"
+      ],
+      "kind": "supplied verified capture date"
+    },
+    {
+      "query": "2026-10-16 Boston",
+      "expected": [
+        "boarding",
+        "inverted"
+      ],
+      "kind": "capture date with OCR"
+    },
+    {
+      "query": "2026-10-15 Boston",
+      "expected": [],
+      "kind": "date exclusion"
+    },
+    {
+      "query": "Screenshot",
+      "expected": [
+        "boarding"
+      ],
+      "kind": "supplied screenshot correction"
+    },
+    {
+      "query": "Boston",
+      "scope": "screenshots",
+      "expected": [
+        "boarding"
+      ],
+      "kind": "screenshot filter"
+    },
+    {
+      "query": "Boston",
+      "scope": "photosOnly",
+      "expected": [
+        "inverted"
+      ],
+      "kind": "exclude screenshots filter"
+    },
+    {
+      "query": "Holiday",
+      "scope": "favorites",
+      "expected": [
+        "singapore"
+      ],
+      "kind": "favorite filter"
+    },
+    {
+      "query": "Boston",
+      "scope": "favorites",
+      "expected": [],
+      "kind": "favorite exclusion"
+    },
+    {
+      "query": "archived receipt",
+      "expected": [],
+      "kind": "Trash exclusion"
+    },
+    {
+      "query": "archived receipt",
+      "scope": "trash",
+      "expected": [
+        "trashed"
+      ],
+      "kind": "explicit Trash scope"
+    },
+    {
+      "query": "unicorn",
+      "expected": [],
+      "kind": "absent literal"
+    }
+  ],
+  "semantic": [
+    {
+      "query": "fireworks over a city at night",
+      "expected": [
+        "singapore"
+      ]
+    },
+    {
+      "query": "a brightly lit ferris wheel at night",
+      "expected": [
+        "singapore"
+      ]
+    },
+    {
+      "query": "city skyline reflected in water at night",
+      "expected": [
+        "singapore"
+      ]
+    },
+    {
+      "query": "a dog on a beach",
+      "expected": []
+    },
+    {
+      "query": "birthday cake",
+      "expected": []
+    },
+    {
+      "query": "snowy mountains in daylight",
+      "expected": []
+    },
+    {
+      "query": "a boarding pass with text",
+      "expected": [
+        "boarding",
+        "inverted"
+      ]
+    },
+    {
+      "query": "a receipt with printed text",
+      "expected": [
+        "receipt"
+      ]
+    },
+    {
+      "query": "boarding pass",
+      "expected": [
+        "boarding",
+        "inverted"
+      ]
+    },
+    {
+      "query": "receipt",
+      "expected": [
+        "receipt"
+      ]
+    }
+  ],
+  "baseline": {
+    "lexicalTasks": 25,
+    "combinedTasks": 10,
+    "positiveQueries": 7,
+    "maximumFalsePositives": 6,
+    "knownFailures": [
+      {
+        "query": "a boarding pass with text",
+        "allowedFalsePositiveIDs": [
+          "receipt"
+        ],
+        "reason": "TinyCLIP confuses the public printed document layouts; lexical matches keep first-result precedence but do not block visual expansion."
+      },
+      {
+        "query": "a receipt with printed text",
+        "allowedFalsePositiveIDs": [
+          "boarding",
+          "inverted"
+        ],
+        "reason": "TinyCLIP confuses the public printed document layouts; lexical matches keep first-result precedence but do not block visual expansion."
+      },
+      {
+        "query": "boarding pass",
+        "allowedFalsePositiveIDs": [
+          "receipt"
+        ],
+        "reason": "TinyCLIP confuses the public printed document layouts; lexical matches keep first-result precedence but do not block visual expansion."
+      },
+      {
+        "query": "receipt",
+        "allowedFalsePositiveIDs": [
+          "boarding",
+          "inverted"
+        ],
+        "reason": "TinyCLIP confuses the public printed document layouts; lexical matches keep first-result precedence but do not block visual expansion."
+      }
+    ]
+  }
+}

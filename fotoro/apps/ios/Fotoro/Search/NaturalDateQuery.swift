@@ -5,7 +5,7 @@ struct NaturalDateQuery: Sendable {
   var scope: SearchScope
   var datePhrase: String?
 
-  // Deliberately small grammar: date constraints remove only their own words.
+  // Deliberately small grammar: dates and explicit leading photo requests.
   // The remaining scene/person query still needs independent indexed evidence.
   static func parse(
     _ query: String, scope: SearchScope = SearchScope(), now: Date = Date(),
@@ -17,7 +17,7 @@ struct NaturalDateQuery: Sendable {
     gregorian.minimumDaysInFirstWeek = calendar.minimumDaysInFirstWeek
     let calendar = gregorian
     let text = SearchNormalization.text(query)
-    var result = NaturalDateQuery(text: text, scope: scope)
+    var result = NaturalDateQuery(text: photoRequestText(text), scope: scope)
     func apply(_ interval: DateInterval?, prefix: String, phrase: String) -> NaturalDateQuery? {
       guard let interval else { return nil }
       var value = result
@@ -116,11 +116,18 @@ struct NaturalDateQuery: Sendable {
   private static func remaining(_ value: String) -> String {
     var words = value.split(separator: " ").map(String.init)
     if let last = words.last, ["from", "in", "on", "during"].contains(last) { words.removeLast() }
-    if let first = words.first, ["photo", "photos", "picture", "pictures"].contains(first) {
-      words.removeFirst()
-      if words.first == "of" { words.removeFirst() }
-    }
-    return words.joined(separator: " ")
+    let text = words.joined(separator: " "), subject = photoRequestText(text)
+    if subject != text { return subject }
+    return words.count == 1 && ["photo", "photos", "picture", "pictures"].contains(words[0]) ? "" : text
+  }
+  // Only complete leading photo requests are syntax; ordinary names, embedded
+  // words and unfinished requests remain literal evidence-based text.
+  private static func photoRequestText(_ value: String) -> String {
+    var words = value.split(separator: " ").map(String.init)
+    if words.starts(with: ["show", "me"]) { words.removeFirst(2) }
+    guard words.count > 2, ["photo", "photos", "picture", "pictures"].contains(words[0]),
+      words[1] == "of" else { return value }
+    return words.dropFirst(2).joined(separator: " ")
   }
   private static func minDate(_ first: Date?, _ second: Date) -> Date {
     first.map { min($0, second) } ?? second

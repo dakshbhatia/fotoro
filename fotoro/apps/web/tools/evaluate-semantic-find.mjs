@@ -2,6 +2,7 @@ import {AutoTokenizer, AutoProcessor, CLIPModel, RawImage, env} from '@huggingfa
 import assert from 'node:assert/strict';
 import {fileURLToPath} from 'node:url';
 env.allowLocalModels=false;
+if(process.env.FOTORO_PUBLIC_MODEL_CACHE)env.cacheDir=process.env.FOTORO_PUBLIC_MODEL_CACHE;
 const id='onnx-community/TinyCLIP-ViT-8M-16-Text-3M-YFCC15M-ONNX', options={revision:'9463a9c508a344c837ffefe9d724f3827bf2dc79',dtype:'q8',device:'cpu'};
 env.remotePathTemplate=`{model}/resolve/${options.revision}/`;
 const [tokenizer,processor,model]=await Promise.all([AutoTokenizer.from_pretrained(id,options),AutoProcessor.from_pretrained(id,options),CLIPModel.from_pretrained(id,options)]);

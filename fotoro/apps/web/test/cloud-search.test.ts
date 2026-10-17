@@ -170,7 +170,9 @@ test("large cached queries yield through broad candidate ranking and cancel repl
   try {
     const result = await index.searchAsync("family", options);
     assert.ok(beats > 1, "broad candidate collection and ranking must let timers run");
-    assert.deepEqual(result, index.search("family", options));
+    assert.equal(result.current?.(), true);
+    const {current: _current, ...retrieved} = result;
+    assert.deepEqual(retrieved, index.search("family", options));
     let generation = 1, published: string[] = [];
     const old = index.searchAsync("family", options, undefined, () => generation === 1).then(value => published.push(value.query));
     setTimeout(() => {generation = 2;}, 0);

@@ -34,6 +34,9 @@ def preview_files(paths, target):
 preview_sources=preview_files([
  'Fotoro/FotoroApp.swift',
  'Fotoro/Library/RecentPhotosStore.swift',
+ 'Fotoro/Library/PhotoViewerGesturePolicy.swift',
+ 'Fotoro/Library/PhotoGridSelection.swift',
+ 'Fotoro/Library/PhotoPresentationValidation.swift',
  'Fotoro/Library/PhotoBrowsing.swift',
  'Fotoro/Library/PhotoLocations.swift',
  'Fotoro/Library/PhotoCaptureMetadata.swift',

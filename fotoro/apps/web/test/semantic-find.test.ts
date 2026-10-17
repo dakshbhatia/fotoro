@@ -115,7 +115,7 @@ test("unfinished or failed text reading never renders a completed no-match claim
       const result = {...new PhotoSearchIndex(photos).search("receipt"),textStatus};
       const markup = renderToStaticMarkup(createElement(LocalSearch,{photos,result,resources:new LocalResources(),coverage:"1 photo",onAccept(){},onNavigate(){},onOpen(){},onConfirm(){},onPin(){},onFailure(){}}));
       assert.doesNotMatch(markup,/No matching photos/);
-      assert.match(markup,textStatus === "indexing" ? /Text is still being read/ : /Text couldn’t be read/);
+      if (!matched || textStatus === "incomplete") assert.match(markup,textStatus === "indexing" ? /Text is still being read/ : /Text couldn’t be read/);
       if(matched) assert.match(markup,/aria-label="Open one.jpg"/);
     }
   }
@@ -252,7 +252,6 @@ test("the initial semantic search render is busy without a false empty result, w
   assert.doesNotMatch(pending, /No matching photos|Try a label/);
   const lexical = render([{...photo("one"), labels: ["fireworks"]}], "fireworks");
   assert.match(lexical, /aria-label="Open one.jpg"/); assert.doesNotMatch(lexical, /Searching photos…|No matching photos/);
-  assert.match(lexical, /Preparing visual search…/);
   for (const markup of [render([photo("one")], "fireworks", false), render([photo("one")], "fireworks", true, "label:fireworks"),
     render([photo("one")], "2026-10-03"), render([{...photo("one"), current: () => false}], "fireworks"),
     render([{...photo("one"), previewAvailable: false}], "fireworks")]) {

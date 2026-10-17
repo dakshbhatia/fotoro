@@ -109,7 +109,7 @@ final class TransferTests: XCTestCase {
   @MainActor private func assertPromotedCommitRetry(failure: CommitRetryFailure) async throws {
     let account = try fixture(FixtureAccounts.self, "accounts").testSecrets[0]
     let s = try AppServices(root: FileManager.default.temporaryDirectory.appendingPathComponent(Wire.id()))
-    try s.configureAPI("http://127.0.0.1:8787")
+    try s.configureAPI(nativeTestAPIURL())
     try await s.auth.recover("fotoro1.\(account.accountId).\(account.recoverySecret)")
     try s.activateAccount()
     var baseline: ChangePageV1 = try await s.api.get("/v1/changes?media=1&limit=100")

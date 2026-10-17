@@ -563,7 +563,7 @@ final class AnnotationTests: XCTestCase {
     }
     let first = try AppServices(root: firstRoot)
     defer { first.vault.lock() }
-    try first.configureAPI("http://127.0.0.1:8787")
+    try first.configureAPI(nativeTestAPIURL())
     // Hosted transport losses have occurred on initial loopback recovery after
     // the build's readiness probe. Restart only this setup on one timeout/reset;
     // recover obtains a fresh challenge rather than replaying a consumed proof.
@@ -573,7 +573,7 @@ final class AnnotationTests: XCTestCase {
         break
       } catch let error as URLError where [.timedOut, .networkConnectionLost].contains(error.code) && attempt == 0 {
         try Task.checkCancellation()
-        XCTAssertEqual(first.api.baseURL.absoluteString, "http://127.0.0.1:8787")
+        XCTAssertEqual(first.api.baseURL.absoluteString, nativeTestAPIURL())
         print("Public fixture recovery setup lost transport; starting the final fresh ceremony.")
       }
     }
@@ -606,7 +606,7 @@ final class AnnotationTests: XCTestCase {
     _ = try await first.api.request("/v1/photos/\(photo.id)/annotations", method: "PUT", body: Wire.encode(readerFixture))
     let second = try AppServices(root: secondRoot)
     defer { second.vault.lock() }
-    try second.configureAPI("http://127.0.0.1:8787")
+    try second.configureAPI(nativeTestAPIURL())
     try await second.auth.recover("fotoro1.\(secret.accountId).\(secret.recoverySecret)")
     try second.activateAccount()
     try await second.sync()

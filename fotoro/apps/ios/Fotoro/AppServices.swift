@@ -111,6 +111,7 @@ enum ReviewedPhotosBackupPolicy {
   var backup: PhotosBackup
   var journal: TransferJournal
   var annotations: AnnotationSync
+  let savedTextAnalysis = SavedTextAnalysis<LocalPhoto>()
   var photoAnnotations: [String: PhotoAnnotationsV1] = [:]
   @ObservationIgnored private weak var recentPhotos: RecentPhotosStore?
   func bindRecentPhotos(_ recent: RecentPhotosStore) { recentPhotos = recent }
@@ -125,6 +126,9 @@ enum ReviewedPhotosBackupPolicy {
   @ObservationIgnored private weak var localSearch: LocalSearchStore?
   @ObservationIgnored private var savedVisualIndex: SearchIndex?
   @ObservationIgnored private var savedVisualRoot: URL?
+  private(set) var savedSemanticDeferred = 0
+  private(set) var savedSemanticFailed = 0
+  private(set) var savedSemanticNextRetry: Date?
   @ObservationIgnored private var savedVisualTask: Task<Void, Never>?
   @ObservationIgnored private var savedVisualWork = UUID()
   private struct SavedSemanticSnapshot: Equatable {
@@ -132,7 +136,9 @@ enum ReviewedPhotosBackupPolicy {
     let origin: String?
     let catalogGeneration: UInt64
     let index: ObjectIdentifier
+    let analysisWindow: PhotoAnalysisWindow
   }
+  @ObservationIgnored private var savedSemanticRetry = SavedSemanticRetry<SavedSemanticSnapshot>()
   @ObservationIgnored private var savedVisualRunningSnapshot: SavedSemanticSnapshot?
   @ObservationIgnored private var savedVisualSuccessorForWork: UUID?
   @ObservationIgnored private var savedVisualCatalogGeneration: UInt64?
@@ -219,6 +225,18 @@ enum ReviewedPhotosBackupPolicy {
     let worker: ObjectIdentifier
   }
   @ObservationIgnored private let derivedAnnotationBatch = FixedWindowWorkBatch<DerivedAnnotationBinding>()
+  private struct OwnerAnnotationEdit {
+    let photo: LocalPhoto
+    let editID: String
+    let access: PhotoAccountAccess
+    let vault: UUID
+    let origin: String
+    let catalog: ObjectIdentifier
+    let worker: ObjectIdentifier
+  }
+  @ObservationIgnored private var ownerAnnotationEdits: [String: OwnerAnnotationEdit] = [:]
+  @ObservationIgnored private var ownerAnnotationTask: Task<Void, Never>?
+
   @ObservationIgnored private var automaticSyncCancellationReasons: [UUID: NativeDiagnosticReason] = [:]
   @ObservationIgnored private var automaticSyncNeedsScan = false
   @ObservationIgnored private var automaticPrioritySource: BackupSource?
@@ -364,6 +382,73 @@ enum ReviewedPhotosBackupPolicy {
     }
     return try response.results.compactMap { try consumerSavedPhoto($0.id) }
   }
+  var savedTextCheckAvailable: Bool {
+    photoAccountAccess != nil && photoSyncForeground && (try? store.uploadsPaused()) == false
+  }
+  func prepareSavedTextContinuation() {
+    guard let access = photoAccountAccess, let origin = BackgroundUploadPolicy.origin(api.baseURL) else {
+      savedTextAnalysis.reset()
+      return
+    }
+    savedTextAnalysis.bindContinuation(preferences: .standard,
+      identity: [origin, access.account, store.root.standardizedFileURL.path])
+  }
+  func startSavedTextOver() {
+    guard savedTextCheckAvailable, !savedTextAnalysis.running else { return }
+    prepareSavedTextContinuation()
+    savedTextAnalysis.startOver()
+    checkSavedText()
+  }
+  func checkSavedText(nextBatch: Bool = false, resume: Bool = false) {
+    prepareSavedTextContinuation()
+    guard savedTextCheckAvailable, let access = photoAccountAccess,
+      let origin = BackgroundUploadPolicy.origin(api.baseURL),
+      let bundle = try? vault.requireBundle(), let card = try? session.requireCard(access.account) else { return }
+    let catalog = store, ledger = annotations.ledger
+    let processor = VisionTextProcessor()
+    let current: @MainActor () -> Bool = { [weak self] in
+      guard let self else { return false }
+      return self.savedTextCheckAvailable && self.photoAccountAccess == access
+        && self.store === catalog && self.annotations.ledger === ledger
+        && self.session.pinnedCards[access.account] == card
+        && BackgroundUploadPolicy.origin(self.api.baseURL) == origin
+    }
+    let state: @MainActor (LocalPhoto) throws -> SavedTextState = { [weak self] source in
+      guard let self, current(), let photo = try self.consumerSavedPhoto(source.id),
+        photo.metadata == source.metadata, photo.manifest == source.manifest,
+        photo.previewURL == source.previewURL else { throw CancellationError() }
+      let value = try ledger.current(photo: photo, bundle: bundle, card: card)
+      if value?.ocr != nil { return .checked }
+      guard SavedTextMedia.permitsPreviewOCR(photo.metadata.mediaType),
+        !PhotoOrganizationFacts.trashed(value?.facts),
+        let url = photo.previewURL, FileManager.default.fileExists(atPath: url.path) else { return .unavailable }
+      return .missing
+    }
+    savedTextAnalysis.start(nextBatch: nextBatch || (resume && savedTextAnalysis.resumeNextBatch), current: current, load: { cursor, limit in
+      guard current() else { throw CancellationError() }
+      // Admission is one bounded owner page, including already checked rows.
+      // Never scan the full catalog to fill an inference batch.
+      let page = try await Task.detached(priority: .utility) {
+        try catalog.ownedPhotos(accountId: access.account, after: cursor, limit: limit)
+      }.value
+      guard current() else { throw CancellationError() }
+      return SavedTextPage(sources: page.filter { ["committed", "saved"].contains($0.transferState)
+        && SavedTextMedia.permitsPreviewOCR($0.metadata.mediaType) }, nextCursor: page.last?.id, hasMore: page.count == limit)
+    }, state: state, recognize: { photo in
+      guard current(), let url = photo.previewURL,
+        let preview = try await Self.semanticPreview(url, maximumEdge: 1600) else { throw FotoroError("Saved preview is unavailable") }
+      guard current() else { throw CancellationError() }
+      let result = try await processor.recognize(preview)
+      return SavedTextRecognition(text: result.text, confidence: result.confidence)
+    }, commit: { [weak self] source, result in
+      guard let self, current(), try state(source) == .missing else { return false }
+      let applied = try ledger.fillMissingOCR(result, photo: source, bundle: bundle, card: card)
+      if applied {
+        try self.publishEditedAnnotation(source, account: access.account, bundle: bundle, card: card)
+      }
+      return applied
+    })
+  }
   // Interaction admission is independent of foreground upload permission.
   func setSavedSemanticAnalysisActive(_ active: Bool) {
     guard savedSemanticAnalysisActive != active else { return }
@@ -395,8 +480,9 @@ enum ReviewedPhotosBackupPolicy {
     let catalog = store, generation = vault.generation
     let origin = BackgroundUploadPolicy.origin(api.baseURL)
     let catalogSnapshotGeneration = consumerCatalogGeneration
+    let analysisWindow = localSearch?.automaticAnalysisWindow ?? .tenDays
     let snapshot = SavedSemanticSnapshot(access: snapshotAccess, origin: origin,
-      catalogGeneration: catalogSnapshotGeneration, index: ObjectIdentifier(index))
+      catalogGeneration: catalogSnapshotGeneration, index: ObjectIdentifier(index), analysisWindow: analysisWindow)
     if savedVisualTask != nil {
       // Only a changed hydrated snapshot requests another pass. Ordinary queries
       // cannot turn unavailable originals into a perpetual automatic retry loop.
@@ -408,12 +494,13 @@ enum ReviewedPhotosBackupPolicy {
       savedVisualUnpublishedIndex = nil
     }
     if savedVisualTask == nil {
+      savedSemanticRetry.cancel()
       let work = UUID(); savedVisualWork = work
       savedVisualFence &+= 1
       let fence = savedVisualFence
       guard (try? index.setWorkGeneration(fence)) != nil else { return }
       savedVisualRunningSnapshot = snapshot
-      let automaticScope = PhotoAnalysisScope()
+      let automaticScope = analysisWindow.scope(now: Date())
       savedVisualTask = Task { [weak self] in
         guard let self else { return }
         defer {
@@ -430,6 +517,7 @@ enum ReviewedPhotosBackupPolicy {
           !Task.isCancelled && savedVisualWork == work && vault.isUnlocked && vault.generation == generation
             && store === catalog && session.accountId == account && savedSemanticAnalysisActive && !savedSemanticBrowseInteractionActive
             && consumerCatalogGeneration == catalogSnapshotGeneration
+            && (localSearch?.automaticAnalysisWindow ?? .tenDays) == analysisWindow
             && BackgroundUploadPolicy.origin(api.baseURL) == origin
         }
         @MainActor func notifyProgress() {
@@ -454,15 +542,31 @@ enum ReviewedPhotosBackupPolicy {
             guard current(), !pending.isEmpty else { break }
             after = pending.last?.id
             for record in pending {
-              guard current(), let photo = try consumerSavedPhoto(record.id),
-                photo.metadata.originalSha256 == record.revision else { continue }
+              guard current() else { return }
+              guard let photo = try consumerSavedPhoto(record.id),
+                photo.metadata.originalSha256 == record.revision else {
+                  _ = try await Task.detached(priority: .utility) {
+                    try index.deferSemantic(.unavailable, photoID: record.id, revision: record.revision,
+                      attemptedAt: Date(), generation: fence)
+                  }.value
+                  continue
+                }
+              var failureOutcome = SearchAnalysisOutcome.unavailable
               do {
                 try await ensurePreview(photo)
                 guard current(), let updated = try consumerSavedPhoto(photo.id),
-                  updated.metadata == photo.metadata, updated.manifest == photo.manifest,
-                  let url = updated.previewURL,
-                  let preview = try await Self.semanticPreview(url) else { continue }
+                  updated.metadata == photo.metadata, updated.manifest == photo.manifest else { continue }
+                guard let url = updated.previewURL,
+                  let preview = try await Self.semanticPreview(url) else {
+                    guard current() else { return }
+                    _ = try await Task.detached(priority: .utility) {
+                      try index.deferSemantic(.unavailable, photoID: record.id, revision: record.revision,
+                        attemptedAt: Date(), generation: fence)
+                    }.value
+                    continue
+                  }
                 guard current() else { return }
+                failureOutcome = .failed
                 let vector: [Float]
                 #if DEBUG
                   if let savedVisualEmbedding { vector = try await savedVisualEmbedding(preview) }
@@ -477,25 +581,67 @@ enum ReviewedPhotosBackupPolicy {
                 }.value
                 if applied { savedVisualUnpublishedIndex = ObjectIdentifier(index) }
                 guard current() else { return }
-                guard applied else { continue }
+                guard applied else {
+                  _ = try await Task.detached(priority: .utility) {
+                    try index.deferSemantic(.failed, photoID: record.id, revision: record.revision,
+                      attemptedAt: Date(), generation: fence)
+                  }.value
+                  continue
+                }
                 completed += 1
                 if completed % 8 == 0 { notifyProgress() }
-              } catch is CancellationError { return } catch { continue }
+              } catch is CancellationError { return } catch {
+                guard current() else { return }
+                let outcome = failureOutcome
+                _ = try? await Task.detached(priority: .utility) {
+                  try index.deferSemantic(outcome, photoID: record.id, revision: record.revision,
+                    attemptedAt: Date(), generation: fence)
+                }.value
+                continue
+              }
               await Task.yield()
             }
           }
           if current(), savedVisualUnpublishedIndex == ObjectIdentifier(index) { notifyProgress() }
+          if current() { await refreshSavedSemanticRetryStatus() }
+          if current(), let deadline = savedSemanticNextRetry {
+            savedSemanticRetry.schedule(at: deadline, binding: snapshot,
+              current: { current() ? snapshot : nil },
+              retry: { [weak self] in self?.startSavedSemanticAnalysis() })
+          }
         } catch {}
       }
     }
   }
+  func refreshSavedSemanticRetryStatus() async {
+    guard let index = savedVisualIndex, let access = photoAccountAccess,
+      savedVisualSnapshotAccess == access, savedVisualSnapshotCatalog == ObjectIdentifier(store),
+      savedVisualCatalogGeneration == consumerCatalogGeneration,
+      savedVisualSnapshotOrigin == BackgroundUploadPolicy.origin(api.baseURL) else {
+      savedSemanticDeferred = 0; savedSemanticFailed = 0; savedSemanticNextRetry = nil
+      return
+    }
+    let window = localSearch?.automaticAnalysisWindow ?? .tenDays
+    let scope = window.scope(now: Date()), catalogGeneration = consumerCatalogGeneration
+    let origin = BackgroundUploadPolicy.origin(api.baseURL)
+    guard let status = try? await Task.detached(priority: .utility, operation: {
+      try index.savedSemanticRetryStatus(scope: scope)
+    }).value else { return }
+    guard photoAccountAccess == access, savedVisualIndex === index,
+      consumerCatalogGeneration == catalogGeneration, BackgroundUploadPolicy.origin(api.baseURL) == origin,
+      (localSearch?.automaticAnalysisWindow ?? .tenDays) == window else { return }
+    savedSemanticDeferred = status.deferred; savedSemanticFailed = status.failed
+    savedSemanticNextRetry = status.nextRetry
+  }
   private func invalidateSavedVisualSearch() {
+    savedSemanticRetry.cancel()
+    savedSemanticDeferred = 0; savedSemanticFailed = 0; savedSemanticNextRetry = nil
     savedVisualTask?.cancel()
     savedVisualFence &+= 1
     try? savedVisualIndex?.setWorkGeneration(savedVisualFence)
     Task { await PhotoSemanticProcessor.shared.clearQueryCache() }
   }
-  private nonisolated static func semanticPreview(_ url: URL) async throws -> SearchPreview? {
+  private nonisolated static func semanticPreview(_ url: URL, maximumEdge: Int = 512) async throws -> SearchPreview? {
     let worker = Task.detached(priority: .utility) { () throws -> SearchPreview? in
       try Task.checkCancellation()
       let data = try Data(contentsOf: url, options: .mappedIfSafe)
@@ -503,7 +649,7 @@ enum ReviewedPhotosBackupPolicy {
         let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
           kCGImageSourceCreateThumbnailFromImageAlways: true,
           kCGImageSourceCreateThumbnailWithTransform: true,
-          kCGImageSourceThumbnailMaxPixelSize: 512,
+          kCGImageSourceThumbnailMaxPixelSize: maximumEdge,
         ] as CFDictionary) else { return nil }
       try Task.checkCancellation()
       return SearchPreview(image: image)
@@ -787,6 +933,8 @@ enum ReviewedPhotosBackupPolicy {
     }
   }
   private func resetConsumerSyncObservation() {
+    ownerAnnotationTask?.cancel()
+    ownerAnnotationEdits.removeAll()
     consumerObservation = UUID()
     consumerChecking = false
     consumerOffline = false
@@ -838,6 +986,7 @@ enum ReviewedPhotosBackupPolicy {
     vault.onLock = { [weak self] in
       self?.suspendContactSync()
       self?.invalidateSavedVisualSearch()
+      self?.savedTextAnalysis.reset()
       self?.cancelSharedMomentRefresh()
       self?.suspendAutomaticPhotoSync(reason: .locked)
       self?.activatedPhotoAccount = nil
@@ -868,6 +1017,7 @@ enum ReviewedPhotosBackupPolicy {
     return access == activatedPhotoAccount ? access : nil
   }
   func activateAccount() throws {
+    savedTextAnalysis.reset()
     suspendContactSync()
     suspendAutomaticPhotoSync()
     activatedPhotoAccount = nil
@@ -986,6 +1136,7 @@ enum ReviewedPhotosBackupPolicy {
     automaticSyncFailure = nil
     photoSyncForeground = true
     kickAutomaticPhotoSync()
+    scheduleOwnerAnnotationEdits()
   }
   func expandAutomaticPhotoSyncToAll() throws {
     try Task.checkCancellation()
@@ -1021,11 +1172,11 @@ enum ReviewedPhotosBackupPolicy {
     peopleLinksSyncEngine?.foreground(active)
     if !active { peopleLinks = []; peopleLinksReview = nil }
     guard photoSyncForeground != active else {
-      if active { kickAutomaticPhotoSync() }
+      if active { kickAutomaticPhotoSync(); scheduleOwnerAnnotationEdits() }
       return
     }
     photoSyncForeground = active
-    if active { kickAutomaticPhotoSync() }
+    if active { kickAutomaticPhotoSync(); scheduleOwnerAnnotationEdits() }
     else {
       invalidateSavedVisualSearch()
       suspendAutomaticPhotoSync(reason: photoSyncSuspensionReason)
@@ -1042,7 +1193,9 @@ enum ReviewedPhotosBackupPolicy {
     return .contextChanged
   }
   private func suspendAutomaticPhotoSync(cancelBackground: Bool = false, reason: NativeDiagnosticReason = .contextChanged) {
+    savedTextAnalysis.stop()
     derivedAnnotationBatch.cancel()
+    ownerAnnotationTask?.cancel()
     cancelAutomaticPhotoSyncRetry(resetAttempts: true)
     if automaticSyncTask != nil { automaticSyncCancellationReasons[automaticSyncGeneration] = reason }
     automaticSyncGeneration = UUID()
@@ -1217,6 +1370,7 @@ enum ReviewedPhotosBackupPolicy {
       consumerOffline = false
       consumerFailure = nil
     }
+    scheduleOwnerAnnotationEdits()
     refreshConsumerSyncSummary()
     let generation = vault.generation
     let origin = BackgroundUploadPolicy.origin(api.baseURL)
@@ -1646,6 +1800,7 @@ enum ReviewedPhotosBackupPolicy {
     try catalog.setSyncIntent(enabled: false, uploadsPaused: false)
     consumerOffline = false
     consumerFailure = nil
+    scheduleOwnerAnnotationEdits()
     refreshConsumerSyncSummary()
     func check() throws {
       try Task.checkCancellation()
@@ -2025,6 +2180,7 @@ enum ReviewedPhotosBackupPolicy {
     try catalog.setConsumerLastChecked(Date())
     consumerOffline = false
     consumerFailure = nil
+    scheduleOwnerAnnotationEdits()
     NativeDiagnosticTrace.current?.completed(.catalog)
     } catch {
       try fence()
@@ -2092,6 +2248,27 @@ enum ReviewedPhotosBackupPolicy {
     try annotations.ledger.edit(value, photo: photo, bundle: bundle, card: card)
     try publishEditedAnnotation(photo, account: account, bundle: bundle, card: card)
   }
+  func keepPlaceName(_ name: String, photo: LocalPhoto, expected: PhotoLocationV1) throws {
+    let reviewed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !reviewed.isEmpty, reviewed.unicodeScalars.count <= 200,
+      !reviewed.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }), expected.isValid,
+      let access = photoAccountAccess, let account = session.accountId, access.account == account,
+      photo.manifest.ownerAccountId == account, let current = try consumerSavedPhoto(photo.id),
+      current.metadata == photo.metadata, current.manifest == photo.manifest else { throw FotoroError("Photo source changed") }
+    let catalog = store, generation = vault.generation, origin = BackgroundUploadPolicy.origin(api.baseURL)
+    let bundle = try vault.requireBundle(), card = try session.requireCard(account)
+    var value = try annotations.ledger.current(photo: current, bundle: bundle, card: card)
+      ?? PhotoAnnotationsV1(photoId: current.id, originalSha256: current.metadata.originalSha256)
+    guard value.location == expected, !PhotoOrganizationFacts.trashed(value.facts),
+      expected.name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false else { throw FotoroError("Photo location changed") }
+    var location = expected
+    location.name = reviewed
+    try value.setLocation(location)
+    guard photoAccountAccess == access, vault.isUnlocked, vault.generation == generation,
+      session.accountId == account, store === catalog, BackgroundUploadPolicy.origin(api.baseURL) == origin else { throw CancellationError() }
+    try annotations.ledger.edit(value, photo: current, bundle: bundle, card: card)
+    try publishEditedAnnotation(current, account: account, bundle: bundle, card: card)
+  }
   func setLabels(_ labels: [String], photo: LocalPhoto) throws {
     guard let account = session.accountId else { throw FotoroError("Sign in first") }
     guard store.root.lastPathComponent == account, photo.manifest.ownerAccountId == account,
@@ -2113,6 +2290,7 @@ enum ReviewedPhotosBackupPolicy {
     photoAnnotations[photo.id] = value
     consumerCatalogGeneration &+= 1
     scheduleAnnotationSummaryRefresh()
+    admitOwnerAnnotationEdit(photo)
     guard let localSearch else { return }
     let catalog = store, generation = vault.generation
     let origin = BackgroundUploadPolicy.origin(api.baseURL)
@@ -2134,6 +2312,93 @@ enum ReviewedPhotosBackupPolicy {
       try localSearch.applyAnnotationsBatch(updates)
       guard sources.count == LibraryStore.backupSourcesPhotoPageSize, let last = sources.last else { return }
       after = last.id
+    }
+  }
+  func isAutomaticallySavingAnnotation(_ photo: LocalPhoto) -> Bool {
+    ownerAnnotationSavingAllowed && ownerAnnotationEdits[photo.id]?.photo.metadata == photo.metadata
+      && ownerAnnotationEdits[photo.id]?.photo.manifest == photo.manifest
+  }
+  private var ownerAnnotationSavingAllowed: Bool {
+    photoSyncForeground && !consumerOffline && vault.isUnlocked && photoAccountAccess != nil
+      && (session.isSignedIn || session.fixture) && (try? store.uploadsPaused()) == false
+  }
+  private func ownerAnnotationSourceCurrent(_ edit: OwnerAnnotationEdit) -> Bool {
+    guard photoAccountAccess == edit.access, vault.generation == edit.vault,
+      ObjectIdentifier(store) == edit.catalog, ObjectIdentifier(annotations) == edit.worker,
+      session.accountId == edit.photo.manifest.ownerAccountId,
+      BackgroundUploadPolicy.origin(api.baseURL) == edit.origin,
+      let current = try? store.backupPhoto(edit.photo.id),
+      ["committed", "saved"].contains(current.transferState) else { return false }
+    return current.metadata == edit.photo.metadata && current.manifest == edit.photo.manifest
+  }
+  private func admitOwnerAnnotationEdit(_ photo: LocalPhoto) {
+    guard ["committed", "saved"].contains(photo.transferState),
+      let access = photoAccountAccess, let origin = BackgroundUploadPolicy.origin(api.baseURL),
+      let state = try? annotations.ledger.state(photo.id), let editID = state.editId,
+      state.originalSha256 == photo.metadata.originalSha256, state.accountId == access.account else { return }
+    ownerAnnotationEdits[photo.id] = OwnerAnnotationEdit(photo: photo, editID: editID, access: access,
+      vault: vault.generation, origin: origin, catalog: ObjectIdentifier(store), worker: ObjectIdentifier(annotations))
+    scheduleOwnerAnnotationEdits()
+  }
+  private func scheduleOwnerAnnotationEdits() {
+    guard ownerAnnotationTask == nil, !ownerAnnotationEdits.isEmpty, ownerAnnotationSavingAllowed else { return }
+    ownerAnnotationTask = Task { [weak self] in
+      guard let self else { return }
+      defer {
+        self.ownerAnnotationTask = nil
+        self.scheduleOwnerAnnotationEdits()
+      }
+      do {
+        try await Task.sleep(for: .milliseconds(400))
+        while self.ownerAnnotationSavingAllowed, !self.ownerAnnotationEdits.isEmpty {
+          try Task.checkCancellation()
+          // Share the existing sender, without replacing its coalesced drain.
+          while self.annotations.busy {
+            try await Task.sleep(for: .milliseconds(100))
+            guard self.ownerAnnotationSavingAllowed else { return }
+          }
+          let batch = Dictionary(uniqueKeysWithValues: self.ownerAnnotationEdits.keys.sorted().prefix(25).compactMap { id in
+            self.ownerAnnotationEdits[id].map { (id, $0) }
+          })
+          let worker = self.annotations
+          guard let bundle = try? self.vault.requireBundle(), let account = self.session.accountId,
+            let card = try? self.session.requireCard(account) else {
+            for (id, edit) in batch where self.ownerAnnotationEdits[id]?.editID == edit.editID {
+              self.ownerAnnotationEdits.removeValue(forKey: id)
+            }
+            return
+          }
+          let valid = { !Task.isCancelled && self.ownerAnnotationSavingAllowed
+            && self.annotations === worker && self.session.pinnedCards[account] == card
+            && batch.values.allSatisfy { self.ownerAnnotationSourceCurrent($0) } }
+          guard self.ownerAnnotationSavingAllowed else { return }
+          if !batch.values.allSatisfy({ self.ownerAnnotationSourceCurrent($0) }) {
+            for (id, edit) in batch where !self.ownerAnnotationSourceCurrent(edit)
+              && self.ownerAnnotationEdits[id]?.editID == edit.editID {
+              self.ownerAnnotationEdits.removeValue(forKey: id)
+            }
+            continue
+          }
+          if valid() {
+            await worker.resume(bundle: bundle, card: card, eligible: { photo in
+              guard let edit = batch[photo.id], self.ownerAnnotationSourceCurrent(edit),
+                let state = try? worker.ledger.state(photo.id) else { return false }
+              return state.editId == edit.editID && state.originalSha256 == photo.metadata.originalSha256
+            }, valid: valid, send: { signed in
+              let update = try Wire.decode(PhotoAnnotationsUpdateV1.self, Data(b64: signed.body))
+              _ = try await self.api.request("/v1/photos/\(update.photoId)/annotations", method: "PUT", body: Wire.encode(signed))
+            })
+          }
+          try Task.checkCancellation()
+          // A failed fingerprint waits for manual Sync or another explicit edit.
+          // A newer edit stays admitted even if its predecessor just finished.
+          for (id, edit) in batch where self.ownerAnnotationEdits[id]?.editID == edit.editID {
+            self.ownerAnnotationEdits.removeValue(forKey: id)
+          }
+          self.scheduleAnnotationSummaryRefresh()
+          await Task.yield()
+        }
+      } catch { /* Durable drafts remain available through manual Sync. */ }
     }
   }
   func searchCatalog(_ query: String, now: Date = Date(), calendar: Calendar = .current,

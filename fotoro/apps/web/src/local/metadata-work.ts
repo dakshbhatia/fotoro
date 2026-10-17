@@ -14,7 +14,10 @@ export function metadataDatePhotoIDs(photos: readonly SearchPhoto[], query: stri
 
 export function metadataBackgroundPhotoIDs(result: SearchResult, allowedIDs: ReadonlySet<string>, sources: readonly SearchResult[] = [result]) {
   const matched = new Set<string>();
-  if (result.meaning) for (const source of sources) for (const meaning of source.meanings) {
+  if (result.matches) for (const [id, match] of Object.entries(result.matches)) {
+    if (allowedIDs.has(id) && match.evidence !== "ocr" && match.evidence !== "visual") matched.add(id);
+  }
+  if (!result.matches && result.meaning) for (const source of sources) for (const meaning of source.meanings) {
     if (meaning.id !== result.meaning.id) continue;
     for (const id of meaning.photoIds) if (allowedIDs.has(id) && meaning.evidence[id] !== "ocr" && meaning.evidence[id] !== "visual") matched.add(id);
   }

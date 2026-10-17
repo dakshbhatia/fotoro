@@ -6,6 +6,46 @@ import XCTest
 @testable import Fotoro
 
 final class RecentPhotosTests: XCTestCase {
+  @MainActor func testLargePresentationValidationBoundsReadsAndKeepsSelectionShareSemantics() async throws {
+    let sources = (0..<10_000).map { RecentPhotoSource(id: "presentation-\($0)", revision: "captured") }
+    var reads: [[String]] = []
+    let store = RecentPhotosStore(authorization: { .authorized }, readPhotos: { _ in [] },
+      sourceRevisions: { ids in
+        reads.append(ids)
+        return Dictionary(uniqueKeysWithValues: ids.compactMap { id in
+          id == "presentation-17" ? nil : (id, "captured")
+        })
+      })
+    defer { store.pauseAnalysis() }
+    let result = try await store.validatePresentationInBatches(viewer: sources,
+      selection: [sources[17], sources[18]], share: [sources[19]], isCurrent: { true })
+    XCTAssertEqual(reads.count, 50)
+    XCTAssertTrue(reads.allSatisfy { $0.count <= 200 })
+    XCTAssertFalse(result.viewerIsCurrent)
+    XCTAssertEqual(result.selectedIDs, ["presentation-18"])
+    XCTAssertTrue(result.shareIsCurrent)
+  }
+
+  @MainActor func testPresentationRefreshCancelsOlderBatchedValidationBeforeItCanPublish() async {
+    let sources = (0..<1000).map { RecentPhotoSource(id: "presentation-\($0)", revision: "captured") }
+    var current = true
+    var reads = 0
+    let store = RecentPhotosStore(authorization: { .authorized }, readPhotos: { _ in [] },
+      sourceRevisions: { ids in
+        reads += 1
+        current = false
+        return Dictionary(uniqueKeysWithValues: ids.map { ($0, "captured") })
+      })
+    defer { store.pauseAnalysis() }
+    do {
+      _ = try await store.validatePresentationInBatches(viewer: sources, selection: [], share: [],
+        isCurrent: { current })
+      XCTFail("Superseded validation must not return a result that can withdraw newer UI")
+    } catch is CancellationError { }
+    catch { XCTFail("Unexpected validation error: \(error)") }
+    XCTAssertEqual(reads, 1)
+  }
+
   @MainActor func testThumbnailBurstBatchesCurrentSourcesWithoutCachingPublicationPermission() async {
     var permission = PHAuthorizationStatus.authorized
     let sources = (0..<100).map { RecentPhotoSource(id: "tile-\($0)", revision: "current") }

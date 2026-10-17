@@ -140,6 +140,30 @@ export async function diagnose<T>(operation: DiagnosticOperation, task: (context
   catch (error) {context.finish(error, true); throw error;}
 }
 export function exportDiagnostics() {restore(); return JSON.stringify({version: 1, client: "web", events: events.map(event => ({...event}))}, null, 2);}
+export interface DiagnosticSummary {
+  operation: DiagnosticOperation; succeeded: number; failed: number; cancelled: number;
+  p50Ms?: number; p95Ms?: number; reasons: Partial<Record<DiagnosticReason, number>>;
+}
+// Percentiles cover retained successful logical actions, never request/stage timings.
+export function summarizeDiagnostics(input: readonly unknown[]): DiagnosticSummary[] {
+  const groups = new Map<DiagnosticOperation, {summary: DiagnosticSummary; times: number[]}>();
+  for (const value of input) {
+    const event = sanitizedEvent(value);
+    if (!event || event.step !== "action" || event.outcome === "started") continue;
+    let group = groups.get(event.operation);
+    if (!group) {group = {summary: {operation: event.operation, succeeded: 0, failed: 0, cancelled: 0, reasons: {}}, times: []}; groups.set(event.operation, group);}
+    group.summary[event.outcome]++;
+    if (event.outcome === "succeeded") group.times.push(event.elapsedMs);
+    else group.summary.reasons[event.reason] = (group.summary.reasons[event.reason] ?? 0) + 1;
+  }
+  return diagnosticOperations.flatMap(operation => {
+    const group = groups.get(operation); if (!group) return [];
+    group.times.sort((a, b) => a - b);
+    const percentile = (fraction: number) => group.times[Math.max(0, Math.ceil(group.times.length * fraction) - 1)];
+    return [{...group.summary, ...(group.times.length ? {p50Ms: percentile(.5), p95Ms: percentile(.95)} : {})}];
+  });
+}
+export function diagnosticSummary() {restore(); return summarizeDiagnostics(events);}
 export function clearDiagnostics() {
   historyGeneration++; restored = true; events.length = 0;
   if (persistTimer !== undefined) clearTimeout(persistTimer);

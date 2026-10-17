@@ -166,9 +166,11 @@ async function performSave(session: UnlockedVault, signal: AbortSignal, diagnost
   await put("settings", session.accountId + ":last-checked", encryptPrivate(lastSuccessfulSync));
   assertVault(session);
   const result = await cachedSync(session, diagnostic);
-  assertVault(session); signal.throwIfAborted();
-  if (result.pending.some(item => item.state !== "committed") || result.annotations.length) diagnostic?.incomplete("unavailable");
-  return result;
+  try {
+    assertVault(session); signal.throwIfAborted();
+    if (result.pending.some(item => item.state !== "committed") || result.annotations.length) diagnostic?.incomplete("unavailable");
+    return result;
+  } catch (error) {for (const photo of result.photos) photo.metadataKey.fill(0); throw error;}
 }
 // Viewing the account can read saved photos, but never drains locally queued uploads or edits.
 export async function refreshSync(session = requireVault(), browse?: CatalogBrowse) {

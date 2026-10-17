@@ -81,6 +81,22 @@ test("Select best shots is explicit and appears only after the current review ha
   assert.doesNotMatch(markup({...review, recommendations: {...recommendations, ids: new Set()}}), />Select best shots</);
 });
 
+test("Saved Find counts distinguish the loaded display window from all supported matches without changing Picks scope", () => {
+  const result = new PhotoSearchIndex(Array.from({length: 205}, (_, i) => photo(String(i)))).search("trip");
+  const recommendations = recommendPhotos([photo("pick")], new Map([["pick", signal()]]));
+  const review = {active: false, busy: false, done: 0, recommendations, toggle() {}};
+  const render = (total: number, availableTotal: number, value = review) => renderToStaticMarkup(createElement(FindBestShots, {total, availableTotal, review: value, showCount: true}));
+  assert.match(render(result.photoIds.length, result.totalMatches!), />200 of 205 matches</);
+  assert.match(render(200, 200), />200 matches</);
+  assert.match(render(1, 1), />1 match</);
+  assert.match(render(199, 205), />199 of 205 matches</, "Only loaded photos count as shown while hydration is pending");
+  assert.match(render(0, 205), />0 of 205 matches</);
+  const active = render(200, 205, {...review, active: true});
+  assert.match(active, />1 of 200 matches</, "Best shots reviews the loaded candidate subset");
+  assert.doesNotMatch(active, /of 205/);
+  assert.match(render(200, 205, {...review, active: true, busy: true, done: 50}), /Choosing best shots… 50 of 200/);
+});
+
 test("a date-and-label Find chooses highlights within its matches without inheriting home selection", () => {
   const matches = [photo("soft", "trip"), photo("clear", "trip", "2026-09-01T12:02:00Z"), photo("middle", "trip", "2026-09-01T12:04:00Z")];
   const outside = Array.from({length: 100}, (_, i) => ({...photo("other" + i, "other", "2026-09-01T12:00:00Z"), favorite: true}));

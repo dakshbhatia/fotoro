@@ -1221,22 +1221,31 @@ enum SearchMetadataIntake {
     } catch { self.error = error.localizedDescription }
   }
   func confirm(_ photoID: String, meaningID: String? = nil) {
-    guard let index, let meaning = meaningID ?? response.meaning?.id else { return }
+    guard let index, let meaning = meaningID ?? self.meaningID(for: photoID) else { return }
     do { try index.confirmUse(meaning, photoID: photoID, scope: response.scope, sessionID: sessionID, now: Date()) } catch
     { self.error = error.localizedDescription }
   }
   func pin(_ photoID: String) {
-    guard let index, let meaning = response.meaning else { return }
+    guard let index, let meaning = meaningID(for: photoID) else { return }
     do {
-      try index.pinRepresentative(meaning.id, photoID: photoID, scope: response.scope)
+      try index.pinRepresentative(meaning, photoID: photoID, scope: response.scope)
       updateQuery(query)
     } catch { self.error = error.localizedDescription }
   }
+  func meaningID(for photoID: String) -> String? { response.meaningID(for: photoID) }
   func clearSyncedAnnotations() {
     do { try index?.clearSyncedAnnotations(); organizationGeneration &+= 1; updateQuery(query) }
     catch { self.error = error.localizedDescription }
   }
   func record(_ photoID: String) throws -> SearchRecord? { try index?.record(photoID) }
+  func namingRecords(after id: String?, context: SearchOrganizationReadContext) async throws -> [SearchRecord] {
+    guard browseOrganizationContext == context, let index else { throw CancellationError() }
+    let worker = Task.detached(priority: .userInitiated) { try index.namingRecords(after: id) }
+    let records = try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
+    try Task.checkCancellation()
+    guard browseOrganizationContext == context else { throw CancellationError() }
+    return records
+  }
   var browseOrganizationContext: SearchOrganizationReadContext? {
     guard ready, let index else { return nil }
     return SearchOrganizationReadContext(index: ObjectIdentifier(index), work: work.generation,

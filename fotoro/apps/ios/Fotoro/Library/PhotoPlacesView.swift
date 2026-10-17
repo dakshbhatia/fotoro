@@ -73,6 +73,15 @@ final class PhotoPlaceNames {
 }
 
 enum PhotoPlacesPolicy {
+  static func keepingAreaName(_ name: String, location: PhotoLocationV1) -> PhotoLocationV1? {
+    let area = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard location.isValid, location.name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false,
+      !area.isEmpty, area.unicodeScalars.count <= 195,
+      !area.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
+    var kept = location
+    kept.name = "Near " + area
+    return kept.isValid ? kept : nil
+  }
   static func ordered(_ items: [PhotoPlaceItem]) -> [PhotoPlaceItem] {
     var unique: [String: PhotoPlaceItem] = [:]
     for item in items { unique[item.id] = item }
@@ -127,6 +136,7 @@ struct PhotoPlacesView: View {
   @State private var metadataPageTask: Task<Void, Never>?
   @State private var metadataPageToken = UUID()
   @State private var error: String?
+  @State private var keptNameNotice: String?
   @State private var items: [PhotoPlaceItem] = []
   @State private var byID: [String: PhotoPlaceItem] = [:]
   @State private var devicePhotos: [String: RecentPhoto] = [:]
@@ -222,6 +232,7 @@ struct PhotoPlacesView: View {
           if loading { ProgressView("Loading location metadata…") }
           if search?.indexing == true && search?.assets.isEmpty == true { ProgressView("Updating location metadata…") }
           if let error { Text(error).font(.footnote).foregroundStyle(.secondary) }
+          if let keptNameNotice { Text(keptNameNotice).font(.footnote).foregroundStyle(.secondary) }
           if sourceCurrent, !items.isEmpty {
             Section {
               ForEach(visibleRows) { item in
@@ -231,6 +242,15 @@ struct PhotoPlacesView: View {
                     PhotoPlaceRow(item: item)
                   }.contentShape(.interaction, Rectangle())
                 }.buttonStyle(.plain).accessibilityHint("Open photo")
+                #if !FOTORO_LOCAL_PREVIEW
+                if case .saved = item.reference, let proposal = areaNameProposal(for: item), let name = proposal.name {
+                  VStack(alignment: .leading, spacing: 4) {
+                    Text(name).font(.footnote).foregroundStyle(.secondary)
+                    Button("Keep area name") { keepAreaName(for: item, proposal: proposal) }
+                    Text("Keeps this area label for this photo in Fotoro. GPS stays unchanged.").font(.caption).foregroundStyle(.secondary)
+                  }
+                }
+                #endif
               }
               if visibleRows.count < displayedCount {
                 Button("Show more nearby photos") { rowLimit += 80; updateRows() }
@@ -302,6 +322,7 @@ struct PhotoPlacesView: View {
     cluster.name ?? placeNames.name(for: cluster).map { "Near " + $0 } ?? snapshot.scale.areaLabel
   }
   private func clearPlaces() {
+    keptNameNotice = nil
     metadataPageToken = UUID(); metadataPageTask?.cancel(); metadataPageTask = nil; loading = false
     nameLookup?.cancel(); nameLookup = nil; placeNames.clear()
     projection?.cancel(); projection = nil; sourceToken = UUID(); selectedID = nil
@@ -405,6 +426,29 @@ struct PhotoPlacesView: View {
       await placeNames.load(clusters)
     }
   }
+  #if !FOTORO_LOCAL_PREVIEW
+  private func areaNameProposal(for item: PhotoPlaceItem) -> PhotoLocationV1? {
+    guard sourceCurrent, byID[item.id] == item,
+      let cluster = snapshot.clusters.first(where: { $0.photoIDs.contains(item.id) }),
+      let name = placeNames.name(for: cluster) else { return nil }
+    return PhotoPlacesPolicy.keepingAreaName(name, location: item.location)
+  }
+  private func keepAreaName(for item: PhotoPlaceItem, proposal: PhotoLocationV1) {
+    guard sourceCurrent, byID[item.id] == item, areaNameProposal(for: item) == proposal,
+      let name = proposal.name, case .saved(let id) = item.reference,
+      let services, services.photoAccountAccess == savedAccess,
+      let current = try? services.consumerSavedPhoto(id), current.manifest.ownerAccountId == item.owner,
+      PhotoPlacesPolicy.savedRevision(current) == item.revision, services.annotation(current).location == item.location else {
+      error = "This photo changed. Look up its area again."
+      return
+    }
+    do {
+      try services.keepPlaceName(name, photo: current, expected: item.location)
+      refreshSources()
+      keptNameNotice = "Area name kept on this device. Sync changes to keep it on your other devices."
+    } catch { self.error = error.localizedDescription }
+  }
+  #endif
   private func zoom(to cluster: PhotoPlaceCluster) {
     guard sourceCurrent, snapshot.clusters.contains(cluster) else { return }
     focusedPhotoIDs = Set(cluster.photoIDs); rowLimit = 80; updateRows()

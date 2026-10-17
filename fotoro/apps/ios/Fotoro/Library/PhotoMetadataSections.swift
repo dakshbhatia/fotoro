@@ -154,7 +154,8 @@ struct SavedPhotoOrganizationSection: View {
         .accessibilityLabel("Photo filename").submitLabel(.done).onSubmit { if valid && draft != name { apply(.name(draft)) } }
       Button("Suggest name") {
         nameDraft.edit(PhotoOrganizationFacts.suggestedName(original: photo.metadata.filename, digest: photo.metadata.originalSha256,
-          capturedAt: CameraMedia.captureDate(photo.metadata), labels: value.labels ?? [], place: value.location?.name, screenshot: screenshot))
+          capturedAt: CameraMedia.captureDate(photo.metadata), labels: value.labels ?? [], place: value.location?.name, screenshot: screenshot,
+          analysis: PhotoNameAnalysis(annotation: value, photoID: photo.manifest.photoId, digest: photo.metadata.originalSha256)))
       }
       Button("Apply name") { apply(.name(draft)) }.disabled(!valid || draft == name)
       if name != photo.metadata.filename { Button("Use original name") { apply(.name(nil)) } }
@@ -180,36 +181,173 @@ struct SavedPhotoOrganizationSection: View {
 #endif
 
 #if !FOTORO_LOCAL_PREVIEW
+import GRDB
+
+struct PhotoCleanupJournalRecord: Codable {
+  struct Source: Codable {
+    var id: String
+    var metadata: PhotoMetadataV1
+    var manifest: PhotoManifestV1
+    var transferState: String
+    func matches(_ current: Source, account: String) -> Bool {
+      id == current.id && current.manifest.photoId == id && current.manifest.ownerAccountId == account
+        && ["committed", "saved"].contains(current.transferState) && metadata == current.metadata && manifest == current.manifest
+    }
+  }
+  struct Signal: Codable {
+    var hash: UInt64
+    var luminance: Double
+    var contrast: Double
+    var sharpness: Double
+    var color: [Double]
+    init(_ value: AutomaticPhotoPickSignals) {
+      hash = value.hash; luminance = value.luminance; contrast = value.contrast; sharpness = value.sharpness; color = value.color
+    }
+    var measured: AutomaticPhotoPickSignals? {
+      guard [luminance, contrast, sharpness].allSatisfy({ $0.isFinite && (0...1).contains($0) }),
+        color.count == 3, color.allSatisfy({ $0.isFinite && (0...255).contains($0) }) else { return nil }
+      return AutomaticPhotoPickSignals(hash: hash, luminance: luminance, contrast: contrast, sharpness: sharpness, color: color)
+    }
+  }
+  var version = 1
+  var processor = "cleanup-preview-v1"
+  var account: String
+  var origin: String
+  var sources: [Source]
+  var completed: Int
+  var signals: [String: Signal]
+
+  func restored(current: [Source], retired: [Source], account: String, origin: String) -> (sources: [Source], completed: Int, signals: [String: AutomaticPhotoPickSignals])? {
+    guard version == 1, processor == "cleanup-preview-v1", self.account == account, self.origin == origin,
+      sources.count <= 4096, completed >= 0, completed <= sources.count, signals.count <= completed else { return nil }
+    let available = Dictionary(current.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+    let trashed = Dictionary(retired.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+    guard available.count == current.count else { return nil }
+    var ordered: [Source] = [], checked = 0, seen: Set<String> = [], removed: Set<String> = []
+    for (index, original) in sources.enumerated() {
+      guard seen.insert(original.id).inserted else { return nil }
+      if let latest = available[original.id] {
+        guard original.matches(latest, account: account) else { return nil }
+        ordered.append(latest)
+        if index < completed { checked += 1 }
+      } else {
+        guard let latest = trashed[original.id], original.matches(latest, account: account) else { return nil }
+        removed.insert(original.id)
+      }
+    }
+    guard ordered.count == current.count else { return nil }
+    let assessedIDs = Set(sources.prefix(completed).map(\.id))
+    var measured: [String: AutomaticPhotoPickSignals] = [:]
+    for (id, signal) in signals {
+      guard assessedIDs.contains(id), let value = signal.measured else { return nil }
+      if !removed.contains(id) { measured[id] = value }
+    }
+    return (ordered, checked, measured)
+  }
+}
+
+@MainActor private enum PhotoCleanupJournal {
+  static let key = "cleanupReview.v1"
+  static func source(_ photo: LocalPhoto) -> PhotoCleanupJournalRecord.Source {
+    .init(id: photo.id, metadata: photo.metadata, manifest: photo.manifest, transferState: photo.transferState)
+  }
+  static func read(_ services: AppServices) throws -> PhotoCleanupJournalRecord? {
+    guard services.photoAccountAccess != nil else { return nil }
+    guard let encoded = try services.store.database.read({ try String.fetchOne($0, sql: "SELECT value FROM state WHERE key=?", arguments: [key]) }),
+      encoded.utf8.count <= 4 * 1024 * 1024, let bytes = Data(base64Encoded: encoded) else { return nil }
+    let envelope = try Wire.decode(WrappedKeyV1.self, bytes), bundle = try services.vault.requireBundle()
+    let plain = try services.crypto.unwrap(envelope, key: Data(b64: bundle.vaultKey))
+    guard plain.count <= 2 * 1024 * 1024 else { return nil }
+    return try Wire.decode(PhotoCleanupJournalRecord.self, plain)
+  }
+  static func write(_ value: PhotoCleanupJournalRecord, services: AppServices, current: () -> Bool) throws -> Bool {
+    guard current(), services.photoAccountAccess != nil, value.sources.count <= 4096 else { return false }
+    let bytes = try Wire.encode(value)
+    guard bytes.count <= 2 * 1024 * 1024 else { return false }
+    let bundle = try services.vault.requireBundle()
+    let envelope = try services.crypto.wrap(bytes, key: Data(b64: bundle.vaultKey))
+    let encoded = try Wire.encode(envelope).base64EncodedString()
+    return try services.store.database.write { database in
+      guard current() else { return false }
+      try database.execute(sql: "INSERT INTO state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", arguments: [key, encoded])
+      return true
+    }
+  }
+}
+
 struct PhotoCleanupReview: View {
   @Bindable var services: AppServices
-  @State private var reasons: [String: [String]] = [:]
+  @State private var source: [LocalPhoto] = []
+  @State private var snapshot: [LocalPhoto]?
+  @State private var batchNumber = 0
+  private let batchSize = 200
+  @State private var measurements: [String: AutomaticPhotoPickSignals] = [:]
+  @State private var sourceCurrent: () -> Bool = { false }
+  @State private var runToken = UUID()
+  @State private var progressNotice: String?
   @State private var done = 0
   @State private var total = 0
-  @State private var unassessed = 0
   @State private var busy = true
   @State private var error: String?
   @State private var opened: LocalPhoto?
   @Environment(\.dismiss) private var dismiss
   @Environment(\.scenePhase) private var scenePhase
-  private var candidates: [LocalPhoto] {
-    services.photos.filter { reasons[$0.id] != nil && !PhotoOrganizationFacts.trashed(services.annotation($0).facts) }
+  private var recommendations: PhotoCleanupRecommendations {
+    guard sourceCurrent(), scenePhase == .active, services.vault.isUnlocked else { return PhotoCleanupRecommendations() }
+    let generation = services.consumerCatalogGeneration
+    let published = Dictionary(services.photos.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+    // Rendering follows the published catalog. Scan admission and the actual
+    // Trash action still validate the persisted row before accessing or editing it.
+    func identity(_ photo: LocalPhoto) -> PhotoCleanupSourceIdentity {
+      PhotoCleanupSourceIdentity(id: photo.id, metadata: photo.metadata, manifest: photo.manifest, transferState: photo.transferState)
+    }
+    let current = source.compactMap { photo -> PhotoCleanupCandidate? in
+      guard identity(photo).matches(published[photo.id].map(identity), account: services.session.accountId),
+        let annotation = services.photoAnnotations[photo.id], annotation.photoId == photo.id,
+        annotation.originalSha256 == photo.metadata.originalSha256 else { return nil }
+      return PhotoCleanupCandidate(id: photo.id, digest: photo.metadata.originalSha256,
+        favorite: annotation.favorite == true,
+        screenshot: PhotoOrganizationFacts.screenshot(annotation.facts, originalSha256: photo.metadata.originalSha256),
+        eligible: !PhotoOrganizationFacts.trashed(annotation.facts))
+    }
+    guard sourceCurrent(), services.consumerCatalogGeneration == generation else { return PhotoCleanupRecommendations() }
+    return PhotoCleanupPolicy.review(current, signals: measurements)
   }
   var body: some View {
+    let result = recommendations
+    let candidates = services.photos.filter { result.reasons[$0.id] != nil }
     NavigationStack {
       List {
         Section {
           Text("Review possible duplicates, blurry shots, and photos with little detail. Nothing is selected or removed automatically.")
-          Text("Up to 200 loaded Saved photos. Trash is recoverable and does not affect device Photos or free storage.").font(.caption).foregroundStyle(.secondary)
+          Text("Review loaded Saved photos in batches of 200. Photos outside this loaded snapshot have not been checked. Trash is recoverable and does not affect device Photos or free storage.").font(.caption).foregroundStyle(.secondary)
           if busy { ProgressView("Checking previews… \(done) / \(total)") }
-          else { Text("\(candidates.count) to review · \(unassessed) previews unassessed") }
+          else { Text("\(done) scanned · \(max(0, (snapshot?.count ?? 0) - done)) remaining · \(result.unassessed) current previews unassessed · \(candidates.count) cleanup candidates") }
+          if busy { Button("Pause review") { pauseReview() } }
+          if let progressNotice { Text(progressNotice).font(.caption).foregroundStyle(.secondary) }
+          if !busy, sourceCurrent(), let snapshot, total < snapshot.count {
+            Button("Review next \(min(batchSize, snapshot.count - total)) photos") {
+              guard !busy, sourceCurrent() else { return }
+              busy = true
+              batchNumber += 1
+            }
+          }
+          if !busy, done > 0, sourceCurrent() {
+            Button("Start review over") {
+              source = []; measurements = [:]; done = 0; total = 0
+              snapshot = eligibleLoadedPhotos
+              persistProgress()
+              busy = true; batchNumber += 1
+            }
+          }
         }
         if services.vault.isUnlocked {
           ForEach(candidates) { photo in
             Section {
               LibraryPhotoCell(photo: photo, isSelected: false, open: { opened = photo }, toggleSelection: {}, services: services).frame(maxHeight: 220)
-              Text(PhotoOrganizationFacts.name(services.annotation(photo).facts, original: photo.metadata.filename))
-              ForEach(reasons[photo.id] ?? [], id: \.self) { Text($0).font(.footnote) }
-              if services.annotation(photo).favorite == true { Label("Favorite · review carefully", systemImage: "heart") }
+              Text(PhotoOrganizationFacts.name(services.photoAnnotations[photo.id]?.facts ?? [], original: photo.metadata.filename))
+              ForEach(result.reasons[photo.id] ?? [], id: \.self) { Text($0).font(.footnote) }
+              if services.photoAnnotations[photo.id]?.favorite == true { Label("Favorite · review carefully", systemImage: "heart") }
               Button("Move to Fotoro Trash") {
                 do { try services.setOrganization(.trash(true), photo: photo) } catch { self.error = error.localizedDescription }
               }
@@ -223,32 +361,91 @@ struct PhotoCleanupReview: View {
         }
         if let error { Text(error).foregroundStyle(.secondary) }
       }.navigationTitle("Review cleanup").navigationBarTitleDisplayMode(.inline)
-        .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
-        .task { await review() }
+        .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { persistProgress(); runToken = UUID(); dismiss() } } }
+        .task(id: batchNumber) { await review() }
+        .onDisappear { persistProgress(); runToken = UUID() }
         .onChange(of: scenePhase) { _, value in if value != .active { dismiss() } }
         .onChange(of: services.vault.isUnlocked) { _, unlocked in if !unlocked { dismiss() } }
         .sheet(item: $opened) { photo in PhotoViewer(services: services, initialID: photo.id, displayedPhotos: [photo]) }
     }
   }
+  private var eligibleLoadedPhotos: [LocalPhoto] {
+    services.photos.filter { $0.manifest.ownerAccountId == services.session.accountId && ["committed", "saved"].contains($0.transferState)
+      && !PhotoOrganizationFacts.trashed(services.photoAnnotations[$0.id]?.facts ?? []) }
+  }
+  @MainActor private func persistProgress() {
+    guard sourceCurrent(), scenePhase == .active, let snapshot, let account = services.session.accountId,
+      let origin = BackgroundUploadPolicy.origin(services.api.baseURL) else { return }
+    let published = Dictionary(services.photos.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+    guard snapshot.allSatisfy({ original in
+      guard let latest = published[original.id] else { return false }
+      return PhotoCleanupJournal.source(original).matches(PhotoCleanupJournal.source(latest), account: account)
+    }) else { progressNotice = "The loaded source changed. Reopen review to check current photos."; return }
+    let retained = snapshot.filter { !PhotoOrganizationFacts.trashed(services.photoAnnotations[$0.id]?.facts ?? []) }
+    let checkedIDs = Set(source.prefix(done).map(\.id))
+    let checked = retained.filter { checkedIDs.contains($0.id) }
+    let retainedIDs = Set(checked.map(\.id))
+    let record = PhotoCleanupJournalRecord(account: account, origin: origin,
+      sources: retained.map(PhotoCleanupJournal.source), completed: checked.count,
+      signals: measurements.filter { retainedIDs.contains($0.key) }.mapValues(PhotoCleanupJournalRecord.Signal.init))
+    do {
+      let stored = try PhotoCleanupJournal.write(record, services: services, current: {
+        sourceCurrent() && scenePhase == .active && services.session.accountId == account
+          && BackgroundUploadPolicy.origin(services.api.baseURL) == record.origin
+      })
+      progressNotice = stored ? "Progress is kept encrypted on this device for this loaded scope." : "This review remains available while open. Its scope is too large to retain."
+    } catch { progressNotice = "Progress could not be kept after restart. Completed previews remain available while open." }
+  }
+  @MainActor private func pauseReview() {
+    runToken = UUID()
+    source = Array(source.prefix(done)); total = done; busy = false
+    persistProgress()
+  }
   @MainActor private func review() async {
-    let account = services.session.accountId, vault = services.vault.generation, catalog = services.store
-    let source = Array(services.photos.filter { !PhotoOrganizationFacts.trashed(services.annotation($0).facts) }.prefix(200))
-    total = source.count
-    var digestKeepers: [String: String] = [:]
-    // Keep a favorite as the representative when identical originals are loaded.
-    for photo in source.sorted(by: { services.annotation($0).favorite == true && services.annotation($1).favorite != true }) {
-      if digestKeepers[photo.metadata.originalSha256] == nil { digestKeepers[photo.metadata.originalSha256] = photo.id }
+    let account = services.session.accountId, vault = services.vault.generation, catalog = services.store, access = services.photoAccountAccess
+    guard let origin = BackgroundUploadPolicy.origin(services.api.baseURL) else { busy = false; return }
+    if snapshot != nil && !sourceCurrent() { busy = false; return }
+    if snapshot == nil {
+      sourceCurrent = {
+        access != nil && services.photoAccountAccess == access && services.vault.isUnlocked && services.vault.generation == vault
+          && services.session.accountId == account && services.store === catalog
+          && BackgroundUploadPolicy.origin(services.api.baseURL) == origin
+      }
+      snapshot = eligibleLoadedPhotos
+      if let snapshot, let account {
+        let retired = services.photos.filter { PhotoOrganizationFacts.trashed(services.photoAnnotations[$0.id]?.facts ?? []) }
+        if let record = try? PhotoCleanupJournal.read(services),
+          let restored = record.restored(current: snapshot.map(PhotoCleanupJournal.source), retired: retired.map(PhotoCleanupJournal.source),
+            account: account, origin: origin) {
+          let byID = Dictionary(snapshot.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+          self.snapshot = restored.sources.compactMap { byID[$0.id] }
+          source = Array((self.snapshot ?? []).prefix(restored.completed)); done = restored.completed; total = done
+          measurements = restored.signals; busy = false
+          progressNotice = "Previous review restored. Continue explicitly to check more of this loaded scope."
+          return
+        }
+      }
     }
+    guard sourceCurrent(), !Task.isCancelled else { busy = false; return }
+    let token = UUID(); runToken = token
+    func running() -> Bool { runToken == token && sourceCurrent() && !Task.isCancelled && scenePhase == .active }
+    let batch = Array((snapshot ?? []).dropFirst(source.count).prefix(batchSize))
+    source.append(contentsOf: batch)
+    total = source.count
+    busy = true
     func current(_ photo: LocalPhoto) -> Bool {
-      !Task.isCancelled && scenePhase == .active && services.vault.isUnlocked && services.vault.generation == vault
+      running() && services.vault.isUnlocked && services.vault.generation == vault
         && services.session.accountId == account && services.store === catalog
+        && !PhotoOrganizationFacts.trashed(services.photoAnnotations[photo.id]?.facts ?? [])
         && ((try? services.consumerSavedPhoto(photo.id)).map { $0.metadata == photo.metadata && $0.manifest == photo.manifest } ?? false)
     }
-    defer { busy = false }
-    for photo in source {
-      guard current(photo) else { return }
-      var why: [String] = []
-      if digestKeepers[photo.metadata.originalSha256] != photo.id { why.append("Identical original · keep another copy") }
+    defer { if runToken == token { busy = false } }
+    for photo in batch {
+      guard running() else { return }
+      guard current(photo), !PhotoOrganizationFacts.trashed(services.photoAnnotations[photo.id]?.facts ?? []) else {
+        done += 1
+        continue
+      }
       do {
         try await services.ensurePreview(photo)
         guard current(photo), let url = try services.consumerSavedPhoto(photo.id)?.previewURL else { throw CancellationError() }
@@ -260,25 +457,156 @@ struct PhotoCleanupReview: View {
           return try PhotoPickAnalyzer.measure(thumbnail)
         }
         let signals = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
-        guard current(photo) else { return }
-        let annotation = services.annotation(photo)
-        if let signals {
-          if annotation.favorite != true && !PhotoOrganizationFacts.screenshot(annotation.facts, originalSha256: photo.metadata.originalSha256) {
-            if signals.luminance < 0.025 || signals.luminance > 0.985 { why.append("Possibly too dark or bright") }
-            else if signals.contrast < 0.012 { why.append("Very little visible detail") }
-            else if signals.sharpness < 0.008 && signals.contrast > 0.025 { why.append("Possibly blurry") }
-          }
-        } else { unassessed += 1 }
+        guard current(photo) else { throw CancellationError() }
+        if let signals { measurements[photo.id] = signals }
       } catch {
-        guard current(photo) else { return }
-        unassessed += 1
+        guard running() else { return }
+        measurements.removeValue(forKey: photo.id)
       }
-      guard current(photo) else { return }
-      if !why.isEmpty { reasons[photo.id] = why }
+      guard running() else { return }
       done += 1
+      if done % 32 == 0 { persistProgress() }
       await Task.yield()
     }
-    NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .metadata, outcome: .completed, completed: done, unavailable: unassessed, step: .analysis))
+    guard running() else { return }
+    persistProgress()
+    NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .metadata, outcome: .completed, completed: done, unavailable: recommendations.unassessed, step: .analysis))
+  }
+}
+#endif
+
+#if !FOTORO_LOCAL_PREVIEW
+struct SavedBatchNamingPresentation: Identifiable {
+  let id = UUID()
+  let photos: [LocalPhoto]
+  let current: @MainActor () -> Bool
+}
+
+struct SavedBatchNamingReview: View {
+  @Bindable var services: AppServices
+  let presentation: SavedBatchNamingPresentation
+  @Environment(\.dismiss) private var dismiss
+  @State private var preview: [Entry] = []
+  @State private var undo: [Entry] = []
+  @State private var status = ""
+  @State private var busy = false
+  @State private var work: Task<Void, Never>?
+  struct Entry: Identifiable {
+    let photo: LocalPhoto
+    let before: String
+    let previous: String?
+    let name: String
+    var id: String { photo.id }
+  }
+  private func key(_ value: String) -> String { PhotoOrganizationFacts.nameKey(value) }
+  private func reservedNames(excluding excludedIDs: Set<String>? = nil) async throws -> Set<String> {
+    guard let account = services.session.accountId, presentation.current() else { throw FotoroError("Photo selection changed") }
+    let selected = excludedIDs ?? Set(presentation.photos.map(\.id)), revision = services.consumerCatalogGeneration
+    var reserved = Set<String>(), cursor: String?
+    while true {
+      try Task.checkCancellation()
+      guard presentation.current(), services.consumerCatalogGeneration == revision else { throw CancellationError() }
+      let page = try services.store.ownedPhotos(accountId: account, after: cursor, limit: 200)
+      for photo in page where !selected.contains(photo.id) {
+        reserved.insert(key(PhotoOrganizationFacts.name(services.annotation(photo).facts, original: photo.metadata.filename)))
+      }
+      guard let last = page.last else { break }
+      cursor = last.id
+      await Task.yield()
+      try Task.checkCancellation()
+      guard presentation.current(), services.consumerCatalogGeneration == revision else { throw CancellationError() }
+      if page.count < 200 { break }
+    }
+    return reserved
+  }
+  private func makePreview() async {
+    guard !busy else { return }
+    busy = true; defer { busy = false; work = nil }
+    do {
+      let revision = services.consumerCatalogGeneration
+      var allocator = PhotoNameAllocator(reservedNames: try await reservedNames())
+      var entries: [Entry] = []
+      for photo in presentation.photos.sorted(by: { $0.id < $1.id }) {
+        try Task.checkCancellation()
+        guard presentation.current(), let current = try services.consumerSavedPhoto(photo.id), current.metadata == photo.metadata, current.manifest == photo.manifest else { throw FotoroError("Photo source changed") }
+        let value = services.annotation(photo)
+        let proposed = PhotoOrganizationFacts.suggestedName(original: photo.metadata.filename, digest: photo.metadata.originalSha256,
+          capturedAt: CameraMedia.captureDate(photo.metadata), labels: value.labels ?? [], place: value.location?.name,
+          screenshot: PhotoOrganizationFacts.screenshot(value.facts, originalSha256: photo.metadata.originalSha256),
+          analysis: PhotoNameAnalysis(annotation: value, photoID: photo.id, digest: photo.metadata.originalSha256))
+        let name = try allocator.reserve(proposed)
+        entries.append(Entry(photo: photo, before: PhotoOrganizationFacts.name(value.facts, original: photo.metadata.filename),
+          previous: PhotoOrganizationFacts.one(value.facts, prefix: PhotoOrganizationFacts.namePrefix), name: name))
+        if entries.count.isMultiple(of: 200) {
+          await Task.yield()
+          try Task.checkCancellation()
+          guard presentation.current(), services.consumerCatalogGeneration == revision else { throw CancellationError() }
+        }
+      }
+      preview = entries; status = ""
+    } catch { preview = []; status = error.localizedDescription }
+  }
+  private func apply(restoring: Bool) async {
+    guard !busy else { return }
+    busy = true; defer { busy = false; work = nil }
+    let entries = restoring ? undo : preview
+    var completed: [Entry] = []
+    do {
+      let reserved = try await reservedNames(excluding: Set(entries.map(\.id)))
+      var revision = services.consumerCatalogGeneration
+      // Validate the whole reviewed plan before the first mutation.
+      // Removing an override restores the original filename, including names
+      // already shared by other originals before this preview.
+      for entry in entries {
+        guard presentation.current(), let current = try services.consumerSavedPhoto(entry.id),
+          current.metadata == entry.photo.metadata, current.manifest == entry.photo.manifest,
+          PhotoOrganizationFacts.name(services.annotation(current).facts, original: current.metadata.filename) == (restoring ? entry.name : entry.before),
+          (restoring && entry.previous == nil || !reserved.contains(key(restoring ? (entry.previous ?? entry.photo.metadata.filename) : entry.name))) else { throw FotoroError("Selection or names changed. Preview again.") }
+      }
+      for entry in entries where entry.before != entry.name {
+        try Task.checkCancellation()
+        guard presentation.current(), services.consumerCatalogGeneration == revision, let live = try services.consumerSavedPhoto(entry.id),
+          live.metadata == entry.photo.metadata, live.manifest == entry.photo.manifest,
+          PhotoOrganizationFacts.name(services.annotation(live).facts, original: live.metadata.filename) == (restoring ? entry.name : entry.before)
+          else { throw FotoroError("Photo selection or name changed") }
+        try services.setOrganization(.name(restoring ? entry.previous : entry.name), photo: entry.photo)
+        completed.append(entry)
+        revision = services.consumerCatalogGeneration
+        await Task.yield()
+        try Task.checkCancellation()
+        guard presentation.current(), services.consumerCatalogGeneration == revision else { throw CancellationError() }
+      }
+      status = restoring ? "Names restored." : "\(completed.count) names applied. Original files stay unchanged."
+    } catch { status = "Stopped: \(error.localizedDescription). Completed changes are kept." }
+    if restoring { undo.removeAll { entry in completed.contains { $0.id == entry.id } } }
+    else { undo = completed; preview = [] }
+  }
+  var body: some View {
+    NavigationStack {
+      List {
+        Section {
+          Text("Review names for \(presentation.photos.count) selected photos. Original files stay unchanged.")
+          Button("Preview names") { work = Task { await makePreview() } }.disabled(busy)
+          if busy { ProgressView("Preparing names") }
+        }
+        if !preview.isEmpty {
+          Section("Name preview") {
+            if preview.allSatisfy({ $0.before == $0.name }) { Text("No better names to suggest from current photo details.") }
+            ForEach(preview) { entry in
+              VStack(alignment: .leading) { Text(entry.before).foregroundStyle(.secondary); Text(entry.name) }
+            }
+            Button("Apply names") { work = Task { await apply(restoring: false) } }.disabled(busy || preview.allSatisfy { $0.before == $0.name })
+            Button("Cancel preview") { preview = [] }.disabled(busy)
+          }
+        }
+        if !undo.isEmpty { Button("Undo names") { work = Task { await apply(restoring: true) } }.disabled(busy) }
+        if !status.isEmpty { Text(status).accessibilityAddTraits(.updatesFrequently) }
+      }
+      .navigationTitle("Name selected photos")
+      .onDisappear { work?.cancel(); work = nil }
+      .onChange(of: presentation.current()) { _, valid in if !valid { dismiss() } }
+      .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+    }
   }
 }
 #endif

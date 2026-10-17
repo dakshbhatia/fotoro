@@ -24,6 +24,8 @@ export function shortlistSearchResult(result: SearchResult, recommendations?: Ph
   const matches = new Set(result.photoIds);
   const photoIds = [...(recommendations?.ids ?? [])].filter(id => matches.has(id));
   return {...result, photoIds, photoId: result.photoId && photoIds.includes(result.photoId) ? result.photoId : photoIds[0],
+    matches: result.matches ? Object.fromEntries(photoIds.map(id => [id, result.matches![id]])) : undefined,
+    totalMatches: photoIds.length, truncated: false,
     meaning: result.meaning ? {...result.meaning, photoIds} : undefined};
 }
 

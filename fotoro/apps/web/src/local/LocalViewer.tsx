@@ -1,4 +1,6 @@
+import {useViewerGestures, viewerKeyboardAllowed} from "../library/viewer-gestures";
 import {PhotoOrganization} from "../library/PhotoOrganization";
+import {localPhotoNameAnalysis} from "../library/photo-name-analysis";
 import {photoName, renamedPhotoFile, type PhotoOrganizationPatch} from "@fotoro/contracts/organization";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Icon } from "../library/icons";
@@ -29,22 +31,27 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
   const [selected, setSelected] = useState(initial), [loaded, setLoaded] = useState<{id: string; source?: unknown; url: string}>({id: "", url: ""}),
     [details, setDetails] = useState(false), [zoom, setZoom] = useState(false), [status, setStatus] = useState(""), [label, setLabel] = useState(""),
     [sharing, setSharing] = useState(false), [shareAttempt] = useState(() => new OriginalShareAttempt());
-  const panel = useRef<HTMLDivElement>(null), touch = useRef<{x: number; y: number} | undefined>(undefined);
+  const panel = useRef<HTMLDivElement>(null);
   const index = Math.max(0, photos.findIndex(p => p.id === selected)), photo = photos[index] as LocalOcrPhoto | undefined;
   const source = photo?.file ?? photo?.preview ?? photo?.previewLoader;
+  const gestures = useViewerGestures({identity: JSON.stringify([photo?.id, photo?.digest, photo?.width, photo?.height]), zoom, source: source,
+    onPrevious: () => setSelected(photos[Math.max(0, index - 1)]?.id ?? selected),
+    onNext: () => setSelected(photos[Math.min(photos.length - 1, index + 1)]?.id ?? selected),
+    onDismiss: () => {if (details) setDetails(false); else onClose();}, onDetails: () => setDetails(true),
+  });
   const currentPhoto = useRef(photo), alive = useRef(false);
   currentPhoto.current = photo;
   useDialogFocus(panel, onClose);
   useEffect(() => {alive.current = true; return () => {alive.current = false;};}, []);
   useEffect(() => {
     const key = (event: KeyboardEvent) => {
-      const editing = (event.target as HTMLElement)?.matches("input,textarea,select");
-      if (!editing && event.key === "ArrowRight") {event.preventDefault(); setSelected(photos[Math.min(photos.length - 1, index + 1)]?.id ?? selected);}
-      if (!editing && event.key === "ArrowLeft") {event.preventDefault(); setSelected(photos[Math.max(0, index - 1)]?.id ?? selected);}
+      const editing = (event.target as HTMLElement)?.closest("input,textarea,select,[contenteditable]:not([contenteditable=false]),[role=textbox],video");
+      if (viewerKeyboardAllowed(event, !!editing, zoom) && event.key === "ArrowRight") {event.preventDefault(); setSelected(photos[Math.min(photos.length - 1, index + 1)]?.id ?? selected);}
+      if (viewerKeyboardAllowed(event, !!editing, zoom) && event.key === "ArrowLeft") {event.preventDefault(); setSelected(photos[Math.max(0, index - 1)]?.id ?? selected);}
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [index, photos, selected]);
+  }, [index, photos, selected, zoom]);
   useEffect(() => {
     if (!photo) return;
     const controller = new AbortController();
@@ -67,16 +74,8 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
       {photos.length > 1 && <span>{index + 1} / {photos.length}</span>}
       <button onClick={() => setDetails(!details)} aria-label="More photo options" aria-expanded={details}>More</button>
     </div>
-    <div className="view-image" onDoubleClick={() => setZoom(!zoom)}
-      onTouchStart={event => {touch.current = event.touches.length === 1 ? {x: event.touches[0].clientX, y: event.touches[0].clientY} : undefined;}}
-      onTouchEnd={event => {
-        if (touch.current && !zoom && event.changedTouches.length === 1) {
-          const dx = event.changedTouches[0].clientX - touch.current.x, dy = event.changedTouches[0].clientY - touch.current.y;
-          if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.5) setSelected(photos[Math.max(0, Math.min(photos.length - 1, index + (dx < 0 ? 1 : -1)))].id);
-        }
-        touch.current = undefined;
-      }}>
-      {loaded.id === photo.id && loaded.source === source && loaded.url && <img className={zoom ? "zoomed" : ""} src={loaded.url} alt={photoName(photo, photo.filename)} />}
+    <div className="view-image" data-zoomed={zoom} {...gestures} onDoubleClick={event => {if ((event.target as HTMLElement).tagName === "IMG") setZoom(!zoom);}}>
+      {loaded.id === photo.id && loaded.source === source && loaded.url && <img draggable={false} className={zoom ? "zoomed" : ""} src={loaded.url} alt={photoName(photo, photo.filename)} />}
     </div>
     {!photo.file && <p className="original-gate">Reselect the original to Save or Share. <button onClick={onReselect}>Reselect</button></p>}
     <div className="viewer-bottom glass">
@@ -95,10 +94,10 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
       <button onClick={() => setZoom(!zoom)}>{zoom ? "Fit" : "Zoom"}</button>
       <p>{photo.dateSource === "selected" ? "Capture date unavailable" : new Date(photo.date).toLocaleString()}</p>
       <PhotoLocation location={photo.location} />
-      {intelligence && <Suspense fallback={null}><CloudPhotoUnderstanding apiBase="" expectedAccountId={intelligence.expectedAccountId} photoId={photo.id} sourceRevision={photo.digest ?? photo.id} scopeKey={intelligence.scopeKey}
+      {intelligence && <details><summary>AI details</summary><Suspense fallback={null}><CloudPhotoUnderstanding apiBase="" expectedAccountId={intelligence.expectedAccountId} photoId={photo.id} sourceRevision={photo.digest ?? photo.id} scopeKey={intelligence.scopeKey}
         current={() => alive.current && currentPhoto.current?.id === photo.id && currentPhoto.current.digest === photo.digest && photo.current?.() !== false && intelligence.current()}
         getPreview={async signal => {const loaded = await resources.load(photo, "preview", signal); return loaded.blob;}}
-        onObservation={observation => intelligence.keep(photo, observation)} /></Suspense>}
+        onObservation={observation => intelligence.keep(photo, observation)} /></Suspense></details>}
       {onSave && <button disabled={!photo.file || sharing || saved} onClick={() => {
         if (photo.file && !isSaved?.(photo) && alive.current && currentPhoto.current === photo) onSave(photo);
       }}>{saved ? "Saved" : "Save to Fotoro"}</button>}
@@ -106,8 +105,8 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
         if (alive.current && currentPhoto.current === photo) onFavorite(photo.id, !photo.favorite);
       }}>{photo.favorite ? "Unfavorite" : "Favorite"}</button>}
       {photo.file && <button onClick={download} disabled={sharing}>Download original</button>}
-      <PhotoOrganization key={photo.id} source={photo} saved={!!owned} onChange={onOrganization ? patch => onOrganization(photo, patch) : undefined} />
-      <h3>Tags</h3>
+      <PhotoOrganization key={photo.id} source={{...photo, analysis: localPhotoNameAnalysis(photo)}} saved={!!owned} onChange={onOrganization ? patch => onOrganization(photo, patch) : undefined} />
+      <details><summary>Tags{photo.labels?.length ? ` · ${photo.labels.length}` : ""}</summary>
       <div className="local-labels">{(photo.labels ?? []).map((value, i) => <span key={i}>{value}{onLabels && <button aria-label={"Remove tag " + value} onClick={() => onLabels(photo.id, photo.labels!.filter((_, position) => position !== i))}>×</button>}</span>)}</div>
       {onLabels && <form className="local-label-form" onSubmit={event => {
         event.preventDefault();
@@ -115,7 +114,7 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
         if (!tag) return;
         onLabels(photo.id, [...(photo.labels ?? []), tag]);
         setLabel("");
-      }}><label>New tag<input aria-label="New tag" placeholder="BTS, a place, or your own words" value={label} maxLength={120} onChange={event => setLabel(event.target.value)} /></label><button disabled={!newPhotoTag(label, photo.labels ?? [])}>Add tag</button></form>}
+      }}><label>New tag<input aria-label="New tag" placeholder="BTS, a place, or your own words" value={label} maxLength={120} onChange={event => setLabel(event.target.value)} /></label><button disabled={!newPhotoTag(label, photo.labels ?? [])}>Add tag</button></form>}</details>
       {changes && owned && <PhotoChangesNotice key={owned.manifest.ownerAccountId + owned.manifest.photoId} changes={changes} photoId={owned.manifest.photoId} digest={owned.metadata.originalSha256} accountId={owned.manifest.ownerAccountId}
         current={() => alive.current && currentPhoto.current?.id === photo.id && currentPhoto.current?.digest === photo.digest && photo.current?.() !== false && changes.current() && !!savedPhotoFor?.(photo)} />}
       <KeptObservations facts={photo.facts} photoId={photo.id} sourceRevision={photo.digest ?? photo.id} />

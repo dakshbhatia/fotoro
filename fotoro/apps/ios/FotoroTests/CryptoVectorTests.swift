@@ -31,6 +31,13 @@ func fixture<T: Decodable>(_ type: T.Type, _ name: String) throws -> T {
       contentsOf: Bundle(for: CryptoVectorTests.self).url(forResource: name, withExtension: "json")!
     ))
 }
+// Match the API helper's configurable port so parallel projects cannot capture
+// integration tests intended for this repository. The host always stays local.
+func nativeTestAPIURL() -> String {
+  let port = ProcessInfo.processInfo.environment["FOTORO_NATIVE_TEST_API_PORT"].flatMap(Int.init) ?? 8787
+  precondition((1...65535).contains(port), "Native test API requires a valid loopback port")
+  return "http://127.0.0.1:\(port)"
+}
 final class CryptoVectorTests: XCTestCase {
   func testGoldenMediaAndRejections() throws {
     let v = try fixture(Vectors.self, "crypto-v1")

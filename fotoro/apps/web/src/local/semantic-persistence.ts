@@ -15,6 +15,7 @@ export interface SemanticInferenceStore {
   write(photo: LocalPhoto, record: SemanticInferenceRecord, current: () => boolean): Promise<void>;
 }
 let persistenceEpoch = 0;
+export const privateInferenceEpoch = () => persistenceEpoch;
 export async function clearSemanticInference() {
   persistenceEpoch++;
   const choice = loadLocalChoices(); if (choice) saveLocalChoices({...choice, retain: false});
@@ -22,7 +23,7 @@ export async function clearSemanticInference() {
   const database = await db();
   await new Promise<void>((resolve, reject) => {
     const tx = database.transaction("settings", "readwrite"), cursor = tx.objectStore("settings").openCursor();
-    cursor.onsuccess = () => {const row = cursor.result; if (!row) return; if (/^[^:]+:semantic:/.test(String(row.key))) row.delete(); row.continue();};
+    cursor.onsuccess = () => {const row = cursor.result; if (!row) return; if (/^[^:]+:(?:semantic:|cleanup:)/.test(String(row.key))) row.delete(); row.continue();};
     tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error ?? new Error("Inference could not be cleared")); tx.onerror = () => {};
   });
 }

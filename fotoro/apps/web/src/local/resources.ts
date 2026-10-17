@@ -109,7 +109,11 @@ export class LocalResources {
     kind: "thumbnail" | "preview",
     signal?: AbortSignal,
   ): Promise<Raster> {
-    signal?.throwIfAborted();
+    const checkCaller = () => {
+      signal?.throwIfAborted();
+      if (photo.current?.() === false) throw new DOMException("Photo request cancelled", "AbortError");
+    };
+    checkCaller();
     const source = rasterSource(photo), previous = this.sources.get(photo.id);
     if (!previous || previous.source?.deref() !== source.source?.deref() || previous.digest !== source.digest || previous.width !== source.width || previous.height !== source.height || previous.available !== source.available) {
       this.sources.set(photo.id, source);
@@ -125,6 +129,12 @@ export class LocalResources {
       }
     }
     const identity = this.sources.get(photo.id);
+    const generation = this.generation;
+    const checkResult = () => {
+      checkCaller();
+      if (generation !== this.generation || this.sources.get(photo.id) !== identity)
+        throw new DOMException("Photo request cancelled", "AbortError");
+    };
     if (!source.source || photo.previewAvailable === false) throw new Error("Preview unavailable. Reselect this photo.");
     const key = photo.id + ":" + kind;
     const found = this.cache.get(key);
@@ -133,8 +143,12 @@ export class LocalResources {
       return found;
     }
     const pending = this.pending.get(key);
-    if (pending) {this.demand.get(key)?.add(signal); return pending;}
-    const generation = this.generation;
+    if (pending) {
+      this.demand.get(key)?.add(signal);
+      const value = await pending;
+      checkResult();
+      return value;
+    }
     const demand = new Set<AbortSignal | undefined>([signal]);
     this.demand.set(key, demand);
     const promise = this.queue.then(async () => {
@@ -189,7 +203,9 @@ export class LocalResources {
     this.queue = promise.catch(() => undefined);
     this.pending.set(key, promise);
     try {
-      return await promise;
+      const value = await promise;
+      checkResult();
+      return value;
     } finally {
       if (this.pending.get(key) === promise) {this.pending.delete(key); this.demand.delete(key);}
     }

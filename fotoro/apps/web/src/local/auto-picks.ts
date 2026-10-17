@@ -46,11 +46,12 @@ export function analyzePixels(image: {width:number; height:number; data:Uint8Cla
     sharpness: measured ? Math.sqrt(detail / measured) / 1020 : 0, color: color.map(value => value / count) as [number, number, number]};
 }
 const hashLimit = (1n << 64n) - 1n;
-function valid(signal: PhotoSignals) {
+export function validPhotoSignals(signal: PhotoSignals) {
   return typeof signal.hash === "bigint" && signal.hash >= 0n && signal.hash <= hashLimit &&
     [signal.luminance, signal.contrast, signal.sharpness].every(value => Number.isFinite(value) && value >= 0 && value <= 1) &&
     signal.color.length === 3 && signal.color.every(value => Number.isFinite(value) && value >= 0 && value <= 255);
 }
+const valid = validPhotoSignals;
 function captured(photo: LocalPhoto) {
   const time = photo.captureVerified === true && ["exif", "photos"].includes(photo.dateSource) ? Date.parse(photo.date) : NaN;
   return Number.isFinite(time) ? time : undefined;
@@ -174,11 +175,11 @@ export class PickAnalyzer {
   private controller = new AbortController();
   private cache = new Map<string, CachedSignals>();
   constructor(private readonly yieldWork: () => Promise<void> = () => new Promise(resolve => setTimeout(resolve, 0))) {}
-  private async measurements(photos:LocalPhoto[], load:(photo:LocalPhoto, signal?: AbortSignal)=>Promise<PhotoSignals>, progress?: (done:number,total:number)=>void, highlights = false) {
+  private async measurements(photos:LocalPhoto[], load:(photo:LocalPhoto, signal?: AbortSignal)=>Promise<PhotoSignals>, progress?: (done:number,total:number)=>void, highlights = false, retainCompleted = false) {
     this.cancel();
     const version = this.version, cancellationSignal = this.controller.signal, unique = [...new Map(photos.map(photo => [photo.id, photo])).values()];
     const ids = new Set(unique.map(photo => photo.id));
-    for (const id of this.cache.keys()) if (!ids.has(id)) this.cache.delete(id);
+    if (!retainCompleted) for (const id of this.cache.keys()) if (!ids.has(id)) this.cache.delete(id);
     const signals = new Map<string, PhotoSignals>();
     for (let i = 0; i < unique.length; i++) {
       if (version !== this.version) return;
@@ -207,7 +208,7 @@ export class PickAnalyzer {
         if (photo.current?.() === false) this.cache.delete(photo.id);
         else if (signal) signals.set(photo.id, signal);
       } else this.cache.delete(photo.id);
-      if ((i + 1) % 8 === 0 || i + 1 === unique.length) progress?.(i + 1, unique.length);
+      if (retainCompleted || (i + 1) % 8 === 0 || i + 1 === unique.length) progress?.(i + 1, unique.length);
       if ((i + 1) % PICK_WORK_BATCH === 0) await this.yieldWork();
     }
     return version === this.version ? {version, unique, signals} : undefined;
@@ -234,10 +235,32 @@ export class PickAnalyzer {
       await this.yieldWork();
     }
   }
-  async cleanup(photos:LocalPhoto[], load:(photo:LocalPhoto, signal?: AbortSignal)=>Promise<PhotoSignals>, progress?:(done:number,total:number)=>void) {
-    const measured = await this.measurements(photos, load, progress);
+  async cleanup(photos:LocalPhoto[], load:(photo:LocalPhoto, signal?: AbortSignal)=>Promise<PhotoSignals>, progress?:(done:number,total:number)=>void, retainCompleted = false) {
+    const measured = await this.measurements(photos, load, progress, false, retainCompleted);
     if (!measured || measured.version !== this.version) return;
     return cleanupCandidates(measured.unique, measured.signals);
+  }
+  cleanupSignals(photos: readonly LocalPhoto[]) {
+    const signals = new Map<string, PhotoSignals>(), ids = new Set(photos.map(photo => photo.id));
+    for (const id of this.cache.keys()) if (!ids.has(id)) this.cache.delete(id);
+    for (const photo of photos) {
+      const entry = this.cache.get(photo.id), source = photo.file ?? photo.preview ?? photo.previewLoader;
+      if (!source || photo.previewAvailable === false || photo.current?.() === false ||
+        entry && (entry.source.deref() !== source || entry.digest !== photo.digest || entry.width !== photo.width || entry.height !== photo.height)) {
+        this.cache.delete(photo.id);
+      } else if (entry?.signal && !isPhotoTrashed(photo)) signals.set(photo.id, entry.signal);
+    }
+    return signals;
+  }
+  restoreCleanupSignals(photos: readonly LocalPhoto[], signals: ReadonlyMap<string, PhotoSignals>) {
+    for (const photo of photos) {
+      const signal = signals.get(photo.id), source = photo.file ?? photo.preview ?? photo.previewLoader;
+      if (source && signal && valid(signal) && photo.current?.() !== false && !isPhotoTrashed(photo))
+        this.cache.set(photo.id, {source: new WeakRef(source), digest: photo.digest, width: photo.width, height: photo.height, signal});
+    }
+  }
+  cleanupSnapshot(photos: readonly LocalPhoto[]) {
+    return cleanupCandidates(photos, this.cleanupSignals(photos));
   }
   // Completed measurements survive harmless metadata updates; pending work never crosses a cancellation.
   cancel() {
@@ -287,7 +310,11 @@ export function cleanupCandidates(photos: readonly LocalPhoto[], signals: Readon
 export class CleanupAnalyzer {
   private analyzer = new PickAnalyzer();
   async run(photos: LocalPhoto[], load: (photo: LocalPhoto, signal?: AbortSignal) => Promise<PhotoSignals>, progress: (done: number) => void) {
-    return this.analyzer.cleanup(photos, load, progress);
+    return this.analyzer.cleanup(photos, load, progress, true);
   }
+  review(photos: readonly LocalPhoto[]) {return this.analyzer.cleanupSnapshot(photos);}
+  signals(photos: readonly LocalPhoto[]) {return this.analyzer.cleanupSignals(photos);}
+  restore(photos: readonly LocalPhoto[], signals: ReadonlyMap<string, PhotoSignals>) {this.analyzer.restoreCleanupSignals(photos, signals);}
+  cancel() {this.analyzer.cancel();}
   clear() {this.analyzer.clear();}
 }

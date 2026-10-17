@@ -7,14 +7,15 @@ export interface NaturalDateQuery {
 type Period = {from: number; until: number};
 const months = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
 const normalized = (value: string) => value.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().trim().replace(/\s+/g, " ");
+// Only a complete, leading photo request is syntax. Keep names such as
+// "Photo Booth", embedded words and unfinished requests as literal text.
+const photoRequestText = (value: string) => value.replace(/^(?:show me )?(?:photos?|pictures?) of (.+)$/, "$1");
 const remaining = (value: string) => {
   const words = value.split(" ").filter(Boolean);
   if (["from", "in", "on", "during"].includes(words.at(-1) ?? "")) words.pop();
-  if (["photo", "photos", "picture", "pictures"].includes(words[0])) {
-    words.shift();
-    if (words[0] === "of") words.shift();
-  }
-  return words.join(" ");
+  const text = words.join(" "), subject = photoRequestText(text);
+  if (subject !== text) return subject;
+  return words.length === 1 && ["photo", "photos", "picture", "pictures"].includes(words[0]) ? "" : text;
 };
 function firstWeekday(): number {
   try {
@@ -61,7 +62,7 @@ function relativePeriod(phrase: string, now: number, weekStart: number): Period 
   return {from: start.getTime(), until: end.getTime()};
 }
 export function parseNaturalDateQuery(query: string, options: {now?: number; firstWeekday?: number} = {}): NaturalDateQuery {
-  const text = normalized(query), result: NaturalDateQuery = {text}, now = options.now ?? Date.now();
+  const text = normalized(query), result: NaturalDateQuery = {text: photoRequestText(text)}, now = options.now ?? Date.now();
   if (!Number.isFinite(now)) return result;
   const apply = (bounds: Period, rest: string, phrase: string): NaturalDateQuery => ({text: remaining(rest), phrase, ...bounds});
   for (const phrase of ["today", "yesterday", "this week", "last week", "this month", "last month", "this year", "last year"]) {

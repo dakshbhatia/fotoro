@@ -251,29 +251,103 @@ private struct DevicePhotosPaginationFooter: View {
   }
 }
 
+struct PhotoViewerImageSizeKey: PreferenceKey {
+  static var defaultValue: CGSize? { nil }
+  static func reduce(value: inout CGSize?, nextValue: () -> CGSize?) {
+    if let next = nextValue() { value = next }
+  }
+}
+
+struct PhotoTilePressStyle: ButtonStyle {
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  func makeBody(configuration: Configuration) -> some View {
+    configuration.label
+      .scaleEffect(configuration.isPressed && !reduceMotion ? 0.98 : 1)
+      .opacity(configuration.isPressed ? 0.82 : 1)
+      .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: configuration.isPressed)
+  }
+}
+
 struct PhotoViewerStillInteraction: ViewModifier {
-  @Binding var zoom: PhotoViewerZoom
+  let zoom: PhotoViewerZoomController
   @Binding var controlsVisible: Bool
   let isCurrent: Bool
+  var imageSize: CGSize? = nil
+  var dismiss: () -> Void = {}
+  var showDetails: () -> Void = {}
+  @State private var loadedImageSize: CGSize?
+  @State private var vertical = PhotoViewerVerticalGesture()
+  @State private var verticalRejected = false
+  @GestureState private var verticalActive = false
+  @GestureState private var magnifying = false
   @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  private var animation: Animation? { reduceMotion ? nil : .easeOut(duration: 0.2) }
+  private var verticalEnabled: Bool { isCurrent && !voiceOver && !magnifying && zoom.value.scale == 1 }
   func body(content: Content) -> some View {
     GeometryReader { geometry in
+      let size = imageSize ?? loadedImageSize
       content.frame(width: geometry.size.width, height: geometry.size.height)
-        .scaleEffect(zoom.scale).offset(zoom.offset)
+        .scaleEffect(isCurrent ? zoom.value.scale : 1)
+        .offset(isCurrent ? zoom.value.offset : .zero)
+        .offset(y: isCurrent ? vertical.offset : 0)
         .frame(width: geometry.size.width, height: geometry.size.height).clipped()
         .contentShape(.interaction, Rectangle())
+        .onPreferenceChange(PhotoViewerImageSizeKey.self) { loadedImageSize = $0 }
         .highPriorityGesture(DragGesture()
-          .onChanged { if isCurrent { zoom.drag($0.translation, viewport: geometry.size) } }
-          .onEnded { if isCurrent { zoom.settleDrag($0.translation, viewport: geometry.size) } },
-          including: zoom.scale > 1 ? .all : .none)
+          .onChanged { if isCurrent { zoom.drag($0.translation, viewport: geometry.size, content: size) } }
+          .onEnded { if isCurrent { zoom.settleDrag($0.translation, viewport: geometry.size, content: size) } },
+          including: isCurrent && !voiceOver && zoom.value.scale > 1 ? .all : .none)
         .simultaneousGesture(MagnifyGesture()
-          .onChanged { if isCurrent { zoom.change($0.magnification); zoom.constrain(to: geometry.size) } }
-          .onEnded { if isCurrent { zoom.settle($0.magnification); zoom.constrain(to: geometry.size) } })
-        .onTapGesture(count: 2) { if isCurrent { zoom.toggle() } }
-        .onTapGesture { if isCurrent, !voiceOver { controlsVisible.toggle() } }
-        .onChange(of: geometry.size) { if isCurrent { zoom.constrain(to: geometry.size) } }
-        .onChange(of: voiceOver) { if isCurrent, voiceOver { controlsVisible = true } }
+          .updating($magnifying) { _, state, _ in state = true }
+          .onChanged { if isCurrent && !voiceOver { zoom.change($0.magnification); zoom.constrain(to: geometry.size, content: size) } }
+          .onEnded { if isCurrent && !voiceOver { zoom.settle($0.magnification); zoom.constrain(to: geometry.size, content: size) } })
+        .simultaneousGesture(DragGesture(minimumDistance: 12)
+          .updating($verticalActive) { _, state, _ in state = true }
+          .onChanged { value in
+            if !verticalEnabled { verticalRejected = true }
+            vertical.update(value.translation, enabled: verticalEnabled && !verticalRejected)
+          }
+          .onEnded { value in
+            let action = verticalEnabled && !verticalRejected
+              ? vertical.action(predicted: value.predictedEndTranslation, height: geometry.size.height) : nil
+            resetVertical()
+            switch action {
+            case .dismiss: dismiss()
+            case .details: showDetails()
+            case nil: break
+            }
+          })
+        .gesture(SpatialTapGesture(count: 2).exclusively(before: SpatialTapGesture(count: 1))
+          .onEnded { value in
+            guard isCurrent, !voiceOver, !magnifying else { return }
+            withAnimation(animation) {
+              switch value {
+              case .first(let tap): zoom.toggle(at: tap.location, viewport: geometry.size, content: size)
+              case .second: controlsVisible.toggle()
+              }
+            }
+          })
+        .onChange(of: geometry.size) { if isCurrent { zoom.constrain(to: geometry.size, content: size) } }
+        .onChange(of: loadedImageSize) { if isCurrent { zoom.constrain(to: geometry.size, content: size) } }
+        .onChange(of: verticalActive) { if !verticalActive { resetVertical() } }
+        .onChange(of: magnifying) {
+          if magnifying { rejectVertical() }
+        }
+        .onChange(of: zoom.value.scale) { if zoom.value.scale > 1 { rejectVertical() } }
+        .onChange(of: isCurrent) { if !isCurrent { rejectVertical() } }
+        .onChange(of: voiceOver) {
+          if voiceOver { rejectVertical(); if isCurrent { controlsVisible = true } }
+        }
     }.clipped()
+  }
+  private func rejectVertical() {
+    if verticalActive { verticalRejected = true }
+    vertical.reset()
+  }
+  private func resetVertical() {
+    withAnimation(animation) { vertical.reset() }
+    verticalRejected = false
   }
 }
 
@@ -297,10 +371,11 @@ struct RecentPhotoViewer: View {
   var save: ((RecentPhoto) -> Void)? = nil
   var share: (RecentPhoto) -> Void
   @State private var selected = ""
-  @State private var zoom = PhotoViewerZoom()
+  @State private var zoom = PhotoViewerZoomController()
   @State private var details = false
   @State private var controlsVisible = true
   @Environment(\.dismiss) private var dismiss
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   init(store: RecentPhotosStore, photos: [RecentPhoto], initialID: String,
     search: LocalSearchStore? = nil, save: ((RecentPhoto) -> Void)? = nil,
     share: @escaping (RecentPhoto) -> Void) {
@@ -319,7 +394,10 @@ struct RecentPhotoViewer: View {
     else { return false }
     return RecentPhotosPolicy.shouldLoadPage(index, current: current)
   }
-  var current: RecentPhoto? { photos.first { $0.id == selected } }
+  var current: RecentPhoto? {
+    guard let index = photoIndices[selected], photos.indices.contains(index) else { return nil }
+    return photos[index]
+  }
   var body: some View {
     NavigationStack {
       TabView(selection: $selected) {
@@ -331,11 +409,19 @@ struct RecentPhotoViewer: View {
                 RecentMotionPhotoPage(photo: photo, store: store, isCurrent: photo.id == selected)
               } else {
                 PhotosImage(photo: photo, store: store, large: true).scaledToFit()
-                  .modifier(PhotoViewerStillInteraction(zoom: $zoom, controlsVisible: $controlsVisible, isCurrent: photo.id == selected))
+                  .modifier(PhotoViewerStillInteraction(zoom: zoom, controlsVisible: $controlsVisible,
+                    isCurrent: photo.id == selected,
+                    imageSize: CGSize(width: photo.asset.pixelWidth, height: photo.asset.pixelHeight),
+                    dismiss: { dismiss() }, showDetails: { details = true }))
+                  .id(RecentPhotoSource(photo))
               }
               #else
               PhotosImage(photo: photo, store: store, large: true).scaledToFit()
-                .modifier(PhotoViewerStillInteraction(zoom: $zoom, controlsVisible: $controlsVisible, isCurrent: photo.id == selected))
+                .modifier(PhotoViewerStillInteraction(zoom: zoom, controlsVisible: $controlsVisible,
+                    isCurrent: photo.id == selected,
+                    imageSize: CGSize(width: photo.asset.pixelWidth, height: photo.asset.pixelHeight),
+                    dismiss: { dismiss() }, showDetails: { details = true }))
+                  .id(RecentPhotoSource(photo))
               #endif
             } else {
               Color.black
@@ -346,13 +432,15 @@ struct RecentPhotoViewer: View {
       }.tabViewStyle(.page(indexDisplayMode: .never)).background(.black)
         .ignoresSafeArea(.container)
         .onChange(of: selected) { zoom.reset(); controlsVisible = true }
+        .onChange(of: current.map { RecentPhotoSource($0) }) { zoom.reset(); controlsVisible = true }
+        .sensoryFeedback(.selection, trigger: selected)
         .accessibilityAction(named: "Next photo") { movePage(forward: true) }
         .accessibilityAction(named: "Previous photo") { movePage(forward: false) }
         .toolbar {
           ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() } }
           if current.map({ !$0.isVideo && !$0.isLivePhoto }) == true {
             ToolbarItem(placement: .topBarTrailing) {
-              Button(zoom.scale == 1 ? "Zoom in" : "Reset zoom", systemImage: "plus.magnifyingglass") { zoom.toggle() }
+              Button(!zoom.isZoomed ? "Zoom in" : "Reset zoom", systemImage: "plus.magnifyingglass") { withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { zoom.toggle() } }
                 .accessibilityIdentifier("photo.zoom")
             }
           }
@@ -386,6 +474,7 @@ struct RecentPhotoViewer: View {
 }
 
 private struct RecentPhotoViewerPresentation: Identifiable {
+  let validationID = UUID()
   let initial: RecentPhoto
   let photos: [RecentPhoto]
   let sources: [RecentPhotoSource]
@@ -396,6 +485,7 @@ private struct RecentPhotoViewerPresentation: Identifiable {
 }
 
 private struct SelectedRecentPhoto {
+  let validationID = UUID()
   let photo: RecentPhoto
   let source: RecentPhotoSource
   init(_ photo: RecentPhoto) { self.photo = photo; source = RecentPhotoSource(photo) }
@@ -459,6 +549,7 @@ enum PhotoPicksAdmission {
 
 struct RecentPhotosView: View {
   @State private var store = RecentPhotosStore()
+  @State private var gridSelection = PhotoGridSelectionRegistry()
   @State private var search = LocalSearchStore()
   @State private var bestShots = FindBestShotsReview()
   @State private var bestShotsTask: Task<Void, Never>?
@@ -498,8 +589,20 @@ struct RecentPhotosView: View {
   @State private var savedFavoritesOnly = false
   @State private var savedOrganization = "photos"
   @State private var cleanupOpen = false
+  @State private var deviceBatchNaming: DeviceBatchNamingPresentation?
 #endif
   @State private var selectedPhotos: [String: SelectedRecentPhoto] = [:]
+  private var gridSelectionContext: PhotoGridSelectionContext {
+    let presentation = [scope.rawValue, query, browseFilter.rawValue, browseDates.rawValue].joined(separator: "|")
+    #if !FOTORO_LOCAL_PREVIEW
+    return PhotoGridSelectionContext(photos: store.thumbnailGeneration,
+      account: services?.photoAccountAccess?.account, vault: services?.vault.generation,
+      catalog: services.map { ObjectIdentifier($0.store) }, origin: services?.api.baseURL.absoluteString,
+      presentation: presentation + "|" + savedOrganization + "|" + String(savedFavoritesOnly))
+    #else
+    return PhotoGridSelectionContext(photos: store.thumbnailGeneration, presentation: presentation)
+    #endif
+  }
   @State private var homeVisible = false
   @State private var browseInteractionActive = false
   @State private var galleryRestorationGeneration: UInt64?
@@ -523,15 +626,17 @@ struct RecentPhotosView: View {
   @State private var savedCatalogProjection = PhotoBrowseValueProjection<SavedPhotoCatalogProjectionID, SavedPhotoCatalogSnapshot>()
   @State private var savedProjection = PhotoBrowseValueProjection<SavedPhotoBrowseProjectionID, SavedPhotoBrowseSnapshot>()
   #endif
+  @State private var presentationValidationTask: Task<Void, Never>?
+  @State private var presentationValidationID = UUID()
   @State private var viewer: RecentPhotoViewerPresentation?
   @State private var pendingShare: RecentPhoto?
   @State private var shareTask: Task<Void, Never>?
   @State private var sharing: [URL] = []
   @State private var showShare = false
   @State private var preparingShare = false
-  @State private var shareMeaning: String?
-  @State private var sharedPhotoIDs: [String] = []
+  @State private var sharedMeanings: [String: String] = [:]
   @State private var shareSources: [RecentPhotoSource] = []
+  @State private var shareValidationID = UUID()
   @State private var settings = false
   @State private var places: PhotoPlacesPresentation?
   #if !FOTORO_LOCAL_PREVIEW
@@ -540,7 +645,6 @@ struct RecentPhotosView: View {
   @State private var pendingPlace: PhotoPlaceItem?
   @Environment(\.scenePhase) private var scenePhase
   @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
   private var photoColumns: [GridItem] { [GridItem(.adaptive(minimum: 160, maximum: 260), spacing: 3)] }
   private var allPhotos: Bool { scope == .photos }
@@ -826,14 +930,16 @@ struct RecentPhotosView: View {
                   failed: { store.error = $0 })
               }
             }
-          }
+          }.background(PhotoGridSelectionGesture(registry: gridSelection, context: gridSelectionContext,
+            enabled: selecting && !preparingShare && !showShare && scenePhase == .active))
           if ownedPhotos.isEmpty && !savedRefresh.isRefreshing,
             !savedHasMore || services.photos.isEmpty {
             ContentUnavailableView(savedOrganization == "trash" ? "Trash is empty" : savedOrganization == "screenshots" ? "No saved screenshots" : "No saved photos", systemImage: "photo.stack",
               description: Text(savedLibraryEmptyMessage(sync: services.automaticPhotoSync,
                 favoritesOnly: savedFavoritesOnly)))
           }
-        }.id("\(savedFavoritesOnly)|\(savedOrganization)").scrollDismissesKeyboard(.interactively)
+        }.environment(\.photoGridSelection, gridSelection)
+          .id("\(savedFavoritesOnly)|\(savedOrganization)").scrollDismissesKeyboard(.interactively)
           .defaultScrollAnchor(.top, for: .initialOffset).scrollBounceBehavior(.basedOnSize)
           .onScrollPhaseChange { _, phase in setBrowseInteractionActive(phase != .idle) }
           .onDisappear { setBrowseInteractionActive(false) }
@@ -891,6 +997,7 @@ struct RecentPhotosView: View {
         if let services { PhotoViewer(services: services, initialID: presentation.initial.id, displayedPhotos: presentation.photos) }
       }
       .onChange(of: savedViewer?.id) { if savedViewer != nil { cancelSearchPreview(reason: .inactive) } }
+      .sheet(item: $deviceBatchNaming) { DeviceBatchNamingReview(search: search, presentation: $0) }
       .sheet(isPresented: $cleanupOpen) { if let services { PhotoCleanupReview(services: services) } }
       .sheet(item: $sharedSavedPhotos) { presentation in
         if let services { ExchangeView(services: services, selected: presentation.photos) }
@@ -948,7 +1055,8 @@ struct RecentPhotosView: View {
   }
 #endif
   private var homeChrome: some View {
-    homeSearchContent.background(.black).preferredColorScheme(.dark)
+    homeSearchContent.environment(\.photoGridSelection, gridSelection)
+      .background(.black).preferredColorScheme(.dark)
         .navigationBarTitleDisplayMode(.inline)
         .toolbarVisibility(showsHomeNavigation ? .visible : .hidden, for: .navigationBar)
         .toolbar {
@@ -991,8 +1099,8 @@ struct RecentPhotosView: View {
         }
         .sheet(isPresented: $showShare, onDismiss: cleanupShare) {
           OriginalShareSheet(urls: sharing) { success in
-            if success, let meaning = shareMeaning {
-              for id in sharedPhotoIDs { search.confirm(id, meaningID: meaning) }
+            if success {
+              for (id, meaning) in sharedMeanings { search.confirm(id, meaningID: meaning) }
             }
             cleanupShare()
           }
@@ -1098,6 +1206,7 @@ struct RecentPhotosView: View {
         }
         .onDisappear {
           homeVisible = false
+          presentationValidationTask?.cancel(); presentationValidationTask = nil
           #if !FOTORO_LOCAL_PREVIEW
           cancelSearchPreview(reason: .inactive)
           #endif
@@ -1159,6 +1268,7 @@ struct RecentPhotosView: View {
       updateAutomaticAnalysisAdmission()
       if homeVisible { restorePhotos() }
     } else {
+      presentationValidationTask?.cancel(); presentationValidationTask = nil
       updateAutomaticAnalysisAdmission()
       cancelBestShots()
 #if !FOTORO_LOCAL_PREVIEW
@@ -1373,12 +1483,14 @@ struct RecentPhotosView: View {
         ProgressView(preparingBestShots ? "Checking matches…" : "Reviewing previews…")
           .font(.footnote)
       } else if let result = bestShots.snapshot {
-        Text("\(result.recommendations.ids.count) suggestions · \(result.candidates.count) of \(bestShots.matchCount) matches reviewed")
-          .font(.footnote).foregroundStyle(.secondary)
-        if result.recommendations.unassessed > 0 {
-          Text("\(result.recommendations.unassessed) previews unavailable. All matches keeps every photo reviewable.")
-            .font(.caption).foregroundStyle(.secondary)
-        }
+        DisclosureGroup("Review details") {
+          Text("\(result.recommendations.ids.count) suggestions · \(result.candidates.count) of \(bestShots.matchCount) matches reviewed")
+            .font(.footnote).foregroundStyle(.secondary)
+          if result.recommendations.unassessed > 0 {
+            Text("\(result.recommendations.unassessed) previews unavailable. All matches keeps every photo reviewable.")
+              .font(.caption).foregroundStyle(.secondary)
+          }
+        }.font(.footnote)
       }
       if let error = bestShots.error {
         Text(error).font(.caption).foregroundStyle(.secondary)
@@ -1732,7 +1844,8 @@ struct RecentPhotosView: View {
             isActive: scenePhase == .active)
         }
       }
-    }
+    }.background(PhotoGridSelectionGesture(registry: gridSelection, context: gridSelectionContext,
+      enabled: selecting && !preparingShare && !showShare && scenePhase == .active))
   }
 #if !FOTORO_LOCAL_PREVIEW
   private var timelineGallery: some View {
@@ -1775,7 +1888,8 @@ struct RecentPhotosView: View {
             failed: { store.error = $0 })
         }
       }
-    }
+    }.background(PhotoGridSelectionGesture(registry: gridSelection, context: gridSelectionContext,
+      enabled: selecting && !preparingShare && !showShare && scenePhase == .active))
   }
 #endif
   @ViewBuilder private var homeSearchContent: some View {
@@ -1852,41 +1966,25 @@ struct RecentPhotosView: View {
     }.accessibilityLabel("Photo library").accessibilityValue(scope.rawValue)
       .accessibilityIdentifier("home.scope")
   }
-  private var browseContext: some View {
-    VStack(spacing: 0) {
-      PhotoBrowseOverviewChooser(granularity: $overviewGranularity,
-        selection: overviewSelection, origin: overviewOrigin,
-        clear: { overviewSelection = nil; overviewGranularity = overviewOrigin },
-        choose: { overviewSelection = nil; overviewOrigin = overviewGranularity })
-      browseFilters
-    }
-  }
-  private var browseFilters: some View {
-    HStack(spacing: 12) {
-      Menu {
-        Picker("Dates", selection: $browseDates) {
-          Text("Last 30 days").tag(PhotoBrowseDateScope.recent)
-          Text("All dates").tag(PhotoBrowseDateScope.all)
+  @ViewBuilder private var browseContext: some View {
+    if overviewSelection != nil || browseFilter != .all {
+      HStack(spacing: 12) {
+        if let selection = overviewSelection {
+          Button {
+            overviewSelection = nil; overviewGranularity = overviewOrigin
+          } label: {
+            Label(selection.title, systemImage: "chevron.left")
+          }.accessibilityIdentifier("gallery.overview.clear")
         }
-      } label: {
-        Label(browseDates == .recent ? "Last 30 days" : "All dates", systemImage: "calendar")
-          .font(.caption).foregroundStyle(Color.secondary).frame(minHeight: 44)
-      }.accessibilityIdentifier("gallery.dateScope")
-      Spacer(minLength: 0)
-      if browseFilter != .all {
-        Button { browseFilter = .all } label: {
-          Label(browseFilterTitle, systemImage: "xmark.circle.fill").font(.caption.weight(.medium))
-            .frame(minHeight: 44)
-        }.buttonStyle(.plain).accessibilityLabel("Clear \(browseFilterTitle) filter")
-          .accessibilityIdentifier("gallery.filter.clear")
-      }
-      Menu { browseFilterPicker } label: {
-        Image(systemName: browseFilter == .all ? "line.3.horizontal.decrease" : "line.3.horizontal.decrease.circle.fill")
-          .font(.subheadline).foregroundStyle(browseFilter == .all ? Color.secondary : Color.accentColor)
-          .frame(width: 44, height: 44)
-      }.accessibilityLabel("Filter photos").accessibilityValue(browseFilterTitle)
-        .accessibilityIdentifier("gallery.filter.menu")
-    }.padding(.horizontal, 16)
+        Spacer(minLength: 0)
+        if browseFilter != .all {
+          Button { browseFilter = .all } label: {
+            Label(browseFilterTitle, systemImage: "xmark.circle.fill")
+          }.accessibilityLabel("Clear \(browseFilterTitle) filter")
+            .accessibilityIdentifier("gallery.filter.clear")
+        }
+      }.font(.caption).buttonStyle(.plain).frame(minHeight: 44).padding(.horizontal, 16)
+    }
   }
   private var browseFilterTitle: String {
     switch browseFilter {
@@ -1911,7 +2009,24 @@ struct RecentPhotosView: View {
       if !allPhotos {
         Menu { browseFilterPicker } label: { Label("Filter", systemImage: "line.3.horizontal.decrease") }
       }
-      if allPhotos { Toggle("Group by moment", isOn: $groupMoments) }
+      if allPhotos {
+        Menu("View", systemImage: "square.grid.2x2") {
+          Picker("Photo overview", selection: Binding(get: { overviewGranularity }, set: {
+            overviewGranularity = $0; overviewSelection = nil; overviewOrigin = $0
+          })) {
+            Text("Days").tag(PhotoBrowseOverviewGranularity.days)
+            Text("Months").tag(PhotoBrowseOverviewGranularity.months)
+            Text("Years").tag(PhotoBrowseOverviewGranularity.years)
+          }.accessibilityIdentifier("gallery.overview")
+          Picker("Dates", selection: $browseDates) {
+            Text("Last 30 days").tag(PhotoBrowseDateScope.recent)
+            Text("All dates").tag(PhotoBrowseDateScope.all)
+          }.accessibilityIdentifier("gallery.dateScope")
+          Toggle("Group by moment", isOn: $groupMoments)
+        }
+        Menu { browseFilterPicker } label: { Label("Filter", systemImage: "line.3.horizontal.decrease") }
+          .accessibilityIdentifier("gallery.filter.menu")
+      }
     }
   }
   #if !FOTORO_LOCAL_PREVIEW
@@ -1943,35 +2058,13 @@ struct RecentPhotosView: View {
     }
   #endif
   private var selectionTray: some View {
-    Group {
-      if dynamicTypeSize.isAccessibilitySize {
-        HStack(spacing: 12) {
-          selectionSummary
-          Spacer(minLength: 0)
-          Menu { selectionActions } label: {
-            Label("Actions", systemImage: "ellipsis").labelStyle(.iconOnly)
-              .frame(width: 44, height: 44)
-          }
-            .accessibilityLabel("Selected photo actions")
-            .accessibilityIdentifier("selection.actions")
-        }
-      } else {
-        ViewThatFits(in: .horizontal) {
-          HStack(spacing: 12) {
-            selectionSummary
-            Spacer(minLength: 0)
-            selectionActions
-          }
-          VStack(alignment: .leading, spacing: 8) {
-            selectionSummary
-            HStack(spacing: 12) { selectionActions; Spacer(minLength: 0) }
-          }
-          VStack(alignment: .leading, spacing: 8) {
-            selectionSummary
-            selectionActions
-          }
-        }
-      }
+    HStack(spacing: 12) {
+      selectionSummary
+      Spacer(minLength: 0)
+      Menu { selectionActions } label: {
+        Label("Organize", systemImage: "ellipsis.circle").frame(minHeight: 44)
+      }.accessibilityLabel("Selected photo actions")
+        .accessibilityIdentifier("selection.actions")
     }.controlSize(.large).padding(14).glassEffect(.regular, in: .rect(cornerRadius: 24))
       .padding(.horizontal, 12).padding(.bottom, 8)
   }
@@ -1999,6 +2092,9 @@ struct RecentPhotosView: View {
         .accessibilityIdentifier("selection.album")
     }
     if !selected.isEmpty {
+      Button("Name device photos", systemImage: "textformat") { openDeviceBatchNaming() }
+        .buttonStyle(.bordered).frame(minHeight: 44).disabled(preparingShare || showShare)
+        .accessibilityHint("Name only the selected device photos. Saved selections are unchanged.")
       Button("Save", systemImage: "icloud.and.arrow.up") {
         reviewSave(selectedPhotos.values.map(\.source).sorted { $0.id < $1.id })
       }.buttonStyle(.bordered).fixedSize(horizontal: true, vertical: false).frame(minHeight: 44)
@@ -2010,6 +2106,21 @@ struct RecentPhotosView: View {
     #endif
   }
   #if !FOTORO_LOCAL_PREVIEW
+  private func openDeviceBatchNaming() {
+    let photos = selectedPhotos.values.map(\.photo).sorted { $0.id < $1.id }
+    let sources = selectedPhotos.mapValues(\.source)
+    let savedIDs = selectedSavedPhotos.ids, permissionGeneration = store.thumbnailGeneration
+    let service = services, account = services?.session.accountId, access = services?.photoAccountAccess
+    let origin = services?.api.origin, generation = services?.vault.generation
+    guard !photos.isEmpty else { return }
+    deviceBatchNaming = DeviceBatchNamingPresentation(photos: photos, current: {
+      homeVisible && store.thumbnailGeneration == permissionGeneration && search.browseOrganizationContext != nil
+        && selectedPhotos.mapValues(\.source) == sources && selectedSavedPhotos.ids == savedIDs
+        && services === service && services?.session.accountId == account && services?.photoAccountAccess == access
+        && services?.api.origin == origin && services?.vault.generation == generation
+        && RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite))
+    })
+  }
   private func openAlbums(incoming: FotoroAlbumInvitation? = nil) {
     do {
       if services == nil { services = try AppServices() }
@@ -2079,6 +2190,15 @@ struct RecentPhotosView: View {
           } label: {
             Label("Photo analysis", systemImage: "viewfinder")
           }.accessibilityIdentifier("settings.analysis")
+#if !FOTORO_LOCAL_PREVIEW
+          if let services {
+            NavigationLink {
+              SavedTextAnalysisView(services: services)
+            } label: {
+              Label("Text in Saved photos", systemImage: "text.viewfinder")
+            }.accessibilityIdentifier("settings.savedText")
+          }
+#endif
         }
         Section("Photos access") {
           Button("Refresh photos") { restorePhotos(); settings = false }
@@ -2115,27 +2235,55 @@ struct RecentPhotosView: View {
 #endif
   }
   private func validatePhotosPresentation() {
-    let selection = selectedPhotos.values.map(\.source)
+    presentationValidationTask?.cancel()
+    let token = UUID()
+    presentationValidationID = token
+    let viewerSources = viewer?.sources ?? []
+    let viewerID = viewer?.validationID
+    let selectionIDs = selectedPhotos.mapValues(\.validationID)
+    let shareID = shareValidationID
+    let selection = Set(selectedPhotos.values.map(\.source))
     let pending = pendingShare.map { [RecentPhotoSource($0)] } ?? []
-    let validation = store.validatePresentation(viewer: viewer?.sources ?? [], selection: selection,
-      share: shareSources + pending)
-    let previousCount = selectedPhotos.count
-    selectedPhotos = selectedPhotos.filter { validation.selectedIDs.contains($0.key) }
-    if previousCount > selectedPhotos.count {
-      store.error = "Some selected photos changed or are no longer available."
-    }
-    if validation.withdrawsDeviceShare(shareSources + pending) {
-      pendingShare = nil
-      shareTask?.cancel()
-      cleanupShare()
-    }
-    if !validation.viewerIsCurrent { viewer = nil }
+    let shares = shareSources
 #if !FOTORO_LOCAL_PREVIEW
-    if let photo = pendingSavePhoto,
-      !store.validatePresentation(viewer: [], selection: [], share: [RecentPhotoSource(photo)]).shareIsCurrent {
-      pendingSavePhoto = nil
-    }
+    let pendingSave = pendingSavePhoto.map(RecentPhotoSource.init)
 #endif
+    let current: @MainActor () -> Bool = {
+      presentationValidationID == token && scenePhase == .active
+    }
+    presentationValidationTask = Task { @MainActor in
+      defer { if presentationValidationID == token { presentationValidationTask = nil } }
+      do {
+        let validation = try await store.validatePresentationInBatches(viewer: viewerSources,
+          selection: Array(selection), share: shares + pending, isCurrent: current)
+        try Task.checkCancellation()
+        guard current() else { return }
+        // Each surface withdraws only the identities this pass inspected. A
+        // newly selected B must not shield unchanged stale A from withdrawal.
+        let withdrawn = PhotoPresentationValidation.withdrawnSelection(captured: selectionIDs,
+          current: selectedPhotos.mapValues(\.validationID), valid: validation.selectedIDs)
+        if !withdrawn.isEmpty {
+          selectedPhotos = selectedPhotos.filter { !withdrawn.contains($0.key) }
+          store.error = "Some selected photos changed or are no longer available."
+        }
+        if shareValidationID == shareID, shareSources == shares,
+          (pendingShare.map { [RecentPhotoSource($0)] } ?? []) == pending,
+          validation.withdrawsDeviceShare(shares + pending) {
+          pendingShare = nil
+          shareTask?.cancel()
+          cleanupShare()
+        }
+        if viewer?.validationID == viewerID, !validation.viewerIsCurrent { viewer = nil }
+#if !FOTORO_LOCAL_PREVIEW
+        if pendingSavePhoto.map(RecentPhotoSource.init) == pendingSave, let photo = pendingSavePhoto,
+          !store.validatePresentation(viewer: [], selection: [], share: [RecentPhotoSource(photo)]).shareIsCurrent {
+          pendingSavePhoto = nil
+        }
+#endif
+      } catch is CancellationError {
+        // A superseded snapshot must never withdraw newer UI or publish errors.
+      } catch { }
+    }
   }
   private func restorePhotos() {
     store.restoreAccess()
@@ -2377,6 +2525,7 @@ struct RecentPhotosView: View {
     guard !preparingShare, !showShare, !photos.isEmpty else { return }
     preparingShare = true
     let sources = photos.map(RecentPhotoSource.init)
+    shareValidationID = UUID()
     shareSources = sources
     shareTask = Task {
       defer { preparingShare = false; shareTask = nil; if !showShare { shareSources = [] } }
@@ -2386,8 +2535,9 @@ struct RecentPhotosView: View {
         try Task.checkCancellation()
         guard store.validatePresentation(viewer: [], selection: [], share: sources).shareIsCurrent else { throw CancellationError() }
         sharing = exported
-        shareMeaning = search.hasSearch ? search.response.meaning?.id : nil
-        sharedPhotoIDs = photos.map(\.id)
+        sharedMeanings = search.hasSearch ? Dictionary(photos.compactMap { photo in
+          search.meaningID(for: photo.id).map { (photo.id, $0) }
+        }, uniquingKeysWith: { first, _ in first }) : [:]
         showShare = true
       } catch is CancellationError { removeShareFiles(exported) }
       catch { removeShareFiles(exported); store.error = error.localizedDescription }
@@ -2398,6 +2548,7 @@ struct RecentPhotosView: View {
     RecentShareExports.remove(urls)
   }
   private func cleanupShare() {
+    shareValidationID = UUID()
     #if !FOTORO_LOCAL_PREVIEW
     removeShareFiles(deviceShareExports)
     ConsumerShareExports.remove(savedShareExports)
@@ -2410,8 +2561,7 @@ struct RecentPhotosView: View {
     #endif
     sharing = []
     showShare = false
-    shareMeaning = nil
-    sharedPhotoIDs = []
+    sharedMeanings = [:]
     shareSources = []
   }
 #if !FOTORO_LOCAL_PREVIEW
@@ -2438,6 +2588,7 @@ struct RecentPhotosView: View {
       }
     }
     preparingShare = true
+    shareValidationID = UUID()
     shareSources = sources
     savedShareSources = saved
     savedShareBinding = saved.isEmpty ? nil : binding
@@ -2471,8 +2622,9 @@ struct RecentPhotosView: View {
         deviceShareExports = completed.device
         savedShareExports = completed.saved
         sharing = completed.urls
-        shareMeaning = search.hasSearch ? search.response.meaning?.id : nil
-        sharedPhotoIDs = device.map(\.id)
+        sharedMeanings = search.hasSearch ? Dictionary(device.compactMap { photo in
+          search.meaningID(for: photo.id).map { (photo.id, $0) }
+        }, uniquingKeysWith: { first, _ in first }) : [:]
         showShare = true
         pending = nil
       } catch is CancellationError {
@@ -2740,7 +2892,8 @@ private struct RecentPhotoCell: View {
         // Clipping only trims pixels; aspect-fill content can still claim a
         // neighboring tile's touches unless the label's hit region is bounded.
         .contentShape(.interaction, Rectangle())
-    }.buttonStyle(.plain)
+    }.buttonStyle(PhotoTilePressStyle())
+      .modifier(PhotoGridSelectionTile(id: photo.id + "|" + photo.sourceRevision, selected: selected, toggle: toggle))
       .accessibilityValue(accessibilityStatus(syncText: syncText))
       .contextMenu { Button(selected ? "Deselect" : "Select", action: toggle) }
   }
@@ -2773,37 +2926,6 @@ private struct PhotoHomeCloudLabel: View {
   }
 }
 #endif
-
-private struct PhotoBrowseOverviewChooser: View {
-  @Binding var granularity: PhotoBrowseOverviewGranularity
-  let selection: PhotoBrowseOverviewSelection?
-  let origin: PhotoBrowseOverviewGranularity
-  let clear: () -> Void
-  let choose: () -> Void
-  var body: some View {
-    VStack(alignment: .leading, spacing: 8) {
-      if let selection {
-        HStack {
-          Button(action: clear) {
-            Label(origin == .years ? "All years" : "All months", systemImage: "chevron.left")
-          }.buttonStyle(.plain).frame(minHeight: 44)
-            .accessibilityIdentifier("gallery.overview.clear")
-          Spacer(minLength: 8)
-          Text(selection.title).font(.subheadline).foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-        }
-      }
-      Picker("Photo overview", selection: Binding(get: { granularity }, set: {
-        granularity = $0
-        choose()
-      })) {
-        Text("Days").tag(PhotoBrowseOverviewGranularity.days)
-        Text("Months").tag(PhotoBrowseOverviewGranularity.months)
-        Text("Years").tag(PhotoBrowseOverviewGranularity.years)
-      }.pickerStyle(.segmented).accessibilityIdentifier("gallery.overview")
-    }.padding(.horizontal, 16).padding(.top, 8)
-  }
-}
 
 private struct PhotoBrowseOverviewCard<Cover: View>: View {
   let group: PhotoBrowseOverviewGroup
@@ -2842,3 +2964,142 @@ private struct PhotoBrowseSuggestionRow: View {
       .accessibilityHint("Search permitted photo metadata")
   }
 }
+
+#if !FOTORO_LOCAL_PREVIEW
+struct DeviceBatchNamingPresentation: Identifiable {
+  let id = UUID()
+  let photos: [RecentPhoto]
+  let current: @MainActor () -> Bool
+}
+
+struct DeviceBatchNamingReview: View {
+  @Bindable var search: LocalSearchStore
+  let presentation: DeviceBatchNamingPresentation
+  @Environment(\.dismiss) private var dismiss
+  @State private var preview: [Entry] = []
+  @State private var undo: [Entry] = []
+  @State private var busy = false
+  @State private var status = ""
+  @State private var work: Task<Void, Never>?
+  struct Entry: Identifiable {
+    let photo: RecentPhoto
+    let original: String
+    let before: String
+    let previous: String?
+    let name: String
+    var id: String { photo.id }
+  }
+  private func key(_ value: String) -> String { PhotoOrganizationFacts.nameKey(value) }
+  private func record(_ photo: RecentPhoto) throws -> SearchRecord {
+    guard presentation.current(), RecentPhotosPolicy.canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)),
+      search.assets[photo.id]?.sourceRevision == photo.sourceRevision,
+      let asset = PHAsset.fetchAssets(withLocalIdentifiers: [photo.id], options: nil).firstObject,
+      !asset.isHidden, RecentPhoto.sourceRevision(asset) == photo.sourceRevision,
+      let record = try search.record(photo.id), record.revision == photo.sourceRevision,
+      search.canEditLabels(photo.id) else { throw FotoroError("Photo details changed or are still preparing. Open the photo again and try naming it.") }
+    return record
+  }
+  private func reservations(excluding ids: Set<String>) async throws -> Set<String> {
+    guard presentation.current(), let context = search.browseOrganizationContext else { throw CancellationError() }
+    var names = Set<String>(), cursor: String?
+    while true {
+      let page = try await search.namingRecords(after: cursor, context: context)
+      try Task.checkCancellation()
+      guard presentation.current() else { throw CancellationError() }
+      for record in page where !ids.contains(record.id) {
+        names.insert(key(PhotoOrganizationFacts.name(record.facts, original: record.filename)))
+      }
+      guard let last = page.last else { break }
+      cursor = last.id
+      if page.count < 200 { break }
+    }
+    return names
+  }
+  private func makePreview() async {
+    guard !busy else { return }
+    busy = true; defer { busy = false; work = nil }
+    do {
+      var allocator = PhotoNameAllocator(reservedNames: try await reservations(excluding: Set(presentation.photos.map(\.id))))
+      var entries: [Entry] = []
+      let context = search.browseOrganizationContext
+      for photo in presentation.photos.sorted(by: { $0.id < $1.id }) {
+        let value = try record(photo)
+        let proposed = PhotoOrganizationFacts.suggestedName(original: value.filename, digest: nil, capturedAt: photo.capturedAt,
+          labels: value.labels, place: photo.photoLocation?.name,
+          screenshot: PhotoOrganizationFacts.screenshot(value.facts, detected: photo.isScreenshot),
+          analysis: PhotoNameAnalysis(record: value, photoID: photo.id, revision: photo.sourceRevision))
+        let name = try allocator.reserve(proposed)
+        entries.append(Entry(photo: photo, original: value.filename,
+          before: PhotoOrganizationFacts.name(value.facts, original: value.filename),
+          previous: PhotoOrganizationFacts.one(value.facts, prefix: PhotoOrganizationFacts.namePrefix), name: name))
+        if entries.count.isMultiple(of: 100) {
+          await Task.yield(); try Task.checkCancellation()
+          guard presentation.current(), search.browseOrganizationContext == context else { throw CancellationError() }
+        }
+      }
+      preview = entries; status = ""
+    } catch { preview = []; status = error.localizedDescription }
+  }
+  private func apply(restoring: Bool) async {
+    guard !busy else { return }
+    busy = true; defer { busy = false; work = nil }
+    let entries = restoring ? undo : preview
+    var completed: [Entry] = []
+    do {
+      let reserved = try await reservations(excluding: Set(entries.map(\.id)))
+      var context = search.browseOrganizationContext
+      // Removing an override restores the original filename, including names
+      // already shared by other originals before this preview.
+      for entry in entries {
+        let value = try record(entry.photo)
+        let target = restoring ? entry.previous ?? entry.original : entry.name
+        guard value.filename == entry.original,
+          PhotoOrganizationFacts.name(value.facts, original: value.filename) == (restoring ? entry.name : entry.before),
+          (restoring && entry.previous == nil || !reserved.contains(key(target))) else { throw FotoroError("Selection or names changed. Preview again.") }
+      }
+      for entry in entries where entry.before != entry.name {
+        try Task.checkCancellation()
+        let value = try record(entry.photo)
+        guard search.browseOrganizationContext == context, value.filename == entry.original,
+          PhotoOrganizationFacts.name(value.facts, original: value.filename) == (restoring ? entry.name : entry.before)
+          else { throw FotoroError("Photo selection or names changed") }
+        guard search.setOrganization(.name(restoring ? entry.previous : entry.name), photoID: entry.id) else {
+          throw FotoroError(search.error ?? "Name could not be kept")
+        }
+        completed.append(entry)
+        context = search.browseOrganizationContext
+        await Task.yield(); try Task.checkCancellation()
+        guard presentation.current(), search.browseOrganizationContext == context else { throw CancellationError() }
+      }
+      status = restoring ? "Names restored." : "\(completed.count) names applied. Original files stay unchanged."
+    } catch { status = "Stopped: \(error.localizedDescription). Completed changes are kept." }
+    if restoring { undo.removeAll { entry in completed.contains { $0.id == entry.id } } }
+    else { undo = completed; preview = [] }
+  }
+  var body: some View {
+    NavigationStack {
+      List {
+        Section {
+          Text("Review \(presentation.photos.count) selected device photos. Names stay in Fotoro and on exported copies. Originals in Photos stay unchanged.")
+          Button("Preview names") { guard work == nil else { return }; work = Task { await makePreview() } }.disabled(busy)
+          if busy { ProgressView("Preparing names") }
+        }
+        if !preview.isEmpty {
+          Section("Name preview") {
+            if preview.allSatisfy({ $0.before == $0.name }) { Text("No better names to suggest from current photo details.") }
+            ForEach(preview) { entry in VStack(alignment: .leading) { Text(entry.before).foregroundStyle(.secondary); Text(entry.name) } }
+            Button("Apply names") { guard work == nil else { return }; work = Task { await apply(restoring: false) } }.disabled(busy || preview.allSatisfy { $0.before == $0.name })
+            Button("Cancel preview") { preview = [] }.disabled(busy)
+          }
+        }
+        if !undo.isEmpty { Button("Undo names") { guard work == nil else { return }; work = Task { await apply(restoring: true) } }.disabled(busy) }
+        if !status.isEmpty { Text(status) }
+      }
+      .navigationTitle("Name device photos")
+      .onDisappear { work?.cancel(); work = nil }
+      .onChange(of: presentation.current()) { _, valid in if !valid { dismiss() } }
+      .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+    }
+  }
+}
+#endif

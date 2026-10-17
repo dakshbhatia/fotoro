@@ -35,7 +35,8 @@ test("metadata scope includes every eligible hit beyond lexical display caps in 
   const local = new PhotoSearchIndex(Array.from({length: 250}, (_, index) => photo(`local-${index}`))).search("Paris");
   const saved = new PhotoSearchIndex(Array.from({length: 250}, (_, index) => photo(`saved:${index}`))).search("Paris");
   const combined = combineConsumerSearch(local, saved);
-  assert.equal(combined.photoIds.length, 400);
+  assert.equal(combined.photoIds.length, 200);
+  assert.equal(combined.totalMatches, 500);
   assert.equal(peopleMetadataMatches(combined, [local, saved]).size, 500);
 });
 

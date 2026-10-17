@@ -1,4 +1,4 @@
-export type ConsumerSyncState = "notStarted" | "preparing" | "uploading" | "checking" | "upToDate" | "paused" | "offline" | "needsAttention";
+export type ConsumerSyncState = "notStarted" | "preparing" | "uploading" | "checking" | "pending" | "upToDate" | "paused" | "offline" | "needsAttention";
 export type ConsumerSyncAction = "start" | "continue" | "retry" | "signIn" | "openSettings" | "review" | "none";
 export interface ConsumerSyncSummary {
   state: ConsumerSyncState;
@@ -16,7 +16,7 @@ export interface ConsumerSyncFacts {
 }
 export const syncStateLabel: Record<ConsumerSyncState, string> = {
   notStarted: "Save photos", preparing: "Preparing photos…", uploading: "Saving photos…", checking: "Checking photos…",
-  upToDate: "Photos saved", paused: "Saving paused", offline: "Offline", needsAttention: "Needs attention",
+  pending: "Changes to Save", upToDate: "Photos saved", paused: "Saving paused", offline: "Offline", needsAttention: "Needs attention",
 };
 export function deriveConsumerSyncSummary(facts: ConsumerSyncFacts): ConsumerSyncSummary {
   if (!facts.unlocked) return {state: "notStarted", skippedPhotos: 0, action: "signIn"};
@@ -36,7 +36,8 @@ export function deriveConsumerSyncSummary(facts: ConsumerSyncFacts): ConsumerSyn
   if (facts.preparing) return {...base, state: "preparing", action: "none"};
   if (facts.queuedPhotos) return {...base, state: facts.busy ? "uploading" : "paused", action: facts.busy ? "none" : "continue"};
   if (facts.busy) return {...base, state: "checking", action: "none"};
-  if (facts.pendingEdits || facts.skippedPhotos) return {...base, state: "needsAttention", action: facts.skippedPhotos ? "review" : "retry"};
+  if (facts.skippedPhotos) return {...base, state: "needsAttention", action: "review"};
+  if (facts.pendingEdits) return {...base, state: "pending", action: "start"};
   if (facts.localPhotos) return {...base, state: "notStarted", action: "start"};
   return {...base, state: facts.lastCheckedAt ? "upToDate" : "notStarted", action: facts.lastCheckedAt ? "none" : "start"};
 }

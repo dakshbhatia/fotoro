@@ -25,3 +25,24 @@ export function saveUploadPause(paused: boolean, session = requireVault()): Prom
   void task.finally(() => {if (writes.get(session) === task) writes.delete(session);}).catch(() => undefined);
   return task;
 }
+
+export async function loadSavedTextConsent(session = requireVault()): Promise<boolean> {
+  await writes.get(session);
+  assertVault(session);
+  const value = await get<WrappedKeyV1>("settings", session.accountId + ":consumer-saved-text-consent");
+  assertVault(session);
+  if (!value) return false;
+  const decoded = decryptPrivate<{enabled: boolean}>(value);
+  if (typeof decoded.enabled !== "boolean") throw new Error("INVALID_SYNC_PREFERENCE");
+  return decoded.enabled;
+}
+export function saveSavedTextConsent(enabled: boolean, session = requireVault()): Promise<void> {
+  const task = (writes.get(session) ?? Promise.resolve()).catch(() => undefined).then(async () => {
+    assertVault(session);
+    await put("settings", session.accountId + ":consumer-saved-text-consent", encryptPrivate({enabled}));
+    assertVault(session);
+  });
+  writes.set(session, task);
+  void task.finally(() => {if (writes.get(session) === task) writes.delete(session);}).catch(() => undefined);
+  return task;
+}

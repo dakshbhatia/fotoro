@@ -803,11 +803,14 @@ main:has(.consumer-selection) .canvas { padding-bottom: calc(max(140px, var(--se
 .selection-more > summary::-webkit-details-marker { display: none; }
 .selection-more > summary:focus-visible { outline: 2px solid var(--photo-focus); outline-offset: 2px; }
 .selection-more > div { position: absolute; bottom: calc(100% + 8px); right: 10px; width: max-content; max-width: min(280px,calc(100vw - 52px)); padding: 6px; border: 1px solid var(--photo-border); border-radius: 18px; background: #1c1f22; box-shadow: 0 8px 24px #0005; }
+.selection-more > div:has([aria-label="Name selected photos"]) { max-height: min(60vh, 480px); overflow-y: auto; width: min(420px, calc(100vw - 52px)); max-width: calc(100vw - 52px); padding: 14px; }
+.selection-more [aria-label="Name selected photos"] li { overflow-wrap: anywhere; margin-block: 10px; }
 .selection-more button { min-height: var(--control-target); width: 100%; border: 0; border-radius: 12px; background: transparent; color: var(--photo-text); text-align: left; }
 .consumer-save-progress { flex: 0 0 auto; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 24px 10px; }
 .consumer-save-progress p { margin: 0; font-size: var(--font-control); }
 .consumer-save-progress .hint { margin-top: 3px; font-size: 12px; line-height: 1.5; }
 .consumer-save-progress .actions { flex: 0 0 auto; margin: 0; }
+.consumer-background-state { align-self: center; color: var(--photo-muted); font-size: var(--font-caption); margin-right: 8px; }
 .local-search { padding: 0 24px calc(24px + env(safe-area-inset-bottom)); --local-preview-height: clamp(96px,calc(100dvh - 250px - env(safe-area-inset-top) - env(safe-area-inset-bottom)),800px); }
 main:has(.consumer-selection) .local-search { padding-bottom: calc(max(140px, var(--selection-tray-height, 0px) + 40px) + env(safe-area-inset-bottom)); scroll-padding-bottom: calc(max(140px, var(--selection-tray-height, 0px) + 40px) + env(safe-area-inset-bottom)); }
 .local-leading { border-radius: 4px; position: relative; }
@@ -1086,3 +1089,10 @@ main:has(.consumer-selection) .local-search { padding-bottom: calc(max(140px, va
 .photo-cleanup li { padding: 1rem 0; border-bottom: 1px solid var(--line, #8884); }
 .photo-cleanup li > button:first-child { display: flex; align-items: center; gap: .75rem; text-align: left; max-width: 100%; overflow-wrap: anywhere; }
 .photo-cleanup li img { width: 5rem; height: 5rem; object-fit: contain; }
+
+.view-image { touch-action: pinch-zoom; overscroll-behavior: contain; }
+.view-image[data-zoomed="true"] { touch-action: pan-x pan-y pinch-zoom; display: block; }
+.view-image img { user-select: none; -webkit-user-drag: none; }
+@media (prefers-reduced-motion: reduce) {
+  .viewer, .viewer * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}

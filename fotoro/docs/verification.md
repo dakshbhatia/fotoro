@@ -1873,3 +1873,191 @@ three existing/opt-in skips
 Hosted checks, merge, web deployment and native distribution remain
 separate gates; these results do not establish physical latency, battery, iCloud
 background behavior or held-out personal retrieval quality.
+
+## Analysis-to-organization cohesion — October 16, 2026
+
+Source changes connect existing on-device evidence to three concrete jobs:
+complete leading photo requests retrieve their supported subject, missing Saved
+OCR can be checked in an explicit batch of at most 25 owned previews, and filename
+previews can use completed OCR or validated scenes when supplied tags are absent.
+`Photo Booth` remains literal with a date; numeric receipt matching stays exact.
+Saved OCR is a fill-missing encrypted pending annotation, not a server-side photo
+processor. Concurrent OCR, conflicts, origin/account/source withdrawal and Stop
+remain fenced. Scene publication remains disabled.
+
+Browser acceptance used an ordinary isolated local account and the public receipt
+fixture. Before text checking, exact receipt number `4826` had no result. One
+explicit Saved check kept text locally; the number then returned the receipt.
+Suggest name produced `Screenshot_SEATTLE-RECEIPT_<digest>.png`. Apply name and
+Save changes retained the reviewed name and OCR. A separate `localhost` browser
+origin unlocked the same local account and retrieved it with `photos of 4826`,
+showing both the reviewed filename and the recognized invoice text. No app
+warnings/errors appeared in that readback tab. This qualifies the local encrypted
+readback path, not production/device latency or general OCR accuracy.
+
+The full native Simulator suite passes 814 with zero failures and three existing
+skips. Its first broad run had seven infrastructure failures: the fixture server
+was stopped and another project occupied the fixed integration API port. Native
+test clients now honor `FOTORO_NATIVE_TEST_API_PORT`, matching the existing local
+API helper while retaining a loopback host. With public fixtures on 8790 and an
+isolated seeded native API on 8789, the complete rerun passes without excluding
+tests. `TEST_RUNNER_FOTORO_NATIVE_TEST_API_PORT=8789` passes this value through
+terminal xcodebuild; XcodeBuildMCP accepts it via `testRunnerEnv`.
+
+This source work is separate from the previously distributed build 86. Native
+distribution, production browser acceptance, installed-reader scene rollout and
+held-out personal search relevance remain separate gates.
+
+Final workspace `pnpm check` passes, including 836 browser and 129 API tests.
+The isolated-preview suite passes 224 with zero failures and three existing
+skips; host sync regressions pass 20/20. Review found and fixed repeated catalog
+admission for already-read photos and missing recognition cancellation when the
+source list changes. A 2,000-record regression goes from 4,000 source-admission
+reads before the fix to zero afterward. These operation counts establish a work
+bound, not a measured device speedup.
+
+
+## Host-only foundations and indexed-text replay — October 16, 2026
+
+At the owner's request this pass uses no iPhone or Simulator runtime. The full
+Fotoro and isolated-preview applications compile for generic iOS with signing
+disabled. `pnpm test:ios:host` passes 37 macOS tests: 20 sync retry, 13 Saved-text
+coordinator/draft/media-boundary, and four cleanup-policy/source-identity tests.
+These compile actual production Foundation policies and draft construction; they
+do not execute SwiftUI, Vision inference, GRDB encryption transactions or PhotoKit.
+`pnpm check` passes with 841 browser and 129 API tests plus the core checks/audits.
+
+Native Settings now provides explicit Saved-text checking on at most 25 owned
+catalog rows per batch. It uses cached still previews only, Apple Vision and the
+existing pending encrypted annotation writer. Stop/drain, retry, explicit next
+page, current-source/account/vault/origin/revision/Pause/foreground fences,
+empty-but-complete existing OCR and concurrent pending edits have host regressions.
+JPEG/PNG/HEIC and Live Photo still previews use one explicit admission predicate;
+video and unknown containers are excluded. Saved semantic preparation also uses
+the selected automatic analysis window, defaulting to Latest 10 days.
+
+A read-only replay used an already copied private index, not a newly connected
+phone. Its frozen New York calendar window covers October 7 through October 16,
+with 201 records, unique IDs, valid dates/confidences and completed OCR/scene
+states for every row. The copy predates this run and does not establish live
+coverage. An independent same-OCR-field token oracle generated 60 deterministic
+queries. Before the browser conjunction fallback, only one of 22 two-word cases
+fully retrieved its supported photos; afterward all 22 do (25/25 supported
+photo-query pairs). Single-prefix coverage remains 27/38 fully retrieved: that
+oracle unions completions while the UI chooses one meaning. This is supported
+text retrieval, not a held-out human-intent relevance score. Private queries,
+recognized text, IDs and source rows remain outside the repository. The local
+notebook, replay code, aggregate summaries and logs are in
+`Fotoro-Artifacts/host-foundations-20261016`. No device, inference, network,
+rendering, battery or comparative whole-app speed claim follows from these data.
+
+The fallback reuses pretokenized postings, yields every bounded scan interval,
+and requires all words in one OCR/caption/keyword/filename source. Direct meanings
+retain priority; numeric identifiers stay exact. RED-to-GREEN regressions cover
+separated/reversed words, cross-field refusal, number-prefix refusal, unchanged
+index reuse, source withdrawal and selected-photo feedback with competing direct
+phrases outside date/allowed scopes. Review caught and fixed that last feedback
+collision. The fixed public synthetic ten-day benchmark passes 33 retrieval checks
+and ten daily ingestion checks.
+
+Cleanup refreshes bounded metadata over cached measurements on both clients.
+Favorites, screenshot corrections and removing the duplicate keeper immediately
+change the reasons. Changed or new sources remain unassessed. Native presentation
+uses already published metadata, with no per-body SQL reads; scan and actual Trash
+retain durable revalidation. Browser acceptance mounted the real cleanup component
+and image-analysis/resource pipeline with two public synthetic flat PNGs. After
+trashing the keeper, the other row retained its low-detail hint and lost the
+incorrect identical-copy warning. A fixture hot-reload root warning was confined
+to setup; a fresh tab repeated the flow with no warnings/errors. The temporary
+harness was removed.
+
+Ordinary local-account acceptance on `127.0.0.1:4310/saved` and independent
+`localhost:4310/saved` read the same encrypted public receipt. `Seattle 4826` and
+`4826 Seattle` returned it; its viewer showed the reviewed name and original OCR.
+`Seattle 482` returned no result. Page identity, nonblank content, no framework
+overlay, correct result opening and clean warning/error consoles pass. Screenshots
+are local artifacts. This is browser/readback evidence, not native runtime proof.
+
+PR-only label `fotoro-host-only` selects macOS host regressions and generic iOS SDK
+builds in CI; its summary explicitly marks runtime checks unrun. Default PRs and
+all main pushes retain native/preview Simulator checks. This source remains
+separate from distributed build 86; native runtime interaction/performance,
+production acceptance and held-out search relevance remain unqualified.
+
+
+## Three foundation slices — October 16, 2026
+
+Uncommitted browser and native prefix search now retrieve supported photos across
+all matching completions, with explicit accepted meanings narrowing. The browser
+retains complete deduplicated support receipts and a 200-photo display. Native
+SQLite unions and deduplicates before the limit, returning at most 200 hits plus
+one private previous-choice candidate for stable typing. Counts precede the limit;
+per-photo meaning receipts keep confirmation, pins and share feedback honest.
+Meaning precedence remains ahead of pins within a weaker meaning. Incompatible
+accepted completions return to union retrieval. Date, exact-number, allowed/source
+and current-evidence fences remain active. Full-text and native date counts also
+retain their uncapped totals. Saved adapter composition hydrates the final
+combined window, including off-window rows introduced by alias deduplication.
+
+Saved text continuation persists only cursor/completion flags in local account/
+origin/catalog-scoped preferences; existing OCR/draft state stays in the existing
+ledger. Relaunch, unlock, stopped second-page Retry, explicit Resume/Start over
+and account/origin/catalog replacement have host regressions. Saved semantic
+failures use existing durable stage-attempt rows and exponential deadlines.
+Missing, unreadable and revised sources are deferred. One fenced timer wakes at
+the earliest deadline, clamping overdue work to a 500 ms wake after long passes;
+withdrawn account/origin/vault/catalog/window/activity cancels old work. The view
+rebinds on access identity changes and displays aggregate deferred/failed status.
+
+Native presentation validation reads at most 200 source revisions per actor
+slice and yields before each slice. A 10,000-source fixture changes one unbounded
+lookup into 50 bounded reads. Permission, cancellation and library generation
+checks fence publication. Each viewer/selection/share surface withdraws only
+captured identities; toggling B cannot preserve stale A, while reselected A stays
+protected. Immediate export authorization remains synchronous and unchanged.
+Viewer current-photo lookup uses the existing ID index. These operation counts
+prove a work bound, not frame pacing or an end-to-end device speedup.
+
+The new macOS index host harness compiles the actual production SearchIndex,
+models, normalization, date grammar and supporting declarations with the exact
+GRDB revision already pinned by the app. It exercises real SQLite; it does not
+substitute a query implementation. It runs existing SearchTests and
+NaturalDateSearchTests alongside the new union/count/retry regressions. Other
+host runners execute the actual Saved draft/coordinator and bounded validation
+policies. No iPhone or Simulator was used. Native SwiftUI/PhotoKit/Vision runtime,
+physical performance/battery and installed cross-device acceptance remain open.
+
+On the unchanged private 201-photo frozen ten-day snapshot, deterministic
+single-prefix support rises from 27/38 fully retrieved to 38/38; two-word support
+remains 22/22. All 170 supported photo-query pairs are retrieved. Expected matches
+come from indexed OCR token support, not human intent; this is not a calibrated
+semantic-relevance score. Private inputs and queries remain outside the repo.
+The public synthetic ten-day benchmark remains a separate fixed workload.
+
+Browser acceptance runs the real search index, resources and search component on
+public synthetic fixtures: eight completions appear for `ha`, choosing Happiness
+narrows, the 205-photo case shows `200 of 205 matches`, and Next opens the correct
+second photo. The ordinary isolated local account still finds and opens the
+encrypted public receipt with reversed OCR words. Page identity, meaningful
+content, no framework overlay, correct interactions and clean app warning/error
+consoles pass. Temporary fixture entry points were removed; screenshots and logs
+remain under `Fotoro-Artifacts/sol-foundations-20261016`.
+
+Final local qualification: `pnpm check` passes 856 browser and 129 API tests,
+plus the existing core checks and artifact audits. Host qualification passes 92
+cases: 20 sync, 18 Saved text/timer, four cleanup, seven presentation-validation
+scenarios and 43 actual SQLite/search/date tests. Both full and isolated-preview
+generic iOS SDK builds pass with signing disabled. No native runtime tests ran.
+Review fixes for incompatible accepted completions, per-meaning pins, previous
+choices outside the first 200, cross-source hydration and independent stale
+selection withdrawal all have regressions. Distribution preflight currently sees
+no local Apple Distribution identity; it does not verify the Xcode account.
+
+Hosted macOS 26 qualification initially caught three disk-reopen failures: the
+runner rejects iOS file-protection attributes with EINVAL, while this macOS 27
+host accepted them. SearchIndex now applies complete data protection on its iOS
+path and omits that unsupported attribute only for macOS host tests. The same
+43 real SQLite/search/date cases pass locally after the platform fix. A new
+hosted run must qualify the exact corrected revision before release. Build 87's
+archive audit passed; distribution export reports No Accounts and a missing
+iOS Distribution identity, so it has not been uploaded.

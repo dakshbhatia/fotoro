@@ -22,6 +22,7 @@
     "test:web": "pnpm --filter @fotoro/web test",
     "test:ios": "node tools/test-ios.mjs",
     "test:sync:retry:host": "node tools/test-sync-retry-host.mjs",
+    "test:ios:host": "node tools/test-sync-retry-host.mjs && node tools/test-saved-text-host.mjs && node tools/test-cleanup-host.mjs && node tools/test-presentation-validation-host.mjs && node tools/test-viewer-gestures-host.mjs && node tools/test-search-host.mjs && node tools/test-photo-context-host.mjs",
     "test:ios-preview-audit": "node --experimental-vm-modules tools/check-ios-preview.test.mjs",
     "test:release-artifact": "node --experimental-vm-modules --test tools/build-testflight.test.mjs && node --experimental-vm-modules tools/check-ios-release.test.mjs",
     "test:asc-metadata": "node --test tools/asc-metadata.test.mjs",
@@ -30,7 +31,8 @@
     "check:api": "pnpm --filter @fotoro/api check && pnpm test:api",
     "build:web": "pnpm --filter @fotoro/web build",
     "check": "pnpm check:core && pnpm check:api && pnpm build:web && pnpm test:web",
-    "test:diagnostics": "node --test tools/diagnostics.test.mjs"
+    "test:diagnostics": "node --test tools/diagnostics.test.mjs",
+    "test:search:relevance": "tsx apps/web/tools/benchmark-public-search.ts"
   },
   "dependencies": {
     "ajv": "8.18.0",

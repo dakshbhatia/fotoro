@@ -264,6 +264,32 @@ final class AnnotationLedger: @unchecked Sendable {
       try save(state, db: db)
     }
   }
+  // The current slot and encrypted draft replacement share this transaction.
+  // Existing OCR (including empty completion) and frozen retries remain intact.
+  @discardableResult func fillMissingOCR(_ result: SavedTextRecognition, photo: LocalPhoto,
+    bundle: AccountBundle, card: AccountCardV1) throws -> Bool {
+    try store.database.write { db in
+      let state = try Data.fetchOne(db, sql: "SELECT value FROM annotations WHERE id=?", arguments: [photo.id]).map { try Wire.decode(AnnotationState.self, $0) }
+        ?? AnnotationState(accountId: accountId, photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+      let current = try self.current(state: state, photo: photo, bundle: bundle, card: card)
+        ?? PhotoAnnotationsV1(photoId: photo.id, originalSha256: photo.metadata.originalSha256)
+      guard let built = try SavedTextAnnotationDraft.fillingMissingOCR(result, current: current, state: state,
+        editId: Wire.id(), wrap: { value in
+          try AnnotationCrypto.validate(value, photo: photo, accountId: self.accountId)
+          let encrypted = try CryptoAdapter().wrap(Wire.encode(value), key: Data(b64: bundle.vaultKey))
+          guard encrypted.ciphertext.count <= 262144 else { throw FotoroError("Photo labels are too large") }
+          return encrypted
+        }) else { return false }
+      var next = built.state
+      if next.conflict, let accepted = next.accepted, let fields = next.conflictingFields {
+        let remote = try AnnotationCrypto.open(accepted, photo: photo, card: card, bundle: bundle).annotations
+        let alternative = AnnotationMerge.choosingRemote(fields, local: built.value, remote: remote)
+        next.remoteChoice = try CryptoAdapter().wrap(Wire.encode(alternative), key: Data(b64: bundle.vaultKey))
+      }
+      try save(next, db: db)
+      return true
+    }
+  }
   func prepare(photo: LocalPhoto, bundle: AccountBundle, card: AccountCardV1? = nil, derivedOnly: Bool = false) throws -> SignedPayloadV1? {
     try store.database.write { db in
       guard var state = try Data.fetchOne(db, sql: "SELECT value FROM annotations WHERE id=?", arguments: [photo.id]).map({ try Wire.decode(AnnotationState.self, $0) }) else { return nil }

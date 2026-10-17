@@ -1,4 +1,5 @@
 import {annotationCaptureMetadata} from "./capture-metadata";
+import {validatedVisualLabels} from "./visual";
 
 // These remain private, owner/digest-bound annotation facts. Older readers keep them.
 export const ORGANIZATION_PREFIXES = {name: "fotoro.name.v1:", trash: "fotoro.trash.v1:", screenshot: "fotoro.screenshot.v1:"} as const;
@@ -41,7 +42,24 @@ export function withPhotoOrganization<T extends {facts?: string[]}>(value: T, pa
   if (facts.length > 64) throw new Error("Photo facts are full. Remove an unused fact before changing this photo.");
   return {...value, facts};
 }
-export function suggestedPhotoName(input: {filename: string; digest?: string; date?: string; dateSource?: string; labels?: readonly string[]; location?: {name?: string}; screenshot?: boolean}) {
+export interface PhotoNameAnalysis {
+  ocr?: {text: string; confidence: number; processor: string};
+  visual?: import("./models").PhotoVisualV1;
+}
+// A preview may quote readable text, never guess a person, place or document type.
+// Bound work even when the retained OCR contains an entire document.
+function nameText(ocr: PhotoNameAnalysis["ocr"]): string | undefined {
+  if (!ocr || !["vision-text-v1", "tesseract.js-7.0.0/eng-1.0.0/lstm-orientation-v2"].includes(ocr.processor)
+    || !Number.isFinite(ocr.confidence) || ocr.confidence < 0.8 || ocr.confidence > 1) return;
+  for (const line of ocr.text.slice(0, 8192).split(/\r\n|[\n\r\u2028\u2029]/u).slice(0, 12)) {
+    const text = line.normalize("NFC").trim().replace(/\s+/gu, " ");
+    if (!text || Array.from(text).length > 64 || !/^[\p{L}\p{M}\s'’&():—–-]+$/u.test(text)) continue;
+    const words = text.match(/\p{L}[\p{L}\p{M}]*/gu) ?? [];
+    if (!words.length || words.length > 6 || Array.from(words.join("")).length < 4) continue;
+    return text;
+  }
+}
+export function suggestedPhotoName(input: {filename: string; digest?: string; date?: string; dateSource?: string; labels?: readonly string[]; location?: {name?: string}; screenshot?: boolean; analysis?: PhotoNameAnalysis}) {
   const extension = input.filename.match(/\.([a-zA-Z0-9]{1,10})$/)?.[1].toLowerCase();
   const slug = (text: string) => text.normalize("NFC").replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "");
   const date = ["exif", "photos"].includes(input.dateSource ?? "") && input.date && Number.isFinite(Date.parse(input.date)) ? new Date(input.date).toISOString().slice(0, 10) : undefined;
@@ -54,6 +72,12 @@ export function suggestedPhotoName(input: {filename: string; digest?: string; da
   add(input.screenshot ? "Screenshot" : undefined); add(input.location?.name);
   let tags = 0;
   for (const label of input.labels ?? []) if (add(label) && ++tags === 2) break;
+  if (!tags) {
+    const text = nameText(input.analysis?.ocr);
+    const scene = input.screenshot ? undefined : validatedVisualLabels(input.analysis?.visual)[0]?.label;
+    add(input.screenshot ? text : scene ?? text);
+  }
+  if (!date && !words.length) return input.filename;
   // Digest suffix prevents common date/tag collisions, independent of device locale/timezone.
   let digest = input.digest;
   if (digest && !/^[a-fA-F0-9]{64}$/.test(digest)) {
@@ -81,4 +105,30 @@ export function inOrganizationScope(photo: {facts?: readonly string[]; filename?
   if (isPhotoTrashed(photo)) return false;
   if (scope === "screenshots") return isPhotoScreenshot(photo);
   return scope !== "photosOnly" || !isPhotoScreenshot(photo);
+}
+
+export type PhotoNamePlanSource = Parameters<typeof suggestedPhotoName>[0] & {id: string; facts?: readonly string[]};
+export interface PhotoNamePlanEntry {id: string; original: string; before: string; name: string; previousName: string | null; digest?: string}
+// Caller supplies only selected photos. Unselected effective names remain reserved.
+export function planPhotoNames(sources: readonly PhotoNamePlanSource[], reservedNames: readonly string[] = []): PhotoNamePlanEntry[] {
+  const key = (name: string) => name.normalize("NFC").toLowerCase();
+  const used = new Set(reservedNames.map(key)), ids = new Set<string>();
+  const ordered = [...sources].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  return ordered.map(source => {
+    if (ids.has(source.id)) throw new Error("Duplicate photo in naming selection");
+    ids.add(source.id);
+    const proposed = suggestedPhotoName({...source, screenshot: isPhotoScreenshot(source)});
+    const extension = proposed.match(/\.[a-zA-Z0-9]{1,10}$/)?.[0] ?? "";
+    const stem = extension ? proposed.slice(0, -extension.length) : proposed;
+    let name = proposed, ordinal = 1;
+    while (used.has(key(name))) {
+      const suffix = "_" + (++ordinal) + extension;
+      const characters = Array.from(stem);
+      while (characters.length && !validPhotoName(characters.join("") + suffix)) characters.pop();
+      name = characters.join("") + suffix;
+    }
+    if (!validPhotoName(name)) throw new Error("Could not create a safe photo name");
+    used.add(key(name));
+    return {id: source.id, original: source.filename, before: photoName(source, source.filename), name, previousName: one(source.facts, "name") ?? null, digest: source.digest};
+  });
 }
