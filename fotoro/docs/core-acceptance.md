@@ -17,8 +17,8 @@ still starts with the latest ten calendar days.
 | Fast search | A disposed index now invalidates both populated and empty async results; stale results cannot stay current after index replacement. |
 | Complete indexing/status | Web Photos and Saved expose loaded-scope OCR coverage, readable-text counts, unavailable evidence and existing visual-search progress. Unchecked does not mean queued. Existing Latest 10 days admission and Saved continuation remain. |
 | Screenshots | Web cleanup groups known screenshots by existing tags or current readable text, with explicit individual review. No dimensions or filename guesses classify screenshots. Changing source text preserves a newer account screenshot correction. |
-| Consistent filenames | Web selection and native Saved selection support preview, collision-safe Apply and guarded name-only Undo. Without naming evidence, the original filename is retained. Native reservation scans yield every 200 photos; originals stay unchanged. |
-| Recoverable cleanup | Native and web reviews continue in explicit batches of 200 over the loaded session snapshot. Counts distinguish scanned, remaining and unassessed photos; no unloaded-library coverage is claimed. Trash stays Fotoro-only with Restore. |
+| Consistent filenames | Web, native Saved and native Device Photos selection support preview, collision-safe Apply and guarded name-only Undo. Device naming requires current indexed metadata and permission/source bindings. Without naming evidence, the original filename is retained. Native reservation scans read 200 records at a time; originals stay unchanged and reviewed device names reach exported copies. |
+| Recoverable cleanup | Native Saved and eligible web reviews keep encrypted, revision-bound checkpoints on this device and continue in explicit batches of 200 over the loaded snapshot. Pause preserves completed work; current verified Trash removals do not discard remaining progress. Counts distinguish scanned, remaining and unassessed photos; no unloaded-library coverage is claimed. Trash stays Fotoro-only with Restore. |
 | Cross-device convergence | Supplied text, organization, People and observation categories merge independently into the latest account facts; unchanged stale categories cannot replace them. |
 | Interrupted/offline edits | After a successful online installation, the web shell can cold-start offline at Photos and Saved entry routes. Only public built JS/CSS and static shell HTML are cached here, never API replies or photo data. Existing encrypted data/offline-edit rules remain. |
 | Truthful status | Local diagnostics summarize successful logical-action median/p95 timings, failures and cancellation over the retained sample. This is not production aggregation or frame-rate measurement. No log records private photo text, query text or coordinates. |
@@ -37,7 +37,7 @@ coordinates, source and accuracy remain unchanged. Existing names are preserved.
 | Pinch zoom | Native scale is finite and bounded; pinch cancels dismissal. Browser preserves native pinch zoom and cancels its navigation session on multitouch. |
 | Double-tap zoom | Native zoom preserves the tapped point within fitted-image bounds; web double-click applies only to the image. |
 | Pan a zoomed photo | Pan owns movement while zoomed; actual decoded or PhotoKit dimensions prevent panning letterboxed images into blank space. |
-| Drag selection | Native horizontal drags in Select mode paint visible tiles once, selecting or deselecting from the starting tile. Vertical drags remain with scrolling. Fast paths include crossed tiles; changed tile tokens are rejected. No automatic edge scrolling is added. |
+| Drag selection | Native horizontal drags in Select mode paint visible tiles once, selecting or deselecting from the starting tile. Vertical drags remain with scrolling. Active selection near viewport edges scrolls at a bounded speed. Hit geometry follows scroll offsets, recycled tokens are rejected, and source/account/filter changes cancel the stroke. Work stays proportional to visible tiles. Host policy checks and SDK compilation do not establish physical gesture feel. |
 | Press feedback | Native device/Saved tiles use bounded opacity/scale feedback without changing layout or hit rectangles. |
 | Cancel and return | Axis locks, source replacement, pinch, zoom, VoiceOver and gesture cancellation reject pending dismissal. Pulls settle back; paging resets zoom. Existing grid presentation remains mounted behind the viewer. |
 | Accessible motion/feedback | Native Reduce Motion removes added animation/press scaling, VoiceOver retains explicit controls, and haptics occur on settled page changes. Web keyboard navigation excludes text editing and zoom, and viewer CSS respects reduced motion. |
@@ -67,7 +67,33 @@ an explicitly tagged/corrected screenshot review group, and a cold reload plus
 Saved entry with the local preview server stopped. The installed worker served
 the app with a clean warning/error console. Public fixture data and screenshots
 remain outside Git. A first visit while already offline cannot install the shell.
-Native Device Photos batch naming, durable library-wide cleanup history, edge
-auto-scroll selection and physical performance acceptance remain open.
+
+The follow-up browser acceptance retained the public Singapore fixture with
+Remember enabled, completed cleanup, reloaded the page, and restored the completed
+review with no unassessed previews or warning/error console entries. Review
+checkpoints stay encrypted and bounded to the loaded scope, account/origin and
+source revisions. Eligible local persistence requires existing Remember consent;
+unretained or mixed scopes remain session-only. Explicit Pause preserves the
+completed cursor; verified Fotoro Trash removals can resume the remaining sources.
+This is not library-wide cleanup history or a cross-device review journal.
+Native Saved cleanup uses the existing account catalog and vault wrapping for
+the bounded journal, with Pause/Done checkpoints and host restoration tests.
+
+## Public search baseline
+
+`pnpm test:search:relevance -- --require-baseline` runs real OCR and visual inference
+against a small public, developer-judged corpus. Its initial measured result is
+25/25 lexical/filter cases, and 6/10 exact combined visual-search result sets:
+9 true positives, 6 false positives, no false negatives. All seven positive
+combined queries rank their expected result first. Printed document layouts are
+still confused by visual candidate admission. `--require-exact` deliberately
+fails on those known errors; the regression gate permits only the explicitly
+recorded false positives and retains the full report in CI.
+
+These are development cases, not held-out relevance evidence. The corpus is too
+small to justify changing the global visual threshold. Native Device Photos
+naming and edge selection have source/host/SDK evidence; their latest source
+changes are not included in the previously uploaded build 89. Physical
+performance acceptance remains open, and TestFlight setup remains deferred.
 
 Interaction reference: [Apple's continuous animation guidance](https://developer.apple.com/videos/play/wwdc2024/10145/).

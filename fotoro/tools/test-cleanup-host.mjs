@@ -21,6 +21,11 @@ const policyStart = picks.indexOf("enum AutomaticPhotoPickPolicy");
 const cleanupStart = picks.indexOf("struct PhotoCleanupCandidate");
 if (policyStart < 0 || cleanupStart < policyStart) throw new Error("Expected pure cleanup policy and measurement types.");
 const cleanupSource = picks.slice(0, policyStart) + picks.slice(cleanupStart);
+const presentation = read("Fotoro/Library/PhotoMetadataSections.swift");
+const journalStart = presentation.indexOf("struct PhotoCleanupJournalRecord: Codable");
+const journalEnd = presentation.indexOf("@MainActor private enum PhotoCleanupJournal", journalStart);
+if (journalStart < 0 || journalEnd < journalStart) throw new Error("Expected pure cleanup checkpoint model.");
+const journalSource = presentation.slice(journalStart, journalEnd);
 const cleanupTests = withoutAppImport(read("FotoroTests/PhotoCleanupTests.swift"));
 const expected = [...cleanupTests.matchAll(/\bfunc test\w+\(/g)].length;
 if (expected === 0) throw new Error("No cleanup host tests were found.");
@@ -31,6 +36,7 @@ try {
   writeFileSync(source, [
     read("Fotoro/WireModels.swift").split("struct PhotoAnnotationsV1")[0],
     cleanupSource,
+    journalSource,
     cleanupTests,
     `
 let suite = XCTestSuite(name: "Fotoro cleanup host regressions")

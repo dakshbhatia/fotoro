@@ -181,6 +181,100 @@ struct SavedPhotoOrganizationSection: View {
 #endif
 
 #if !FOTORO_LOCAL_PREVIEW
+import GRDB
+
+struct PhotoCleanupJournalRecord: Codable {
+  struct Source: Codable {
+    var id: String
+    var metadata: PhotoMetadataV1
+    var manifest: PhotoManifestV1
+    var transferState: String
+    func matches(_ current: Source, account: String) -> Bool {
+      id == current.id && current.manifest.photoId == id && current.manifest.ownerAccountId == account
+        && ["committed", "saved"].contains(current.transferState) && metadata == current.metadata && manifest == current.manifest
+    }
+  }
+  struct Signal: Codable {
+    var hash: UInt64
+    var luminance: Double
+    var contrast: Double
+    var sharpness: Double
+    var color: [Double]
+    init(_ value: AutomaticPhotoPickSignals) {
+      hash = value.hash; luminance = value.luminance; contrast = value.contrast; sharpness = value.sharpness; color = value.color
+    }
+    var measured: AutomaticPhotoPickSignals? {
+      guard [luminance, contrast, sharpness].allSatisfy({ $0.isFinite && (0...1).contains($0) }),
+        color.count == 3, color.allSatisfy({ $0.isFinite && (0...255).contains($0) }) else { return nil }
+      return AutomaticPhotoPickSignals(hash: hash, luminance: luminance, contrast: contrast, sharpness: sharpness, color: color)
+    }
+  }
+  var version = 1
+  var processor = "cleanup-preview-v1"
+  var account: String
+  var origin: String
+  var sources: [Source]
+  var completed: Int
+  var signals: [String: Signal]
+
+  func restored(current: [Source], retired: [Source], account: String, origin: String) -> (sources: [Source], completed: Int, signals: [String: AutomaticPhotoPickSignals])? {
+    guard version == 1, processor == "cleanup-preview-v1", self.account == account, self.origin == origin,
+      sources.count <= 4096, completed >= 0, completed <= sources.count, signals.count <= completed else { return nil }
+    let available = Dictionary(current.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+    let trashed = Dictionary(retired.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+    guard available.count == current.count else { return nil }
+    var ordered: [Source] = [], checked = 0, seen: Set<String> = [], removed: Set<String> = []
+    for (index, original) in sources.enumerated() {
+      guard seen.insert(original.id).inserted else { return nil }
+      if let latest = available[original.id] {
+        guard original.matches(latest, account: account) else { return nil }
+        ordered.append(latest)
+        if index < completed { checked += 1 }
+      } else {
+        guard let latest = trashed[original.id], original.matches(latest, account: account) else { return nil }
+        removed.insert(original.id)
+      }
+    }
+    guard ordered.count == current.count else { return nil }
+    let assessedIDs = Set(sources.prefix(completed).map(\.id))
+    var measured: [String: AutomaticPhotoPickSignals] = [:]
+    for (id, signal) in signals {
+      guard assessedIDs.contains(id), let value = signal.measured else { return nil }
+      if !removed.contains(id) { measured[id] = value }
+    }
+    return (ordered, checked, measured)
+  }
+}
+
+@MainActor private enum PhotoCleanupJournal {
+  static let key = "cleanupReview.v1"
+  static func source(_ photo: LocalPhoto) -> PhotoCleanupJournalRecord.Source {
+    .init(id: photo.id, metadata: photo.metadata, manifest: photo.manifest, transferState: photo.transferState)
+  }
+  static func read(_ services: AppServices) throws -> PhotoCleanupJournalRecord? {
+    guard services.photoAccountAccess != nil else { return nil }
+    guard let encoded = try services.store.database.read({ try String.fetchOne($0, sql: "SELECT value FROM state WHERE key=?", arguments: [key]) }),
+      encoded.utf8.count <= 4 * 1024 * 1024, let bytes = Data(base64Encoded: encoded) else { return nil }
+    let envelope = try Wire.decode(WrappedKeyV1.self, bytes), bundle = try services.vault.requireBundle()
+    let plain = try services.crypto.unwrap(envelope, key: Data(b64: bundle.vaultKey))
+    guard plain.count <= 2 * 1024 * 1024 else { return nil }
+    return try Wire.decode(PhotoCleanupJournalRecord.self, plain)
+  }
+  static func write(_ value: PhotoCleanupJournalRecord, services: AppServices, current: () -> Bool) throws -> Bool {
+    guard current(), services.photoAccountAccess != nil, value.sources.count <= 4096 else { return false }
+    let bytes = try Wire.encode(value)
+    guard bytes.count <= 2 * 1024 * 1024 else { return false }
+    let bundle = try services.vault.requireBundle()
+    let envelope = try services.crypto.wrap(bytes, key: Data(b64: bundle.vaultKey))
+    let encoded = try Wire.encode(envelope).base64EncodedString()
+    return try services.store.database.write { database in
+      guard current() else { return false }
+      try database.execute(sql: "INSERT INTO state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", arguments: [key, encoded])
+      return true
+    }
+  }
+}
+
 struct PhotoCleanupReview: View {
   @Bindable var services: AppServices
   @State private var source: [LocalPhoto] = []
@@ -189,6 +283,8 @@ struct PhotoCleanupReview: View {
   private let batchSize = 200
   @State private var measurements: [String: AutomaticPhotoPickSignals] = [:]
   @State private var sourceCurrent: () -> Bool = { false }
+  @State private var runToken = UUID()
+  @State private var progressNotice: String?
   @State private var done = 0
   @State private var total = 0
   @State private var busy = true
@@ -226,12 +322,22 @@ struct PhotoCleanupReview: View {
           Text("Review possible duplicates, blurry shots, and photos with little detail. Nothing is selected or removed automatically.")
           Text("Review loaded Saved photos in batches of 200. Photos outside this loaded snapshot have not been checked. Trash is recoverable and does not affect device Photos or free storage.").font(.caption).foregroundStyle(.secondary)
           if busy { ProgressView("Checking previews… \(done) / \(total)") }
-          else { Text("\(done) scanned · \(max(0, (snapshot?.count ?? 0) - total)) remaining · \(result.unassessed) current previews unassessed · \(candidates.count) cleanup candidates") }
+          else { Text("\(done) scanned · \(max(0, (snapshot?.count ?? 0) - done)) remaining · \(result.unassessed) current previews unassessed · \(candidates.count) cleanup candidates") }
+          if busy { Button("Pause review") { pauseReview() } }
+          if let progressNotice { Text(progressNotice).font(.caption).foregroundStyle(.secondary) }
           if !busy, sourceCurrent(), let snapshot, total < snapshot.count {
             Button("Review next \(min(batchSize, snapshot.count - total)) photos") {
               guard !busy, sourceCurrent() else { return }
               busy = true
               batchNumber += 1
+            }
+          }
+          if !busy, done > 0, sourceCurrent() {
+            Button("Start review over") {
+              source = []; measurements = [:]; done = 0; total = 0
+              snapshot = eligibleLoadedPhotos
+              persistProgress()
+              busy = true; batchNumber += 1
             }
           }
         }
@@ -255,37 +361,87 @@ struct PhotoCleanupReview: View {
         }
         if let error { Text(error).foregroundStyle(.secondary) }
       }.navigationTitle("Review cleanup").navigationBarTitleDisplayMode(.inline)
-        .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+        .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { persistProgress(); runToken = UUID(); dismiss() } } }
         .task(id: batchNumber) { await review() }
+        .onDisappear { persistProgress(); runToken = UUID() }
         .onChange(of: scenePhase) { _, value in if value != .active { dismiss() } }
         .onChange(of: services.vault.isUnlocked) { _, unlocked in if !unlocked { dismiss() } }
         .sheet(item: $opened) { photo in PhotoViewer(services: services, initialID: photo.id, displayedPhotos: [photo]) }
     }
   }
+  private var eligibleLoadedPhotos: [LocalPhoto] {
+    services.photos.filter { $0.manifest.ownerAccountId == services.session.accountId && ["committed", "saved"].contains($0.transferState)
+      && !PhotoOrganizationFacts.trashed(services.photoAnnotations[$0.id]?.facts ?? []) }
+  }
+  @MainActor private func persistProgress() {
+    guard sourceCurrent(), scenePhase == .active, let snapshot, let account = services.session.accountId,
+      let origin = BackgroundUploadPolicy.origin(services.api.baseURL) else { return }
+    let published = Dictionary(services.photos.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+    guard snapshot.allSatisfy({ original in
+      guard let latest = published[original.id] else { return false }
+      return PhotoCleanupJournal.source(original).matches(PhotoCleanupJournal.source(latest), account: account)
+    }) else { progressNotice = "The loaded source changed. Reopen review to check current photos."; return }
+    let retained = snapshot.filter { !PhotoOrganizationFacts.trashed(services.photoAnnotations[$0.id]?.facts ?? []) }
+    let checkedIDs = Set(source.prefix(done).map(\.id))
+    let checked = retained.filter { checkedIDs.contains($0.id) }
+    let retainedIDs = Set(checked.map(\.id))
+    let record = PhotoCleanupJournalRecord(account: account, origin: origin,
+      sources: retained.map(PhotoCleanupJournal.source), completed: checked.count,
+      signals: measurements.filter { retainedIDs.contains($0.key) }.mapValues(PhotoCleanupJournalRecord.Signal.init))
+    do {
+      let stored = try PhotoCleanupJournal.write(record, services: services, current: {
+        sourceCurrent() && scenePhase == .active && services.session.accountId == account
+          && BackgroundUploadPolicy.origin(services.api.baseURL) == record.origin
+      })
+      progressNotice = stored ? "Progress is kept encrypted on this device for this loaded scope." : "This review remains available while open. Its scope is too large to retain."
+    } catch { progressNotice = "Progress could not be kept after restart. Completed previews remain available while open." }
+  }
+  @MainActor private func pauseReview() {
+    runToken = UUID()
+    source = Array(source.prefix(done)); total = done; busy = false
+    persistProgress()
+  }
   @MainActor private func review() async {
     let account = services.session.accountId, vault = services.vault.generation, catalog = services.store, access = services.photoAccountAccess
+    guard let origin = BackgroundUploadPolicy.origin(services.api.baseURL) else { busy = false; return }
     if snapshot != nil && !sourceCurrent() { busy = false; return }
     if snapshot == nil {
       sourceCurrent = {
         access != nil && services.photoAccountAccess == access && services.vault.isUnlocked && services.vault.generation == vault
           && services.session.accountId == account && services.store === catalog
+          && BackgroundUploadPolicy.origin(services.api.baseURL) == origin
       }
-      snapshot = services.photos.filter { !PhotoOrganizationFacts.trashed(services.photoAnnotations[$0.id]?.facts ?? []) }
+      snapshot = eligibleLoadedPhotos
+      if let snapshot, let account {
+        let retired = services.photos.filter { PhotoOrganizationFacts.trashed(services.photoAnnotations[$0.id]?.facts ?? []) }
+        if let record = try? PhotoCleanupJournal.read(services),
+          let restored = record.restored(current: snapshot.map(PhotoCleanupJournal.source), retired: retired.map(PhotoCleanupJournal.source),
+            account: account, origin: origin) {
+          let byID = Dictionary(snapshot.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+          self.snapshot = restored.sources.compactMap { byID[$0.id] }
+          source = Array((self.snapshot ?? []).prefix(restored.completed)); done = restored.completed; total = done
+          measurements = restored.signals; busy = false
+          progressNotice = "Previous review restored. Continue explicitly to check more of this loaded scope."
+          return
+        }
+      }
     }
     guard sourceCurrent(), !Task.isCancelled else { busy = false; return }
+    let token = UUID(); runToken = token
+    func running() -> Bool { runToken == token && sourceCurrent() && !Task.isCancelled && scenePhase == .active }
     let batch = Array((snapshot ?? []).dropFirst(source.count).prefix(batchSize))
     source.append(contentsOf: batch)
     total = source.count
     busy = true
     func current(_ photo: LocalPhoto) -> Bool {
-      sourceCurrent() && !Task.isCancelled && scenePhase == .active && services.vault.isUnlocked && services.vault.generation == vault
+      running() && services.vault.isUnlocked && services.vault.generation == vault
         && services.session.accountId == account && services.store === catalog
         && !PhotoOrganizationFacts.trashed(services.photoAnnotations[photo.id]?.facts ?? [])
         && ((try? services.consumerSavedPhoto(photo.id)).map { $0.metadata == photo.metadata && $0.manifest == photo.manifest } ?? false)
     }
-    defer { busy = false }
+    defer { if runToken == token { busy = false } }
     for photo in batch {
-      guard sourceCurrent(), !Task.isCancelled, scenePhase == .active else { return }
+      guard running() else { return }
       guard current(photo), !PhotoOrganizationFacts.trashed(services.photoAnnotations[photo.id]?.facts ?? []) else {
         done += 1
         continue
@@ -304,13 +460,16 @@ struct PhotoCleanupReview: View {
         guard current(photo) else { throw CancellationError() }
         if let signals { measurements[photo.id] = signals }
       } catch {
-        guard sourceCurrent(), !Task.isCancelled, scenePhase == .active else { return }
+        guard running() else { return }
         measurements.removeValue(forKey: photo.id)
       }
-      guard sourceCurrent(), !Task.isCancelled, scenePhase == .active else { return }
+      guard running() else { return }
       done += 1
+      if done % 32 == 0 { persistProgress() }
       await Task.yield()
     }
+    guard running() else { return }
+    persistProgress()
     NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .metadata, outcome: .completed, completed: done, unavailable: recommendations.unassessed, step: .analysis))
   }
 }

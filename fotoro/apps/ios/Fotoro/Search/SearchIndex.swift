@@ -198,6 +198,14 @@ final class SearchIndex: @unchecked Sendable {
         decode)
     }
   }
+  // Explicit naming review reads bounded metadata pages; it starts no analysis.
+  func namingRecords(after id: String? = nil, limit: Int = 200) throws -> [SearchRecord] {
+    try Task.checkCancellation()
+    return try database.read { db in
+      try Row.fetchAll(db, sql: "SELECT value FROM searchRecords WHERE id > ? ORDER BY id LIMIT ?",
+        arguments: [id ?? "", min(200, max(1, limit))]).map(decode)
+    }
+  }
   func records(_ ids: [String]) throws -> [String: SearchRecord] {
     let ids = Array(Set(ids))
     guard !ids.isEmpty else { return [:] }

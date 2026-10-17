@@ -50,7 +50,34 @@ private final class ObservationCounter: @unchecked Sendable { var count = 0 }
     precondition(!PhotoGridSelectionStroke.intersects(tile,from:CGPoint(x:0,y:0),to:CGPoint(x:90,y:90)))
     precondition(PhotoGridSelectionStroke.intersects(tile,from:CGPoint(x:0,y:0),to:CGPoint(x:200,y:200)))
     precondition(!PhotoGridSelectionStroke.intersects(.zero,from:.zero,to:.zero))
+    let movedTile = PhotoGridSelectionStroke.frame(CGRect(x: 100, y: 200, width: 40, height: 40), measuredOffset: 0, currentOffset: 100)
+    precondition(movedTile == tile, "Scrolling must correct stale geometry before hit testing")
+    precondition(PhotoGridSelectionStroke.intersects(movedTile, from: CGPoint(x: 120, y: 120), to: CGPoint(x: 120, y: 120)))
+    precondition(PhotoGridSelectionStroke.frame(tile, measuredOffset: .nan, currentOffset: 100) == .zero)
     print("PASS: selection direction, idempotent painting/deselecting and fast path intersection")
+
+    let bounds = CGRect(x: 0, y: 100, width: 400, height: 600)
+    precondition(PhotoGridEdgeScroll.velocity(at: CGPoint(x: 200, y: 400), viewport: bounds) == 0)
+    precondition(PhotoGridEdgeScroll.velocity(at: CGPoint(x: 200, y: 100), viewport: bounds) == -480)
+    precondition(PhotoGridEdgeScroll.velocity(at: CGPoint(x: 200, y: 700), viewport: bounds) == 480)
+    precondition(PhotoGridEdgeScroll.velocity(at: CGPoint(x: -1, y: 700), viewport: bounds) == 0, "Outside touches cannot scroll")
+    precondition(PhotoGridEdgeScroll.velocity(at: CGPoint(x: 200, y: 701), viewport: bounds) == 0)
+    precondition(PhotoGridEdgeScroll.velocity(at: CGPoint(x: CGFloat.nan, y: 700), viewport: bounds) == 0)
+    let slow = PhotoGridEdgeScroll.velocity(at: CGPoint(x: 200, y: 650), viewport: bounds)
+    precondition(slow > 0 && slow < 480, "Edge approach must accelerate gradually")
+    func advance(_ current: CGFloat, _ velocity: CGFloat, _ elapsed: Double) -> CGFloat {
+      PhotoGridEdgeScroll.offset(current: current, velocity: velocity, elapsed: elapsed,
+        contentHeight: 2000, viewportHeight: 600, topInset: 80, bottomInset: 60)
+    }
+    precondition(advance(0, -480, 1) == -32, "Stalled frames cannot jump through multiple rows")
+    precondition(advance(-79, -480, 1.0 / 60) == -80, "Respect adjusted top inset")
+    precondition(advance(1459, 480, 1.0 / 60) == 1460, "Respect adjusted bottom inset")
+    precondition(advance(200, 480, .nan) == 200)
+    precondition(advance(200, .infinity, 1) == 200)
+    precondition(advance(200, 480, 0) == 200)
+    precondition(PhotoGridEdgeScroll.offset(current: 0, velocity: 480, elapsed: 1,
+      contentHeight: 100, viewportHeight: 600, topInset: 0, bottomInset: 0) == 0)
+    print("PASS: edge-scroll acceleration, bounds, short content, invalid input and stalled-frame cap")
 
     let controller=PhotoViewerZoomController(), mode=ObservationCounter(), image=ObservationCounter()
     withObservationTracking { _=controller.isZoomed } onChange: { mode.count += 1 }

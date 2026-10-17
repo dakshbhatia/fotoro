@@ -31,7 +31,8 @@
     "check:api": "pnpm --filter @fotoro/api check && pnpm test:api",
     "build:web": "pnpm --filter @fotoro/web build",
     "check": "pnpm check:core && pnpm check:api && pnpm build:web && pnpm test:web",
-    "test:diagnostics": "node --test tools/diagnostics.test.mjs"
+    "test:diagnostics": "node --test tools/diagnostics.test.mjs",
+    "test:search:relevance": "tsx apps/web/tools/benchmark-public-search.ts"
   },
   "dependencies": {
     "ajv": "8.18.0",

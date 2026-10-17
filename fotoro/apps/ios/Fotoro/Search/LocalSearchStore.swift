@@ -1238,6 +1238,14 @@ enum SearchMetadataIntake {
     catch { self.error = error.localizedDescription }
   }
   func record(_ photoID: String) throws -> SearchRecord? { try index?.record(photoID) }
+  func namingRecords(after id: String?, context: SearchOrganizationReadContext) async throws -> [SearchRecord] {
+    guard browseOrganizationContext == context, let index else { throw CancellationError() }
+    let worker = Task.detached(priority: .userInitiated) { try index.namingRecords(after: id) }
+    let records = try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
+    try Task.checkCancellation()
+    guard browseOrganizationContext == context else { throw CancellationError() }
+    return records
+  }
   var browseOrganizationContext: SearchOrganizationReadContext? {
     guard ready, let index else { return nil }
     return SearchOrganizationReadContext(index: ObjectIdentifier(index), work: work.generation,

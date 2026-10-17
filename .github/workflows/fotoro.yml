@@ -19,6 +19,8 @@ jobs:
   web-api:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      FOTORO_PUBLIC_MODEL_CACHE: ${{ runner.temp }}/fotoro-public-model-cache
     defaults:
       run:
         working-directory: fotoro
@@ -32,7 +34,22 @@ jobs:
       - run: npm install --global pnpm@10.17.1
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
+      - name: Cache public search model assets
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/fotoro-public-model-cache
+          key: fotoro-public-tinyclip-q8-${{ runner.os }}-transformers4-9463a9c508a344c837ffefe9d724f3827bf2dc79
       - run: pnpm test:search:visual
+      - name: Public search relevance regression baseline
+        run: pnpm test:search:relevance --require-baseline --output="${{ runner.temp }}/fotoro-public-search-relevance.json"
+      - name: Preserve public search relevance report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fotoro-public-search-relevance
+          path: ${{ runner.temp }}/fotoro-public-search-relevance.json
+          if-no-files-found: warn
+          retention-days: 14
 
   ios:
     runs-on: macos-26

@@ -8,6 +8,25 @@ final class SearchRetrievalHostTests: XCTestCase {
     value.captions = [caption]; value.previewAvailable = true; value.capturedAt = now
     return value
   }
+  func testExplicitNamingMetadataPagesAreBoundedAndPreserveOriginalsAndFacts() throws {
+    let index = try SearchIndex()
+    for number in 0..<205 {
+      var value = record(String(format: "%04d", number), caption: "Untouched source")
+      value.filename = "IMG_\(number).JPG"
+      value.facts = ["Exact original words", "fotoro.name.v1:Reviewed \(number).jpg"]
+      try index.put(value)
+    }
+    let first = try index.namingRecords(limit: 1000)
+    XCTAssertEqual(first.count, 200)
+    let last = try XCTUnwrap(first.last)
+    let continuation = try index.namingRecords(after: last.id)
+    XCTAssertEqual(continuation.count, 5)
+    XCTAssertEqual(Set((first + continuation).map(\.id)).count, 205)
+    XCTAssertEqual(first.first?.filename, "IMG_0.JPG")
+    XCTAssertEqual(first.first?.facts, ["Exact original words", "fotoro.name.v1:Reviewed 0.jpg"])
+    XCTAssertEqual(try index.record("0000")?.filename, "IMG_0.JPG")
+    XCTAssertTrue(try index.namingRecords(after: "9999").isEmpty)
+  }
   func testPrefixIncludesEveryCompletionAndExplicitChoiceNarrows() throws {
     let index = try SearchIndex()
     let names = ["Harbor", "Haven", "Harvest", "Hasty", "Hammock", "Happiness", "Habitat", "Hailstone"]

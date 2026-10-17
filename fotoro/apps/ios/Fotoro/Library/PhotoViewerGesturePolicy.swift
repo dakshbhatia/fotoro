@@ -59,6 +59,10 @@ struct PhotoGridSelectionStroke {
   mutating func begin(selected: Bool) { self.selected = !selected; visited = [] }
   mutating func visit(_ id: String) -> Bool { visited.insert(id).inserted }
   mutating func reset() { visited = [] }
+  static func frame(_ frame: CGRect, measuredOffset: CGFloat, currentOffset: CGFloat) -> CGRect {
+    guard measuredOffset.isFinite, currentOffset.isFinite else { return .zero }
+    return frame.offsetBy(dx: 0, dy: measuredOffset - currentOffset)
+  }
   static func intersects(_ rect: CGRect, from start: CGPoint, to end: CGPoint) -> Bool {
     guard !rect.isEmpty, start.x.isFinite, start.y.isFinite, end.x.isFinite, end.y.isFinite else { return false }
     if rect.contains(start) || rect.contains(end) { return true }
@@ -71,5 +75,25 @@ struct PhotoGridSelectionStroke {
       if low > high { return false }
     }
     return true
+  }
+}
+
+enum PhotoGridEdgeScroll {
+  static func velocity(at point: CGPoint, viewport: CGRect) -> CGFloat {
+    guard point.x.isFinite, point.y.isFinite, viewport.width.isFinite, viewport.height.isFinite,
+      viewport.height > 0, viewport.width > 0, point.x >= viewport.minX, point.x <= viewport.maxX,
+      point.y >= viewport.minY, point.y <= viewport.maxY else { return 0 }
+    let zone = min(72, max(24, viewport.height * 0.12), viewport.height / 2)
+    if point.y < viewport.minY + zone { return -480 * pow((viewport.minY + zone - point.y) / zone, 2) }
+    if point.y > viewport.maxY - zone { return 480 * pow((point.y - viewport.maxY + zone) / zone, 2) }
+    return 0
+  }
+  static func offset(current: CGFloat, velocity: CGFloat, elapsed: Double, contentHeight: CGFloat,
+    viewportHeight: CGFloat, topInset: CGFloat, bottomInset: CGFloat) -> CGFloat {
+    guard current.isFinite, velocity.isFinite, elapsed.isFinite, elapsed > 0,
+      contentHeight.isFinite, viewportHeight.isFinite, viewportHeight > 0,
+      topInset.isFinite, bottomInset.isFinite else { return current }
+    let minimum = -max(0, topInset), maximum = max(minimum, contentHeight - viewportHeight + max(0, bottomInset))
+    return min(maximum, max(minimum, current + velocity * CGFloat(min(elapsed, 1.0 / 15))))
   }
 }

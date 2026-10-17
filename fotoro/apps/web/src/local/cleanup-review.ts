@@ -1,15 +1,32 @@
 import {isPhotoScreenshot, isPhotoTrashed} from "@fotoro/contracts/organization";
 import type {LocalPhoto} from "./resources";
+import {savedInferenceSource} from "../library/consumer-search";
 
 export const CLEANUP_BATCH_SIZE = 200;
+const admittedSaved = new WeakMap<object, NonNullable<ReturnType<typeof savedInferenceSource>>>();
+function admittedSavedSource(photo: LocalPhoto) {
+  const previous = admittedSaved.get(photo);
+  if (previous) return previous;
+  const current = savedInferenceSource(photo);
+  if (current) admittedSaved.set(photo, current);
+  return current;
+}
+export function cleanupSourceIdentityCurrent(initial: LocalPhoto, latest: LocalPhoto | undefined, allowTrash = false): latest is LocalPhoto {
+  if (!latest || latest.current?.() === false || !allowTrash && isPhotoTrashed(latest) ||
+    latest.digest !== initial.digest || latest.width !== initial.width || latest.height !== initial.height) return false;
+  const before = admittedSavedSource(initial), after = savedInferenceSource(latest);
+  if (before || after) return !!before && !!after && before.token === after.token && before.accountId === after.accountId &&
+    before.photoId === after.photoId && before.digest === initial.digest && before.revision === after.revision;
+  return initial.current?.() !== false && latest.file === initial.file && latest.preview === initial.preview && latest.previewLoader === initial.previewLoader;
+}
 export function cleanupSourceCurrent(initial: LocalPhoto, latest: LocalPhoto | undefined): latest is LocalPhoto {
-  return !!latest && initial.current?.() !== false && latest.current?.() !== false && !isPhotoTrashed(latest) &&
-    latest.previewAvailable !== false && latest.digest === initial.digest && latest.file === initial.file &&
-    latest.preview === initial.preview && latest.previewLoader === initial.previewLoader &&
-    latest.width === initial.width && latest.height === initial.height;
+  return cleanupSourceIdentityCurrent(initial, latest) && latest.previewAvailable !== false;
 }
 export function cleanupReviewPhotos(photos: readonly LocalPhoto[]) {
-  return [...new Map(photos.filter(photo => photo.current?.() !== false && !isPhotoTrashed(photo)).map(photo => [photo.id, photo])).values()];
+  return [...new Map(photos.filter(photo => photo.current?.() !== false && !isPhotoTrashed(photo)).map(photo => {
+    admittedSavedSource(photo);
+    return [photo.id, photo] as const;
+  })).values()];
 }
 
 export interface ScreenshotReviewGroup {key: string; title: string; photos: LocalPhoto[]}

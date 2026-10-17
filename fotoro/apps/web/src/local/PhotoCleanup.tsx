@@ -1,13 +1,14 @@
 import {useEffect, useMemo, useRef, useState} from "react";
 import {isPhotoTrashed, photoName} from "@fotoro/contracts/organization";
 import {CleanupAnalyzer} from "./auto-picks";
+import {CleanupReviewPersistence} from "./cleanup-persistence";
 import {readPickSignals} from "./usePhotoPicks";
 import type {LocalPhoto, LocalResources} from "./resources";
 import {useLocalThumbnail} from "./useLocalThumbnail";
 import {useDialogFocus} from "../library/dialog-focus";
 import type {ConsumerPhotoChanges} from "../library/consumer-changes";
 import {diagnose} from "../diagnostics";
-import {CLEANUP_BATCH_SIZE, cleanupSourceCurrent, cleanupReviewPhotos, screenshotReviewGroups, type ScreenshotReviewGroup} from "./cleanup-review";
+import {CLEANUP_BATCH_SIZE, cleanupSourceCurrent, cleanupSourceIdentityCurrent, cleanupReviewPhotos, screenshotReviewGroups, type ScreenshotReviewGroup} from "./cleanup-review";
 function CleanupRow({photo, reasons, resources, remove, open}: {photo: LocalPhoto; reasons: string[]; resources: LocalResources; remove?: () => Promise<void>; open: () => void}) {
   const {url} = useLocalThumbnail(photo, resources, () => {}), [busy, setBusy] = useState(false), [error, setError] = useState("");
   const pending = useRef(false), alive = useRef(true);
@@ -30,19 +31,28 @@ export function PhotoCleanup({photos, resources, onTrash, canTrash, onOpen, chan
   onOpen: (photo: LocalPhoto) => void; changes?: ConsumerPhotoChanges; onClose: () => void;
 }) {
   const panel = useRef<HTMLElement>(null), [analyzer] = useState(() => new CleanupAnalyzer());
-  const [reviewSnapshot] = useState(() => cleanupReviewPhotos(photos));
-  const [limit, setLimit] = useState(CLEANUP_BATCH_SIZE);
+  const [reviewSnapshot, setReviewSnapshot] = useState(() => cleanupReviewPhotos(photos));
+  const scope = useRef(reviewSnapshot), completed = useRef(0), runEpoch = useRef(0);
+  const [persistence] = useState(() => new CleanupReviewPersistence());
+  const [request, setRequest] = useState(0), [reviewNotice, setReviewNotice] = useState("");
+  const [limit, setLimit] = useState(0);
   const measurementScan = useMemo(() => reviewSnapshot.slice(0, limit), [reviewSnapshot, limit]);
-  const scanIDs = useMemo(() => new Set(measurementScan.map(photo => photo.id)), [measurementScan]);
-  const scan = useMemo(() => photos.filter(photo => scanIDs.has(photo.id)), [photos, scanIDs]);
-  const result = analyzer.review(scan);
   const latestPhotos = useRef(new Map(photos.map(photo => [photo.id, photo])));
   latestPhotos.current = new Map(photos.map(photo => [photo.id, photo]));
+  // Keep measured source identity stable across harmless annotation refreshes;
+  // current favorites, screenshot corrections and Trash still control the review.
+  const scan = useMemo(() => measurementScan.flatMap(initial => {
+    const latest = latestPhotos.current.get(initial.id);
+    if (!cleanupSourceIdentityCurrent(initial, latest)) return [];
+    return [{...initial, favorite: latest.favorite, facts: latest.facts, labels: latest.labels,
+      current: () => cleanupSourceIdentityCurrent(initial, latestPhotos.current.get(initial.id))}];
+  }), [measurementScan, photos]);
+  const result = analyzer.review(scan);
   const latestResources = useRef(resources); latestResources.current = resources;
   const [view, setView] = useState<"quality" | "screenshots">("quality");
   const screenshotGroups = useMemo(() => screenshotReviewGroups(scan), [scan]);
-  const remaining = Math.max(0, reviewSnapshot.length - measurementScan.length);
   const [done, setDone] = useState(0), [busy, setBusy] = useState(true), [saveError, setSaveError] = useState("");
+  const remaining = Math.max(0, reviewSnapshot.length - done);
   const nextPending = useRef(false);
   const alive = useRef(false), saving = useRef(false), [saveBusy, setSaveBusy] = useState(false);
   const latestChanges = useRef(changes); latestChanges.current = changes;
@@ -56,28 +66,92 @@ export function PhotoCleanup({photos, resources, onTrash, canTrash, onOpen, chan
     catch {if (alive.current && source.current() && latestChanges.current?.token === source.token) setSaveError("Changes could not finish saving. Try again.");}
     finally {saving.current = false; if (alive.current) setSaveBusy(false);}
   };
+  const measuredSignals = (count: number) => analyzer.signals(scope.current.slice(0, count).flatMap(initial => {
+    const latest = latestPhotos.current.get(initial.id);
+    if (!cleanupSourceIdentityCurrent(initial, latest)) return [];
+    return [{...initial, facts: latest.facts, current: () => cleanupSourceIdentityCurrent(initial, latestPhotos.current.get(initial.id))}];
+  }));
   useDialogFocus(panel, onClose);
   useEffect(() => {
-    let alive = true;
-    const start = Math.max(0, limit - CLEANUP_BATCH_SIZE);
-    setBusy(true); setDone(start);
-    void diagnose("metadata", async () => analyzer.run(measurementScan.slice(start), (photo, signal) => {
-      const latest = latestPhotos.current.get(photo.id);
-      if (!cleanupSourceCurrent(photo, latest))
-        return Promise.reject(new Error("Review source changed. Reopen review for the new snapshot."));
-      const guarded = {...latest, current: () => cleanupSourceCurrent(photo, latestPhotos.current.get(photo.id))};
-      return readPickSignals(guarded, latestResources.current(latest), signal);
-    }, value => {if (alive) setDone(start + value);}))
-      .then(() => {if (alive) {nextPending.current = false; setBusy(false);}}).catch(() => {if (alive) {nextPending.current = false; setBusy(false); setSaveError("Review could not finish. Close and try again.");}});
-    return () => {alive = false; analyzer.cancel();};
-  }, [analyzer, measurementScan, limit]);
+    let active = true;
+    const epoch = ++runEpoch.current;
+    const current = () => active && epoch === runEpoch.current && scope.current.every(initial =>
+      cleanupSourceIdentityCurrent(initial, latestPhotos.current.get(initial.id), true));
+    const checkpoint = async (count: number) => {
+      const retained = scope.current.map(initial => latestPhotos.current.get(initial.id)!).filter(photo => photo && !isPhotoTrashed(photo));
+      const checkedIDs = new Set(scope.current.slice(0, count).map(photo => photo.id));
+      const checked = retained.filter(photo => checkedIDs.has(photo.id));
+      const durable = await persistence.write(retained, checked.length, measuredSignals(count), current);
+      if (current()) setReviewNotice(durable ? "Progress is kept encrypted on this device for this loaded scope." : "Progress stays in this session. Remember these photos to keep eligible local review progress after restart.");
+    };
+    setBusy(true);
+    void (async () => {
+      if (request === 0) {
+        const restored = await persistence.read(scope.current, current, [...latestPhotos.current.values()].filter(isPhotoTrashed));
+        if (!current()) return;
+        if (restored) {
+          scope.current = restored.photos; setReviewSnapshot(restored.photos);
+          analyzer.restore(restored.photos, restored.signals);
+          completed.current = restored.completed; setDone(restored.completed); setLimit(restored.completed);
+          setReviewNotice("Previous review restored. Continue explicitly to check more of this loaded scope.");
+          return;
+        }
+      }
+      if (!current()) return;
+      const start = completed.current, end = Math.min(scope.current.length, start + CLEANUP_BATCH_SIZE);
+      setLimit(end); setDone(start);
+      const result = await diagnose("metadata", async () => analyzer.run(scope.current.slice(start, end), (photo, signal) => {
+        const latest = latestPhotos.current.get(photo.id);
+        if (!current() || !cleanupSourceCurrent(photo, latest))
+          return Promise.reject(new Error("Review source changed. Reopen review for the new snapshot."));
+        const guarded = {...latest, current: () => current() && cleanupSourceCurrent(photo, latestPhotos.current.get(photo.id))};
+        return readPickSignals(guarded, latestResources.current(latest), signal);
+      }, value => {
+        if (!current()) return;
+        completed.current = start + value; setDone(start + value);
+        if ((start + value) % 32 === 0) void checkpoint(start + value).catch(() => {
+          if (current()) setReviewNotice("Progress could not be kept after restart. This review remains available while open.");
+        });
+      }));
+      if (!current() || !result) return;
+      completed.current = end; setDone(end);
+      await checkpoint(end);
+    })().catch(() => {
+      if (active && epoch === runEpoch.current) setReviewNotice("Progress could not finish saving. Completed previews remain available while open.");
+    }).finally(() => {
+      if (active && epoch === runEpoch.current) {
+        nextPending.current = false; setBusy(false);
+        if (!current()) setReviewNotice("The review source changed. Close and reopen to check the current photos.");
+      }
+    });
+    return () => {active = false; analyzer.cancel();};
+  }, [analyzer, persistence, request]);
+  const continueReview = () => {
+    if (nextPending.current) return;
+    nextPending.current = true; setBusy(true); setRequest(value => value + 1);
+  };
+  const pauseReview = () => {
+    const epoch = ++runEpoch.current; analyzer.cancel(); nextPending.current = true; setBusy(true); setLimit(completed.current);
+    const current = () => alive.current && epoch === runEpoch.current && scope.current.every(initial => cleanupSourceIdentityCurrent(initial, latestPhotos.current.get(initial.id), true));
+    const retained = scope.current.map(initial => latestPhotos.current.get(initial.id)!).filter(photo => photo && !isPhotoTrashed(photo));
+    const checkedIDs = new Set(scope.current.slice(0, completed.current).map(photo => photo.id));
+    const checked = retained.filter(photo => checkedIDs.has(photo.id));
+    void persistence.write(retained, checked.length, measuredSignals(completed.current), current).then(durable => {
+      if (current()) setReviewNotice(durable ? "Review paused. Progress is kept encrypted on this device." : "Review paused. Progress stays in this session.");
+    }).catch(() => {if (current()) setReviewNotice("Review paused. Its latest progress could not be kept after restart.");})
+      .finally(() => {if (alive.current && epoch === runEpoch.current) {nextPending.current = false; setBusy(false);}});
+  };
+
   const rows = photos.filter(photo => photo.current?.() !== false && !isPhotoTrashed(photo) && result.reasons.has(photo.id));
   return <aside className="sheet places-sheet photo-cleanup" ref={panel} role="dialog" aria-modal="true" aria-label="Review cleanup" tabIndex={-1}>
     <header className="places-header"><h2>Review cleanup</h2><button onClick={onClose}>Done</button></header>
     <p>Review possible duplicates, blurry shots, and photos with little detail. Nothing is selected or removed automatically.</p>
     <p className="hint">Review currently loaded photos in batches of {CLEANUP_BATCH_SIZE}. Photos outside this loaded snapshot have not been checked. Trash is recoverable and only affects Fotoro; it does not free storage.</p>
     {busy ? <p role="status">Checking previews… {done} / {measurementScan.length} · {remaining} remaining in this loaded snapshot.</p> : <p role="status">{done} scanned · {remaining} remaining · {result.unassessed} current previews unassessed · {rows.length} cleanup candidates.</p>}
-    {!busy && remaining > 0 && <button onClick={() => {if (nextPending.current) return; nextPending.current = true; setLimit(value => value + CLEANUP_BATCH_SIZE);}}>Review next {Math.min(CLEANUP_BATCH_SIZE, remaining)} photos</button>}
+    {busy && <button onClick={pauseReview}>Pause review</button>}
+    {!busy && remaining > 0 && <button onClick={continueReview}>Review next {Math.min(CLEANUP_BATCH_SIZE, remaining)} photos</button>}
+    {!busy && done > 0 && <button onClick={() => {analyzer.clear(); completed.current = 0; setDone(0); setLimit(0); continueReview();}}>Start review over</button>}
+    {reviewNotice && <p className="hint" role="status">{reviewNotice}</p>}
     <div role="group" aria-label="Review type"><button aria-pressed={view === "quality"} onClick={() => setView("quality")}>Quality and duplicates</button><button aria-pressed={view === "screenshots"} onClick={() => setView("screenshots")}>Screenshots ({screenshotGroups.reduce((total, group) => total + group.photos.length, 0)})</button></div>
     {view === "quality" && !busy && !rows.length && <p>No candidates found in this review. Unassessed photos have not been judged.</p>}
     {view === "quality" && <ul>{rows.map(photo => <CleanupRow key={photo.id} photo={photo} reasons={result.reasons.get(photo.id)!} resources={resources(photo)} remove={canTrash(photo) ? () => onTrash(photo) : undefined} open={() => onOpen(photo)} />)}</ul>}

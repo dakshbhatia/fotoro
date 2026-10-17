@@ -22,6 +22,7 @@ const batchSource = read("PhotoMetadataSections.swift");
 const reservationSelection = between(batchSource, "    let selected = excludedIDs ??", ", revision = services.consumerCatalogGeneration");
 const reservationFilter = between(batchSource, "      for photo in page where ", " {\n        reserved.insert").trim().replace("for photo in page where ", "");
 if (!batchSource.includes("reservedNames(excluding: Set(entries.map(\\.id)))")) throw new Error("Undo must reserve photos outside its actual mutation plan.");
+const deviceCollision = between(read("RecentPhotosView.swift"), "        let ext = (proposed as NSString).pathExtension, ending", "        entries.append(Entry(photo:");
 const root = mkdtempSync(join(tmpdir(), "fotoro-photo-context-host-"));
 try {
   const source = join(root, "main.swift"), binary = join(root, "photo-context-host");
@@ -48,6 +49,10 @@ func reserves(_ photo: ReservationPhoto, presentation: ReservationPresentation, 
 ${reservationSelection}
 return ${reservationFilter}
 }
+func deviceCollisionName(_ proposed: String, used: inout Set<String>) throws -> String {
+${deviceCollision}
+return name
+}
 var checks = 0
 @MainActor func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
   checks += 1
@@ -58,6 +63,14 @@ expect(reserves(ReservationPhoto(id: "no-op"), presentation: reservationPresenta
 expect(reserves(ReservationPhoto(id: "unapplied"), presentation: reservationPresentation, excludedIDs: ["completed"]), "Undo must reserve selected unapplied photo names")
 expect(!reserves(ReservationPhoto(id: "completed"), presentation: reservationPresentation, excludedIDs: ["completed"]), "Undo retains reviewed duplicates within its mutation plan")
 expect(!reserves(ReservationPhoto(id: "no-op"), presentation: reservationPresentation, excludedIDs: nil), "Preview still excludes its whole selected plan")
+var deviceNames: Set<String> = [key("IMG.JPG"), key("IMG_2.JPG")]
+let deviceThird = try deviceCollisionName("IMG.JPG", used: &deviceNames)
+expect(deviceThird == "IMG_3.JPG", "Device batch resolves reserved original names")
+let deviceFourth = try deviceCollisionName("IMG.JPG", used: &deviceNames)
+expect(deviceFourth == "IMG_4.JPG", "Device batch reserves prior planned names")
+var deviceNoOp = Set<String>()
+let unchangedDeviceName = try deviceCollisionName("Singapore Holiday.JPG", used: &deviceNoOp)
+expect(unchangedDeviceName == "Singapore Holiday.JPG", "No-evidence device plan preserves original spelling")
 let digest = String(repeating: "ab", count: 32)
 func name(_ date: Date? = nil, _ labels: [String] = [], _ analysis: PhotoNameAnalysis? = nil) -> String {
   PhotoOrganizationFacts.suggestedName(original: "Singapore Holiday.JPG", digest: digest, capturedAt: date,

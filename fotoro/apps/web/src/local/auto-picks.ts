@@ -46,11 +46,12 @@ export function analyzePixels(image: {width:number; height:number; data:Uint8Cla
     sharpness: measured ? Math.sqrt(detail / measured) / 1020 : 0, color: color.map(value => value / count) as [number, number, number]};
 }
 const hashLimit = (1n << 64n) - 1n;
-function valid(signal: PhotoSignals) {
+export function validPhotoSignals(signal: PhotoSignals) {
   return typeof signal.hash === "bigint" && signal.hash >= 0n && signal.hash <= hashLimit &&
     [signal.luminance, signal.contrast, signal.sharpness].every(value => Number.isFinite(value) && value >= 0 && value <= 1) &&
     signal.color.length === 3 && signal.color.every(value => Number.isFinite(value) && value >= 0 && value <= 255);
 }
+const valid = validPhotoSignals;
 function captured(photo: LocalPhoto) {
   const time = photo.captureVerified === true && ["exif", "photos"].includes(photo.dateSource) ? Date.parse(photo.date) : NaN;
   return Number.isFinite(time) ? time : undefined;
@@ -239,7 +240,7 @@ export class PickAnalyzer {
     if (!measured || measured.version !== this.version) return;
     return cleanupCandidates(measured.unique, measured.signals);
   }
-  cleanupSnapshot(photos: readonly LocalPhoto[]) {
+  cleanupSignals(photos: readonly LocalPhoto[]) {
     const signals = new Map<string, PhotoSignals>(), ids = new Set(photos.map(photo => photo.id));
     for (const id of this.cache.keys()) if (!ids.has(id)) this.cache.delete(id);
     for (const photo of photos) {
@@ -249,7 +250,17 @@ export class PickAnalyzer {
         this.cache.delete(photo.id);
       } else if (entry?.signal && !isPhotoTrashed(photo)) signals.set(photo.id, entry.signal);
     }
-    return cleanupCandidates(photos, signals);
+    return signals;
+  }
+  restoreCleanupSignals(photos: readonly LocalPhoto[], signals: ReadonlyMap<string, PhotoSignals>) {
+    for (const photo of photos) {
+      const signal = signals.get(photo.id), source = photo.file ?? photo.preview ?? photo.previewLoader;
+      if (source && signal && valid(signal) && photo.current?.() !== false && !isPhotoTrashed(photo))
+        this.cache.set(photo.id, {source: new WeakRef(source), digest: photo.digest, width: photo.width, height: photo.height, signal});
+    }
+  }
+  cleanupSnapshot(photos: readonly LocalPhoto[]) {
+    return cleanupCandidates(photos, this.cleanupSignals(photos));
   }
   // Completed measurements survive harmless metadata updates; pending work never crosses a cancellation.
   cancel() {
@@ -302,6 +313,8 @@ export class CleanupAnalyzer {
     return this.analyzer.cleanup(photos, load, progress, true);
   }
   review(photos: readonly LocalPhoto[]) {return this.analyzer.cleanupSnapshot(photos);}
+  signals(photos: readonly LocalPhoto[]) {return this.analyzer.cleanupSignals(photos);}
+  restore(photos: readonly LocalPhoto[], signals: ReadonlyMap<string, PhotoSignals>) {this.analyzer.restoreCleanupSignals(photos, signals);}
   cancel() {this.analyzer.cancel();}
   clear() {this.analyzer.clear();}
 }

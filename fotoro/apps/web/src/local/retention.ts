@@ -129,6 +129,36 @@ export class LocalRetention {
     } finally { db.close(); }
   }
   /* Inference shares the opt-in, key and clear epoch of retained photo metadata. */
+  async readCleanupReview(current: () => boolean) {
+    const generation = this.generation, db = await this.database();
+    try {
+      const store = db.transaction("data").objectStore("data");
+      const [enabled, key, epoch, envelope] = await Promise.all([request(store.get("enabled")), request<CryptoKey>(store.get("key")), request(store.get("epoch")), request<Envelope>(store.get("cleanup-review"))]);
+      if (!enabled || !key || !envelope || !(envelope.data instanceof ArrayBuffer) || envelope.data.byteLength > 2 * 1024 * 1024 + 1024 || generation !== this.generation || !current()) return;
+      const value = JSON.parse(decoder.decode(await open(key, envelope, "cleanup-review")));
+      const latest = await request(db.transaction("data").objectStore("data").get("epoch"));
+      return latest === epoch && generation === this.generation && current() ? value : undefined;
+    } finally {db.close();}
+  }
+  async writeCleanupReview(value: unknown, current: () => boolean) {
+    const generation = this.generation, db = await this.database();
+    try {
+      const store = db.transaction("data").objectStore("data");
+      const [enabled, key, epoch] = await Promise.all([request(store.get("enabled")), request<CryptoKey>(store.get("key")), request(store.get("epoch"))]);
+      if (!enabled || !key || generation !== this.generation || !current()) return false;
+      const bytes = jsonBytes(value);
+      if (bytes.byteLength > 2 * 1024 * 1024) return false;
+      const envelope = await seal(key, bytes, "cleanup-review");
+      let wrote = false;
+      const tx = db.transaction("data", "readwrite"), done = finished(tx), data = tx.objectStore("data"), check = data.get("epoch"), active = data.get("enabled");
+      active.onsuccess = () => {
+        if (generation !== this.generation || !current() || check.result !== epoch || !active.result) return;
+        data.put(envelope, "cleanup-review"); wrote = true;
+      };
+      await done;
+      return wrote;
+    } finally {db.close();}
+  }
   async readInference(id: string, digest: string, processor: string, current: () => boolean) {
     const generation = this.generation, db = await this.database();
     try {
@@ -230,7 +260,7 @@ export class LocalRetention {
             data.clear(); data.put(epoch, "epoch"); data.put(key, "key"); data.put(true, "enabled"); data.put(encryptedFeedback, "feedback");
             for (const [id, value] of records) data.put(value, id);
             const retainedIDs = new Set(photos.map(photo => "inference:" + photo.id));
-            for (let i = 0; i < oldKeys.result.length; i++) if (retainedIDs.has(String(oldKeys.result[i]))) data.put(oldValues.result[i], oldKeys.result[i]);
+            for (let i = 0; i < oldKeys.result.length; i++) if (retainedIDs.has(String(oldKeys.result[i])) || oldKeys.result[i] === "cleanup-review") data.put(oldValues.result[i], oldKeys.result[i]);
             const keys = images.getAllKeys();
             keys.onsuccess = () => { for (const id of keys.result) if (!keep.has(String(id))) images.delete(id); };
             for (const [id, value] of previews) images.put(value, id);
