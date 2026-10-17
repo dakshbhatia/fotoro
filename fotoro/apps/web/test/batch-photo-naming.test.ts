@@ -35,7 +35,7 @@ test("batch preview and name-only undo preserve original names and unrelated fac
 
 
 test("Undo rejects newly reserved prior names, including un-restored selected photos", () => {
-  const sources = [{id: "a", filename: "Original.jpg"}, {id: "b", filename: "Other.jpg"}];
+  const sources = [{id: "a", filename: "first.jpg", facts: ["fotoro.name.v1:Original.jpg"]}, {id: "b", filename: "second.jpg", facts: ["fotoro.name.v1:Other.jpg"]}];
   const plan = planPhotoNames(sources);
   const applied = sources.map((source, index) => withPhotoOrganization(source, {name: plan[index].name}));
   assert.equal(canRestorePhotoNames(plan, applied, []), true);
@@ -45,9 +45,9 @@ test("Undo rejects newly reserved prior names, including un-restored selected ph
   assert.equal(canRestorePhotoNames(plan.slice(0, 1), [applied[0], withPhotoOrganization(applied[1], {name: "Original.jpg"})], []), false);
 });
 
-test("Undo permits reviewed duplicate originals and normalizes Unicode collisions", () => {
+test("Undo restores duplicate original filenames despite external reservations", () => {
   const sources = [{id: "a", filename: "Café.jpg"}, {id: "b", filename: "Café.jpg"}];
   const plan = planPhotoNames(sources);
   assert.equal(canRestorePhotoNames(plan, sources, []), true);
-  assert.equal(canRestorePhotoNames(plan, sources, ["Cafe\u0301.jpg"]), false);
+  assert.equal(canRestorePhotoNames(plan, sources, ["Cafe\u0301.jpg"]), true);
 });

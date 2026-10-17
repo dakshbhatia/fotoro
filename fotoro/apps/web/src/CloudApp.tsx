@@ -70,7 +70,7 @@ import {visualSearchFeedback} from "./local/LocalSearch";
 import { PhotoSearchIndex, normalizeSearch } from "./local/search";
 import type { LocalPhoto } from "./local/resources";
 import { currentSearchRecords, cloudSearchRecords, mergeSearchPhotos } from "./library/search";
-import {subscribeCachedMetadata} from "./exchange/cache";
+import {cachedMetadataRevision, subscribeCachedMetadata} from "./exchange/cache";
 import {deriveConsumerSyncSummary, syncStateLabel} from "./library/consumer-sync";
 import {loadUploadPause, saveUploadPause} from "./library/consumer-preferences";
 import type {OwnedPhotoSnapshot} from "./library/consumer-search";
@@ -298,6 +298,8 @@ export default function CloudApp({
   const searchCorpusRef = useRef<CachedAccountSearch | null>(null);
   const [searchCorpus, setSearchCorpus] = useState<CachedAccountSearch | null>(null);
   const [metadataEpoch, setMetadataEpoch] = useState(0);
+  // Debounced refreshes are still search work; partial coverage alone is not.
+  const [metadataUpdating, setMetadataUpdating] = useState(false);
   const [metadataSearchError, setMetadataSearchError] = useState("");
   const metadataInFlight = useRef(false), metadataDirty = useRef(false);
   const publishedMetadata = useRef<CachedAccountSearch | null>(null);
@@ -820,10 +822,17 @@ export default function CloudApp({
     if (!corpus?.admitted) return undefined;
     return {token: corpus, records: currentSearchRecords(corpus.records, cloudSearchRecords(photos)), get complete() {return corpus.complete;}, browseIds: new Set(photos.filter(photo => !searchAdded.current.has(photo.manifest.photoId)).map(photo => photo.manifest.photoId)),
       current: () => corpus.admitted, search: (query, options) => corpus.index!.search(query, options),
-      searchAsync: (query, options, signal, current) => corpus.index!.searchAsync(query, options, signal, () => corpus.admitted && (current?.() ?? true)).catch(error => {
-        if (error instanceof Error && error.message === "CACHED_SEARCH_SOURCE_CHANGED" && corpus.admitted) requestMetadataRefresh.current();
-        throw error;
-      }),
+      searchAsync: (query, options, signal, current) => {
+        const revision = cachedMetadataRevision(account);
+        return corpus.index!.searchAsync(query, options, signal, () => corpus.admitted && (current?.() ?? true)).then(result => ({...result,
+          searching: result.searching || metadataUpdating,
+          metadataIncomplete: result.metadataIncomplete || !!metadataSearchError,
+          current: () => corpus.admitted && cachedMetadataRevision(account) === revision && result.current?.() !== false,
+        })).catch(error => {
+          if (error instanceof Error && error.message === "CACHED_SEARCH_SOURCE_CHANGED" && corpus.admitted) requestMetadataRefresh.current();
+          throw error;
+        });
+      },
       hydrate: async (ids, signal, current) => {
         signal.throwIfAborted(); if (!current() || !corpus.admitted) throw new DOMException("Saved search changed", "AbortError");
         const session = requireVault(), starting = currentCatalog.current;
@@ -838,7 +847,7 @@ export default function CloudApp({
         const merged = mergeSearchPhotos(starting, matches, searchAdded.current, retained); searchAdded.current = merged.added;
         if (merged.photos.length !== starting.length || merged.photos.some((photo, i) => photo !== starting[i])) {currentCatalog.current = merged.photos; setPhotos(merged.photos);}
       }};
-  }, [searchCorpus, photos, consumerSelection]);
+  }, [searchCorpus, photos, consumerSelection, metadataUpdating, metadataSearchError, account]);
   const ownedSnapshot = useMemo<OwnedPhotoSnapshot | null>(() => {
     if (!account) return null;
     let session;
@@ -912,11 +921,11 @@ export default function CloudApp({
     let controller: AbortController | undefined;
     let restartTimer: ReturnType<typeof setTimeout> | undefined;
     const discard = () => {
-      clearTimeout(restartTimer); controller?.abort(); metadataInFlight.current = false; metadataDirty.current = false;
+      clearTimeout(restartTimer); controller?.abort(); metadataInFlight.current = false; metadataDirty.current = false; setMetadataUpdating(false);
       searchCorpusRef.current?.dispose(); publishedMetadata.current?.dispose(); searchCorpusRef.current = null; publishedMetadata.current = null; setSearchCorpus(null);
     };
     const changed = () => {
-      metadataDirty.current = true;
+      metadataDirty.current = true; setMetadataUpdating(true);
       if (metadataInFlight.current) return;
       if (!restartTimer) restartTimer = setTimeout(() => {restartTimer = undefined; setMetadataEpoch(value => value + 1);}, 500);
     };
@@ -928,7 +937,7 @@ export default function CloudApp({
     document.addEventListener("visibilitychange", hidden);
     if (unlocked && account && document.visibilityState === "visible") {
       const session = requireVault(), origin = location.origin;
-      controller = new AbortController(); metadataInFlight.current = true; metadataDirty.current = false;
+      controller = new AbortController(); metadataInFlight.current = true; metadataDirty.current = false; setMetadataUpdating(true);
       const previous = searchCorpusRef.current;
       const corpus = new CachedAccountSearch(session, () => metadataMounted.current && document.visibilityState === "visible" && location.origin === origin, previous ?? undefined);
       if (previous !== publishedMetadata.current) previous?.dispose();
@@ -944,6 +953,7 @@ export default function CloudApp({
       }).finally(() => {
         if (searchCorpusRef.current === corpus) {
           metadataInFlight.current = false;
+          if (!metadataDirty.current) setMetadataUpdating(false);
           if (metadataDirty.current && metadataMounted.current && document.visibilityState === "visible") {clearTimeout(restartTimer); restartTimer = setTimeout(() => {restartTimer = undefined; setMetadataEpoch(value => value + 1);}, 0);}
         }
       });
@@ -963,10 +973,17 @@ export default function CloudApp({
   const permitted = useMemo(() => peopleMatchingPhotoIDs(peopleRecords.filter(photo => inBrowseRange(photo, recentActive, !received && favoritesOnly, Date.now(), received ? "photos" : organizationScope)), peopleFind.filter), [peopleRecords, peopleFind.filter, recentActive, received, favoritesOnly, organizationScope]);
   const loadedRecords = useMemo(() => cloudSearchRecords(searchable), [searchable]);
   const index = useMemo(() => !received && searchCorpus?.admitted ? searchCorpus.index! : new PhotoSearchIndex(loadedRecords), [loadedRecords, received, searchCorpus]);
-  const accountQuery = useMemo(() => !received && searchCorpus?.admitted ? (signal: AbortSignal, current: () => boolean) => index.searchAsync(query, {scope: "account:" + account, allowedIds: permitted, committedMeaning}, signal, () => current() && searchCorpus.admitted).catch(error => {
-    if (error instanceof Error && error.message === "CACHED_SEARCH_SOURCE_CHANGED" && searchCorpus.admitted) requestMetadataRefresh.current();
-    throw error;
-  }) : undefined, [index, query, account, committedMeaning, permitted, received, searchCorpus]);
+  const accountQuery = useMemo(() => !received && searchCorpus?.admitted ? (signal: AbortSignal, current: () => boolean) => {
+    const revision = cachedMetadataRevision(account);
+    return index.searchAsync(query, {scope: "account:" + account, allowedIds: permitted, committedMeaning}, signal, () => current() && searchCorpus.admitted).then(result => ({...result,
+      searching: result.searching || metadataUpdating,
+      metadataIncomplete: result.metadataIncomplete || !!metadataSearchError,
+      current: () => searchCorpus.admitted && cachedMetadataRevision(account) === revision && result.current?.() !== false,
+    })).catch(error => {
+      if (error instanceof Error && error.message === "CACHED_SEARCH_SOURCE_CHANGED" && searchCorpus.admitted) requestMetadataRefresh.current();
+      throw error;
+    });
+  } : undefined, [index, query, account, committedMeaning, permitted, received, searchCorpus, metadataUpdating, metadataSearchError]);
   const asynchronousLexical = useAccountSearch(query, "account:" + account, accountQuery, active && unlocked && !received);
   const boundedLexical = useMemo(() => accountQuery ? undefined : index.search(query, {scope: "account:" + account, allowedIds: permitted, committedMeaning}), [accountQuery, index, query, account, committedMeaning, permitted]);
   const lexicalSearchResult = boundedLexical ?? asynchronousLexical;

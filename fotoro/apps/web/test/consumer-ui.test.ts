@@ -111,7 +111,7 @@ test("skipped photos and pending or conflicting edits prevent an unconditional c
   const {deriveConsumerSyncSummary} = await import("../src/library/consumer-sync");
   for (const extra of [{skippedPhotos: 1}, {pendingEdits: 1}, {conflictingEdits: 1}]) {
     const summary = deriveConsumerSyncSummary({...facts, queuedPhotos: 0, ...extra});
-    assert.equal(summary.state, "needsAttention"); assert.notEqual(summary.action, "none");
+    assert.equal(summary.state, "pendingEdits" in extra ? "pending" : "needsAttention"); assert.notEqual(summary.action, "none");
   }
 });
 test("local optional features have no implicit choice or storage write", async () => {

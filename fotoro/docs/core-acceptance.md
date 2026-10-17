@@ -97,3 +97,21 @@ changes are not included in the previously uploaded build 89. Physical
 performance acceptance remains open, and TestFlight setup remains deferred.
 
 Interaction reference: [Apple's continuous animation guidance](https://developer.apple.com/videos/play/wwdc2024/10145/).
+
+October 17 full browser acceptance used a disposable local account and the real
+local D1/R2 API. A public receipt was imported, encrypted and saved, renamed,
+searched, moved to Fotoro Trash, saved, and restored. A separate browser origin
+with independent local storage recovered the account and verified the saved
+name, hidden Trash state, Restore, and searchable OCR invoice number 4826.
+A fresh boarding-pass OCR batch immediately showed Searching photos during
+metadata refresh and then matched BOSTON. Both browser warning/error consoles
+were clean. This establishes a local cross-origin backend journey, not physical
+device performance or a signed-in production cross-device journey.
+
+Annotation Save now fails visibly if conflicts or retry contention leave edits
+queued. Upload 401 responses expire only their captured vault session and retain
+structured request diagnostics. Removing a naming override during Undo restores
+intrinsic filenames even when originals share that name; explicit restored names
+still require collision checks. Ordinary pending edits say Changes to Save.
+Metadata refresh keeps account searches pending; cache revision receipts also
+withdraw obsolete empty results. No new test files or assertions were added.

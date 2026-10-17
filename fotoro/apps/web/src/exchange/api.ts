@@ -146,8 +146,9 @@ export async function fetchCipher(objectId: string, signal?: AbortSignal, diagno
 }
 export async function uploadCipher(url: URL, options: RequestInit, diagnostic?: DiagnosticContext) {
   const context = diagnostic ?? new DiagnosticContext("sync");
+  const session = requestSession(url.pathname);
   return tracedResponse(context, "transfer", () => fetch(url, {...options, headers: {...Object.fromEntries(new Headers(options.headers)), "X-Fotoro-Trace-Id": context.traceId}}), async response => {
-    if (!response.ok) throw new Error("UPLOAD_FAILED");
+    if (!response.ok) throw await responseError(response, session, options.signal ?? undefined);
     return response;
   }, options.signal ?? undefined);
 }

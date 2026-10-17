@@ -3099,12 +3099,14 @@ struct DeviceBatchNamingReview: View {
     do {
       let reserved = try await reservations(excluding: Set(entries.map(\.id)))
       var context = search.browseOrganizationContext
+      // Removing an override restores the original filename, including names
+      // already shared by other originals before this preview.
       for entry in entries {
         let value = try record(entry.photo)
         let target = restoring ? entry.previous ?? entry.original : entry.name
         guard value.filename == entry.original,
           PhotoOrganizationFacts.name(value.facts, original: value.filename) == (restoring ? entry.name : entry.before),
-          !reserved.contains(key(target)) else { throw FotoroError("Selection or names changed. Preview again.") }
+          (restoring && entry.previous == nil || !reserved.contains(key(target))) else { throw FotoroError("Selection or names changed. Preview again.") }
       }
       for entry in entries where entry.before != entry.name {
         try Task.checkCancellation()

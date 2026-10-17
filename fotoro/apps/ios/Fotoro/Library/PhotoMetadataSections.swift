@@ -555,11 +555,13 @@ struct SavedBatchNamingReview: View {
       let reserved = try await reservedNames(excluding: Set(entries.map(\.id)))
       var revision = services.consumerCatalogGeneration
       // Validate the whole reviewed plan before the first mutation.
+      // Removing an override restores the original filename, including names
+      // already shared by other originals before this preview.
       for entry in entries {
         guard presentation.current(), let current = try services.consumerSavedPhoto(entry.id),
           current.metadata == entry.photo.metadata, current.manifest == entry.photo.manifest,
           PhotoOrganizationFacts.name(services.annotation(current).facts, original: current.metadata.filename) == (restoring ? entry.name : entry.before),
-          !reserved.contains(key(restoring ? (entry.previous ?? entry.photo.metadata.filename) : entry.name)) else { throw FotoroError("Selection or names changed. Preview again.") }
+          (restoring && entry.previous == nil || !reserved.contains(key(restoring ? (entry.previous ?? entry.photo.metadata.filename) : entry.name))) else { throw FotoroError("Selection or names changed. Preview again.") }
       }
       for entry in entries where entry.before != entry.name {
         try Task.checkCancellation()
