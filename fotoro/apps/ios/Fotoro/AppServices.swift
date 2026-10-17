@@ -2229,6 +2229,27 @@ enum ReviewedPhotosBackupPolicy {
     try annotations.ledger.edit(value, photo: photo, bundle: bundle, card: card)
     try publishEditedAnnotation(photo, account: account, bundle: bundle, card: card)
   }
+  func keepPlaceName(_ name: String, photo: LocalPhoto, expected: PhotoLocationV1) throws {
+    let reviewed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !reviewed.isEmpty, reviewed.unicodeScalars.count <= 200,
+      !reviewed.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }), expected.isValid,
+      let access = photoAccountAccess, let account = session.accountId, access.account == account,
+      photo.manifest.ownerAccountId == account, let current = try consumerSavedPhoto(photo.id),
+      current.metadata == photo.metadata, current.manifest == photo.manifest else { throw FotoroError("Photo source changed") }
+    let catalog = store, generation = vault.generation, origin = BackgroundUploadPolicy.origin(api.baseURL)
+    let bundle = try vault.requireBundle(), card = try session.requireCard(account)
+    var value = try annotations.ledger.current(photo: current, bundle: bundle, card: card)
+      ?? PhotoAnnotationsV1(photoId: current.id, originalSha256: current.metadata.originalSha256)
+    guard value.location == expected, !PhotoOrganizationFacts.trashed(value.facts),
+      expected.name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false else { throw FotoroError("Photo location changed") }
+    var location = expected
+    location.name = reviewed
+    try value.setLocation(location)
+    guard photoAccountAccess == access, vault.isUnlocked, vault.generation == generation,
+      session.accountId == account, store === catalog, BackgroundUploadPolicy.origin(api.baseURL) == origin else { throw CancellationError() }
+    try annotations.ledger.edit(value, photo: current, bundle: bundle, card: card)
+    try publishEditedAnnotation(current, account: account, bundle: bundle, card: card)
+  }
   func setLabels(_ labels: [String], photo: LocalPhoto) throws {
     guard let account = session.accountId else { throw FotoroError("Sign in first") }
     guard store.root.lastPathComponent == account, photo.manifest.ownerAccountId == account,

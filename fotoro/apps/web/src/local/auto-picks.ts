@@ -174,11 +174,11 @@ export class PickAnalyzer {
   private controller = new AbortController();
   private cache = new Map<string, CachedSignals>();
   constructor(private readonly yieldWork: () => Promise<void> = () => new Promise(resolve => setTimeout(resolve, 0))) {}
-  private async measurements(photos:LocalPhoto[], load:(photo:LocalPhoto, signal?: AbortSignal)=>Promise<PhotoSignals>, progress?: (done:number,total:number)=>void, highlights = false) {
+  private async measurements(photos:LocalPhoto[], load:(photo:LocalPhoto, signal?: AbortSignal)=>Promise<PhotoSignals>, progress?: (done:number,total:number)=>void, highlights = false, retainCompleted = false) {
     this.cancel();
     const version = this.version, cancellationSignal = this.controller.signal, unique = [...new Map(photos.map(photo => [photo.id, photo])).values()];
     const ids = new Set(unique.map(photo => photo.id));
-    for (const id of this.cache.keys()) if (!ids.has(id)) this.cache.delete(id);
+    if (!retainCompleted) for (const id of this.cache.keys()) if (!ids.has(id)) this.cache.delete(id);
     const signals = new Map<string, PhotoSignals>();
     for (let i = 0; i < unique.length; i++) {
       if (version !== this.version) return;
@@ -234,8 +234,8 @@ export class PickAnalyzer {
       await this.yieldWork();
     }
   }
-  async cleanup(photos:LocalPhoto[], load:(photo:LocalPhoto, signal?: AbortSignal)=>Promise<PhotoSignals>, progress?:(done:number,total:number)=>void) {
-    const measured = await this.measurements(photos, load, progress);
+  async cleanup(photos:LocalPhoto[], load:(photo:LocalPhoto, signal?: AbortSignal)=>Promise<PhotoSignals>, progress?:(done:number,total:number)=>void, retainCompleted = false) {
+    const measured = await this.measurements(photos, load, progress, false, retainCompleted);
     if (!measured || measured.version !== this.version) return;
     return cleanupCandidates(measured.unique, measured.signals);
   }
@@ -299,8 +299,9 @@ export function cleanupCandidates(photos: readonly LocalPhoto[], signals: Readon
 export class CleanupAnalyzer {
   private analyzer = new PickAnalyzer();
   async run(photos: LocalPhoto[], load: (photo: LocalPhoto, signal?: AbortSignal) => Promise<PhotoSignals>, progress: (done: number) => void) {
-    return this.analyzer.cleanup(photos, load, progress);
+    return this.analyzer.cleanup(photos, load, progress, true);
   }
   review(photos: readonly LocalPhoto[]) {return this.analyzer.cleanupSnapshot(photos);}
+  cancel() {this.analyzer.cancel();}
   clear() {this.analyzer.clear();}
 }

@@ -803,6 +803,8 @@ main:has(.consumer-selection) .canvas { padding-bottom: calc(max(140px, var(--se
 .selection-more > summary::-webkit-details-marker { display: none; }
 .selection-more > summary:focus-visible { outline: 2px solid var(--photo-focus); outline-offset: 2px; }
 .selection-more > div { position: absolute; bottom: calc(100% + 8px); right: 10px; width: max-content; max-width: min(280px,calc(100vw - 52px)); padding: 6px; border: 1px solid var(--photo-border); border-radius: 18px; background: #1c1f22; box-shadow: 0 8px 24px #0005; }
+.selection-more > div:has([aria-label="Name selected photos"]) { max-height: min(60vh, 480px); overflow-y: auto; width: min(420px, calc(100vw - 52px)); max-width: calc(100vw - 52px); padding: 14px; }
+.selection-more [aria-label="Name selected photos"] li { overflow-wrap: anywhere; margin-block: 10px; }
 .selection-more button { min-height: var(--control-target); width: 100%; border: 0; border-radius: 12px; background: transparent; color: var(--photo-text); text-align: left; }
 .consumer-save-progress { flex: 0 0 auto; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 24px 10px; }
 .consumer-save-progress p { margin: 0; font-size: var(--font-control); }

@@ -43,6 +43,7 @@ struct LibraryView: View {
   @State private var dayProjection = PhotoBrowseValueProjection<SavedLibraryDayProjectionID, [(String, [Int])]>()
   @State private var searchAttempt: UInt64 = 0
   @State private var selection = SavedPhotoSelection()
+  @State private var batchNaming: SavedBatchNamingPresentation?
   @State private var catalogRefresh = SavedLibraryRefresh()
   @State private var reopeningAccount = false
   @State private var viewer: SavedPhotoViewerPresentation?
@@ -211,6 +212,12 @@ struct LibraryView: View {
         }.disabled(preparingShare || sharingOriginals)
       }
     }
+    if selection.count > 0 {
+      ToolbarItem(placement: .bottomBar) {
+        Button("Name selected", systemImage: "textformat") { openBatchNaming() }
+          .disabled(preparingShare || sharingOriginals)
+      }
+    }
     ToolbarItem(placement: .topBarTrailing) {
       Menu("Saved options", systemImage: "ellipsis.circle") {
         Toggle("Favorites", isOn: $favoritesOnly)
@@ -263,6 +270,9 @@ struct LibraryView: View {
   }
   private var libraryPresentations: some View {
     libraryNavigation
+      .sheet(item: $batchNaming) { presentation in
+        SavedBatchNamingReview(services: services, presentation: presentation)
+      }
       .fullScreenCover(item: $viewer, onDismiss: { viewer = nil }) { presentation in
         PhotoViewer(
           services: services, initialID: presentation.initial.id,
@@ -474,6 +484,19 @@ struct LibraryView: View {
       shareTask?.cancel()
       cleanupShare()
     }
+  }
+  private func openBatchNaming() {
+    do {
+      let photos = try selection.resolve(using: services.consumerSavedPhoto)
+      let ids = selection.ids, access = services.photoAccountAccess, account = services.session.accountId
+      let catalog = services.store, generation = services.vault.generation, origin = services.api.origin
+      guard access != nil, !photos.isEmpty else { return }
+      batchNaming = SavedBatchNamingPresentation(photos: photos, current: {
+        services.vault.isUnlocked && services.vault.generation == generation && services.store === catalog
+          && services.session.accountId == account && services.photoAccountAccess == access && services.api.origin == origin
+          && selection.ids == ids && SavedPhotoSelection.isCurrent(photos, lookup: services.consumerSavedPhoto)
+      })
+    } catch { services.error = error.localizedDescription }
   }
   private func shareOriginals() {
     guard selection.count > 0, !preparingShare, !sharingOriginals else { return }

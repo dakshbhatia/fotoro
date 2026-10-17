@@ -266,6 +266,7 @@ enum PhotoOrganizationFacts {
     var tags = 0
     for label in labels where tags < 2 { if add(label) { tags += 1 } }
     if tags == 0 { _ = add(screenshot ? analysis?.text : analysis?.scene ?? analysis?.text) }
+    guard !parts.isEmpty else { return original }
     var identity: String?
     if let digest {
       var hex = digest.lowercased()

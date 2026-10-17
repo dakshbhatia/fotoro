@@ -77,6 +77,7 @@ export function suggestedPhotoName(input: {filename: string; digest?: string; da
     const scene = input.screenshot ? undefined : validatedVisualLabels(input.analysis?.visual)[0]?.label;
     add(input.screenshot ? text : scene ?? text);
   }
+  if (!date && !words.length) return input.filename;
   // Digest suffix prevents common date/tag collisions, independent of device locale/timezone.
   let digest = input.digest;
   if (digest && !/^[a-fA-F0-9]{64}$/.test(digest)) {
@@ -104,4 +105,30 @@ export function inOrganizationScope(photo: {facts?: readonly string[]; filename?
   if (isPhotoTrashed(photo)) return false;
   if (scope === "screenshots") return isPhotoScreenshot(photo);
   return scope !== "photosOnly" || !isPhotoScreenshot(photo);
+}
+
+export type PhotoNamePlanSource = Parameters<typeof suggestedPhotoName>[0] & {id: string; facts?: readonly string[]};
+export interface PhotoNamePlanEntry {id: string; original: string; before: string; name: string; previousName: string | null; digest?: string}
+/** Caller supplies only selected photos. Unselected effective names remain reserved. */
+export function planPhotoNames(sources: readonly PhotoNamePlanSource[], reservedNames: readonly string[] = []): PhotoNamePlanEntry[] {
+  const key = (name: string) => name.normalize("NFC").toLowerCase();
+  const used = new Set(reservedNames.map(key)), ids = new Set<string>();
+  const ordered = [...sources].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  return ordered.map(source => {
+    if (ids.has(source.id)) throw new Error("Duplicate photo in naming selection");
+    ids.add(source.id);
+    const proposed = suggestedPhotoName({...source, screenshot: isPhotoScreenshot(source)});
+    const extension = proposed.match(/\.[a-zA-Z0-9]{1,10}$/)?.[0] ?? "";
+    const stem = extension ? proposed.slice(0, -extension.length) : proposed;
+    let name = proposed, ordinal = 1;
+    while (used.has(key(name))) {
+      const suffix = "_" + (++ordinal) + extension;
+      const characters = Array.from(stem);
+      while (characters.length && !validPhotoName(characters.join("") + suffix)) characters.pop();
+      name = characters.join("") + suffix;
+    }
+    if (!validPhotoName(name)) throw new Error("Could not create a safe photo name");
+    used.add(key(name));
+    return {id: source.id, original: source.filename, before: photoName(source, source.filename), name, previousName: one(source.facts, "name") ?? null, digest: source.digest};
+  });
 }

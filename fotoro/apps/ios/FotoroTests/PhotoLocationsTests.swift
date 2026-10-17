@@ -37,6 +37,10 @@ final class PhotoLocationsTests: XCTestCase {
     XCTAssertFalse(draft.savedNameChanged)
   }
 
+  func testNoNamingEvidenceKeepsOriginalFilenameEvenWithDigest() {
+    XCTAssertEqual(PhotoOrganizationFacts.suggestedName(original: "Singapore Holiday.JPG", digest: String(repeating: "ab", count: 32),
+      capturedAt: nil, labels: ["", "!!!"], place: "", screenshot: false), "Singapore Holiday.JPG")
+  }
   func testSuggestedNamesUseDistinctUsefulTagsAndRemainApplicable() {
     let date = ISO8601DateFormatter().date(from: "2018-02-03T23:50:00Z")
     XCTAssertEqual(PhotoOrganizationFacts.suggestedName(original: "IMG.JPG", digest: String(repeating: "00", count: 32),
@@ -47,7 +51,7 @@ final class PhotoLocationsTests: XCTestCase {
     XCTAssertEqual(reserved, "Photo_CON.jpg")
     XCTAssertTrue(PhotoOrganizationFacts.validName(reserved))
     XCTAssertEqual(PhotoOrganizationFacts.suggestedName(original: "IMG.JPG", digest: nil,
-      capturedAt: Date(timeIntervalSince1970: .infinity), labels: [], place: nil, screenshot: false), "Photo.jpg")
+      capturedAt: Date(timeIntervalSince1970: .infinity), labels: [], place: nil, screenshot: false), "IMG.JPG")
   }
   func testOrganizationNamesMatchWebAndTrashRestoresWithoutDestroyingWords() throws {
     let digest = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -84,10 +88,10 @@ final class PhotoLocationsTests: XCTestCase {
     XCTAssertEqual(name(), "dog_0000000000.jpg")
     XCTAssertEqual(name(true), "Screenshot_ALFRED-COFFEE_0000000000.jpg")
     XCTAssertEqual(name(labels: ["My exact title"]), "My-exact-title_0000000000.jpg")
-    XCTAssertEqual(name(evidence: PhotoNameAnalysis(record: record, photoID: "other", revision: "source-r1")), "0000000000.jpg")
-    XCTAssertEqual(name(evidence: PhotoNameAnalysis(record: record, photoID: "public-photo", revision: "changed")), "0000000000.jpg")
+    XCTAssertEqual(name(evidence: PhotoNameAnalysis(record: record, photoID: "other", revision: "source-r1")), "IMG.JPG")
+    XCTAssertEqual(name(evidence: PhotoNameAnalysis(record: record, photoID: "public-photo", revision: "changed")), "IMG.JPG")
     record.ocrStatus = .failed; record.visualStatus = .pending
-    XCTAssertEqual(name(evidence: PhotoNameAnalysis(record: record, photoID: record.id, revision: record.revision)), "0000000000.jpg")
+    XCTAssertEqual(name(evidence: PhotoNameAnalysis(record: record, photoID: record.id, revision: record.revision)), "IMG.JPG")
   }
 
   func testNamePreviewsRejectUncertainTextIdentifiersAndUnsupportedScenes() {
@@ -98,16 +102,16 @@ final class PhotoLocationsTests: XCTestCase {
         screenshot: false, analysis: PhotoNameAnalysis(record: record, photoID: record.id, revision: record.revision))
     }
     record.ocrText = "9:41\nuser@example.com\nhttps://example.com\nOrder 123456\nTotal $12.50"
-    XCTAssertEqual(name(), "Photo.jpg")
+    XCTAssertEqual(name(), "IMG.JPG")
     record.ocrText = "Wrong title"; record.ocrConfidence = 0.4
-    XCTAssertEqual(name(), "Photo.jpg")
+    XCTAssertEqual(name(), "IMG.JPG")
     record.ocrConfidence = .nan
-    XCTAssertEqual(name(), "Photo.jpg")
+    XCTAssertEqual(name(), "IMG.JPG")
     record.ocrConfidence = 1; record.processor = "unknown-model"
-    XCTAssertEqual(name(), "Photo.jpg")
+    XCTAssertEqual(name(), "IMG.JPG")
     record.visualStatus = .complete
     record.visualLabels = [SearchVisualLabel(label: "Person name", identifier: "dog", confidence: 0.99, processor: SearchVisualPolicy.processor)]
-    XCTAssertEqual(name(), "Photo.jpg")
+    XCTAssertEqual(name(), "IMG.JPG")
   }
 
   func testPlacePresentationKeepsCoordinatesForAnExplicitMapAction() throws {
@@ -185,4 +189,18 @@ final class PhotoLocationsTests: XCTestCase {
     XCTAssertEqual(result.map(\.id), ["device:a", "device:b", "device:c"])
     XCTAssertEqual(result.first?.revision, "2")
   }
+  func testReviewedAreaNamePreservesGPSAndDoesNotReplaceExistingNames() {
+    let original = PhotoLocationV1(latitude: 40.7, longitude: -74, source: "photos", accuracyMeters: 15)
+    let kept = PhotoPlacesPolicy.keepingAreaName("  New York  ", location: original)
+    XCTAssertEqual(kept?.name, "Near New York")
+    XCTAssertEqual(kept?.latitude, original.latitude)
+    XCTAssertEqual(kept?.longitude, original.longitude)
+    XCTAssertEqual(kept?.source, original.source)
+    XCTAssertEqual(kept?.accuracyMeters, original.accuracyMeters)
+    XCTAssertNil(PhotoPlacesPolicy.keepingAreaName("Other", location: kept!))
+    for invalid in ["", "   ", "New\nYork", String(repeating: "x", count: 196)] {
+      XCTAssertNil(PhotoPlacesPolicy.keepingAreaName(invalid, location: original))
+    }
+  }
+
 }

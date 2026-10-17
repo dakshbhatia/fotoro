@@ -15,13 +15,17 @@ still starts with the latest ten calendar days.
 | Correct photo identity | Device and Saved interactions are revision-scoped; source replacement cancels web touch sessions. Existing bounded presentation checks remain. |
 | Smooth photo work | Native per-frame zoom/pan observation belongs to the image, with a separate mode boundary for toolbar updates; 1,000 drag samples do not notify parent mode observation. This is structural evidence, not a frame-rate measurement. |
 | Fast search | A disposed index now invalidates both populated and empty async results; stale results cannot stay current after index replacement. |
-| Complete indexing/status | Existing Latest 10 days admission, Saved continuation, durable retries and truthful result totals remain; host regression suite passes. Recognition accuracy is not established by these tests. |
-| Screenshots | Changing source text preserves a newer account screenshot correction; an explicit correction change/removal still applies. |
-| Consistent filenames | Source text edits preserve the latest reviewed account name instead of overwriting it with a stale local name. |
-| Recoverable cleanup | Source text edits cannot resurrect stale Trash after another device restored the photo. |
+| Complete indexing/status | Web Photos and Saved expose loaded-scope OCR coverage, readable-text counts, unavailable evidence and existing visual-search progress. Unchecked does not mean queued. Existing Latest 10 days admission and Saved continuation remain. |
+| Screenshots | Web cleanup groups known screenshots by existing tags or current readable text, with explicit individual review. No dimensions or filename guesses classify screenshots. Changing source text preserves a newer account screenshot correction. |
+| Consistent filenames | Web selection and native Saved selection support preview, collision-safe Apply and guarded name-only Undo. Without naming evidence, the original filename is retained. Native reservation scans yield every 200 photos; originals stay unchanged. |
+| Recoverable cleanup | Native and web reviews continue in explicit batches of 200 over the loaded session snapshot. Counts distinguish scanned, remaining and unassessed photos; no unloaded-library coverage is claimed. Trash stays Fotoro-only with Restore. |
 | Cross-device convergence | Supplied text, organization, People and observation categories merge independently into the latest account facts; unchanged stale categories cannot replace them. |
-| Interrupted/offline edits | Reverting an offline edit drops that field from local intent, preventing a false conflict with a remote edit. |
-| Truthful status | Search freshness includes empty results; background status, source and account checks remain. No log records private photo text, query text or coordinates. |
+| Interrupted/offline edits | After a successful online installation, the web shell can cold-start offline at Photos and Saved entry routes. Only public built JS/CSS and static shell HTML are cached here, never API replies or photo data. Existing encrypted data/offline-edit rules remain. |
+| Truthful status | Local diagnostics summarize successful logical-action median/p95 timings, failures and cancellation over the retained sample. This is not production aggregation or frame-rate measurement. No log records private photo text, query text or coordinates. |
+
+Native Places can explicitly keep a looked-up approximate area name on an owned
+Saved photo. The reviewed label follows existing encrypted annotation sync;
+coordinates, source and accuracy remain unchanged. Existing names are preserved.
 
 ## Ten gesture checks
 
@@ -40,7 +44,7 @@ still starts with the latest ten calendar days.
 
 ## Verification
 
-`pnpm check` passes, including 865 browser tests and 129 API tests. Both generic
+`pnpm check` qualifies browser, API, contract and release checks. Both generic
 iOS SDK targets compile. `pnpm test:ios:host` covers existing host scenarios and
 the added actual-production gesture policy/zoom observation checks. The new
 runner compiles the production zoom declaration and gesture policy directly.
@@ -57,5 +61,13 @@ No phone or Simulator was used, as requested. Native frame pacing, thermal/batte
 behavior and physical gesture recognition remain unmeasured. These checks also
 do not establish held-out human search relevance or a new authenticated
 production cross-device journey.
+
+October 17 browser acceptance exercised selected-photo Preview → Apply → Undo,
+an explicitly tagged/corrected screenshot review group, and a cold reload plus
+Saved entry with the local preview server stopped. The installed worker served
+the app with a clean warning/error console. Public fixture data and screenshots
+remain outside Git. A first visit while already offline cannot install the shell.
+Native Device Photos batch naming, durable library-wide cleanup history, edge
+auto-scroll selection and physical performance acceptance remain open.
 
 Interaction reference: [Apple's continuous animation guidance](https://developer.apple.com/videos/play/wwdc2024/10145/).

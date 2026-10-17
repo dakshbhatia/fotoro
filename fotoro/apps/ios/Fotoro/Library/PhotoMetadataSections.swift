@@ -184,6 +184,9 @@ struct SavedPhotoOrganizationSection: View {
 struct PhotoCleanupReview: View {
   @Bindable var services: AppServices
   @State private var source: [LocalPhoto] = []
+  @State private var snapshot: [LocalPhoto]?
+  @State private var batchNumber = 0
+  private let batchSize = 200
   @State private var measurements: [String: AutomaticPhotoPickSignals] = [:]
   @State private var sourceCurrent: () -> Bool = { false }
   @State private var done = 0
@@ -221,9 +224,16 @@ struct PhotoCleanupReview: View {
       List {
         Section {
           Text("Review possible duplicates, blurry shots, and photos with little detail. Nothing is selected or removed automatically.")
-          Text("Up to 200 loaded Saved photos. Trash is recoverable and does not affect device Photos or free storage.").font(.caption).foregroundStyle(.secondary)
+          Text("Review loaded Saved photos in batches of 200. Photos outside this loaded snapshot have not been checked. Trash is recoverable and does not affect device Photos or free storage.").font(.caption).foregroundStyle(.secondary)
           if busy { ProgressView("Checking previews… \(done) / \(total)") }
-          else { Text("\(candidates.count) to review · \(result.unassessed) previews unassessed") }
+          else { Text("\(done) scanned · \(max(0, (snapshot?.count ?? 0) - total)) remaining · \(result.unassessed) current previews unassessed · \(candidates.count) cleanup candidates") }
+          if !busy, sourceCurrent(), let snapshot, total < snapshot.count {
+            Button("Review next \(min(batchSize, snapshot.count - total)) photos") {
+              guard !busy, sourceCurrent() else { return }
+              busy = true
+              batchNumber += 1
+            }
+          }
         }
         if services.vault.isUnlocked {
           ForEach(candidates) { photo in
@@ -246,7 +256,7 @@ struct PhotoCleanupReview: View {
         if let error { Text(error).foregroundStyle(.secondary) }
       }.navigationTitle("Review cleanup").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
-        .task { await review() }
+        .task(id: batchNumber) { await review() }
         .onChange(of: scenePhase) { _, value in if value != .active { dismiss() } }
         .onChange(of: services.vault.isUnlocked) { _, unlocked in if !unlocked { dismiss() } }
         .sheet(item: $opened) { photo in PhotoViewer(services: services, initialID: photo.id, displayedPhotos: [photo]) }
@@ -254,20 +264,32 @@ struct PhotoCleanupReview: View {
   }
   @MainActor private func review() async {
     let account = services.session.accountId, vault = services.vault.generation, catalog = services.store, access = services.photoAccountAccess
-    sourceCurrent = {
-      access != nil && services.photoAccountAccess == access && services.vault.isUnlocked && services.vault.generation == vault
-        && services.session.accountId == account && services.store === catalog
+    if snapshot != nil && !sourceCurrent() { busy = false; return }
+    if snapshot == nil {
+      sourceCurrent = {
+        access != nil && services.photoAccountAccess == access && services.vault.isUnlocked && services.vault.generation == vault
+          && services.session.accountId == account && services.store === catalog
+      }
+      snapshot = services.photos.filter { !PhotoOrganizationFacts.trashed(services.photoAnnotations[$0.id]?.facts ?? []) }
     }
-    source = Array(services.photos.filter { !PhotoOrganizationFacts.trashed(services.photoAnnotations[$0.id]?.facts ?? []) }.prefix(200))
+    guard sourceCurrent(), !Task.isCancelled else { busy = false; return }
+    let batch = Array((snapshot ?? []).dropFirst(source.count).prefix(batchSize))
+    source.append(contentsOf: batch)
     total = source.count
+    busy = true
     func current(_ photo: LocalPhoto) -> Bool {
-      !Task.isCancelled && scenePhase == .active && services.vault.isUnlocked && services.vault.generation == vault
+      sourceCurrent() && !Task.isCancelled && scenePhase == .active && services.vault.isUnlocked && services.vault.generation == vault
         && services.session.accountId == account && services.store === catalog
+        && !PhotoOrganizationFacts.trashed(services.photoAnnotations[photo.id]?.facts ?? [])
         && ((try? services.consumerSavedPhoto(photo.id)).map { $0.metadata == photo.metadata && $0.manifest == photo.manifest } ?? false)
     }
     defer { busy = false }
-    for photo in source {
-      guard current(photo) else { return }
+    for photo in batch {
+      guard sourceCurrent(), !Task.isCancelled, scenePhase == .active else { return }
+      guard current(photo), !PhotoOrganizationFacts.trashed(services.photoAnnotations[photo.id]?.facts ?? []) else {
+        done += 1
+        continue
+      }
       do {
         try await services.ensurePreview(photo)
         guard current(photo), let url = try services.consumerSavedPhoto(photo.id)?.previewURL else { throw CancellationError() }
@@ -279,16 +301,161 @@ struct PhotoCleanupReview: View {
           return try PhotoPickAnalyzer.measure(thumbnail)
         }
         let signals = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
-        guard current(photo) else { return }
+        guard current(photo) else { throw CancellationError() }
         if let signals { measurements[photo.id] = signals }
       } catch {
-        guard current(photo) else { return }
+        guard sourceCurrent(), !Task.isCancelled, scenePhase == .active else { return }
+        measurements.removeValue(forKey: photo.id)
       }
-      guard current(photo) else { return }
+      guard sourceCurrent(), !Task.isCancelled, scenePhase == .active else { return }
       done += 1
       await Task.yield()
     }
     NativeDiagnostics.shared.record(NativeDiagnosticEvent(phase: .metadata, outcome: .completed, completed: done, unavailable: recommendations.unassessed, step: .analysis))
+  }
+}
+#endif
+
+#if !FOTORO_LOCAL_PREVIEW
+struct SavedBatchNamingPresentation: Identifiable {
+  let id = UUID()
+  let photos: [LocalPhoto]
+  let current: @MainActor () -> Bool
+}
+
+struct SavedBatchNamingReview: View {
+  @Bindable var services: AppServices
+  let presentation: SavedBatchNamingPresentation
+  @Environment(\.dismiss) private var dismiss
+  @State private var preview: [Entry] = []
+  @State private var undo: [Entry] = []
+  @State private var status = ""
+  @State private var busy = false
+  @State private var work: Task<Void, Never>?
+  struct Entry: Identifiable {
+    let photo: LocalPhoto
+    let before: String
+    let previous: String?
+    let name: String
+    var id: String { photo.id }
+  }
+  private func key(_ value: String) -> String { value.precomposedStringWithCanonicalMapping.lowercased() }
+  private func reservedNames() async throws -> Set<String> {
+    guard let account = services.session.accountId, presentation.current() else { throw FotoroError("Photo selection changed") }
+    let selected = Set(presentation.photos.map(\.id)), revision = services.consumerCatalogGeneration
+    var reserved = Set<String>(), cursor: String?
+    while true {
+      try Task.checkCancellation()
+      guard presentation.current(), services.consumerCatalogGeneration == revision else { throw CancellationError() }
+      let page = try services.store.ownedPhotos(accountId: account, after: cursor, limit: 200)
+      for photo in page where !selected.contains(photo.id) {
+        reserved.insert(key(PhotoOrganizationFacts.name(services.annotation(photo).facts, original: photo.metadata.filename)))
+      }
+      guard let last = page.last else { break }
+      cursor = last.id
+      await Task.yield()
+      try Task.checkCancellation()
+      guard presentation.current(), services.consumerCatalogGeneration == revision else { throw CancellationError() }
+      if page.count < 200 { break }
+    }
+    return reserved
+  }
+  private func makePreview() async {
+    guard !busy else { return }
+    busy = true; defer { busy = false; work = nil }
+    do {
+      let revision = services.consumerCatalogGeneration
+      var used = try await reservedNames(), entries: [Entry] = []
+      for photo in presentation.photos.sorted(by: { $0.id < $1.id }) {
+        try Task.checkCancellation()
+        guard presentation.current(), let current = try services.consumerSavedPhoto(photo.id), current.metadata == photo.metadata, current.manifest == photo.manifest else { throw FotoroError("Photo source changed") }
+        let value = services.annotation(photo)
+        let proposed = PhotoOrganizationFacts.suggestedName(original: photo.metadata.filename, digest: photo.metadata.originalSha256,
+          capturedAt: CameraMedia.captureDate(photo.metadata), labels: value.labels ?? [], place: value.location?.name,
+          screenshot: PhotoOrganizationFacts.screenshot(value.facts, originalSha256: photo.metadata.originalSha256),
+          analysis: PhotoNameAnalysis(annotation: value, photoID: photo.id, digest: photo.metadata.originalSha256))
+        let ext = (proposed as NSString).pathExtension
+        let suffix = ext.isEmpty ? "" : "." + ext
+        let stem = suffix.isEmpty ? proposed : String(proposed.dropLast(suffix.count))
+        var name = proposed, number = 1
+        while used.contains(key(name)) {
+          number += 1
+          var bounded = stem
+          let ending = "_\(number)" + suffix
+          while !bounded.isEmpty && !PhotoOrganizationFacts.validName(bounded + ending) { bounded.removeLast() }
+          name = bounded + ending
+        }
+        guard PhotoOrganizationFacts.validName(name) else { throw PhotoOrganizationError.invalid }
+        used.insert(key(name))
+        entries.append(Entry(photo: photo, before: PhotoOrganizationFacts.name(value.facts, original: photo.metadata.filename),
+          previous: PhotoOrganizationFacts.one(value.facts, prefix: PhotoOrganizationFacts.namePrefix), name: name))
+        if entries.count.isMultiple(of: 200) {
+          await Task.yield()
+          try Task.checkCancellation()
+          guard presentation.current(), services.consumerCatalogGeneration == revision else { throw CancellationError() }
+        }
+      }
+      preview = entries; status = ""
+    } catch { preview = []; status = error.localizedDescription }
+  }
+  private func apply(restoring: Bool) async {
+    guard !busy else { return }
+    busy = true; defer { busy = false; work = nil }
+    let entries = restoring ? undo : preview
+    var completed: [Entry] = []
+    do {
+      let reserved = try await reservedNames()
+      var revision = services.consumerCatalogGeneration
+      // Validate the whole reviewed plan before the first mutation.
+      for entry in entries {
+        guard presentation.current(), let current = try services.consumerSavedPhoto(entry.id),
+          current.metadata == entry.photo.metadata, current.manifest == entry.photo.manifest,
+          PhotoOrganizationFacts.name(services.annotation(current).facts, original: current.metadata.filename) == (restoring ? entry.name : entry.before),
+          !reserved.contains(key(restoring ? (entry.previous ?? entry.photo.metadata.filename) : entry.name)) else { throw FotoroError("Selection or names changed. Preview again.") }
+      }
+      for entry in entries where entry.before != entry.name {
+        try Task.checkCancellation()
+        guard presentation.current(), services.consumerCatalogGeneration == revision, let live = try services.consumerSavedPhoto(entry.id),
+          live.metadata == entry.photo.metadata, live.manifest == entry.photo.manifest,
+          PhotoOrganizationFacts.name(services.annotation(live).facts, original: live.metadata.filename) == (restoring ? entry.name : entry.before)
+          else { throw FotoroError("Photo selection or name changed") }
+        try services.setOrganization(.name(restoring ? entry.previous : entry.name), photo: entry.photo)
+        completed.append(entry)
+        revision = services.consumerCatalogGeneration
+        await Task.yield()
+        try Task.checkCancellation()
+        guard presentation.current(), services.consumerCatalogGeneration == revision else { throw CancellationError() }
+      }
+      status = restoring ? "Names restored." : "\(completed.count) names applied. Original files stay unchanged."
+    } catch { status = "Stopped: \(error.localizedDescription). Completed changes are kept." }
+    if restoring { undo.removeAll { entry in completed.contains { $0.id == entry.id } } }
+    else { undo = completed; preview = [] }
+  }
+  var body: some View {
+    NavigationStack {
+      List {
+        Section {
+          Text("Review names for \(presentation.photos.count) selected photos. Original files stay unchanged.")
+          Button("Preview names") { work = Task { await makePreview() } }.disabled(busy)
+          if busy { ProgressView("Preparing names") }
+        }
+        if !preview.isEmpty {
+          Section("Name preview") {
+            ForEach(preview) { entry in
+              VStack(alignment: .leading) { Text(entry.before).foregroundStyle(.secondary); Text(entry.name) }
+            }
+            Button("Apply names") { work = Task { await apply(restoring: false) } }.disabled(busy)
+            Button("Cancel preview") { preview = [] }.disabled(busy)
+          }
+        }
+        if !undo.isEmpty { Button("Undo names") { work = Task { await apply(restoring: true) } }.disabled(busy) }
+        if !status.isEmpty { Text(status).accessibilityAddTraits(.updatesFrequently) }
+      }
+      .navigationTitle("Name selected photos")
+      .onDisappear { work?.cancel(); work = nil }
+      .onChange(of: presentation.current()) { _, valid in if !valid { dismiss() } }
+      .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+    }
   }
 }
 #endif

@@ -3,6 +3,10 @@ import type {PhotoOrganizationPatch} from "@fotoro/contracts/organization";
 import {SelectionTray} from "./components/SelectionTray";
 import {diagnose, diagnosticReason, type DiagnosticContext} from "./diagnostics";
 import {CopyDiagnostics} from "./components/CopyDiagnostics";
+import {BatchPhotoNaming} from "./library/BatchPhotoNaming";
+import {SearchCoverage} from "./local/SearchCoverage";
+import {savedPhotoNameAnalysis} from "./library/photo-name-analysis";
+import {photoName} from "@fotoro/contracts/organization";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { DeviceChallengeV1, GrantV1, PhotoLocationV1 } from "@fotoro/contracts";
 import {annotationLocation} from "@fotoro/contracts/location";
@@ -995,6 +999,7 @@ export default function CloudApp({
   const peopleEligibleIDs = useMemo(() => new Set([...(normalizeSearch(query) ? peopleMetadataMatches(lexicalSearchResult) : permitted)].map(id => "saved:" + id)), [query, lexicalSearchResult, permitted]);
   const latestPeoplePhotos = useRef(peoplePhotos); latestPeoplePhotos.current = peoplePhotos;
   const findPhotos = useMemo(() => peoplePhotos.map(photo => ({...photo, id: photo.id.slice(6)})).filter(photo => permitted.has(photo.id)), [peoplePhotos, permitted]);
+  const coveragePhotos = useMemo(() => peoplePhotos.filter(photo => permitted.has(photo.id.slice(6))), [peoplePhotos, permitted]);
   const semanticSearchResult = useSemanticFind(findPhotos, lexicalSearchResult, active && unlocked && !received, ownedSnapshot?.token, committedMeaning);
   const searchResult = useMemo(() => ({...peopleFilteredResult(semanticSearchResult, permitted), searching: semanticSearchResult.searching || metadataMatchesPending}), [semanticSearchResult, permitted, metadataMatchesPending]);
   const findMatches = useMemo(() => findMatchPhotos(findPhotos, searchResult), [findPhotos, searchResult]);
@@ -1129,6 +1134,11 @@ export default function CloudApp({
     });
   }, [photos]);
   const chosen = photos.filter((p) => selected.has(p.manifest.photoId));
+  const namingScope = useMemo(() => crypto.randomUUID(), [ownedSnapshot?.token]);
+  const namingSources = useMemo(() => chosen.map(photo => ({...photo.annotations,
+    id: photo.manifest.photoId, filename: photo.metadata.filename, digest: photo.metadata.originalSha256,
+    date: photo.metadata.sourceDate, dateSource: photo.metadata.dateSource, location: annotationLocation(photo.annotations ?? {}), analysis: savedPhotoNameAnalysis(photo)})), [photos, selected]);
+  const namingReserved = useMemo(() => photos.filter(photo => !selected.has(photo.manifest.photoId)).map(photo => photoName(photo.annotations ?? {}, photo.metadata.filename)), [photos, selected]);
   const selectBestShots = () => {
     if (running.current || !bestShots.active || bestShots.busy || !bestShots.recommendations || !ownedSnapshot?.current() || !activeRef.current || currentReceived.current || preparingOriginals || sharingOriginals) return;
     const ids = selectionCandidates(findMatches, bestShots.recommendations).map(photo => photo.id);
@@ -1376,13 +1386,14 @@ export default function CloudApp({
               peopleFind.filter.ids.size > 0 ? `${peopleFind.filter.ids.size} ${peopleFind.filter.ids.size === 1 ? "person" : "people"}${peopleFind.filter.mode === "everyone" ? " · Everyone" : ""}` : undefined,
               favoritesOnly ? "Favorites" : undefined,
           organizationScope === "photos" ? undefined : organizationScope === "photosOnly" ? "Photos" : organizationScope === "trash" ? "Trash" : "Screenshots",
-            ].filter(Boolean).join(" · ")}</span></summary><div className="photo-browse-filter-options"><button disabled={busy} onClick={() => setCleanupOpen(true)}>Review cleanup</button><label>Show<select aria-label="Photo type" value={organizationScope} onChange={event => setOrganizationScope(event.target.value as PhotoOrganizationScope)}><option value="photos">All</option><option value="photosOnly">Photos</option><option value="screenshots">Screenshots</option><option value="trash">Fotoro Trash</option></select></label>
+            ].filter(Boolean).join(" · ")}</span></summary><div className="photo-browse-filter-options"><button disabled={busy} onClick={event => {const menu = event.currentTarget.closest("details"); if (menu) {menu.open = false; menu.querySelector("summary")?.focus();} setCleanupOpen(true);}}>Review cleanup</button><label>Show<select aria-label="Photo type" value={organizationScope} onChange={event => setOrganizationScope(event.target.value as PhotoOrganizationScope)}><option value="photos">All</option><option value="photosOnly">Photos</option><option value="screenshots">Screenshots</option><option value="trash">Fotoro Trash</option></select></label>
               {photoTypeBrowse && recentBrowseActive(true, query) && <label className="local-check"><input type="checkbox" checked={recentOnly} disabled={preparingOriginals || sharingOriginals} onChange={event => setRecentOnly(event.target.checked)} />Last 30 days</label>}
               <label className="local-check"><input type="checkbox" checked={favoritesOnly} disabled={preparingOriginals || sharingOriginals} onChange={event => setFavoritesOnly(event.target.checked)} />Favorites</label>
               <PeopleFilter people={peopleFind.people} value={peopleFind.filter} onChange={peopleFind.change}
                 disabled={preparingOriginals || sharingOriginals} onReview={!publicDemo ? () => setPeopleOpen(true) : undefined} />
             </div></details>}
             </div>}
+            {!received && photos.length > 0 && <SearchCoverage photos={coveragePhotos} scopeLabel={(recentActive ? "Last 30 days and current filters" : "Current filters") + (catalogIncomplete ? " · More Saved photos may be available" : "")} textEnabled={savedTextConsent} result={normalizeSearch(query) ? searchResult : undefined} onReviewSettings={() => setMenu(true)} />}
             {!received && photos.length > 0 && (browseFilter || normalizeSearch(query)) && <div className="photo-browse-result-actions"><button disabled={busy || preparingOriginals || sharingOriginals || searchResult.searching || bestShots.busy || !shown.length} onClick={selectResults}>Select {shown.length} {shown.length === 1 ? "photo" : "photos"}</button></div>}
             {!received && metadataSearchError && <p className="hint" role="status">{metadataSearchError}</p>}
             {!received && catalogIncomplete && <div className="hint" aria-label="Saved coverage"><p role="status">{catalogCoverage!.loaded} Saved {catalogCoverage!.loaded === 1 ? "photo loaded" : "photos loaded"}. {searchCorpus?.admitted ? `Search and People cover ${searchCorpus.records.length} cached photos${searchCorpus.complete ? "" : " while the index updates"}; up to 200 matches are shown. More server photos may be available.` : "Date, search and People filters cover loaded photos only."}</p><button disabled={loadingSavedBrowse || busy && !catalogCoverage!.hasMore || preparingOriginals || sharingOriginals} onClick={() => void loadMoreSaved()}>Load more Saved photos</button>{savedBrowseError && <p role="alert">{savedBrowseError}</p>}</div>}
@@ -1448,6 +1459,15 @@ export default function CloudApp({
             )}
             {!received && selected.size > 0 && <SelectionTray className="consumer-selection glass" aria-label="Selected photos">
               <span role="status">{selected.size} selected</span>
+              {!publicDemo && <details className="selection-more"><summary>Name photos</summary><div>
+                <BatchPhotoNaming key={namingScope} sources={namingSources} reservedNames={namingReserved} disabled={busy || preparingOriginals || sharingOriginals}
+                  current={() => activeRef.current && !currentReceived.current && !running.current && currentOwnedSnapshot.current?.token === ownedSnapshot?.token && !!currentOwnedSnapshot.current?.current()}
+                  onChange={async (id, organization) => {
+                    const snapshot = currentOwnedSnapshot.current, photo = currentCatalog.current.find(value => value.manifest.photoId === id);
+                    if (!snapshot?.current() || !snapshot.edit || !photo || !currentSelection.current.has(id)) throw new Error("Photo selection changed");
+                    await snapshot.edit(photo, {organization});
+                  }} />
+              </div></details>}
               <AlbumContinuation destination={albumDestination} photos={chosen} disabled={busy || preparingOriginals || sharingOriginals || chosen.length > 100} onContinue={(items, albumId) => {if (!running.current) openAlbums(items, albumId);}} />
               <button ref={originalButton} className="primary-action" disabled={busy || preparingOriginals || sharingOriginals} onClick={() => void prepareSelectedOriginals()}>{preparingOriginals ? "Preparing…" : "Share"}</button>
               {!publicDemo && !albumDestination?.current() && <button disabled={busy || preparingOriginals || sharingOriginals || chosen.length > 100} onClick={() => {if (!running.current) openAlbums(chosen);}}>Add to trip</button>}

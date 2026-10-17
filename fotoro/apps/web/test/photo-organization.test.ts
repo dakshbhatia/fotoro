@@ -24,7 +24,7 @@ test("suggested names avoid repeated place/tag words and always provide an appli
   assert.equal(name, "2018-02-03_Seoul_BTS_Family_0000000000.jpg");
   const reserved = suggestedPhotoName({filename: "IMG.JPG", labels: ["CON"]});
   assert.equal(reserved, "Photo_CON.jpg"); assert.equal(validPhotoName(reserved), true);
-  assert.equal(suggestedPhotoName({filename: "IMG.JPG", date: "garbage", dateSource: "photos"}), "Photo.jpg");
+  assert.equal(suggestedPhotoName({filename: "IMG.JPG", date: "garbage", dateSource: "photos"}), "IMG.JPG");
 });
 test("name previews use completed analysis when no supplied tags describe the photo", () => {
   const source = {filename: "IMG.JPG", digest: "00".repeat(32)};
@@ -43,9 +43,9 @@ test("name previews fall back instead of turning uncertain text or unsupported s
     {processor: "unknown-model", confidence: 1, text: "Wrong title"},
     {processor: "vision-text-v1", confidence: NaN, text: "Wrong title"},
     {processor: "vision-text-v1", confidence: 0.9, text: "9:41\nuser@example.com\nhttps://example.com\nOrder 123456\nTotal $12.50"},
-  ]) assert.equal(suggestedPhotoName({...source, analysis: {ocr}}), "Photo.jpg");
+  ]) assert.equal(suggestedPhotoName({...source, analysis: {ocr}}), "IMG.JPG");
   const visual = {processor: "vision-image-classification-r1-v1", labels: [{label: "Person name", identifier: "dog", confidence: 0.99}]};
-  assert.equal(suggestedPhotoName({...source, analysis: {visual}}), "Photo.jpg");
+  assert.equal(suggestedPhotoName({...source, analysis: {visual}}), "IMG.JPG");
 });
 test("name analysis respects local source withdrawal, revisions and signed Saved identity", () => {
   const ocr = {photoID: "public-photo", revision: digest, status: "complete" as const,
@@ -239,4 +239,11 @@ test("Places excludes Fotoro Trash and restores the same recorded location", () 
   const trashed = withPhotoOrganization(photo, {trash: true});
   assert.deepEqual(groupPhotoPlaces([trashed]), []);
   assert.equal(groupPhotoPlaces([withPhotoOrganization(trashed, {trash: false})])[0].visits[0].photos[0].id, photo.id);
+});
+
+test("no naming evidence retains original spelling and extension even with a digest", () => {
+  const source = {filename: "Singapore Holiday.JPG", digest: "ab".repeat(32)};
+  assert.equal(suggestedPhotoName(source), source.filename);
+  assert.equal(suggestedPhotoName({...source, date: "2026-10-17", dateSource: "selected", labels: ["", "!!!"], location: {name: ""}}), source.filename);
+  assert.equal(suggestedPhotoName({...source, date: "2026-10-17", dateSource: "photos"}), "2026-10-17_ababababab.jpg");
 });
