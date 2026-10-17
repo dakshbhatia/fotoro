@@ -122,3 +122,37 @@ found that filtering unchanged photo objects into a new array could cancel OCR
 after its first write. Saved text scopes now preserve array identity only for
 identical photo objects in identical order. Source, membership, order, explicit
 scope, account, consent, and Pause/visibility changes retain cancellation.
+
+## Quiet organizing flow
+
+The default web surface is a photo grid and search with one Organize disclosure.
+Coverage, processing counts, ranking refinements and technical fields are kept
+in Details. Native overview/filter controls live in the existing library menu;
+selection actions share one Organize menu. Routine Saved name/tag/Trash/text
+edits queue for background saving; original uploads and cleanup removals remain
+explicit. Web saving coalesces bursts at 700ms and sends at most40 admitted own
+photos per batch, independent of which navigation panel is showing. Pause,
+offline state, hidden pages, lock and source/account changes stop the work;
+unchanged failed drafts wait for manual retry or another edit. Foreground
+return resumes authorized unattempted work. Native explicit-edit admissions
+use400ms/25-photo batches and the existing annotation sender. Native admissions
+are in-memory; encrypted drafts remain durable and regain manual Sync after
+restart or failed admission.
+
+Saved text checks use the existing opt-in, kept encrypted per account in this
+browser. Closing Settings no longer resets that choice. Consented automatic
+checks run in25-photo batches within the latest10calendar days, using capture
+date when available and import date otherwise. Older loaded scopes retain an
+explicit check. Checked failures do not spin indefinitely; unfinished cancelled
+tails remain eligible. Text checks and metadata network writes run independently
+of the photo grid. Empty searches expose actual pending/unreadable text state.
+
+Real local-backend browser acceptance verified hands-off two-photo OCR and
+annotation Save, independent-origin receipt4826 and BOSTON search, rename while
+keeping the viewer open, and background saving from both Photos and Saved.
+Pause kept a later name local while the independent session retained its old
+name; Resume delivered that queued edit. Text consent survived reload. Both
+warning/error consoles were clean. No manual Check text or Save changes action
+was used for normal processing. These are independent origins on one Mac, not
+physical-device performance measurements. Native generic SDK/host checks pass;
+latest native code remains undistributed while TestFlight is deferred.

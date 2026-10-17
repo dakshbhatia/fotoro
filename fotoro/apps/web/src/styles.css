@@ -810,6 +810,7 @@ main:has(.consumer-selection) .canvas { padding-bottom: calc(max(140px, var(--se
 .consumer-save-progress p { margin: 0; font-size: var(--font-control); }
 .consumer-save-progress .hint { margin-top: 3px; font-size: 12px; line-height: 1.5; }
 .consumer-save-progress .actions { flex: 0 0 auto; margin: 0; }
+.consumer-background-state { align-self: center; color: var(--photo-muted); font-size: var(--font-caption); margin-right: 8px; }
 .local-search { padding: 0 24px calc(24px + env(safe-area-inset-bottom)); --local-preview-height: clamp(96px,calc(100dvh - 250px - env(safe-area-inset-top) - env(safe-area-inset-bottom)),800px); }
 main:has(.consumer-selection) .local-search { padding-bottom: calc(max(140px, var(--selection-tray-height, 0px) + 40px) + env(safe-area-inset-bottom)); scroll-padding-bottom: calc(max(140px, var(--selection-tray-height, 0px) + 40px) + env(safe-area-inset-bottom)); }
 .local-leading { border-radius: 4px; position: relative; }

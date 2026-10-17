@@ -84,7 +84,7 @@ export function LocalSearch({photos, result, resources, committed, pinned, canCo
   const selecting = !!photo && !!selection?.eligible(photo.id);
   return <section className="local-search" aria-label="Search result" aria-busy={result.searching || undefined}>
     <div className="search-caption">{result.photoIds.length > 1 && <p className="local-coverage" role="status">{result.truncated ? `${result.photoIds.length} of ${result.totalMatches} matches` : `${result.photoIds.length} matches`}</p>}
-      {meaning?.kind === "label" && <button aria-pressed={committed === meaning.id} onClick={() => onAccept(meaning)}>Only this tag</button>}
+      {details && meaning?.kind === "label" && <button aria-pressed={committed === meaning.id} onClick={() => onAccept(meaning)}>Only this tag</button>}
       <button className="text-button" aria-label="Search details" aria-expanded={details} onClick={() => setDetails(!details)}><Icon kind="info" /></button></div>
     {photo && meaning ? <>
       <button className="local-leading" id={"local-photo-" + photo.id} aria-label={(selecting ? "Select " : "Open ") + photo.filename} aria-pressed={selecting ? selection!.ids.has(photo.id) : undefined} disabled={selecting && selection!.disabled}
@@ -104,11 +104,11 @@ export function LocalSearch({photos, result, resources, committed, pinned, canCo
         <button aria-label="Next matching photo" disabled={index >= result.photoIds.length - 1} onClick={() => move(1)}><Icon kind="next" /></button>
       </div>}
       {reasons?.get(photo.id)?.length ? <p className="find-shot-reason">{reasons.get(photo.id)!.join(" · ")}</p> : null}
-      {result.meanings.some(value => value.id !== meaning.id && value.photoIds.some(id => !meaning.photoIds.includes(id))) && <div className="local-alternatives" aria-label="Other matches"><span>Also try</span>{result.meanings.filter(value => value.id !== meaning.id && value.photoIds.some(id => !meaning.photoIds.includes(id))).slice(0, 3).map(value => <button key={value.id} onClick={() => onAccept(value)}>{value.term}</button>)}</div>}
+      {details && result.meanings.some(value => value.id !== meaning.id && value.photoIds.some(id => !meaning.photoIds.includes(id))) && <div className="local-alternatives" aria-label="Other matches"><span>Also try</span>{result.meanings.filter(value => value.id !== meaning.id && value.photoIds.some(id => !meaning.photoIds.includes(id))).slice(0, 3).map(value => <button key={value.id} onClick={() => onAccept(value)}>{value.term}</button>)}</div>}
       {details && <SearchMatchDetails photo={photo} meaning={meaning} coverage={coverage} committed={committed} pinned={pinned} canCorrect={canCorrect} onAccept={onAccept} onConfirm={onConfirm} onPin={onPin} />}
-      {visualSearchProgress(result) && <p className="hint" role="status">{visualSearchProgress(result)}</p>}
+      {details && visualSearchProgress(result) && <p className="hint" role="status">{visualSearchProgress(result)}</p>}
       {visualSearchFeedback(result) && <p className="hint" role="status">{visualSearchFeedback(result)}</p>}
-      {textSearchFeedback(result) && <p className="hint" role="status">{textSearchFeedback(result)}</p>}
+      {(details || result.textStatus === "incomplete") && textSearchFeedback(result) && <p className="hint" role="status">{textSearchFeedback(result)}</p>}
     </> : <div className="empty"><p role={result.searching || result.visualStatus || result.textStatus ? "status" : undefined}>{result.searching ? visualSearchProgress(result) ?? "Searching photos…" : visualSearchFeedback(result) ?? textSearchFeedback(result) ?? emptyMessage ?? "No matching photos"}</p>{!result.searching && result.visualStatus && textSearchFeedback(result) && <p role="status">{textSearchFeedback(result)}</p>}{!result.searching && !result.textStatus && <p className="hint">{emptyHint ?? "Try a tag, a place, a date or words in the photo."}</p>}{details && <p className="hint">{coverage}. Text is searchable after it has been read on this device.</p>}</div>}
   </section>;
 }

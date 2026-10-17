@@ -55,6 +55,7 @@ export interface OwnedPhotoSnapshot {
     searchAsync: PhotoSearchIndex["searchAsync"];
     hydrate: (ids: readonly string[], signal: AbortSignal, current: () => boolean) => Promise<void>};
   selectionReady?: boolean;
+  automaticTextActive?: boolean;
   retainSelection?: (ids: ReadonlySet<string>) => void;
   current: () => boolean;
   sourceCurrent?: (photo: Photo) => boolean;

@@ -168,7 +168,7 @@ export function PhotoCleanup({photos, resources, onTrash, canTrash, onOpen, chan
     {view === "quality" && !busy && !rows.length && <p>No candidates found in this review. Unassessed photos have not been judged.</p>}
     {view === "quality" && <ul>{rows.map(photo => <CleanupRow key={photo.id} photo={photo} reasons={result.reasons.get(photo.id)!} resources={resources(photo)} remove={canTrash(photo) ? () => onTrash(photo) : undefined} open={() => onOpen(photo)} />)}</ul>}
     {view === "screenshots" && <section><p>Screenshots grouped by existing tags or matching readable text. Open each photo to decide what to keep. Nothing is selected automatically.</p>{!screenshotGroups.length && <p>No known screenshots in these review batches.</p>}{screenshotGroups.map(group => <ScreenshotGroup key={group.key} group={group} resources={resources} canTrash={canTrash} onTrash={onTrash} onOpen={onOpen} />)}</section>}
-    {changes?.current() && changes.pending.length > 0 && <section><p>Changes are on this device until you save them.</p><button disabled={changes.busy || saveBusy} onClick={() => void save()}>{changes.pending.some(edit => edit.conflict) ? "Review changes" : "Save changes"}</button></section>}
+    {changes?.current() && changes.pending.length > 0 && <section><p>{changes.automatic ? "Changes save automatically." : "Changes are kept on this device until saving resumes."}</p>{(!changes.automatic || changes.error || changes.pending.some(edit => edit.conflict)) && <button disabled={changes.busy || saveBusy} onClick={() => void save()}>{changes.pending.some(edit => edit.conflict) ? "Review changes" : "Save changes"}</button>}</section>}
     {saveError && <p role="alert">{saveError}</p>}
   </aside>;
 }

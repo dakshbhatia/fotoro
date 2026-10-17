@@ -225,6 +225,18 @@ enum ReviewedPhotosBackupPolicy {
     let worker: ObjectIdentifier
   }
   @ObservationIgnored private let derivedAnnotationBatch = FixedWindowWorkBatch<DerivedAnnotationBinding>()
+  private struct OwnerAnnotationEdit {
+    let photo: LocalPhoto
+    let editID: String
+    let access: PhotoAccountAccess
+    let vault: UUID
+    let origin: String
+    let catalog: ObjectIdentifier
+    let worker: ObjectIdentifier
+  }
+  @ObservationIgnored private var ownerAnnotationEdits: [String: OwnerAnnotationEdit] = [:]
+  @ObservationIgnored private var ownerAnnotationTask: Task<Void, Never>?
+
   @ObservationIgnored private var automaticSyncCancellationReasons: [UUID: NativeDiagnosticReason] = [:]
   @ObservationIgnored private var automaticSyncNeedsScan = false
   @ObservationIgnored private var automaticPrioritySource: BackupSource?
@@ -921,6 +933,8 @@ enum ReviewedPhotosBackupPolicy {
     }
   }
   private func resetConsumerSyncObservation() {
+    ownerAnnotationTask?.cancel()
+    ownerAnnotationEdits.removeAll()
     consumerObservation = UUID()
     consumerChecking = false
     consumerOffline = false
@@ -1122,6 +1136,7 @@ enum ReviewedPhotosBackupPolicy {
     automaticSyncFailure = nil
     photoSyncForeground = true
     kickAutomaticPhotoSync()
+    scheduleOwnerAnnotationEdits()
   }
   func expandAutomaticPhotoSyncToAll() throws {
     try Task.checkCancellation()
@@ -1157,11 +1172,11 @@ enum ReviewedPhotosBackupPolicy {
     peopleLinksSyncEngine?.foreground(active)
     if !active { peopleLinks = []; peopleLinksReview = nil }
     guard photoSyncForeground != active else {
-      if active { kickAutomaticPhotoSync() }
+      if active { kickAutomaticPhotoSync(); scheduleOwnerAnnotationEdits() }
       return
     }
     photoSyncForeground = active
-    if active { kickAutomaticPhotoSync() }
+    if active { kickAutomaticPhotoSync(); scheduleOwnerAnnotationEdits() }
     else {
       invalidateSavedVisualSearch()
       suspendAutomaticPhotoSync(reason: photoSyncSuspensionReason)
@@ -1180,6 +1195,7 @@ enum ReviewedPhotosBackupPolicy {
   private func suspendAutomaticPhotoSync(cancelBackground: Bool = false, reason: NativeDiagnosticReason = .contextChanged) {
     savedTextAnalysis.stop()
     derivedAnnotationBatch.cancel()
+    ownerAnnotationTask?.cancel()
     cancelAutomaticPhotoSyncRetry(resetAttempts: true)
     if automaticSyncTask != nil { automaticSyncCancellationReasons[automaticSyncGeneration] = reason }
     automaticSyncGeneration = UUID()
@@ -1354,6 +1370,7 @@ enum ReviewedPhotosBackupPolicy {
       consumerOffline = false
       consumerFailure = nil
     }
+    scheduleOwnerAnnotationEdits()
     refreshConsumerSyncSummary()
     let generation = vault.generation
     let origin = BackgroundUploadPolicy.origin(api.baseURL)
@@ -1783,6 +1800,7 @@ enum ReviewedPhotosBackupPolicy {
     try catalog.setSyncIntent(enabled: false, uploadsPaused: false)
     consumerOffline = false
     consumerFailure = nil
+    scheduleOwnerAnnotationEdits()
     refreshConsumerSyncSummary()
     func check() throws {
       try Task.checkCancellation()
@@ -2162,6 +2180,7 @@ enum ReviewedPhotosBackupPolicy {
     try catalog.setConsumerLastChecked(Date())
     consumerOffline = false
     consumerFailure = nil
+    scheduleOwnerAnnotationEdits()
     NativeDiagnosticTrace.current?.completed(.catalog)
     } catch {
       try fence()
@@ -2271,6 +2290,7 @@ enum ReviewedPhotosBackupPolicy {
     photoAnnotations[photo.id] = value
     consumerCatalogGeneration &+= 1
     scheduleAnnotationSummaryRefresh()
+    admitOwnerAnnotationEdit(photo)
     guard let localSearch else { return }
     let catalog = store, generation = vault.generation
     let origin = BackgroundUploadPolicy.origin(api.baseURL)
@@ -2292,6 +2312,93 @@ enum ReviewedPhotosBackupPolicy {
       try localSearch.applyAnnotationsBatch(updates)
       guard sources.count == LibraryStore.backupSourcesPhotoPageSize, let last = sources.last else { return }
       after = last.id
+    }
+  }
+  func isAutomaticallySavingAnnotation(_ photo: LocalPhoto) -> Bool {
+    ownerAnnotationSavingAllowed && ownerAnnotationEdits[photo.id]?.photo.metadata == photo.metadata
+      && ownerAnnotationEdits[photo.id]?.photo.manifest == photo.manifest
+  }
+  private var ownerAnnotationSavingAllowed: Bool {
+    photoSyncForeground && !consumerOffline && vault.isUnlocked && photoAccountAccess != nil
+      && (session.isSignedIn || session.fixture) && (try? store.uploadsPaused()) == false
+  }
+  private func ownerAnnotationSourceCurrent(_ edit: OwnerAnnotationEdit) -> Bool {
+    guard photoAccountAccess == edit.access, vault.generation == edit.vault,
+      ObjectIdentifier(store) == edit.catalog, ObjectIdentifier(annotations) == edit.worker,
+      session.accountId == edit.photo.manifest.ownerAccountId,
+      BackgroundUploadPolicy.origin(api.baseURL) == edit.origin,
+      let current = try? store.backupPhoto(edit.photo.id),
+      ["committed", "saved"].contains(current.transferState) else { return false }
+    return current.metadata == edit.photo.metadata && current.manifest == edit.photo.manifest
+  }
+  private func admitOwnerAnnotationEdit(_ photo: LocalPhoto) {
+    guard ["committed", "saved"].contains(photo.transferState),
+      let access = photoAccountAccess, let origin = BackgroundUploadPolicy.origin(api.baseURL),
+      let state = try? annotations.ledger.state(photo.id), let editID = state.editId,
+      state.originalSha256 == photo.metadata.originalSha256, state.accountId == access.account else { return }
+    ownerAnnotationEdits[photo.id] = OwnerAnnotationEdit(photo: photo, editID: editID, access: access,
+      vault: vault.generation, origin: origin, catalog: ObjectIdentifier(store), worker: ObjectIdentifier(annotations))
+    scheduleOwnerAnnotationEdits()
+  }
+  private func scheduleOwnerAnnotationEdits() {
+    guard ownerAnnotationTask == nil, !ownerAnnotationEdits.isEmpty, ownerAnnotationSavingAllowed else { return }
+    ownerAnnotationTask = Task { [weak self] in
+      guard let self else { return }
+      defer {
+        self.ownerAnnotationTask = nil
+        self.scheduleOwnerAnnotationEdits()
+      }
+      do {
+        try await Task.sleep(for: .milliseconds(400))
+        while self.ownerAnnotationSavingAllowed, !self.ownerAnnotationEdits.isEmpty {
+          try Task.checkCancellation()
+          // Share the existing sender, without replacing its coalesced drain.
+          while self.annotations.busy {
+            try await Task.sleep(for: .milliseconds(100))
+            guard self.ownerAnnotationSavingAllowed else { return }
+          }
+          let batch = Dictionary(uniqueKeysWithValues: self.ownerAnnotationEdits.keys.sorted().prefix(25).compactMap { id in
+            self.ownerAnnotationEdits[id].map { (id, $0) }
+          })
+          let worker = self.annotations
+          guard let bundle = try? self.vault.requireBundle(), let account = self.session.accountId,
+            let card = try? self.session.requireCard(account) else {
+            for (id, edit) in batch where self.ownerAnnotationEdits[id]?.editID == edit.editID {
+              self.ownerAnnotationEdits.removeValue(forKey: id)
+            }
+            return
+          }
+          let valid = { !Task.isCancelled && self.ownerAnnotationSavingAllowed
+            && self.annotations === worker && self.session.pinnedCards[account] == card
+            && batch.values.allSatisfy { self.ownerAnnotationSourceCurrent($0) } }
+          guard self.ownerAnnotationSavingAllowed else { return }
+          if !batch.values.allSatisfy({ self.ownerAnnotationSourceCurrent($0) }) {
+            for (id, edit) in batch where !self.ownerAnnotationSourceCurrent(edit)
+              && self.ownerAnnotationEdits[id]?.editID == edit.editID {
+              self.ownerAnnotationEdits.removeValue(forKey: id)
+            }
+            continue
+          }
+          if valid() {
+            await worker.resume(bundle: bundle, card: card, eligible: { photo in
+              guard let edit = batch[photo.id], self.ownerAnnotationSourceCurrent(edit),
+                let state = try? worker.ledger.state(photo.id) else { return false }
+              return state.editId == edit.editID && state.originalSha256 == photo.metadata.originalSha256
+            }, valid: valid, send: { signed in
+              let update = try Wire.decode(PhotoAnnotationsUpdateV1.self, Data(b64: signed.body))
+              _ = try await self.api.request("/v1/photos/\(update.photoId)/annotations", method: "PUT", body: Wire.encode(signed))
+            })
+          }
+          try Task.checkCancellation()
+          // A failed fingerprint waits for manual Sync or another explicit edit.
+          // A newer edit stays admitted even if its predecessor just finished.
+          for (id, edit) in batch where self.ownerAnnotationEdits[id]?.editID == edit.editID {
+            self.ownerAnnotationEdits.removeValue(forKey: id)
+          }
+          self.scheduleAnnotationSummaryRefresh()
+          await Task.yield()
+        }
+      } catch { /* Durable drafts remain available through manual Sync. */ }
     }
   }
   func searchCatalog(_ query: String, now: Date = Date(), calendar: Calendar = .current,

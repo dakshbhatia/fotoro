@@ -645,7 +645,6 @@ struct RecentPhotosView: View {
   @State private var pendingPlace: PhotoPlaceItem?
   @Environment(\.scenePhase) private var scenePhase
   @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
   private var photoColumns: [GridItem] { [GridItem(.adaptive(minimum: 160, maximum: 260), spacing: 3)] }
   private var allPhotos: Bool { scope == .photos }
@@ -1484,12 +1483,14 @@ struct RecentPhotosView: View {
         ProgressView(preparingBestShots ? "Checking matches…" : "Reviewing previews…")
           .font(.footnote)
       } else if let result = bestShots.snapshot {
-        Text("\(result.recommendations.ids.count) suggestions · \(result.candidates.count) of \(bestShots.matchCount) matches reviewed")
-          .font(.footnote).foregroundStyle(.secondary)
-        if result.recommendations.unassessed > 0 {
-          Text("\(result.recommendations.unassessed) previews unavailable. All matches keeps every photo reviewable.")
-            .font(.caption).foregroundStyle(.secondary)
-        }
+        DisclosureGroup("Review details") {
+          Text("\(result.recommendations.ids.count) suggestions · \(result.candidates.count) of \(bestShots.matchCount) matches reviewed")
+            .font(.footnote).foregroundStyle(.secondary)
+          if result.recommendations.unassessed > 0 {
+            Text("\(result.recommendations.unassessed) previews unavailable. All matches keeps every photo reviewable.")
+              .font(.caption).foregroundStyle(.secondary)
+          }
+        }.font(.footnote)
       }
       if let error = bestShots.error {
         Text(error).font(.caption).foregroundStyle(.secondary)
@@ -1965,41 +1966,25 @@ struct RecentPhotosView: View {
     }.accessibilityLabel("Photo library").accessibilityValue(scope.rawValue)
       .accessibilityIdentifier("home.scope")
   }
-  private var browseContext: some View {
-    VStack(spacing: 0) {
-      PhotoBrowseOverviewChooser(granularity: $overviewGranularity,
-        selection: overviewSelection, origin: overviewOrigin,
-        clear: { overviewSelection = nil; overviewGranularity = overviewOrigin },
-        choose: { overviewSelection = nil; overviewOrigin = overviewGranularity })
-      browseFilters
-    }
-  }
-  private var browseFilters: some View {
-    HStack(spacing: 12) {
-      Menu {
-        Picker("Dates", selection: $browseDates) {
-          Text("Last 30 days").tag(PhotoBrowseDateScope.recent)
-          Text("All dates").tag(PhotoBrowseDateScope.all)
+  @ViewBuilder private var browseContext: some View {
+    if overviewSelection != nil || browseFilter != .all {
+      HStack(spacing: 12) {
+        if let selection = overviewSelection {
+          Button {
+            overviewSelection = nil; overviewGranularity = overviewOrigin
+          } label: {
+            Label(selection.title, systemImage: "chevron.left")
+          }.accessibilityIdentifier("gallery.overview.clear")
         }
-      } label: {
-        Label(browseDates == .recent ? "Last 30 days" : "All dates", systemImage: "calendar")
-          .font(.caption).foregroundStyle(Color.secondary).frame(minHeight: 44)
-      }.accessibilityIdentifier("gallery.dateScope")
-      Spacer(minLength: 0)
-      if browseFilter != .all {
-        Button { browseFilter = .all } label: {
-          Label(browseFilterTitle, systemImage: "xmark.circle.fill").font(.caption.weight(.medium))
-            .frame(minHeight: 44)
-        }.buttonStyle(.plain).accessibilityLabel("Clear \(browseFilterTitle) filter")
-          .accessibilityIdentifier("gallery.filter.clear")
-      }
-      Menu { browseFilterPicker } label: {
-        Image(systemName: browseFilter == .all ? "line.3.horizontal.decrease" : "line.3.horizontal.decrease.circle.fill")
-          .font(.subheadline).foregroundStyle(browseFilter == .all ? Color.secondary : Color.accentColor)
-          .frame(width: 44, height: 44)
-      }.accessibilityLabel("Filter photos").accessibilityValue(browseFilterTitle)
-        .accessibilityIdentifier("gallery.filter.menu")
-    }.padding(.horizontal, 16)
+        Spacer(minLength: 0)
+        if browseFilter != .all {
+          Button { browseFilter = .all } label: {
+            Label(browseFilterTitle, systemImage: "xmark.circle.fill")
+          }.accessibilityLabel("Clear \(browseFilterTitle) filter")
+            .accessibilityIdentifier("gallery.filter.clear")
+        }
+      }.font(.caption).buttonStyle(.plain).frame(minHeight: 44).padding(.horizontal, 16)
+    }
   }
   private var browseFilterTitle: String {
     switch browseFilter {
@@ -2024,7 +2009,24 @@ struct RecentPhotosView: View {
       if !allPhotos {
         Menu { browseFilterPicker } label: { Label("Filter", systemImage: "line.3.horizontal.decrease") }
       }
-      if allPhotos { Toggle("Group by moment", isOn: $groupMoments) }
+      if allPhotos {
+        Menu("View", systemImage: "square.grid.2x2") {
+          Picker("Photo overview", selection: Binding(get: { overviewGranularity }, set: {
+            overviewGranularity = $0; overviewSelection = nil; overviewOrigin = $0
+          })) {
+            Text("Days").tag(PhotoBrowseOverviewGranularity.days)
+            Text("Months").tag(PhotoBrowseOverviewGranularity.months)
+            Text("Years").tag(PhotoBrowseOverviewGranularity.years)
+          }.accessibilityIdentifier("gallery.overview")
+          Picker("Dates", selection: $browseDates) {
+            Text("Last 30 days").tag(PhotoBrowseDateScope.recent)
+            Text("All dates").tag(PhotoBrowseDateScope.all)
+          }.accessibilityIdentifier("gallery.dateScope")
+          Toggle("Group by moment", isOn: $groupMoments)
+        }
+        Menu { browseFilterPicker } label: { Label("Filter", systemImage: "line.3.horizontal.decrease") }
+          .accessibilityIdentifier("gallery.filter.menu")
+      }
     }
   }
   #if !FOTORO_LOCAL_PREVIEW
@@ -2056,35 +2058,13 @@ struct RecentPhotosView: View {
     }
   #endif
   private var selectionTray: some View {
-    Group {
-      if dynamicTypeSize.isAccessibilitySize {
-        HStack(spacing: 12) {
-          selectionSummary
-          Spacer(minLength: 0)
-          Menu { selectionActions } label: {
-            Label("Actions", systemImage: "ellipsis").labelStyle(.iconOnly)
-              .frame(width: 44, height: 44)
-          }
-            .accessibilityLabel("Selected photo actions")
-            .accessibilityIdentifier("selection.actions")
-        }
-      } else {
-        ViewThatFits(in: .horizontal) {
-          HStack(spacing: 12) {
-            selectionSummary
-            Spacer(minLength: 0)
-            selectionActions
-          }
-          VStack(alignment: .leading, spacing: 8) {
-            selectionSummary
-            HStack(spacing: 12) { selectionActions; Spacer(minLength: 0) }
-          }
-          VStack(alignment: .leading, spacing: 8) {
-            selectionSummary
-            selectionActions
-          }
-        }
-      }
+    HStack(spacing: 12) {
+      selectionSummary
+      Spacer(minLength: 0)
+      Menu { selectionActions } label: {
+        Label("Organize", systemImage: "ellipsis.circle").frame(minHeight: 44)
+      }.accessibilityLabel("Selected photo actions")
+        .accessibilityIdentifier("selection.actions")
     }.controlSize(.large).padding(14).glassEffect(.regular, in: .rect(cornerRadius: 24))
       .padding(.horizontal, 12).padding(.bottom, 8)
   }
@@ -2946,37 +2926,6 @@ private struct PhotoHomeCloudLabel: View {
   }
 }
 #endif
-
-private struct PhotoBrowseOverviewChooser: View {
-  @Binding var granularity: PhotoBrowseOverviewGranularity
-  let selection: PhotoBrowseOverviewSelection?
-  let origin: PhotoBrowseOverviewGranularity
-  let clear: () -> Void
-  let choose: () -> Void
-  var body: some View {
-    VStack(alignment: .leading, spacing: 8) {
-      if let selection {
-        HStack {
-          Button(action: clear) {
-            Label(origin == .years ? "All years" : "All months", systemImage: "chevron.left")
-          }.buttonStyle(.plain).frame(minHeight: 44)
-            .accessibilityIdentifier("gallery.overview.clear")
-          Spacer(minLength: 8)
-          Text(selection.title).font(.subheadline).foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-        }
-      }
-      Picker("Photo overview", selection: Binding(get: { granularity }, set: {
-        granularity = $0
-        choose()
-      })) {
-        Text("Days").tag(PhotoBrowseOverviewGranularity.days)
-        Text("Months").tag(PhotoBrowseOverviewGranularity.months)
-        Text("Years").tag(PhotoBrowseOverviewGranularity.years)
-      }.pickerStyle(.segmented).accessibilityIdentifier("gallery.overview")
-    }.padding(.horizontal, 16).padding(.top, 8)
-  }
-}
 
 private struct PhotoBrowseOverviewCard<Cover: View>: View {
   let group: PhotoBrowseOverviewGroup

@@ -275,15 +275,20 @@ async function reconcile(id: string, remote: VerifiedAnnotations | undefined, se
   });
 }
 const flights = new WeakMap<UnlockedVault, Promise<void>>();
-export function flushAnnotations(session = requireVault(), signal?: AbortSignal, diagnostic?: DiagnosticContext): Promise<void> {
+export function flushAnnotations(session = requireVault(), signal?: AbortSignal, diagnostic?: DiagnosticContext, selection?: {photoIds: readonly string[]; current: () => boolean}): Promise<void> {
   const request = diagnostic ? scopedApi(diagnostic) : api;
+  const check = () => {assertVault(session); signal?.throwIfAborted(); if (selection?.current() === false) throw new DOMException("Annotation save withdrawn", "AbortError");};
+  const chosen = selection && new Set(selection.photoIds);
   const existing = flights.get(session);
   if (existing) return existing;
   const flight = (async () => {
+    check();
     for (const item of await pendingAnnotations(session)) {
+      check(); if (chosen && !chosen.has(item.photoId)) continue;
       for (let attempt = 0; attempt < 2; attempt++) {
-        assertVault(session); signal?.throwIfAborted();
+        check();
         const pending = await pendingOne(item.photoId, session);
+        check();
         if (!pending || pending.conflict) break;
         const identity = identityFor(session, pending);
         if (!VISUAL_PUBLICATION_ENABLED) {
@@ -293,6 +298,7 @@ export function flushAnnotations(session = requireVault(), signal?: AbortSignal,
           if (Object.hasOwn(plaintext, "visual")) break;
         }
         try {
+          check();
           const response = await request<SignedPayloadV1>("/v1/photos/" + item.photoId + "/annotations", pending.signed, "SignedPayloadV1", "PUT", signal);
           assertVault(session);
           const remote = verifyAnnotations(response, identity, session);
@@ -302,6 +308,7 @@ export function flushAnnotations(session = requireVault(), signal?: AbortSignal,
         } catch (error) {
           assertVault(session);
           if (!(error instanceof ApiError) || error.code !== "VERSION_CONFLICT") throw error;
+          check();
           const response = await request<PhotoAnnotationsReplyV1>("/v1/photos/" + item.photoId + "/annotations", undefined, "PhotoAnnotationsReplyV1", "GET", signal);
           assertVault(session);
           const remote = response.annotations ? verifyAnnotations(response.annotations, identity, session) : undefined;

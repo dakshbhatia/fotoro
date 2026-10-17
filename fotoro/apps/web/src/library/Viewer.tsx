@@ -326,7 +326,7 @@ export function Viewer({
           {!photo.grantId && <PhotoLocation location={annotationLocation(photo.annotations ?? {})} />}
           {!photo.grantId && <>
             <KeptObservations facts={photo.annotations?.facts} photoId={photo.manifest.photoId} sourceRevision={photo.metadata.originalSha256} />
-            {onObservation && intelligenceSession && photo.manifest.ownerAccountId === intelligenceSession.accountId && <Suspense fallback={null}>
+            {onObservation && intelligenceSession && photo.manifest.ownerAccountId === intelligenceSession.accountId && <details><summary>AI details</summary><Suspense fallback={null}>
               <CloudPhotoUnderstanding apiBase="" expectedAccountId={intelligenceSession.accountId} scopeKey={intelligenceScope(intelligenceSession)} photoId={photo.manifest.photoId} sourceRevision={photo.metadata.originalSha256}
                 current={() => mounted.current && currentPhoto.current?.manifest === photo.manifest && currentPhoto.current.metadata === photo.metadata && !currentPhoto.current.grantId && sameVault(intelligenceSession!)}
                 getPreview={async signal => {
@@ -334,10 +334,10 @@ export function Viewer({
                   try {signal.throwIfAborted(); return new Blob([new Uint8Array(bytes)], {type: "image/jpeg"});}
                   finally {bytes.fill(0);}
                 }} onObservation={observation => onObservation(photo, observation)} />
-            </Suspense>}
+            </Suspense></details>}
             {(correction.pending || correction.error || editError) && <section className="viewer-changes" aria-label="Photo changes">
-              <p role="status">{correction.error || editError || (correction.conflict ? "This photo changed on another device. Review before saving." : "Changes stay on this device until you Save changes.")}</p>
-              {correction.pending && changes && <button disabled={correction.busy || savingChanges} onClick={() => {
+              <p role="status">{correction.error || editError || (correction.conflict ? "This photo changed on another device. Review before saving." : correction.automatic ? "Changes save automatically." : "Changes are kept on this device. Saving is paused or offline.")}</p>
+              {correction.pending && changes && (!correction.automatic || correction.conflict || correction.error || editError) && <button disabled={correction.busy || savingChanges} onClick={() => {
                 if (savingChangesRef.current || !changes.current()) return;
                 if (correction.conflict) {changes.review(); return;}
                 savingChangesRef.current = true; setSavingChanges(true);
@@ -346,7 +346,7 @@ export function Viewer({
             </section>}
             {onFavorite && <button aria-pressed={photo.annotations?.favorite === true} onClick={() => void applyChange(() => onFavorite(photo, photo.annotations?.favorite !== true))}>{photo.annotations?.favorite ? "Unfavorite" : "Favorite"}</button>}
             <PhotoOrganization key={photo.manifest.photoId} source={{...photo.annotations, analysis: savedPhotoNameAnalysis(photo), filename: photo.metadata.filename, digest: photo.metadata.originalSha256, date: photo.metadata.sourceDate, dateSource: photo.metadata.dateSource, location: annotationLocation(photo.annotations ?? {})}} saved={!photo.grantId} onChange={onOrganization && !photo.grantId ? patch => Promise.resolve(onOrganization(photo, patch)) : undefined} />
-            <h3>Tags</h3>
+            <details><summary>Tags{photo.annotations?.labels?.length ? ` · ${photo.annotations.labels.length}` : ""}</summary>
             <div className="local-labels">{(photo.annotations?.labels ?? []).map((value, index) => <span key={index}>{value}{onLabels && <button aria-label={"Remove tag " + value} onClick={() => void applyChange(() => onLabels(photo, photo.annotations!.labels!.filter((_, position) => position !== index)))}>×</button>}</span>)}</div>
             {onLabels && <form className="local-label-form" onSubmit={event => {
               event.preventDefault();
@@ -355,7 +355,7 @@ export function Viewer({
               if (!tag) return;
               void applyChange(() => onLabels(photo, [...labels, tag]));
               setLabel("");
-            }}><label>New tag<input aria-label="New tag" placeholder="BTS, a place, or your own words" value={label} maxLength={120} onChange={event => setLabel(event.target.value)} /></label><button disabled={!newPhotoTag(label, photo.annotations?.labels ?? [])}>Add tag</button></form>}
+            }}><label>New tag<input aria-label="New tag" placeholder="BTS, a place, or your own words" value={label} maxLength={120} onChange={event => setLabel(event.target.value)} /></label><button disabled={!newPhotoTag(label, photo.annotations?.labels ?? [])}>Add tag</button></form>}</details>
             {photo.annotations?.ocr && <details><summary>Text in photo</summary><p className="local-ocr-text">{photo.annotations.ocr.text || "No readable text found."}</p></details>}
           </>}
           <details><summary>Technical details</summary>
@@ -367,7 +367,7 @@ export function Viewer({
         </aside>
       )}
       <p role="status" className="viewer-status">
-        {status || (!details && (correction.error || editError || (correction.pending ? "Changes on this device · open Info to Save changes" : "")))}
+        {status || (!details && (correction.error || editError || (correction.pending ? correction.automatic ? "Saving changes…" : "Changes kept on this device" : "")))}
       </p>
     </div>
   );

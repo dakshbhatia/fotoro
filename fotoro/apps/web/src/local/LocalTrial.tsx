@@ -246,8 +246,11 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
   const [requestedBestShots, setRequestedBestShots] = useState<BestShotSelectionRequest>();
   const bestShots = useFindBestShots(findMatches, bestScope, findSource,
     () => alive.current && generation.current === sourceGeneration && (!ownedPhotos || ownedPhotos.current()), active && ready && !progress);
+  const [automaticTextBusy, setAutomaticTextBusy] = useState(false);
+  const [automaticTextIncomplete, setAutomaticTextIncomplete] = useState(false);
+  useEffect(() => setAutomaticTextIncomplete(false), [ownedPhotos?.token, sourceGeneration]);
   const filteredResult = useMemo(() => bestShots.active && bestShots.recommendations ? shortlistSearchResult(predicted, bestShots.recommendations) : predicted, [predicted, bestShots.active, bestShots.recommendations]);
-  const result = useMemo(() => displaySearchResult({...filteredResult, searching: filteredResult.searching || savedPredicted.searching || metadataMatchesPending}, navigation), [filteredResult, navigation, metadataMatchesPending, savedPredicted.searching]);
+  const result = useMemo(() => displaySearchResult({...filteredResult, searching: filteredResult.searching || savedPredicted.searching || metadataMatchesPending || automaticTextBusy && !filteredResult.photoIds.length}, navigation), [filteredResult, navigation, metadataMatchesPending, savedPredicted.searching, automaticTextBusy]);
   useEffect(() => {previous.current = result; if (committed && result.meaning?.id !== committed) setCommitted(undefined);}, [result, committed]);
   const matching = useMemo(() => findMatchPhotos(searchPhotos, result), [result, searchPhotos]);
   const displayedPhotos = normalizeSearch(query) ? matching : permittedPhotos;
@@ -581,7 +584,6 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
         }}><option value="photos">Photos</option><option value="picks">Picks</option><option value="saved">Saved</option></select></nav> : <h1>Fotoro</h1>}
         <div className="header-actions">
           {hasPhotos && <>
-            {displayedPhotos.length > 0 && <button disabled={shareBusy || savedSelectionBusy} aria-pressed={reviewingPicks} onClick={() => {if (currentOwnedPhotos.current?.selectionReady !== false) {selectionIntent.current++; setReviewingPicks(!reviewingPicks);}}}>{reviewingPicks ? "Done" : "Select"}</button>}
             <button className="menu-button" aria-label="Add photos" disabled={!!progress || !ready} onClick={() => input.current?.click()}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="M12 4v16M4 12h16" /></svg></button>
           </>}
           <button className="menu-button" aria-label="Settings" onClick={() => setSettings(true)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m10 3-1 3-3 1-2-1-2 4 2 2v3l-2 2 2 4 3-1 3 1 1 3h4l1-3 3-1 3 1 2-4-2-2v-3l2-2-2-4-3 1-3-1-1-3z" transform="translate(0 -1) scale(.9)"/><circle cx="12" cy="12" r="3" /></svg></button>
@@ -591,14 +593,21 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
         <div className="consumer-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><circle cx="10" cy="10" r="7" /><path d="m15 15 6 6" /></svg><input ref={searchInput} aria-label="Search photos" placeholder="Search photos" value={query} onChange={event => changeQuery(event.target.value)} />{query && <button aria-label="Clear search" onClick={() => {changeQuery(""); searchInput.current?.focus();}}><Icon kind="close" /></button>}</div>
         <details className="photo-browse-filters" onKeyDown={event => {
           if (event.key === "Escape") {event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();}
-        }}><summary>Filters<span className="photo-browse-filter-state">{[
-          photoTypeBrowse && recentBrowseActive(true, query) ? last30 ? "Last 30 days" : "All dates" : undefined,
+        }}><summary>Organize<span className="photo-browse-filter-state">{[
           peopleFind.filter.ids.size > 0 ? `${peopleFind.filter.ids.size} ${peopleFind.filter.ids.size === 1 ? "person" : "people"}${peopleFind.filter.mode === "everyone" ? " · Everyone" : ""}` : undefined,
           favoritesOnly ? "Favorites" : undefined,
           organizationScope === "photos" ? undefined : organizationScope === "photosOnly" ? "Photos" : organizationScope === "trash" ? "Trash" : "Screenshots",
           !normalizeSearch(query) && photoView === "table" ? "Table" : undefined,
         ].filter(Boolean).join(" · ")}</span></summary>
-          <div className="photo-browse-filter-options"><button disabled={shareBusy} onClick={event => {const menu = event.currentTarget.closest("details"); if (menu) {menu.open = false; menu.querySelector("summary")?.focus();} setCleanupOpen(true);}}>Review cleanup</button><label>Show<select aria-label="Photo type" value={organizationScope} onChange={event => setOrganizationScope(event.target.value as PhotoOrganizationScope)}><option value="photos">All</option><option value="photosOnly">Photos</option><option value="screenshots">Screenshots</option><option value="trash">Fotoro Trash</option></select></label>
+          <div className="photo-browse-filter-options">{displayedPhotos.length > 0 && <button disabled={shareBusy || savedSelectionBusy} aria-pressed={reviewingPicks} onClick={() => {if (currentOwnedPhotos.current?.selectionReady !== false) {selectionIntent.current++; setReviewingPicks(!reviewingPicks);}}}>{reviewingPicks ? "Done" : "Select"}</button>}
+            {(browseFilter || normalizeSearch(query)) && <div className="photo-browse-result-actions"><button disabled={shareBusy || savedSelectionBusy || result.searching || bestShots.busy || !displayedPhotos.length} onClick={selectResults}>Select {displayedPhotos.length} {displayedPhotos.length === 1 ? "photo" : "photos"}</button></div>}
+
+            {normalizeSearch(query) && (findMatches.length > 0 || bestShots.active) && <section className="find-best-shots" aria-label="Find review">
+              <button disabled={shareBusy || savedSelectionBusy || result.searching || bestShots.busy || !findMatches.length} onClick={chooseBestShots}>{bestShots.busy ? "Choosing best shots…" : "Select best shots"}</button>
+              {bestShots.active && <button onClick={() => {setRequestedBestShots(undefined); bestShots.toggle();}}>All matches</button>}
+              {bestShots.active && <p role="status">{bestShots.busy ? `${bestShots.done} of ${findMatches.length}` : `${bestShots.recommendations?.ids.size ?? 0} of ${findMatches.length} matches${bestShots.recommendations?.unassessed ? ` · ${bestShots.recommendations.unassessed} previews unavailable` : ""}`}</p>}
+            </section>}
+            <button disabled={shareBusy} onClick={event => {const menu = event.currentTarget.closest("details"); if (menu) {menu.open = false; menu.querySelector("summary")?.focus();} setCleanupOpen(true);}}>Review cleanup</button><label>Show<select aria-label="Photo type" value={organizationScope} onChange={event => setOrganizationScope(event.target.value as PhotoOrganizationScope)}><option value="photos">All</option><option value="photosOnly">Photos</option><option value="screenshots">Screenshots</option><option value="trash">Fotoro Trash</option></select></label>
             {photoTypeBrowse && recentBrowseActive(true, query) && <label className="local-check"><input type="checkbox" checked={last30} disabled={shareBusy} onChange={event => setLast30(event.target.checked)} />Last 30 days</label>}
             <label className="local-check"><input type="checkbox" checked={favoritesOnly} disabled={shareBusy} onChange={event => setFavoritesOnly(event.target.checked)} />Favorites</label>
             <PeopleFilter people={peopleFind.people} value={peopleFind.filter} onChange={peopleFind.change} disabled={shareBusy} onReview={() => setPeopleOpen(true)} />
@@ -617,16 +626,8 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
           </div>
         </details>
       </div>}
-      {(browseFilter || normalizeSearch(query)) && <div className="photo-browse-result-actions"><button disabled={shareBusy || savedSelectionBusy || result.searching || bestShots.busy || !displayedPhotos.length} onClick={selectResults}>Select {displayedPhotos.length} {displayedPhotos.length === 1 ? "photo" : "photos"}</button></div>}
-      {hasPhotos && <SearchCoverage photos={permittedPhotos} scopeLabel={(recentActive ? "Last 30 days and current filters" : "Current filters") + (savedIncomplete ? " · More Saved photos may be available" : "")} textEnabled={readText} result={normalizeSearch(query) ? result : undefined} onReviewSettings={() => setSettings(true)} />}
       {ownedPhotos?.metadataSearchError && <p className="hint" role="status">{ownedPhotos.metadataSearchError}</p>}
-      {savedIncomplete && <p className="hint" role="status">{metadataSearch ? metadataSearch.complete ? "Search and People include cached Saved metadata; up to 200 Saved matches are shown. More server photos may be available." : "Cached Saved metadata search is updating; up to 200 Saved matches are shown." : "Search and People include loaded Saved photos."} <button className="text-button" onClick={openBackup}>Open Saved to load more</button></p>}
-      {normalizeSearch(query) && (findMatches.length > 0 || bestShots.active) && <section className="find-best-shots" aria-label="Find review">
-        <button disabled={shareBusy || savedSelectionBusy || result.searching || bestShots.busy || !findMatches.length} onClick={chooseBestShots}>{bestShots.busy ? "Choosing best shots…" : "Select best shots"}</button>
-        {bestShots.active && <button onClick={() => {setRequestedBestShots(undefined); bestShots.toggle();}}>All matches</button>}
-        {bestShots.active && <p role="status">{bestShots.busy ? `${bestShots.done} of ${findMatches.length}` : `${bestShots.recommendations?.ids.size ?? 0} of ${findMatches.length} matches${bestShots.recommendations?.unassessed ? ` · ${bestShots.recommendations.unassessed} previews unavailable` : ""}`}</p>}
-      </section>}
-      {normalizeSearch(query) && searchPhotos.length ? <LocalSearch key={sourceGeneration} photos={searchPhotos} result={{...result, textStatus: localTextSearchStatus(backgroundPhotos, readText, query, committed, !!ocrProgress)}} resources={result.photoId?.startsWith("saved:") ? savedResources : resources} committed={committed} pinned={pin} selection={reviewingPicks ? {ids: searchSelectionIDs, onChange: chooseSearchPhoto, eligible: id => photos.some(photo => photo.id === id) || (id.startsWith("saved:") && !!ownedPhotos?.current() && savedPhotos.some(photo => photo.id === id)), disabled: shareBusy || savedSelectionBusy} : undefined} reasons={bestShots.active ? bestShots.recommendations?.reasons : undefined} emptyMessage={result.metadataIncomplete ? ownedPhotos?.metadataSearchError || "Search coverage is incomplete." : bestShots.active ? bestShots.busy ? "Choosing best shots…" : "No best shots to suggest" : undefined} emptyHint={bestShots.active ? "All matches remain available. You choose what to Save or Share." : undefined} canCorrect={canCorrectMatch} coverage={coverage + (savedPhotos.length ? ` · ${savedPhotos.length} Saved photos loaded` : "") + (savedIncomplete ? " · More Saved photos are available" : "")} onAccept={accept} onNavigate={id => setNavigation({query, scope, meaningID: result.meaning!.id, photoID: id})} onOpen={id => id.startsWith("saved:") ? onOpenSaved?.(id.slice(6)) : setViewer(id)} onConfirm={id => confirm(id)} onPin={id => confirm(id, true)} onFailure={failure} />
+      {normalizeSearch(query) && searchPhotos.length ? <LocalSearch key={sourceGeneration} photos={searchPhotos} result={{...result, textStatus: result.photoId ? undefined : automaticTextIncomplete ? "incomplete" : localTextSearchStatus(backgroundPhotos, readText, query, committed, !!ocrProgress)}} resources={result.photoId?.startsWith("saved:") ? savedResources : resources} committed={committed} pinned={pin} selection={reviewingPicks ? {ids: searchSelectionIDs, onChange: chooseSearchPhoto, eligible: id => photos.some(photo => photo.id === id) || (id.startsWith("saved:") && !!ownedPhotos?.current() && savedPhotos.some(photo => photo.id === id)), disabled: shareBusy || savedSelectionBusy} : undefined} reasons={bestShots.active ? bestShots.recommendations?.reasons : undefined} emptyMessage={result.metadataIncomplete ? ownedPhotos?.metadataSearchError || "Search coverage is incomplete." : bestShots.active ? bestShots.busy ? "Choosing best shots…" : "No best shots to suggest" : undefined} emptyHint={bestShots.active ? "All matches remain available. You choose what to Save or Share." : undefined} canCorrect={canCorrectMatch} coverage={coverage + (savedPhotos.length ? ` · ${savedPhotos.length} Saved photos loaded` : "") + (savedIncomplete ? " · More Saved photos are available" : "")} onAccept={accept} onNavigate={id => setNavigation({query, scope, meaningID: result.meaning!.id, photoID: id})} onOpen={id => id.startsWith("saved:") ? onOpenSaved?.(id.slice(6)) : setViewer(id)} onConfirm={id => confirm(id)} onPin={id => confirm(id, true)} onFailure={failure} />
         : !hasPhotos ? <section className="local-empty local-first-use"><div className="first-use-content"><div className="first-use-actions"><button className="open-photos" aria-label="Open photos from this device" disabled={!ready || !!progress} onClick={() => input.current?.click()}>Open photos</button><button className="text-button" onClick={openBackup}>Open Saved photos</button></div><p className="hint first-use-note">Photos opened here stay on this device until you choose Save.</p></div></section>
         : displayedPhotos.length ? <LocalLibrary key={sourceGeneration} view={photoView} columns={visibleColumns} active={active} photos={displayedPhotos} resources={resources} resourceForPhoto={photo => photo.id.startsWith("saved:") ? savedResources : resources} onOpen={id => id.startsWith("saved:") ? onOpenSaved?.(id.slice(6)) : setViewer(id)} onFailure={failure} selection={{ids: searchSelectionIDs, editing: reviewingPicks, disabled: shareBusy || savedSelectionBusy, onChange: (id, checked) => {setReviewingPicks(true); chooseSearchPhoto(id, checked);}}} />
         : <section className="empty"><p>{browseFilter ? "No matching photos" : browseScope === "picks" ? picks.busy ? "Choosing your picks…" : "No picks yet" : "No photos in this date range"}</p><button onClick={() => {setBrowseScope("photos"); setLast30(false); setFavoritesOnly(false); peopleFind.change({...peopleFind.filter, ids: new Set()});}}>Show all photos</button></section>}
@@ -660,15 +661,18 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
         {onAlbumSelection && selectedCount > 100 && <small>Choose up to 100 photos to add to a trip.</small>}
         {readyOriginals < picks.ids.size && <small>Reselect {picks.ids.size - readyOriginals} {picks.ids.size - readyOriginals === 1 ? "original" : "originals"} to Save or Share.</small>}
       </SelectionTray>}
-      {(progress || ocrProgress || (saving && !saving.startsWith("Saved locally ·")) || (browseScope === "picks" && picks.busy)) && <p className="local-progress" role="status">{progress || ocrProgress || (saving.startsWith("Saved locally ·") ? "" : saving) || "Choosing picks…"}</p>}
+      {progress && <p className="local-progress" role="status">{progress}</p>}
       {status && <div className="status" role="status">{status}<button aria-label="Dismiss message" onClick={() => setStatus("")}><Icon kind="close" /></button></div>}
     </main>
+    {ownedPhotos?.current() && <SavedTextCheck automatic onBusyChange={setAutomaticTextBusy} onIncomplete={() => setAutomaticTextIncomplete(true)} snapshot={ownedPhotos} photos={savedTextPhotos} consent={readText} active={active && ready && !progress && !settings && ownedPhotos.automaticTextActive !== false}
+      scope={JSON.stringify([backgroundScope, sourceGeneration, organizationScope, browseScope])} onSync={() => {}} />}
     <input ref={input} hidden type="file" accept="image/jpeg,image/png,image/heic,image/heif,.heic,.heif" multiple onChange={event => {const files = Array.from(event.target.files ?? []); event.target.value = ""; void openFiles(files);}} />
     {settings && <aside className="sheet local-settings" ref={settingsPanel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Settings">
       <button className="close" aria-label="Close settings" onClick={closeSettings}><Icon kind="close" /></button><h2>Settings</h2>
-      <button onClick={() => {closeSettings(); setPlacesOpen(true);}}>Places</button>
-      <button onClick={() => {closeSettings(); setPeopleOpen(true);}}>People</button>
-      <label className="local-check"><input type="checkbox" checked={last30} onChange={event => setLast30(event.target.checked)} />Browse the last 30 days</label>
+      <details><summary>Details</summary>
+      {hasPhotos && <SearchCoverage photos={permittedPhotos} scopeLabel={(recentActive ? "Last 30 days and current filters" : "Current filters") + (savedIncomplete ? " · More Saved photos may be available" : "")} textEnabled={readText} result={normalizeSearch(query) ? result : undefined} onReviewSettings={() => setSettings(true)} />}
+      {savedIncomplete && <p className="hint" role="status">{metadataSearch ? metadataSearch.complete ? "Search and People include cached Saved metadata; up to 200 Saved matches are shown. More server photos may be available." : "Cached Saved metadata search is updating; up to 200 Saved matches are shown." : "Search and People include loaded Saved photos."} <button className="text-button" onClick={openBackup}>Open Saved to load more</button></p>}
+        {(ocrProgress || (browseScope === "picks" && picks.busy)) && <p role="status">{ocrProgress || "Choosing picks…"}</p>}
       <h3>Selection</h3>
       <p className="hint">{picks.ids.size} of {photos.length} selected.</p>
       <div className="photo-pick-actions">
@@ -676,17 +680,20 @@ export function LocalTrial({onBackup, onSave, onCancelSave, onPhotosChange, owne
         <button disabled={!photos.length} onClick={() => {selectionIntent.current++; picks.chooseAll();}}>Select all</button>
       </div>
       {(picks.recommendations?.unassessed ?? 0) > 0 && <p className="hint">{picks.recommendations!.unassessed} could not be assessed. You can still select them.</p>}
-      <h3>Search and storage</h3>
+      <button onClick={() => {closeSettings(); setPlacesOpen(true);}}>Places</button>
+      <button onClick={() => {closeSettings(); setPeopleOpen(true);}}>People</button>
+      <CopyDiagnostics />
+      </details>
+      <h3>Automatic organizing</h3>
       <label className="local-check"><input type="checkbox" checked={readText} onChange={event => {const choice = {readText: event.target.checked, retain: retained}; saveLocalChoices(choice); setReadText(choice.readText);}} />Find words in photos</label>
-      <p className="hint">Find photos by English words inside them. Text is read on this device.</p>
-      {ownedPhotos?.current() && <SavedTextCheck snapshot={ownedPhotos} photos={savedTextPhotos} consent={readText} active={active && ready && !progress}
+      <p className="hint">Read text on this device in small background batches.</p>
+      {ownedPhotos?.current() && <details><summary>Check older photos</summary><SavedTextCheck snapshot={ownedPhotos} photos={savedTextPhotos} consent={readText} active={active && ready && !progress}
         scope={JSON.stringify([backgroundScope, sourceGeneration, organizationScope, browseScope])} changes={photoChanges}
-        onSync={() => {closeSettings(); onBackup();}} />}
+        onSync={() => {closeSettings(); onBackup();}} /></details>}
       <label className="local-check"><input type="checkbox" checked={retained} disabled={!ready || retentionBusy} onChange={event => {const choice = {readText, retain: event.target.checked}; saveLocalChoices(choice); void toggleRetention(choice.retain);}} />Remember these photos</label>
       <p className="hint">Keep search data and up to 100 MB of previews in this browser. Original files are not retained.</p>
       {saving && <p role="status">{saving}</p>}
-      <button disabled={!ready} onClick={() => {void clear(); closeSettings();}}>Clear local search</button>
-              <CopyDiagnostics />
+      <details><summary>Local storage</summary><button disabled={!ready} onClick={() => {void clear(); closeSettings();}}>Clear local search</button></details>
     </aside>}
     {active && preparedShare && originalsCurrent(preparedShare) && <aside className="original-share saved-original-share" ref={originalPanel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Share selected photos">
       <button className="close" aria-label="Close share options" disabled={sharing} onClick={cancelOriginals}><Icon kind="close" /></button>

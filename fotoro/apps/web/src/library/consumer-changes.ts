@@ -4,6 +4,7 @@ export interface ConsumerPhotoChanges {
   current: () => boolean;
   pending: readonly {photoId: string; originalSha256: string; conflict: boolean}[];
   busy: boolean;
+  automatic?: boolean;
   error: string;
   errorSource?: {photoId: string; originalSha256: string};
   save: () => Promise<boolean>;
@@ -11,9 +12,9 @@ export interface ConsumerPhotoChanges {
 }
 
 export function photoChangeState(changes: ConsumerPhotoChanges | undefined, photoId: string, originalSha256: string, ownerAccountId: string) {
-  if (!changes?.current() || changes.accountId !== ownerAccountId) return {pending: false, conflict: false, busy: false, error: ""};
+  if (!changes?.current() || changes.accountId !== ownerAccountId) return {pending: false, conflict: false, busy: false, automatic: false, error: ""};
   const pending = changes?.pending.find(edit => edit.photoId === photoId && edit.originalSha256 === originalSha256);
   const source = changes?.errorSource;
   const error = source ? source.photoId === photoId && source.originalSha256 === originalSha256 : !!pending;
-  return {pending: !!pending, conflict: pending?.conflict === true, busy: changes?.busy === true, error: error ? changes?.error ?? "" : ""};
+  return {pending: !!pending, conflict: pending?.conflict === true, busy: changes?.busy === true, automatic: changes.automatic === true, error: error ? changes?.error ?? "" : ""};
 }

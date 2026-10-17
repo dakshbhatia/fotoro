@@ -94,10 +94,10 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
       <button onClick={() => setZoom(!zoom)}>{zoom ? "Fit" : "Zoom"}</button>
       <p>{photo.dateSource === "selected" ? "Capture date unavailable" : new Date(photo.date).toLocaleString()}</p>
       <PhotoLocation location={photo.location} />
-      {intelligence && <Suspense fallback={null}><CloudPhotoUnderstanding apiBase="" expectedAccountId={intelligence.expectedAccountId} photoId={photo.id} sourceRevision={photo.digest ?? photo.id} scopeKey={intelligence.scopeKey}
+      {intelligence && <details><summary>AI details</summary><Suspense fallback={null}><CloudPhotoUnderstanding apiBase="" expectedAccountId={intelligence.expectedAccountId} photoId={photo.id} sourceRevision={photo.digest ?? photo.id} scopeKey={intelligence.scopeKey}
         current={() => alive.current && currentPhoto.current?.id === photo.id && currentPhoto.current.digest === photo.digest && photo.current?.() !== false && intelligence.current()}
         getPreview={async signal => {const loaded = await resources.load(photo, "preview", signal); return loaded.blob;}}
-        onObservation={observation => intelligence.keep(photo, observation)} /></Suspense>}
+        onObservation={observation => intelligence.keep(photo, observation)} /></Suspense></details>}
       {onSave && <button disabled={!photo.file || sharing || saved} onClick={() => {
         if (photo.file && !isSaved?.(photo) && alive.current && currentPhoto.current === photo) onSave(photo);
       }}>{saved ? "Saved" : "Save to Fotoro"}</button>}
@@ -106,7 +106,7 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
       }}>{photo.favorite ? "Unfavorite" : "Favorite"}</button>}
       {photo.file && <button onClick={download} disabled={sharing}>Download original</button>}
       <PhotoOrganization key={photo.id} source={{...photo, analysis: localPhotoNameAnalysis(photo)}} saved={!!owned} onChange={onOrganization ? patch => onOrganization(photo, patch) : undefined} />
-      <h3>Tags</h3>
+      <details><summary>Tags{photo.labels?.length ? ` · ${photo.labels.length}` : ""}</summary>
       <div className="local-labels">{(photo.labels ?? []).map((value, i) => <span key={i}>{value}{onLabels && <button aria-label={"Remove tag " + value} onClick={() => onLabels(photo.id, photo.labels!.filter((_, position) => position !== i))}>×</button>}</span>)}</div>
       {onLabels && <form className="local-label-form" onSubmit={event => {
         event.preventDefault();
@@ -114,7 +114,7 @@ export function LocalViewer({photos, initial, resources, onClose, onLabels, onFa
         if (!tag) return;
         onLabels(photo.id, [...(photo.labels ?? []), tag]);
         setLabel("");
-      }}><label>New tag<input aria-label="New tag" placeholder="BTS, a place, or your own words" value={label} maxLength={120} onChange={event => setLabel(event.target.value)} /></label><button disabled={!newPhotoTag(label, photo.labels ?? [])}>Add tag</button></form>}
+      }}><label>New tag<input aria-label="New tag" placeholder="BTS, a place, or your own words" value={label} maxLength={120} onChange={event => setLabel(event.target.value)} /></label><button disabled={!newPhotoTag(label, photo.labels ?? [])}>Add tag</button></form>}</details>
       {changes && owned && <PhotoChangesNotice key={owned.manifest.ownerAccountId + owned.manifest.photoId} changes={changes} photoId={owned.manifest.photoId} digest={owned.metadata.originalSha256} accountId={owned.manifest.ownerAccountId}
         current={() => alive.current && currentPhoto.current?.id === photo.id && currentPhoto.current?.digest === photo.digest && photo.current?.() !== false && changes.current() && !!savedPhotoFor?.(photo)} />}
       <KeptObservations facts={photo.facts} photoId={photo.id} sourceRevision={photo.digest ?? photo.id} />

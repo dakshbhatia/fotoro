@@ -45,14 +45,14 @@ test("first use offers Saved and device photos without contacting the server or 
 
 test("viewer correction state follows the exact original and exposes a conflicting or failed edit without crossing sources", () => {
   const changes: ConsumerPhotoChanges = {token: {}, accountId: "owner", current: () => true, pending: [{photoId: "a", originalSha256: "digest-a", conflict: true}], busy: false, error: "Storage is unavailable", errorSource: {photoId: "a", originalSha256: "digest-a"}, save: async () => true, review() {}};
-  assert.deepEqual(photoChangeState(changes, "a", "digest-a", "owner"), {pending: true, conflict: true, busy: false, error: "Storage is unavailable"});
-  assert.deepEqual(photoChangeState(changes, "a", "replacement", "owner"), {pending: false, conflict: false, busy: false, error: ""});
+  assert.deepEqual(photoChangeState(changes, "a", "digest-a", "owner"), {pending: true, conflict: true, busy: false, automatic: false, error: "Storage is unavailable"});
+  assert.deepEqual(photoChangeState(changes, "a", "replacement", "owner"), {pending: false, conflict: false, busy: false, automatic: false, error: ""});
   assert.equal(photoChangeState(changes, "b", "digest-a", "owner").error, "");
-  assert.deepEqual(photoChangeState(changes, "a", "digest-a", "other-owner"), {pending: false, conflict: false, busy: false, error: ""});
-  assert.deepEqual(photoChangeState(undefined, "a", "digest-a", "owner"), {pending: false, conflict: false, busy: false, error: ""});
+  assert.deepEqual(photoChangeState(changes, "a", "digest-a", "other-owner"), {pending: false, conflict: false, busy: false, automatic: false, error: ""});
+  assert.deepEqual(photoChangeState(undefined, "a", "digest-a", "owner"), {pending: false, conflict: false, busy: false, automatic: false, error: ""});
   assert.equal(photoChangeState({...changes, errorSource: undefined}, "a", "digest-a", "owner").error, "Storage is unavailable");
   assert.equal(photoChangeState({...changes, pending: [], errorSource: undefined}, "a", "digest-a", "owner").error, "");
-  assert.deepEqual(photoChangeState({...changes, current: () => false}, "a", "digest-a", "owner"), {pending: false, conflict: false, busy: false, error: ""});
+  assert.deepEqual(photoChangeState({...changes, current: () => false}, "a", "digest-a", "owner"), {pending: false, conflict: false, busy: false, automatic: false, error: ""});
 });
 
 test("loaded Saved photos enter the browse grid, and a stale account returns to first use", () => {

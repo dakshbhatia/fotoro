@@ -11,8 +11,8 @@ export function PhotoChangesNotice({changes, photoId, digest, accountId, current
   const state = photoChangeState(changes, photoId, digest, accountId);
   if (!current() || !state.pending && !state.error && !error) return null;
   return <section className="viewer-changes" aria-label="Photo changes">
-    <p role="status">{state.error || error || (state.conflict ? "This photo changed on another device." : "Your changes are on this device until you save them.")}</p>
-    {state.pending && <button disabled={state.busy || saving} onClick={async () => {
+    <p role="status">{state.error || error || (state.conflict ? "This photo changed on another device." : state.automatic ? "Changes save automatically." : "Changes are kept on this device. Saving is paused or offline.")}</p>
+    {state.pending && (!state.automatic || state.conflict || state.error || error) && <button disabled={state.busy || saving} onClick={async () => {
       if (pending.current || !latest.current() || !changes.current()) return;
       if (state.conflict) {changes.review(); return;}
       pending.current = true; setSaving(true); setError("");

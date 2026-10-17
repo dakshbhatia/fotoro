@@ -1,3 +1,4 @@
+import {BackgroundAnnotations} from "./library/background-annotations";
 import type {PhotoOrganizationScope} from "@fotoro/contracts/organization";
 import type {PhotoOrganizationPatch} from "@fotoro/contracts/organization";
 import {SelectionTray} from "./components/SelectionTray";
@@ -72,7 +73,7 @@ import type { LocalPhoto } from "./local/resources";
 import { currentSearchRecords, cloudSearchRecords, mergeSearchPhotos } from "./library/search";
 import {cachedMetadataRevision, subscribeCachedMetadata} from "./exchange/cache";
 import {deriveConsumerSyncSummary, syncStateLabel} from "./library/consumer-sync";
-import {loadUploadPause, saveUploadPause} from "./library/consumer-preferences";
+import {loadUploadPause, saveUploadPause, loadSavedTextConsent, saveSavedTextConsent} from "./library/consumer-preferences";
 import type {OwnedPhotoSnapshot} from "./library/consumer-search";
 import {SavedSearchProjection, useAccountSearch} from "./library/consumer-search";
 import {findMatchPhotos, shortlistSearchResult} from "./local/find-best-shots";
@@ -177,7 +178,10 @@ export default function CloudApp({
     [pending, setPending] = useState<PendingImport[]>([]);
   const [receivedContext, setReceivedContext] = useState<{grant: GrantV1; sender: string} | null>(null);
   const [savedTextConsent, setSavedTextConsent] = useState(false);
-  useEffect(() => {if (!menu) setSavedTextConsent(false);}, [menu]);
+  const [automaticTextBusy, setAutomaticTextBusy] = useState(false);
+  const [automaticTextIncomplete, setAutomaticTextIncomplete] = useState(false);
+  const [annotationForegroundEpoch, setAnnotationForegroundEpoch] = useState(0);
+  const savedTextChoiceEpoch = useRef(0);
   const [preparingOriginals, setPreparingOriginals] = useState(false), [sharingOriginals, setSharingOriginals] = useState(false);
   const [preparedOriginals, setPreparedOriginals] = useState<{files: File[]; context: SelectedOriginalContext} | null>(null);
   const [originalShareError, setOriginalShareError] = useState("");
@@ -248,6 +252,7 @@ export default function CloudApp({
   useEffect(() => {if (!active || !account) setPeopleOpen(false);}, [active, account]);
   useEffect(() => {if (!active || !account) {albumEntryRevision.cancelReturn(); setAlbumsOpen(false); setAlbumSelection(null); setAlbumDestination(null);}}, [active, account]);
   useEffect(() => () => placeResources.clear(), [placeResources]);
+  const backgroundAnnotations = useRef(new BackgroundAnnotations());
   const running = useRef(false),
     authIntent = useRef(0),
     pausedRef = useRef(true),
@@ -370,6 +375,8 @@ export default function CloudApp({
   const publicDemo = fixtureMode || isPublicDemoAccount(account);
   const choosePhotos = () => {setReselect(undefined); input.current?.click();};
   const clear = () => {
+    setAutomaticTextIncomplete(false);
+    savedTextChoiceEpoch.current++; setSavedTextConsent(false);
     cancelOriginals();
     cancelSavedBrowse();
     placeResources.clear();
@@ -412,6 +419,28 @@ export default function CloudApp({
     try {const session = requireVault(); if (session.accountId === account) return session;} catch {}
     clear(); onOwnedPhotos?.(null); onPhotoChanges?.(null);
     return undefined;
+  };
+  useEffect(() => {
+    setSavedTextConsent(false);
+    const epoch = ++savedTextChoiceEpoch.current;
+    if (!account) return;
+    const session = effectVault(); if (!session) return;
+    const origin = location.origin;
+    let alive = true;
+    const current = () => alive && sameVault(session) && location.origin === origin && savedTextChoiceEpoch.current === epoch;
+    void loadSavedTextConsent(session).then(enabled => {if (current()) setSavedTextConsent(enabled);})
+      .catch(() => {if (current()) setStatus("Text checking preference could not be restored. Choose it again in Settings.");});
+    return () => {alive = false;};
+  }, [account]);
+  const changeSavedTextConsent = (enabled: boolean) => {
+    const session = effectVault(); if (!session) return;
+    const epoch = ++savedTextChoiceEpoch.current, origin = location.origin;
+    setSavedTextConsent(enabled);
+    void saveSavedTextConsent(enabled, session).catch(() => {
+      if (sameVault(session) && location.origin === origin && savedTextChoiceEpoch.current === epoch) {
+        setSavedTextConsent(false); setStatus("Text checking preference could not be saved. Try again in Settings.");
+      }
+    });
   };
   const restorePause = async (session = requireVault()) => {
     const version = intentVersion.current;
@@ -507,6 +536,7 @@ export default function CloudApp({
   const run = async (fn: () => Promise<void | boolean>, accountAction = false) => {
     if (running.current) return false;
     running.current = true;
+    await backgroundAnnotations.current.stop();
     setBusy(true);
     setStatus("");
     let accepted = false;
@@ -857,6 +887,7 @@ export default function CloudApp({
     const current = () => sameVault(session) && location.origin === origin && currentCatalog.current === photos;
     const snapshot: OwnedPhotoSnapshot = {accountId: account, token: session, photos, coverage: catalogCoverage ?? undefined, metadataSearch, metadataSearchError: metadataSearchError || undefined, current,
       get selectionReady() {return current() && !running.current;},
+      get automaticTextActive() {return !pausedRef.current && !running.current;},
       sourceCurrent: source => sameVault(session) && currentCatalog.current.some(photo => !photo.grantId && photo.manifest.ownerAccountId === account
         && photo.manifest.photoId === source.manifest.photoId && photo.metadata.originalSha256 === source.metadata.originalSha256
         && photo.manifest === source.manifest && photo.metadata === source.metadata && photo.metadataKey === source.metadataKey),
@@ -875,7 +906,7 @@ export default function CloudApp({
       const cancel = () => controller.abort();
       signal.addEventListener("abort", cancel, {once: true});
       if (signal.aborted) controller.abort();
-      const valid = () => !controller.signal.aborted && admitted() && current() && intentVersion.current === intent;
+      const valid = () => !controller.signal.aborted && !pausedRef.current && admitted() && current() && intentVersion.current === intent;
       try {
         const result = await readSavedPhotoText(snapshot, candidates, {signal: controller.signal, current: valid, onProgress: progress,
           write: (photo, value, sourceCurrent) => queueMissingPhotoOcr({ownerAccountId: account, photoId: photo.manifest.photoId,
@@ -898,7 +929,7 @@ export default function CloudApp({
     }};
     snapshot.retainSelection = consumerSelection.bind(snapshot, origin, () => location.origin);
     return snapshot;
-  }, [account, photos, publicDemo, catalogCoverage, busy, consumerSelection, metadataSearch, metadataSearchError]);
+  }, [account, photos, publicDemo, catalogCoverage, busy, paused, consumerSelection, metadataSearch, metadataSearchError]);
   useEffect(() => {placeResources.clear();}, [ownedSnapshot?.token, ownedSnapshot?.photos, placeResources]);
   useEffect(() => {onOwnedPhotos?.(ownedSnapshot);}, [ownedSnapshot, onOwnedPhotos]);
   const currentOwnedSnapshot = useRef(ownedSnapshot); currentOwnedSnapshot.current = ownedSnapshot;
@@ -907,13 +938,13 @@ export default function CloudApp({
     let session;
     try {session = requireVault();} catch {return null;}
     if (session.accountId !== account) return null;
-    return {token: session, accountId: session.accountId, current: () => sameVault(session), pending: annotationPending, busy,
+    return {token: session, accountId: session.accountId, current: () => sameVault(session), pending: annotationPending, busy, automatic: online && !paused,
       error: annotationError?.message ?? "",
       errorSource: annotationError?.photoId && annotationError.originalSha256 ? {photoId: annotationError.photoId, originalSha256: annotationError.originalSha256} : undefined,
       save: async () => sameVault(session) ? saveAnnotationChanges(session) : false,
       review: () => {if (sameVault(session)) setMenu(true);},
     };
-  }, [account, publicDemo, annotationPending, busy, annotationError]);
+  }, [account, publicDemo, annotationPending, busy, annotationError, online, paused]);
   useEffect(() => {onPhotoChanges?.(photoChanges);}, [photoChanges, onPhotoChanges]);
   const searchable = received ?? photos;
   const catalogIncomplete = !!catalogCoverage && (catalogCoverage.hasMore || catalogCoverage.hasMoreChanges !== false);
@@ -1047,7 +1078,7 @@ export default function CloudApp({
     });
     await snapshot.people(saved);
   };
-  const viewing = !!viewer && shown.some(photo => photo.manifest.photoId === viewer);
+  const viewing = !!viewer && searchableById.has(viewer) && (!!received || permitted.has(viewer));
   useEffect(() => {if (viewer && !viewing) setViewer(null);}, [viewer, viewing]);
   const publishLocalAnnotations = async (sources: Photo[], session: UnlockedVault, current = () => true) => {
     const original = new Map(sources.map(photo => [photo.manifest.photoId, photo]));
@@ -1113,6 +1144,43 @@ export default function CloudApp({
     });
     return {...await snapshot.locate(updates), needsSave: true};
   };
+  useEffect(() => {
+    if (!account || publicDemo || paused || !online || busy || document.visibilityState !== "visible") {
+      void backgroundAnnotations.current.stop(); return;
+    }
+    const session = effectVault(); if (!session) return;
+    const origin = location.origin;
+    const admitted = new Map(photos.filter(photo => !photo.grantId && photo.manifest.ownerAccountId === session.accountId).map(photo => [photo.manifest.photoId, photo.metadata.originalSha256]));
+    const edits = annotationPending.filter(edit => !edit.conflict && admitted.get(edit.photoId) === edit.originalSha256).slice(0, 40);
+    if (!edits.length) return;
+    const ids = edits.map(edit => edit.photoId);
+    const key = session.accountId + ":" + edits.map(edit => edit.signed.signature).join(":");
+    backgroundAnnotations.current.request(key, async signal => {
+      const current = () => !signal.aborted && sameVault(session) && location.origin === origin
+        && !running.current && !pausedRef.current && navigator.onLine && document.visibilityState === "visible"
+        && edits.every(edit => currentCatalog.current.some(photo => !photo.grantId && photo.manifest.ownerAccountId === session.accountId
+          && photo.manifest.photoId === edit.photoId && photo.metadata.originalSha256 === edit.originalSha256));
+      if (!current()) return;
+      try {
+        const result = await saveQueuedAnnotations(session, current, {...browseFor(session), signal, current}, {photoIds: ids, signal});
+        try {
+          if (!current()) return;
+          setAnnotationPending(result.annotations); setAnnotationError(null);
+        } finally {for (const photo of result.photos) photo.metadataKey.fill(0);}
+      } catch (error) {
+        if (!current()) return;
+        const edits = await pendingAnnotations(session);
+        if (current()) {setAnnotationPending(edits); setAnnotationError({message: readableSyncError(error)});}
+        throw error;
+      }
+    });
+  }, [account, publicDemo, paused, online, busy, annotationPending, photos, annotationForegroundEpoch]);
+  useEffect(() => {
+    const stop = () => {void backgroundAnnotations.current.stop();};
+    const visibility = () => {if (document.visibilityState !== "visible") stop(); else setAnnotationForegroundEpoch(epoch => epoch + 1);};
+    window.addEventListener("pagehide", stop); window.addEventListener("fotoro-lock", stop); document.addEventListener("visibilitychange", visibility);
+    return () => {window.removeEventListener("pagehide", stop); window.removeEventListener("fotoro-lock", stop); document.removeEventListener("visibilitychange", visibility); stop();};
+  }, []);
   const saveAnnotationChanges = async (session = requireVault()) => {
     if (!sameVault(session) || publicDemo || running.current) return false;
     let failure = "Changes could not be saved. Check your connection and try again.";
@@ -1252,8 +1320,9 @@ export default function CloudApp({
             else if (event.target.value === "shared") openSharing();
             else if (event.target.value === "albums") openAlbums(albumDestination?.current() ? chosen : []);
             else {setReceived(null); setReceivedContext(null); setQuery(""); setCommittedMeaning(undefined);}
-          }}><option value="photos">Photos</option><option value="saved">Saved</option><option value="shared">Shared</option><option value="places">Places</option>{!publicDemo && <option value="albums">Trips</option>}</select></nav> : <h1>Fotoro</h1>}
+          }}><option value="photos">Photos</option><option value="saved">Saved</option>{received && <option value="shared">Shared</option>}</select></nav> : <h1>Fotoro</h1>}
           <div className="header-actions">
+          {unlocked && !received && annotationPending.length > 0 && !annotationError && !annotationPending.some(edit => edit.conflict) && <span className="consumer-background-state" role="status">{paused ? "Saving paused" : !online ? "Offline · changes kept" : "Saving…"}</span>}
           {!unlocked && <button
             ref={backButton}
             onClick={() => {
@@ -1401,24 +1470,27 @@ export default function CloudApp({
             </div>
             {!received && photos.length > 0 && <details className="photo-browse-filters" onKeyDown={event => {
               if (event.key === "Escape") {event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus();}
-            }}><summary>Filters<span className="photo-browse-filter-state">{[
-              photoTypeBrowse && recentBrowseActive(true, query) ? recentOnly ? "Last 30 days" : catalogIncomplete ? "All dates · loaded photos" : "All dates" : undefined,
+            }}><summary>Organize<span className="photo-browse-filter-state">{[
+              photoTypeBrowse && recentBrowseActive(true, query) && !recentOnly ? "All dates" : undefined,
               peopleFind.filter.ids.size > 0 ? `${peopleFind.filter.ids.size} ${peopleFind.filter.ids.size === 1 ? "person" : "people"}${peopleFind.filter.mode === "everyone" ? " · Everyone" : ""}` : undefined,
               favoritesOnly ? "Favorites" : undefined,
           organizationScope === "photos" ? undefined : organizationScope === "photosOnly" ? "Photos" : organizationScope === "trash" ? "Trash" : "Screenshots",
-            ].filter(Boolean).join(" · ")}</span></summary><div className="photo-browse-filter-options"><button disabled={busy} onClick={event => {const menu = event.currentTarget.closest("details"); if (menu) {menu.open = false; menu.querySelector("summary")?.focus();} setCleanupOpen(true);}}>Review cleanup</button><label>Show<select aria-label="Photo type" value={organizationScope} onChange={event => setOrganizationScope(event.target.value as PhotoOrganizationScope)}><option value="photos">All</option><option value="photosOnly">Photos</option><option value="screenshots">Screenshots</option><option value="trash">Fotoro Trash</option></select></label>
+            ].filter(Boolean).join(" · ")}</span></summary><div className="photo-browse-filter-options">
+              <div className="actions"><button disabled={busy} onClick={event => {const menu = event.currentTarget.closest("details"); if (menu) {menu.open = false; menu.querySelector("summary")?.focus();} setCleanupOpen(true);}}>Clean up</button><button onClick={() => setPlacesOpen(true)}>Places</button>{!publicDemo && <button onClick={() => openAlbums()}>Trips</button>}<button onClick={() => openSharing()}>Shared</button></div>
+              {(browseFilter || normalizeSearch(query)) && <button disabled={busy || preparingOriginals || sharingOriginals || searchResult.searching || bestShots.busy || !shown.length} onClick={selectResults}>Select matching photos</button>}
+              {normalizeSearch(query) && (findMatches.length > 0 || !!searchResult.totalMatches || bestShots.active) && <FindBestShots total={bestShots.active ? findMatches.length : shown.length} availableTotal={searchResult.totalMatches} review={bestShots} showCount onSelect={selectBestShots} disabled={busy || preparingOriginals || sharingOriginals} />}
+              {normalizeSearch(query) && searchResult.meaning?.kind === "label" && <button aria-pressed={committedMeaning === searchResult.meaning.id} onClick={() => setCommittedMeaning(searchResult.meaning!.id)}>Only this tag</button>}
+              {normalizeSearch(query) && searchResult.meanings.some(meaning => meaning.id !== searchResult.meaning?.id && meaning.photoIds.some(id => !searchResult.photoIds.includes(id))) && <details><summary>Other matches</summary><div className="actions">{searchResult.meanings.filter(meaning => meaning.id !== searchResult.meaning?.id && meaning.photoIds.some(id => !searchResult.photoIds.includes(id))).slice(0, 3).map(meaning => <button key={meaning.id} onClick={() => setCommittedMeaning(meaning.id)}>{meaning.term}</button>)}</div></details>}
+              <label>Show<select aria-label="Photo type" value={organizationScope} onChange={event => setOrganizationScope(event.target.value as PhotoOrganizationScope)}><option value="photos">All</option><option value="photosOnly">Photos</option><option value="screenshots">Screenshots</option><option value="trash">Fotoro Trash</option></select></label>
               {photoTypeBrowse && recentBrowseActive(true, query) && <label className="local-check"><input type="checkbox" checked={recentOnly} disabled={preparingOriginals || sharingOriginals} onChange={event => setRecentOnly(event.target.checked)} />Last 30 days</label>}
               <label className="local-check"><input type="checkbox" checked={favoritesOnly} disabled={preparingOriginals || sharingOriginals} onChange={event => setFavoritesOnly(event.target.checked)} />Favorites</label>
               <PeopleFilter people={peopleFind.people} value={peopleFind.filter} onChange={peopleFind.change}
                 disabled={preparingOriginals || sharingOriginals} onReview={!publicDemo ? () => setPeopleOpen(true) : undefined} />
             </div></details>}
             </div>}
-            {!received && photos.length > 0 && <SearchCoverage photos={coveragePhotos} scopeLabel={(recentActive ? "Last 30 days and current filters" : "Current filters") + (catalogIncomplete ? " · More Saved photos may be available" : "")} textEnabled={savedTextConsent} result={normalizeSearch(query) ? searchResult : undefined} onReviewSettings={() => setMenu(true)} />}
-            {!received && photos.length > 0 && (browseFilter || normalizeSearch(query)) && <div className="photo-browse-result-actions"><button disabled={busy || preparingOriginals || sharingOriginals || searchResult.searching || bestShots.busy || !shown.length} onClick={selectResults}>Select {shown.length} {shown.length === 1 ? "photo" : "photos"}</button></div>}
-            {!received && metadataSearchError && <p className="hint" role="status">{metadataSearchError}</p>}
-            {!received && catalogIncomplete && <div className="hint" aria-label="Saved coverage"><p role="status">{catalogCoverage!.loaded} Saved {catalogCoverage!.loaded === 1 ? "photo loaded" : "photos loaded"}. {searchCorpus?.admitted ? `Search and People cover ${searchCorpus.records.length} cached photos${searchCorpus.complete ? "" : " while the index updates"}; up to 200 matches are shown. More server photos may be available.` : "Date, search and People filters cover loaded photos only."}</p><button disabled={loadingSavedBrowse || busy && !catalogCoverage!.hasMore || preparingOriginals || sharingOriginals} onClick={() => void loadMoreSaved()}>Load more Saved photos</button>{savedBrowseError && <p role="alert">{savedBrowseError}</p>}</div>}
-            {!received && (busy || localCount > 0 || summary.pending > 0 || summary.failed > 0 || needsAttention || annotationPending.length > 0) && <section className={"consumer-save-progress state-" + consumerSummary.state} aria-label="Save progress">
-              <div><p role="status">{status || syncStateLabel[consumerSummary.state]}</p>{consumerSummary.detail && <p className="hint">{consumerSummary.detail}</p>}</div>
+            {!received && normalizeSearch(query) && metadataSearchError && <p className="hint" role="status">Some photos could not be searched. <button onClick={() => setMenu(true)}>Details</button></p>}
+            {!received && (busy || localCount > 0 || summary.pending > 0 || summary.failed > 0 || needsAttention || annotationPending.some(edit => edit.conflict) || !!annotationError) && <section className={"consumer-save-progress state-" + consumerSummary.state} aria-label="Save progress">
+              <div><p role="status">{annotationError?.message || status || syncStateLabel[consumerSummary.state]}</p>{consumerSummary.detail && <p className="hint">{consumerSummary.detail}</p>}</div>
               <div className="actions">
                 {busy && !paused && <button onClick={pause}>Pause</button>}
                 {!busy && (saveIntent?.pending || localCount > 0 || summary.pending > 0 || summary.failed > 0 || annotationPending.length > 0) && <button className="primary-action" disabled={publicDemo} onClick={() => {if (annotationPending.some(edit => edit.conflict)) setMenu(true); else if (saveIntent?.pending) void startChosenSave(); else if (localCount > 0) void syncLocal(); else void retry();}}>{annotationPending.some(edit => edit.conflict) ? "Review changes" : needsAttention || summary.failed ? "Retry" : localCount > 0 ? `Save ${localCount}` : summary.pending > 0 ? "Continue" : "Save changes"}</button>}
@@ -1439,13 +1511,6 @@ export default function CloudApp({
                 </button>
               </div>
             )}
-            {normalizeSearch(query) && searchResult.meanings.some(meaning => meaning.id !== searchResult.meaning?.id && meaning.photoIds.some(id => !searchResult.photoIds.includes(id))) && (
-              <div className="cloud-search-meanings local-labels glass">
-                <span>Also try</span>{searchResult.meanings.filter(meaning => meaning.id !== searchResult.meaning?.id && meaning.photoIds.some(id => !searchResult.photoIds.includes(id))).slice(0, 3).map(meaning => <button key={meaning.id} onClick={() => setCommittedMeaning(meaning.id)}>{meaning.term}</button>)}
-              </div>
-            )}
-            {normalizeSearch(query) && !received && searchResult.meaning?.kind === "label" && <button aria-pressed={committedMeaning === searchResult.meaning.id} onClick={() => setCommittedMeaning(searchResult.meaning!.id)}>Only this tag</button>}
-            {normalizeSearch(query) && !received && (findMatches.length > 0 || !!searchResult.totalMatches || bestShots.active) && <FindBestShots total={bestShots.active ? findMatches.length : shown.length} availableTotal={searchResult.totalMatches} review={bestShots} showCount onSelect={selectBestShots} disabled={busy || preparingOriginals || sharingOriginals} />}
             {shown.length ? (
               <>
               {normalizeSearch(query) && visualSearchFeedback(searchResult) && <p className="hint" role="status">{visualSearchFeedback(searchResult)}</p>}
@@ -1463,7 +1528,7 @@ export default function CloudApp({
             ) : (
               <div className="empty" aria-busy={searchResult.searching || undefined}>
                 <p role={searchResult.searching || searchResult.visualStatus ? "status" : undefined}>
-                  {searchResult.searching ? "Searching photos…" : visualSearchFeedback(searchResult) ?? (searchResult.metadataIncomplete ? metadataSearchError || "Search coverage is incomplete." : bestShots.active ? bestShots.busy ? "Choosing best shots…" : "No best shots to suggest" : query || browseFilter
+                  {automaticTextBusy ? "Reading photo text… More matches may appear." : searchResult.searching ? "Searching photos…" : automaticTextIncomplete && normalizeSearch(query) ? "Some photo text couldn’t be read. Review text checks in Settings." : visualSearchFeedback(searchResult) ?? (searchResult.metadataIncomplete ? metadataSearchError || "Search coverage is incomplete." : bestShots.active ? bestShots.busy ? "Choosing best shots…" : "No best shots to suggest" : query || browseFilter
                     ? catalogIncomplete && !received ? "No matching loaded photos" : "No matching photos"
                     : received
                       ? "No received photos"
@@ -1477,6 +1542,7 @@ export default function CloudApp({
                 )}
               </div>
             )}
+            {!received && catalogIncomplete && <div className="photo-browse-result-actions"><button disabled={loadingSavedBrowse || busy && !catalogCoverage!.hasMore || preparingOriginals || sharingOriginals} onClick={() => void loadMoreSaved()}>{loadingSavedBrowse ? "Loading…" : "Show more photos"}</button>{savedBrowseError && <p role="alert">{savedBrowseError}</p>}</div>}
             {!received && selected.size > 0 && <SelectionTray className="consumer-selection glass" aria-label="Selected photos">
               <span role="status">{selected.size} selected</span>
               {!publicDemo && <details className="selection-more"><summary>Name photos</summary><div>
@@ -1538,6 +1604,9 @@ export default function CloudApp({
           </p>
         )}
       </main>
+        {!received && ownedSnapshot?.checkText && <SavedTextCheck automatic onBusyChange={setAutomaticTextBusy} onIncomplete={() => setAutomaticTextIncomplete(true)} snapshot={ownedSnapshot} photos={savedTextPhotos} consent={savedTextConsent} active={active && unlocked && !busy && !paused && !menu}
+          scope={JSON.stringify([query, recentActive, favoritesOnly, organizationScope, [...peopleFind.filter.ids].sort(), peopleFind.filter.mode])}
+          changes={photoChanges ?? undefined} showSaveAction={false} onSync={() => setMenu(true)} />}
         {active && menu && unlocked && (
           <aside className="account-sheet sheet" ref={accountPanel} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Settings">
             <button
@@ -1548,7 +1617,6 @@ export default function CloudApp({
               ×
             </button>
             <h2>Settings</h2>
-            <p className="hint">This Fotoro · {accountReference}</p>
             <p role="status">
               {status || syncStateLabel[consumerSummary.state]}
             </p>
@@ -1556,18 +1624,20 @@ export default function CloudApp({
               {consumerSummary.detail}
             </p>
             <div className="actions">
-              {(saveIntent?.pending || localCount > 0 || summary.pending || summary.failed || annotationPending.length > 0) && <button className="primary-action" disabled={busy || publicDemo} onClick={() => {if (saveIntent?.pending) void startChosenSave(); else if (localCount > 0) void syncLocal(); else void retry();}}>
+              {(saveIntent?.pending || localCount > 0 || summary.pending || summary.failed || annotationPending.length > 0 && (!online || paused || !!annotationError || annotationPending.some(edit => edit.conflict))) && <button className="primary-action" disabled={busy || publicDemo} onClick={() => {if (saveIntent?.pending) void startChosenSave(); else if (localCount > 0) void syncLocal(); else void retry();}}>
                 {needsAttention && saveIntent?.pending ? "Retry" : localCount > 0 ? `Save ${localCount} selected ${localCount === 1 ? "photo" : "photos"}` : summary.pending || summary.failed ? "Continue" : "Save changes"}
               </button>}
-              {!paused && busy && <button onClick={pause}>Pause</button>}
-              <button onClick={closeAccountPanel}>Saved photos</button>
+              {!paused && <button onClick={pause}>Pause saving</button>}
+              {paused && <button disabled={busy} onClick={() => void run(async () => {await continueSync();})}>Resume saving</button>}
             </div>
             {!received && ownedSnapshot?.checkText && <>
-              <h3>Find words in photos</h3>
-              <label className="local-check"><input type="checkbox" checked={savedTextConsent} onChange={event => setSavedTextConsent(event.target.checked)} />Allow local text checks</label>
+              <h3>Automatic organizing</h3>
+              <label className="local-check"><input type="checkbox" checked={savedTextConsent} onChange={event => changeSavedTextConsent(event.target.checked)} />Find text in new photos</label>
+              <p className="hint">Text is read on this device in small background batches. Names, tags and text save automatically across your devices.</p>
+              <details><summary>Check older photos</summary>
               <SavedTextCheck snapshot={ownedSnapshot} photos={savedTextPhotos} consent={savedTextConsent} active={active && unlocked && !busy}
                 scope={JSON.stringify([query, recentActive, favoritesOnly, organizationScope, [...peopleFind.filter.ids].sort(), peopleFind.filter.mode])}
-                changes={photoChanges ?? undefined} showSaveAction={false} onSync={() => setMenu(true)} />
+                changes={photoChanges ?? undefined} showSaveAction={false} onSync={() => setMenu(true)} /></details>
             </>}
             <details>
               <summary>Open on another device</summary>
@@ -1598,7 +1668,12 @@ export default function CloudApp({
               </details>
             </details>
             <details>
-              <summary>Settings</summary>
+              <summary>Details</summary>
+              <p className="hint">This Fotoro · {accountReference}</p>
+              <SearchCoverage photos={coveragePhotos} scopeLabel={(recentActive ? "Last 30 days and current filters" : "Current filters") + (catalogIncomplete ? " · More Saved photos may be available" : "")} textEnabled={savedTextConsent} result={normalizeSearch(query) ? searchResult : undefined} onReviewSettings={() => setMenu(true)} />
+              {metadataSearchError && <p role="status">{metadataSearchError}</p>}
+              {automaticTextIncomplete && <p role="status">Some photo text couldn’t be read. Use Check older photos to try again.</p>}
+              {catalogIncomplete && <p className="hint">{catalogCoverage!.loaded} Saved photos loaded. Search covers {searchCorpus?.admitted ? searchCorpus.records.length : catalogCoverage!.loaded} cached photos; more may be available.</p>}
               <CopyDiagnostics />
               <button disabled={busy} onClick={() => {void run(refresh);}}>Refresh saved photos</button>
               <button

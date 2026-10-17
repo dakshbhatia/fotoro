@@ -493,24 +493,26 @@ struct SavedPhotoDetails: View {
           }
         }
         SavedPhotoOrganizationSection(services: services, photo: photo).id(photo.id)
-        Section("Tags") {
-          ForEach(Array(labels.enumerated()), id: \.offset) { _, value in
-            HStack {
-              Text(value)
-              Spacer()
-              Button("Remove", systemImage: "minus.circle") {
-                do {
-                  try PhotoTagEdits.remove(value, current: { labels }) {
-                    try services.setLabels($0, photo: photo)
-                  }
-                } catch { services.error = error.localizedDescription }
-              }.labelStyle(.iconOnly).accessibilityLabel("Remove tag \(value)")
+        Section {
+          DisclosureGroup("Tags") {
+            ForEach(Array(labels.enumerated()), id: \.offset) { _, value in
+              HStack {
+                Text(value)
+                Spacer()
+                Button("Remove", systemImage: "minus.circle") {
+                  do {
+                    try PhotoTagEdits.remove(value, current: { labels }) {
+                      try services.setLabels($0, photo: photo)
+                    }
+                  } catch { services.error = error.localizedDescription }
+                }.labelStyle(.iconOnly).accessibilityLabel("Remove tag \(value)")
+              }
             }
-          }
-          HStack {
-            TextField("Add a tag or place name", text: $label).autocorrectionDisabled()
-              .focused($labelFocused).submitLabel(.done).onSubmit(addLabel)
-            Button("Add", action: addLabel).disabled(!canAddLabel)
+            HStack {
+              TextField("Add a tag or place name", text: $label).autocorrectionDisabled()
+                .focused($labelFocused).submitLabel(.done).onSubmit(addLabel)
+              Button("Add", action: addLabel).disabled(!canAddLabel)
+            }
           }
         }
         if (try? services.annotations.ledger.state(photo.id)?.conflict) == true {
@@ -521,8 +523,12 @@ struct SavedPhotoDetails: View {
           }
         } else if (try? services.annotations.ledger.pendingIDs().contains(photo.id)) == true {
           Section {
-            Text("Changes waiting to sync").font(.footnote).foregroundStyle(.secondary)
-            Button("Sync changes") { Task { await services.syncAnnotations() } }
+            if services.isAutomaticallySavingAnnotation(photo) {
+              Text("Saving changes…").font(.footnote).foregroundStyle(.secondary)
+            } else {
+              Text("Changes waiting to sync").font(.footnote).foregroundStyle(.secondary)
+              Button("Sync changes") { Task { await services.syncAnnotations() } }
+            }
           }
         }
         if let caption = services.annotation(photo).caption { Section("Caption") { Text(caption) } }
