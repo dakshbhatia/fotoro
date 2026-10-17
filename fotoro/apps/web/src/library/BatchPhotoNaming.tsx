@@ -51,9 +51,9 @@ export function BatchPhotoNaming({sources, reservedNames, disabled, current, onC
   return <section aria-label="Name selected photos">
     <button type="button" disabled={disabled || busy || !sources.length} onClick={() => {setPreview(planPhotoNames(sources, reservedNames)); setStatus("");}}>Preview names</button>
     {preview && <>
-      <p>Review {preview.length} selected photos. Original files stay unchanged.</p>
+      <p>{preview.some(entry => entry.before !== entry.name) ? `Review ${preview.length} selected photos. Original files stay unchanged.` : "No better names to suggest from current photo details."}</p>
       <ul>{preview.map(entry => <li key={entry.id}>{entry.before} → {entry.name}</li>)}</ul>
-      <button type="button" disabled={disabled || busy} onClick={() => void apply(preview, false)}>Apply names</button>
+      <button type="button" disabled={disabled || busy || !preview.some(entry => entry.before !== entry.name)} onClick={() => void apply(preview, false)}>Apply names</button>
       <button type="button" disabled={busy} onClick={() => setPreview(undefined)}>Cancel</button>
     </>}
     {!!undo.length && <button type="button" disabled={disabled || busy} onClick={() => void apply(undo, true)}>Undo names</button>}

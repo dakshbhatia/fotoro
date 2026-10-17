@@ -18,6 +18,10 @@ const suggestedName = between(policy, "  static func suggestedName(", "\nenum Ph
 const location = between(policy, "struct PhotoLocationV1:", "  var coordinates:") + "}\n";
 const areaName = between(read("PhotoPlacesView.swift"), "  static func keepingAreaName(", "  static func ordered(");
 const collision = between(read("PhotoMetadataSections.swift"), "        let ext = (proposed as NSString).pathExtension", "        entries.append(Entry(photo:");
+const batchSource = read("PhotoMetadataSections.swift");
+const reservationSelection = between(batchSource, "    let selected = excludedIDs ??", ", revision = services.consumerCatalogGeneration");
+const reservationFilter = between(batchSource, "      for photo in page where ", " {\n        reserved.insert").trim().replace("for photo in page where ", "");
+if (!batchSource.includes("reservedNames(excluding: Set(entries.map(\\.id)))")) throw new Error("Undo must reserve photos outside its actual mutation plan.");
 const root = mkdtempSync(join(tmpdir(), "fotoro-photo-context-host-"));
 try {
   const source = join(root, "main.swift"), binary = join(root, "photo-context-host");
@@ -38,11 +42,22 @@ func collisionName(_ proposed: String, used: inout Set<String>) throws -> String
 ${collision}
 return name
 }
+struct ReservationPhoto { let id: String }
+struct ReservationPresentation { let photos: [ReservationPhoto] }
+func reserves(_ photo: ReservationPhoto, presentation: ReservationPresentation, excludedIDs: Set<String>?) -> Bool {
+${reservationSelection}
+return ${reservationFilter}
+}
 var checks = 0
 @MainActor func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
   checks += 1
   guard condition() else { fatalError(message) }
 }
+let reservationPresentation = ReservationPresentation(photos: [ReservationPhoto(id: "completed"), ReservationPhoto(id: "no-op"), ReservationPhoto(id: "unapplied")])
+expect(reserves(ReservationPhoto(id: "no-op"), presentation: reservationPresentation, excludedIDs: ["completed"]), "Undo must reserve selected no-op photo names")
+expect(reserves(ReservationPhoto(id: "unapplied"), presentation: reservationPresentation, excludedIDs: ["completed"]), "Undo must reserve selected unapplied photo names")
+expect(!reserves(ReservationPhoto(id: "completed"), presentation: reservationPresentation, excludedIDs: ["completed"]), "Undo retains reviewed duplicates within its mutation plan")
+expect(!reserves(ReservationPhoto(id: "no-op"), presentation: reservationPresentation, excludedIDs: nil), "Preview still excludes its whole selected plan")
 let digest = String(repeating: "ab", count: 32)
 func name(_ date: Date? = nil, _ labels: [String] = [], _ analysis: PhotoNameAnalysis? = nil) -> String {
   PhotoOrganizationFacts.suggestedName(original: "Singapore Holiday.JPG", digest: digest, capturedAt: date,

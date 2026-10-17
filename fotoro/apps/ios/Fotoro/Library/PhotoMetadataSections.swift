@@ -340,9 +340,9 @@ struct SavedBatchNamingReview: View {
     var id: String { photo.id }
   }
   private func key(_ value: String) -> String { value.precomposedStringWithCanonicalMapping.lowercased() }
-  private func reservedNames() async throws -> Set<String> {
+  private func reservedNames(excluding excludedIDs: Set<String>? = nil) async throws -> Set<String> {
     guard let account = services.session.accountId, presentation.current() else { throw FotoroError("Photo selection changed") }
-    let selected = Set(presentation.photos.map(\.id)), revision = services.consumerCatalogGeneration
+    let selected = excludedIDs ?? Set(presentation.photos.map(\.id)), revision = services.consumerCatalogGeneration
     var reserved = Set<String>(), cursor: String?
     while true {
       try Task.checkCancellation()
@@ -404,7 +404,7 @@ struct SavedBatchNamingReview: View {
     let entries = restoring ? undo : preview
     var completed: [Entry] = []
     do {
-      let reserved = try await reservedNames()
+      let reserved = try await reservedNames(excluding: Set(entries.map(\.id)))
       var revision = services.consumerCatalogGeneration
       // Validate the whole reviewed plan before the first mutation.
       for entry in entries {
@@ -441,10 +441,11 @@ struct SavedBatchNamingReview: View {
         }
         if !preview.isEmpty {
           Section("Name preview") {
+            if preview.allSatisfy({ $0.before == $0.name }) { Text("No better names to suggest from current photo details.") }
             ForEach(preview) { entry in
               VStack(alignment: .leading) { Text(entry.before).foregroundStyle(.secondary); Text(entry.name) }
             }
-            Button("Apply names") { work = Task { await apply(restoring: false) } }.disabled(busy)
+            Button("Apply names") { work = Task { await apply(restoring: false) } }.disabled(busy || preview.allSatisfy { $0.before == $0.name })
             Button("Cancel preview") { preview = [] }.disabled(busy)
           }
         }
